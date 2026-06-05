@@ -78,4 +78,14 @@ pipeline {
       }
     }
   }
+
+  post {
+    failure {
+      // Sends through the global Mailer (SMTP 127.0.0.1:2525 -> skyphusion-email
+      // relay). The mail step needs only a TaskListener, so it runs under agent none.
+      mail to: 'conrad@rockenhaus.net',
+           subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+           body: "Build failed: ${env.BUILD_URL}"
+    }
+  }
 }
