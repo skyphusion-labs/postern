@@ -1,0 +1,16 @@
+# Worker
+node_modules/
+.wrangler/
+worker/worker-configuration.d.ts
+.dev.vars
+*.log
+
+# Relay (Go)
+relay/skyphusion-email-relay
+/relay/skyphusion-email-relay
+*.test
+
+# Local env / secrets
+*.env
+!*.env.example
+.DS_Store

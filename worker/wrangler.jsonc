@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "skyphusion-email",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-05",
+  "observability": { "enabled": true },
+
+  // Cloudflare Email Sending binding. The from domain (skyphusion.org) must be
+  // onboarded first: `npx wrangler email sending enable skyphusion.org`.
+  "send_email": [
+    { "name": "EMAIL" }
+  ],
+
+  "vars": {
+    "DEFAULT_FROM": "noreply@skyphusion.org",
+    "DEFAULT_FROM_NAME": "Skyphusion",
+    "ALLOWED_FROM_DOMAIN": "skyphusion.org"
+  }
+
+  // RELAY_TOKEN is a secret, not a var:
+  //   npx wrangler secret put RELAY_TOKEN
+}

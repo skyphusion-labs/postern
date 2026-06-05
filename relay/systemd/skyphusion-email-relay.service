@@ -1,0 +1,26 @@
+[Unit]
+Description=Skyphusion Email SMTP-to-API relay
+Documentation=https://github.com/skyphusion/skyphusion-email
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/skyphusion-email-relay.env
+ExecStart=/usr/local/bin/skyphusion-email-relay
+Restart=on-failure
+RestartSec=5
+
+# The relay needs no persistent state and only binds loopback. Lock it down.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+# Binds loopback for SMTP; needs outbound for the HTTPS relay to the worker.
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

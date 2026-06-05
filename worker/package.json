@@ -1,0 +1,17 @@
+{
+  "name": "skyphusion-email",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that sends transactional email via Cloudflare Email Sending",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250505.0",
+    "typescript": "^5.5.4",
+    "wrangler": "^4.0.0"
+  }
+}
