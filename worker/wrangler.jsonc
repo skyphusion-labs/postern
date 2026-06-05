@@ -5,18 +5,18 @@
   "compatibility_date": "2025-05-05",
   "observability": { "enabled": true },
 
-  // Cloudflare Email Sending binding. Sends from skyphusion.net, which is
-  // onboarded for Email Sending (cf-bounce.* DNS present, enabled in the
-  // sending list). skyphusion.org is set up for Email Routing (inbound) only;
-  // onboard it via the dashboard if you want a .org From address.
+  // Cloudflare Email Sending binding. Sends from skyphusion.org. Both
+  // skyphusion.org and skyphusion.net are onboarded for Email Sending
+  // (cf-bounce.* DNS present, enabled in the sending list); to send from .net
+  // instead, change the vars below.
   "send_email": [
     { "name": "EMAIL" }
   ],
 
   "vars": {
-    "DEFAULT_FROM": "noreply@skyphusion.net",
+    "DEFAULT_FROM": "noreply@skyphusion.org",
     "DEFAULT_FROM_NAME": "Skyphusion",
-    "ALLOWED_FROM_DOMAIN": "skyphusion.net"
+    "ALLOWED_FROM_DOMAIN": "skyphusion.org"
   }
 
   // RELAY_TOKEN is a secret, not a var:
