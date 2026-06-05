@@ -10,7 +10,7 @@ import (
 // Config is loaded entirely from the environment so the systemd unit can drive
 // it via an EnvironmentFile. No config file, no flags.
 type Config struct {
-	Listen      string        // SMTP_LISTEN, default 127.0.0.1:2525
+	Listen      string        // SMTP_LISTEN, comma-separated, default 127.0.0.1:2525
 	WorkerURL   string        // EMAIL_WORKER_URL, required (.../send)
 	Token       string        // EMAIL_RELAY_TOKEN, required
 	DefaultFrom string        // DEFAULT_FROM, used when the sender is off-domain

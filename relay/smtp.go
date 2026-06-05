@@ -128,16 +128,35 @@ func onDomain(addr, domain string) bool {
 
 func run(cfg Config) error {
 	be := &Backend{cfg: cfg, client: NewClient(cfg)}
-	srv := smtp.NewServer(be)
-	srv.Addr = cfg.Listen
-	srv.Domain = "localhost"
-	srv.MaxMessageBytes = cfg.MaxSize
-	srv.MaxRecipients = 50
-	srv.AllowInsecureAuth = true // localhost-only, no STARTTLS required
-
-	log.Printf("skyphusion-email-relay listening on %s -> %s (from-domain=%s)", cfg.Listen, cfg.WorkerURL, cfg.FromDomain)
-	if err := srv.ListenAndServe(); err != nil {
-		return fmt.Errorf("smtp server: %w", err)
+	addrs := splitListen(cfg.Listen)
+	if len(addrs) == 0 {
+		return fmt.Errorf("no listen address configured (SMTP_LISTEN)")
 	}
-	return nil
+
+	// One go-smtp server per address (e.g. loopback for host services plus a
+	// docker-bridge IP for a containerized caller like Uptime Kuma). They share
+	// the stateless Backend. The function blocks until any listener exits.
+	errc := make(chan error, len(addrs))
+	for _, addr := range addrs {
+		srv := smtp.NewServer(be)
+		srv.Addr = addr
+		srv.Domain = "localhost"
+		srv.MaxMessageBytes = cfg.MaxSize
+		srv.MaxRecipients = 50
+		srv.AllowInsecureAuth = true // plaintext on trusted interfaces only (no STARTTLS)
+		log.Printf("skyphusion-email-relay listening on %s -> %s (from-domain=%s)", addr, cfg.WorkerURL, cfg.FromDomain)
+		go func(s *smtp.Server) { errc <- s.ListenAndServe() }(srv)
+	}
+	return fmt.Errorf("smtp server: %w", <-errc)
+}
+
+// splitListen parses a comma-separated SMTP_LISTEN into trimmed addresses.
+func splitListen(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
