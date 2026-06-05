@@ -31,8 +31,8 @@ const { messageId } = await env.EMAIL.send({
   subject: "Your render is ready",
   html: `<p>Project <strong>${name}</strong> finished rendering.</p>`,
   text: `Project ${name} finished rendering.`,
-  // from defaults to noreply@skyphusion.org; override within @skyphusion.org:
-  // from: { email: "renders@skyphusion.org", name: "Vivijure" },
+  // from defaults to noreply@skyphusion.net; override within @skyphusion.net:
+  // from: { email: "renders@skyphusion.net", name: "Vivijure" },
 });
 ```
 
@@ -71,7 +71,7 @@ Responses:
 | `to` | string \| string[] | yes | Recipient(s) |
 | `subject` | string | yes | |
 | `html` / `text` | string | one required | Include both for deliverability |
-| `from` | string \| `{email,name}` | no | Defaults to `DEFAULT_FROM`; must be `@skyphusion.org` |
+| `from` | string \| `{email,name}` | no | Defaults to `DEFAULT_FROM`; must be `@skyphusion.net` |
 | `replyTo` | string \| `{email,name}` | no | |
 | `cc` / `bcc` | string \| string[] | no | to+cc+bcc <= 50 |
 | `headers` | object | no | Whitelisted headers only |

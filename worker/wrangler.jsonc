@@ -5,16 +5,18 @@
   "compatibility_date": "2025-05-05",
   "observability": { "enabled": true },
 
-  // Cloudflare Email Sending binding. The from domain (skyphusion.org) must be
-  // onboarded first: `npx wrangler email sending enable skyphusion.org`.
+  // Cloudflare Email Sending binding. Sends from skyphusion.net, which is
+  // onboarded for Email Sending (cf-bounce.* DNS present, enabled in the
+  // sending list). skyphusion.org is set up for Email Routing (inbound) only;
+  // onboard it via the dashboard if you want a .org From address.
   "send_email": [
     { "name": "EMAIL" }
   ],
 
   "vars": {
-    "DEFAULT_FROM": "noreply@skyphusion.org",
+    "DEFAULT_FROM": "noreply@skyphusion.net",
     "DEFAULT_FROM_NAME": "Skyphusion",
-    "ALLOWED_FROM_DOMAIN": "skyphusion.org"
+    "ALLOWED_FROM_DOMAIN": "skyphusion.net"
   }
 
   // RELAY_TOKEN is a secret, not a var:

@@ -24,8 +24,8 @@ func loadConfig() (Config, error) {
 		Listen:      env("SMTP_LISTEN", "127.0.0.1:2525"),
 		WorkerURL:   os.Getenv("EMAIL_WORKER_URL"),
 		Token:       os.Getenv("EMAIL_RELAY_TOKEN"),
-		DefaultFrom: env("DEFAULT_FROM", "noreply@skyphusion.org"),
-		FromDomain:  env("FROM_DOMAIN", "skyphusion.org"),
+		DefaultFrom: env("DEFAULT_FROM", "noreply@skyphusion.net"),
+		FromDomain:  env("FROM_DOMAIN", "skyphusion.net"),
 		HTTPTimeout: time.Duration(envInt("HTTP_TIMEOUT_SECONDS", 30)) * time.Second,
 		MaxSize:     int64(envInt("MAX_MESSAGE_BYTES", 25*1024*1024)),
 	}

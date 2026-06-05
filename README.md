@@ -6,8 +6,9 @@ Transactional email for the Skyphusion / Vivijure stack, sent through
 Two components in one repo:
 
 - **`worker/`** — a Cloudflare Worker that actually sends mail (from
-  `@skyphusion.org`). It exposes an RPC entrypoint for same-account Workers and
-  a token-gated public `POST /send` endpoint for everything else.
+  `@skyphusion.net`, the dedicated Email Sending domain). It exposes an RPC
+  entrypoint for same-account Workers and a token-gated public `POST /send`
+  endpoint for everything else.
 - **`relay/`** — a small Go SMTP daemon for `mindcrime-ci`. Local services that
   can only speak SMTP hand it a message; it parses the MIME and relays it to the
   worker's public endpoint over HTTPS.
@@ -29,13 +30,19 @@ HTTP API.
 
 ### Prerequisites (once)
 
-Onboard the sending domain so SPF/DKIM records are added to Cloudflare DNS:
+The sending domain must be onboarded to Email Sending (SPF/DKIM/bounce records
+in Cloudflare DNS). `skyphusion.net` is already onboarded. To onboard another
+domain, use the Dashboard (Compute & AI > Email Service > Email Sending >
+Onboard Domain) or, once the beta CLI works for your account:
 
 ```bash
 cd worker
-npx wrangler email sending enable skyphusion.org
-npx wrangler email sending dns get skyphusion.org   # verify records landed
+npx wrangler email sending enable yourdomain.com
+npx wrangler email sending list                 # confirm enabled=yes
 ```
+
+Note: `skyphusion.org` is configured for Email *Routing* (inbound), not
+Sending; onboard it separately if you want a `.org` From address.
 
 ### Deploy
 
@@ -86,12 +93,12 @@ Point local services at `127.0.0.1:2525` (no auth, loopback only). Examples:
 ```bash
 # msmtp / sendmail-style tools: set host=127.0.0.1 port=2525, no TLS, no auth.
 # Quick test with swaks:
-swaks --server 127.0.0.1:2525 --from cron@skyphusion.org \
+swaks --server 127.0.0.1:2525 --from cron@skyphusion.net \
       --to you@example.com --header "Subject: relay test" --body "hello from mindcrime"
 ```
 
 The relay uses the envelope `RCPT TO` for recipients. If a message's `From`
-isn't on `skyphusion.org` (e.g. `root@mindcrime`), the relay rewrites it to
+isn't on `skyphusion.net` (e.g. `root@mindcrime`), the relay rewrites it to
 `DEFAULT_FROM` and preserves the original as `Reply-To`, because the worker only
 accepts senders on the allowed domain.
 

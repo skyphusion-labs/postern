@@ -55,7 +55,7 @@ function validateRecipients(label: string, list: string[]): void {
 }
 
 function resolveFrom(env: Env, from: EmailRequest["from"]): EmailAddress {
-  const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.net").toLowerCase();
   const fallback = env.DEFAULT_FROM || `noreply@${allowedDomain}`;
 
   let email: string;
