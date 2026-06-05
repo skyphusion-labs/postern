@@ -115,6 +115,20 @@ docs/
   INTEGRATION.md caller setup (service binding + REST)
 ```
 
+## CI / deploy
+
+A Jenkins multibranch job (`skyphusion-email` on mindcrime-ci, mirroring
+`skyphusion-ci`) builds every branch and PR: it typechecks the worker and
+`go vet` + builds the relay. Every green build on `main` auto-deploys the
+worker via `wrangler deploy` (using the `CLOUDFLARE_API_TOKEN` Jenkins
+credential; the worker holds no in-tree secrets, and `RELAY_TOKEN` is a Worker
+secret untouched by deploy). So a plain `git push origin main` ships the worker,
+no manual deploy needed. A GitHub push webhook triggers builds immediately, with
+a 4h periodic scan as fallback.
+
+The relay is **not** auto-deployed; rebuild and reinstall it on mindcrime when
+`relay/` changes (see the Relay section above).
+
 ## Conventions
 
 Account handle is `skyphusion`. No em/en-dashes in source, commits, or docs.
