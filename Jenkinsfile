@@ -26,66 +26,47 @@ pipeline {
   }
 
   stages {
-    // Single checkout so parallel stages don't race on the same workspace ref.
-    stage('Checkout') {
-      agent any
+    stage('Worker: typecheck') {
+      agent { docker { image 'node:22' } }
+      environment {
+        HOME = "${env.WORKSPACE}"
+        npm_config_cache = "${env.WORKSPACE}/.npm"
+        CI = 'true'
+      }
       steps {
-        checkout scm
-        stash name: 'source', useDefaultExcludes: false
+        dir('worker') {
+          sh 'npm ci'
+          sh 'npm run typecheck'
+        }
       }
     }
 
-    stage('Check') {
-      parallel {
-        stage('Worker: typecheck') {
-          agent { docker { image 'node:22' } }
-          options { skipDefaultCheckout() }
-          environment {
-            HOME = "${env.WORKSPACE}"
-            npm_config_cache = "${env.WORKSPACE}/.npm"
-            CI = 'true'
-          }
-          steps {
-            unstash 'source'
-            dir('worker') {
-              sh 'npm ci'
-              sh 'npm run typecheck'
-            }
-          }
+    stage('Inbound: typecheck') {
+      agent { docker { image 'node:22' } }
+      environment {
+        HOME = "${env.WORKSPACE}"
+        npm_config_cache = "${env.WORKSPACE}/.npm"
+        CI = 'true'
+      }
+      steps {
+        dir('inbound') {
+          sh 'npm ci'
+          sh 'npm run typecheck'
         }
+      }
+    }
 
-        stage('Inbound: typecheck') {
-          agent { docker { image 'node:22' } }
-          options { skipDefaultCheckout() }
-          environment {
-            HOME = "${env.WORKSPACE}"
-            npm_config_cache = "${env.WORKSPACE}/.npm"
-            CI = 'true'
-          }
-          steps {
-            unstash 'source'
-            dir('inbound') {
-              sh 'npm ci'
-              sh 'npm run typecheck'
-            }
-          }
-        }
-
-        stage('Relay: vet + build') {
-          agent { docker { image 'golang:1.23' } }
-          options { skipDefaultCheckout() }
-          environment {
-            HOME = "${env.WORKSPACE}"
-            GOCACHE = "${env.WORKSPACE}/.gocache"
-            GOPATH = "${env.WORKSPACE}/.gopath"
-          }
-          steps {
-            unstash 'source'
-            dir('relay') {
-              sh 'go vet ./...'
-              sh 'go build -o /tmp/skyphusion-email-relay .'
-            }
-          }
+    stage('Relay: vet + build') {
+      agent { docker { image 'golang:1.23' } }
+      environment {
+        HOME = "${env.WORKSPACE}"
+        GOCACHE = "${env.WORKSPACE}/.gocache"
+        GOPATH = "${env.WORKSPACE}/.gopath"
+      }
+      steps {
+        dir('relay') {
+          sh 'go vet ./...'
+          sh 'go build -o /tmp/skyphusion-email-relay .'
         }
       }
     }
