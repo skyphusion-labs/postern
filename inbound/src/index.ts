@@ -2,14 +2,23 @@ import PostalMime from "postal-mime";
 
 export default {
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
-    // 1. Parse auth verdicts from headers (added by Cloudflare before delivery)
-    const spf = extractSpfResult(message.headers.get("received-spf") ?? "");
-    const dkim = extractDkimResult(message.headers.get("authentication-results") ?? "");
-    const fromAddr = message.from;
-    const trusted = isTrusted(fromAddr, spf, dkim, env.TRUSTED_SENDER_DOMAINS);
-
-    // 2. Parse MIME
+    // 1. Parse MIME first so we have access to all raw headers (including any
+    //    Authentication-Results CF may have injected into the raw stream).
     const parsed = await new PostalMime().parse(message.raw);
+
+    // Helper: search both message.headers and postal-mime's parsed header list.
+    const getHeader = (name: string): string => {
+      const fromMsg = message.headers.get(name) ?? "";
+      if (fromMsg) return fromMsg;
+      return parsed.headers.find((h) => h.key.toLowerCase() === name)?.value ?? "";
+    };
+
+    const fromAddr = message.from;
+    const spf = extractSpfResult(getHeader("received-spf"));
+    const dkim = extractDkimResult(getHeader("authentication-results"));
+    // CF Email Routing strips transport-level auth headers; fall back to
+    // allowlist-only trust when neither verdict is available.
+    const trusted = isTrusted(fromAddr, spf, dkim, env.TRUSTED_SENDER_DOMAINS);
 
     // 3. Clean body: prefer plain text, strip quoted lines and sig block
     const rawBody = parsed.text ?? htmlToText(parsed.html ?? "");
@@ -81,15 +90,20 @@ function extractDkimResult(authResults: string): string {
 }
 
 function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string): boolean {
-  const spfOk = spf === "pass" || spf === "neutral";
-  const dkimOk = dkim === "pass";
-  if (!spfOk && !dkimOk) return false;
   const domains = allowlistEnv
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   const fromLower = from.toLowerCase();
-  return domains.some((d) => fromLower === d || fromLower.endsWith("@" + d));
+  const onAllowlist = domains.some((d) => fromLower === d || fromLower.endsWith("@" + d));
+  if (!onAllowlist) return false;
+  // Auth verdicts available: require at least SPF pass/neutral OR DKIM pass.
+  // If CF stripped both headers (spf=none AND dkim=none), allowlist alone is
+  // sufficient -- CF's own MX infrastructure already handles inbound filtering.
+  const spfOk = spf === "pass" || spf === "neutral";
+  const dkimOk = dkim === "pass";
+  const noAuthData = spf === "none" && dkim === "none";
+  return spfOk || dkimOk || noAuthData;
 }
 
 // --- Body cleaning ---
