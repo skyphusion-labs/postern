@@ -74,6 +74,16 @@ export default {
         })(),
       );
     }
+
+    // 7. Transparent forward -- re-deliver original envelope to FORWARD_TO
+    //    after ingestion so the worker is the single delivery point.
+    if (env.FORWARD_TO) {
+      try {
+        await message.forward(env.FORWARD_TO);
+      } catch (e) {
+        console.error("forward to", env.FORWARD_TO, "failed:", e);
+      }
+    }
   },
 };
 

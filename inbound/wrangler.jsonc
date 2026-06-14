@@ -36,10 +36,16 @@
   "vars": {
     // Comma-separated list of trusted sender domains or full addresses.
     // Senders must also pass SPF or DKIM to get trusted=1.
-    "TRUSTED_SENDER_DOMAINS": "skyphusion.org,skyphusion.net,rockenhaus.net,cloudflare.com,notify.cloudflare.com,github.com,notifications.github.com,healthchecks.io,hetzner.com,runpod.io"
+    "TRUSTED_SENDER_DOMAINS": "skyphusion.org,skyphusion.net,rockenhaus.net,cloudflare.com,notify.cloudflare.com,github.com,notifications.github.com,healthchecks.io,hetzner.com,runpod.io",
+
+    // Transparent forward destination. Worker stores every inbound message in
+    // D1 + Vectorize, then re-delivers the original envelope here. Set to "" to
+    // disable forwarding (store-only mode).
+    "FORWARD_TO": "conrad@rockenhaus.net"
   }
 
-  // Email Routing rule:
-  //   CF Dashboard -> Email -> Email Routing -> Routing Rules
-  //   Add rule: catch-all (or specific address) -> send to Worker -> skyphusion-email-inbound
+  // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):
+  //   Route ALL addresses (including catch-all) to Worker skyphusion-email-inbound.
+  //   The worker handles forwarding to FORWARD_TO after ingestion.
+  //   Remove any direct "Forward to email" rules -- everything goes through the worker.
 }

@@ -11,4 +11,9 @@ interface Env {
    * Example: "skyphusion.org,rockenhaus.net,github.com,healthchecks.io"
    */
   TRUSTED_SENDER_DOMAINS: string;
+  /**
+   * Destination address for transparent forwarding after ingestion.
+   * Leave empty to disable forwarding (worker stores only, does not deliver).
+   */
+  FORWARD_TO: string;
 }
