@@ -2,8 +2,19 @@ import PostalMime from "postal-mime";
 
 export default {
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
-    // 1. Parse MIME first so we have access to all raw headers (including any
-    //    Authentication-Results CF may have injected into the raw stream).
+    // 1. Forward immediately, before consuming message.raw. CF Email Workers
+    //    require the stream to be unconsumed when forward() is called; parsing
+    //    first exhausts the stream and silently breaks delivery.
+    if (env.FORWARD_TO) {
+      try {
+        await message.forward(env.FORWARD_TO);
+      } catch (e) {
+        console.error("forward to", env.FORWARD_TO, "failed:", e);
+      }
+    }
+
+    // 2. Parse MIME for ingestion (D1 + Vectorize). message.raw is a teed
+    //    copy that CF keeps available after forward() completes.
     const parsed = await new PostalMime().parse(message.raw);
 
     // Helper: search both message.headers and postal-mime's parsed header list.
@@ -75,15 +86,6 @@ export default {
       );
     }
 
-    // 7. Transparent forward -- re-deliver original envelope to FORWARD_TO
-    //    after ingestion so the worker is the single delivery point.
-    if (env.FORWARD_TO) {
-      try {
-        await message.forward(env.FORWARD_TO);
-      } catch (e) {
-        console.error("forward to", env.FORWARD_TO, "failed:", e);
-      }
-    }
   },
 };
 
