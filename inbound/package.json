@@ -1,0 +1,19 @@
+{
+  "name": "skyphusion-email-inbound",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CF Email Worker: ingests inbound mail into D1 + Vectorize for agent consumption",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "postal-mime": "^2.3.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250505.0",
+    "typescript": "^5.5.4",
+    "wrangler": "^4.0.0"
+  }
+}

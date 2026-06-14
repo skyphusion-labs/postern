@@ -1,0 +1,123 @@
+import PostalMime from "postal-mime";
+
+export default {
+  async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
+    // 1. Parse auth verdicts from headers (added by Cloudflare before delivery)
+    const spf = extractSpfResult(message.headers.get("received-spf") ?? "");
+    const dkim = extractDkimResult(message.headers.get("authentication-results") ?? "");
+    const fromAddr = message.from;
+    const trusted = isTrusted(fromAddr, spf, dkim, env.TRUSTED_SENDER_DOMAINS);
+
+    // 2. Parse MIME
+    const parsed = await new PostalMime().parse(message.raw);
+
+    // 3. Clean body: prefer plain text, strip quoted lines and sig block
+    const rawBody = parsed.text ?? htmlToText(parsed.html ?? "");
+    const bodyText = cleanBody(rawBody).slice(0, 32_000);
+
+    // 4. Dedup key -- use Message-ID or generate stable fallback
+    const messageId = (parsed.messageId ?? "").replace(/[<>]/g, "") || crypto.randomUUID();
+    const receivedAt = new Date().toISOString();
+    const date = parsed.date ? new Date(parsed.date).toISOString() : receivedAt;
+
+    // 5. D1 insert -- INSERT OR IGNORE handles duplicates cleanly
+    const result = await env.DB.prepare(
+      `INSERT OR IGNORE INTO messages
+         (message_id, from_addr, to_addr, subject, date, in_reply_to,
+          body_text, spf, dkim, trusted, received_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        messageId,
+        fromAddr,
+        message.to,
+        parsed.subject ?? "",
+        date,
+        parsed.inReplyTo ?? null,
+        bodyText,
+        spf,
+        dkim,
+        trusted ? 1 : 0,
+        receivedAt,
+      )
+      .run();
+
+    if (result.meta.changes === 0) return; // already stored (duplicate)
+
+    // 6. Vectorize embed + upsert (non-blocking, best-effort)
+    if (bodyText.length > 0) {
+      ctx.waitUntil(
+        (async () => {
+          try {
+            const embed = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
+              text: [bodyText.slice(0, 8_000)],
+            });
+            await env.VECTORIZE.upsert([
+              {
+                id: messageId,
+                values: (embed as { data: number[][] }).data[0],
+                metadata: { from: fromAddr, date, subject: parsed.subject ?? "" },
+              },
+            ]);
+          } catch (e) {
+            console.error("vectorize upsert failed", e);
+          }
+        })(),
+      );
+    }
+  },
+};
+
+// --- Auth verdict helpers ---
+
+function extractSpfResult(header: string): string {
+  const m = header.match(/^(pass|fail|softfail|neutral|none|temperror|permerror)/i);
+  return m ? m[1].toLowerCase() : "none";
+}
+
+function extractDkimResult(authResults: string): string {
+  const m = authResults.match(/dkim=(pass|fail|neutral|none|policy|temperror|permerror)/i);
+  return m ? m[1].toLowerCase() : "none";
+}
+
+function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string): boolean {
+  const spfOk = spf === "pass" || spf === "neutral";
+  const dkimOk = dkim === "pass";
+  if (!spfOk && !dkimOk) return false;
+  const domains = allowlistEnv
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const fromLower = from.toLowerCase();
+  return domains.some((d) => fromLower === d || fromLower.endsWith("@" + d));
+}
+
+// --- Body cleaning ---
+
+function cleanBody(raw: string): string {
+  // Strip sig block (RFC 3676 "-- \n" delimiter)
+  const sigIdx = raw.indexOf("\n-- \n");
+  const stripped = sigIdx !== -1 ? raw.slice(0, sigIdx) : raw;
+  // Remove quoted-reply lines ("> ...")
+  return stripped
+    .split("\n")
+    .filter((l) => !l.trimStart().startsWith(">"))
+    .join("\n")
+    .trim();
+}
+
+function htmlToText(html: string): string {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .trim();
+}

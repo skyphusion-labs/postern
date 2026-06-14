@@ -1,0 +1,45 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "skyphusion-email-inbound",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-05",
+  "observability": { "enabled": true },
+
+  // D1 database for message storage.
+  // Create once: wrangler d1 create skyphusion-mail
+  // Apply schema: wrangler d1 execute skyphusion-mail --file=schema.sql
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "skyphusion-mail",
+      "database_id": "512c44f1-008b-43f7-8572-208aaaf55546"
+    }
+  ],
+
+  // Vectorize index for semantic recall.
+  // Create once: wrangler vectorize create skyphusion-mail-vec --dimensions=768 --metric=cosine
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "skyphusion-mail-vec"
+    }
+  ],
+
+  // AI binding for bge-base embeddings, routed through the AI Gateway.
+  "ai": {
+    "binding": "AI",
+    "gateway": {
+      "id": "skyphusion-llm"
+    }
+  },
+
+  "vars": {
+    // Comma-separated list of trusted sender domains or full addresses.
+    // Senders must also pass SPF or DKIM to get trusted=1.
+    "TRUSTED_SENDER_DOMAINS": "skyphusion.org,rockenhaus.net,github.com,healthchecks.io,notifications.github.com"
+  }
+
+  // Email Routing rule:
+  //   CF Dashboard -> Email -> Email Routing -> Routing Rules
+  //   Add rule: catch-all (or specific address) -> send to Worker -> skyphusion-email-inbound
+}
