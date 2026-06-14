@@ -29,6 +29,10 @@ export class EmailService extends WorkerEntrypoint<Env> {
 }
 
 export default {
+  async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
+    await message.forward(env.FORWARD_TO);
+  },
+
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 

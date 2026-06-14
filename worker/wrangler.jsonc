@@ -16,7 +16,9 @@
   "vars": {
     "DEFAULT_FROM": "noreply@skyphusion.org",
     "DEFAULT_FROM_NAME": "Skyphusion",
-    "ALLOWED_FROM_DOMAIN": "skyphusion.org"
+    "ALLOWED_FROM_DOMAIN": "skyphusion.org",
+    // Destination for inbound Email Routing forwards.
+    "FORWARD_TO": "conrad@rockenhaus.net"
   }
 
   // RELAY_TOKEN is a secret, not a var:

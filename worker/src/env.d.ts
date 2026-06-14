@@ -30,4 +30,6 @@ interface Env {
   DEFAULT_FROM_NAME?: string;
   /** Only From addresses on this domain are permitted. */
   ALLOWED_FROM_DOMAIN?: string;
+  /** Destination address for inbound email forwarding via Email Routing. */
+  FORWARD_TO: string;
 }
