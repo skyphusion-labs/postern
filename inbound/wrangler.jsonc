@@ -49,7 +49,7 @@
 
     // Addresses whose mail is embedded + indexed in Vectorize for crew RAG.
     // Crew members opt in by adding their own address here.
-    "VECTORIZE_FOR": "conrad@skyphusion.org,alerts@skyphusion.org,strummer@skyphusion.org,rollins@skyphusion.org"
+    "VECTORIZE_FOR": "conrad@skyphusion.org,alerts@skyphusion.org,strummer@skyphusion.org,rollins@skyphusion.org,mackaye@skyphusion.org"
   }
 
   // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):
