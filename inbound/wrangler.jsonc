@@ -36,7 +36,7 @@
   "vars": {
     // Comma-separated list of trusted sender domains or full addresses.
     // Senders must also pass SPF or DKIM to get trusted=1.
-    "TRUSTED_SENDER_DOMAINS": "skyphusion.org,skyphusion.net,rockenhaus.net,cloudflare.com,github.com,notifications.github.com,healthchecks.io,hetzner.com,runpod.io"
+    "TRUSTED_SENDER_DOMAINS": "skyphusion.org,skyphusion.net,rockenhaus.net,cloudflare.com,notify.cloudflare.com,github.com,notifications.github.com,healthchecks.io,hetzner.com,runpod.io"
   }
 
   // Email Routing rule:
