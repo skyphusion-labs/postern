@@ -45,7 +45,11 @@
 
     // Only forward when message.to matches one of these addresses (comma-separated).
     // Crew addresses are stored in D1 but not forwarded -- their mail is their own.
-    "FORWARD_FOR": "conrad@skyphusion.org,alerts@skyphusion.org"
+    "FORWARD_FOR": "conrad@skyphusion.org,alerts@skyphusion.org",
+
+    // Addresses whose mail is embedded + indexed in Vectorize for crew RAG.
+    // Crew members opt in by adding their own address here.
+    "VECTORIZE_FOR": "conrad@skyphusion.org,alerts@skyphusion.org"
   }
 
   // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):

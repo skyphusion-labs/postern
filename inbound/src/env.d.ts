@@ -20,7 +20,14 @@ interface Env {
    * Comma-separated list of recipient addresses that should be forwarded to
    * FORWARD_TO. Emails addressed to anyone not on this list are stored only.
    * Leave empty to forward everything (not recommended when crew share the domain).
-   * Example: "conrad@skyphusion.org"
+   * Example: "conrad@skyphusion.org,alerts@skyphusion.org"
    */
   FORWARD_FOR: string;
+  /**
+   * Comma-separated list of recipient addresses whose mail is indexed in
+   * Vectorize for crew RAG access. Opt-in only -- crew emails stay private
+   * unless they add their own address here. Leave empty to index everything.
+   * Example: "conrad@skyphusion.org,alerts@skyphusion.org"
+   */
+  VECTORIZE_FOR: string;
 }

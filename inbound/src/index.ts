@@ -41,8 +41,11 @@ export default {
     const rawBody = parsed.text ?? htmlToText(parsed.html ?? "");
     const bodyText = cleanBody(rawBody).slice(0, 32_000);
 
-    // 4. Dedup key -- use Message-ID or generate stable fallback
-    const messageId = (parsed.messageId ?? "").replace(/[<>]/g, "") || crypto.randomUUID();
+    // 4. Dedup key -- use Message-ID or generate stable fallback.
+    //    D1 stores the full raw ID; Vectorize requires max 64 chars so we
+    //    SHA-256 hash anything longer (32 bytes = 64 hex chars exactly).
+    const rawMessageId = (parsed.messageId ?? "").replace(/[<>]/g, "") || crypto.randomUUID();
+    const messageId = rawMessageId.length > 64 ? await sha256hex(rawMessageId) : rawMessageId;
     const receivedAt = new Date().toISOString();
     const date = parsed.date ? new Date(parsed.date).toISOString() : receivedAt;
 
@@ -70,8 +73,17 @@ export default {
 
     if (result.meta.changes === 0) return; // already stored (duplicate)
 
-    // 6. Vectorize embed + upsert (non-blocking, best-effort)
-    if (bodyText.length > 0) {
+    // 6. Vectorize embed + upsert (non-blocking, best-effort).
+    //    Only index mail for addresses that have opted in to crew RAG access.
+    //    Conrad has given permission; crew opt in by adding their address to
+    //    VECTORIZE_FOR. Crew emails are stored in D1 but stay private otherwise.
+    const vectorizeFor = (env.VECTORIZE_FOR ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    const allowedForVectorize = vectorizeFor.length === 0 || vectorizeFor.includes(toAddr);
+
+    if (bodyText.length > 0 && allowedForVectorize) {
       ctx.waitUntil(
         (async () => {
           try {
@@ -82,7 +94,7 @@ export default {
               {
                 id: messageId,
                 values: (embed as { data: number[][] }).data[0],
-                metadata: { from: fromAddr, date, subject: parsed.subject ?? "" },
+                metadata: { from: fromAddr, to: toAddr, date, subject: parsed.subject ?? "" },
               },
             ]);
           } catch (e) {
@@ -94,6 +106,15 @@ export default {
 
   },
 };
+
+// --- Helpers ---
+
+async function sha256hex(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 // --- Auth verdict helpers ---
 
