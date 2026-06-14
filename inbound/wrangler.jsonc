@@ -41,7 +41,11 @@
     // Transparent forward destination. Worker stores every inbound message in
     // D1 + Vectorize, then re-delivers the original envelope here. Set to "" to
     // disable forwarding (store-only mode).
-    "FORWARD_TO": "conrad@rockenhaus.net"
+    "FORWARD_TO": "conrad@rockenhaus.net",
+
+    // Only forward when message.to matches one of these addresses (comma-separated).
+    // Crew addresses are stored in D1 but not forwarded -- their mail is their own.
+    "FORWARD_FOR": "conrad@skyphusion.org"
   }
 
   // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):

@@ -16,4 +16,11 @@ interface Env {
    * Leave empty to disable forwarding (worker stores only, does not deliver).
    */
   FORWARD_TO: string;
+  /**
+   * Comma-separated list of recipient addresses that should be forwarded to
+   * FORWARD_TO. Emails addressed to anyone not on this list are stored only.
+   * Leave empty to forward everything (not recommended when crew share the domain).
+   * Example: "conrad@skyphusion.org"
+   */
+  FORWARD_FOR: string;
 }

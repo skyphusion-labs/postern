@@ -5,7 +5,13 @@ export default {
     // 1. Forward immediately, before consuming message.raw. CF Email Workers
     //    require the stream to be unconsumed when forward() is called; parsing
     //    first exhausts the stream and silently breaks delivery.
-    if (env.FORWARD_TO) {
+    //    Only forward when message.to is in FORWARD_FOR (crew keep their own mail).
+    const forwardFor = (env.FORWARD_FOR ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    const toAddr = message.to.toLowerCase();
+    if (env.FORWARD_TO && (forwardFor.length === 0 || forwardFor.includes(toAddr))) {
       try {
         await message.forward(env.FORWARD_TO);
       } catch (e) {
