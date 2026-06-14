@@ -45,7 +45,7 @@
 
     // Only forward when message.to matches one of these addresses (comma-separated).
     // Crew addresses are stored in D1 but not forwarded -- their mail is their own.
-    "FORWARD_FOR": "conrad@skyphusion.org"
+    "FORWARD_FOR": "conrad@skyphusion.org,alerts@skyphusion.org"
   }
 
   // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):
