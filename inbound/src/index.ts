@@ -19,7 +19,7 @@ export default {
       }
     }
 
-    // 2. Parse MIME for ingestion (D1 + Vectorize). message.raw is a teed
+    // 2. Parse MIME for ingestion (D1 + R2 + Vectorize). message.raw is a teed
     //    copy that CF keeps available after forward() completes.
     const parsed = await new PostalMime().parse(message.raw);
 
@@ -31,8 +31,10 @@ export default {
     };
 
     const fromAddr = message.from;
+    const authResults = getHeader("authentication-results");
     const spf = extractSpfResult(getHeader("received-spf"));
-    const dkim = extractDkimResult(getHeader("authentication-results"));
+    const dkim = extractDkimResult(authResults);
+    const dmarc = extractDmarcResult(authResults);
     // CF Email Routing strips transport-level auth headers; fall back to
     // allowlist-only trust when neither verdict is available.
     const trusted = isTrusted(fromAddr, spf, dkim, env.TRUSTED_SENDER_DOMAINS);
@@ -49,12 +51,13 @@ export default {
     const receivedAt = new Date().toISOString();
     const date = parsed.date ? new Date(parsed.date).toISOString() : receivedAt;
 
-    // 5. D1 insert -- INSERT OR IGNORE handles duplicates cleanly
+    // 5. D1 insert -- INSERT OR IGNORE handles duplicates cleanly. The messages_fts
+    //    FTS5 index is kept in sync by triggers (see schema.sql), so no extra work here.
     const result = await env.DB.prepare(
       `INSERT OR IGNORE INTO messages
          (message_id, from_addr, to_addr, subject, date, in_reply_to,
-          body_text, spf, dkim, trusted, received_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          body_text, spf, dkim, dmarc, trusted, received_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         messageId,
@@ -66,6 +69,7 @@ export default {
         bodyText,
         spf,
         dkim,
+        dmarc,
         trusted ? 1 : 0,
         receivedAt,
       )
@@ -73,10 +77,40 @@ export default {
 
     if (result.meta.changes === 0) return; // already stored (duplicate)
 
-    // 6. Vectorize embed + upsert (non-blocking, best-effort).
-    //    Only index mail for addresses that have opted in to crew RAG access.
-    //    Conrad has given permission; crew opt in by adding their address to
-    //    VECTORIZE_FOR. Crew emails are stored in D1 but stay private otherwise.
+    // 6. Attachments -> R2 (bytes) + D1 (metadata + key). Best-effort, non-blocking.
+    const attachments = parsed.attachments ?? [];
+    if (attachments.length > 0) {
+      ctx.waitUntil(
+        (async () => {
+          for (let i = 0; i < attachments.length; i++) {
+            const att = attachments[i];
+            try {
+              const bytes = toArrayBuffer(att.content);
+              if (!bytes || bytes.byteLength === 0) continue;
+              const safeName = (att.filename || `attachment-${i}`)
+                .replace(/[^A-Za-z0-9._-]/g, "_")
+                .slice(0, 100);
+              const key = `att/${messageId}/${i}-${safeName}`;
+              await env.ATTACHMENTS.put(key, bytes, {
+                httpMetadata: { contentType: att.mimeType || "application/octet-stream" },
+              });
+              await env.DB.prepare(
+                `INSERT INTO attachments (message_id, filename, mime, size, r2_key, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+              )
+                .bind(messageId, att.filename ?? null, att.mimeType ?? null, bytes.byteLength, key, receivedAt)
+                .run();
+            } catch (e) {
+              console.error("attachment store failed", i, e);
+            }
+          }
+        })(),
+      );
+    }
+
+    // 7. Vectorize: chunk the body and embed each window so long mail keeps full
+    //    recall (a single 8k embedding lost the tail). Non-blocking, best-effort.
+    //    Only index mail for addresses that opted in to crew RAG (VECTORIZE_FOR).
     const vectorizeFor = (env.VECTORIZE_FOR ?? "")
       .split(",")
       .map((s) => s.trim().toLowerCase())
@@ -87,27 +121,69 @@ export default {
       ctx.waitUntil(
         (async () => {
           try {
-            const embed = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
-              text: [bodyText.slice(0, 8_000)],
-            });
-            await env.VECTORIZE.upsert([
-              {
-                id: messageId,
-                values: (embed as { data: number[][] }).data[0],
-                metadata: { from: fromAddr, to: toAddr, date, subject: parsed.subject ?? "" },
+            const chunks = chunkText(bodyText, 1200, 150).slice(0, 24); // bound cost on huge mail
+            // 56-hex base keeps chunk ids (`<base>.<i>`) within Vectorize's 64-char id limit.
+            const base = (await sha256hex(messageId)).slice(0, 56);
+            const embed = (await env.AI.run("@cf/baai/bge-base-en-v1.5", {
+              text: chunks,
+            })) as { data: number[][] };
+            const vectors = embed.data.map((values, i) => ({
+              id: `${base}.${i}`,
+              values,
+              metadata: {
+                message_id: messageId,
+                chunk: i,
+                from: fromAddr,
+                to: toAddr,
+                date,
+                subject: parsed.subject ?? "",
               },
-            ]);
+            }));
+            if (vectors.length) await env.VECTORIZE.upsert(vectors);
           } catch (e) {
             console.error("vectorize upsert failed", e);
           }
         })(),
       );
     }
-
   },
 };
 
 // --- Helpers ---
+
+function toArrayBuffer(content: unknown): ArrayBuffer | null {
+  if (content instanceof ArrayBuffer) return content;
+  // Copy into a fresh ArrayBuffer so the type is unambiguously ArrayBuffer
+  // (Uint8Array.buffer / TextEncoder().buffer are typed as ArrayBufferLike).
+  let view: Uint8Array | null = null;
+  if (content instanceof Uint8Array) view = content;
+  else if (typeof content === "string") view = new TextEncoder().encode(content);
+  if (!view) return null;
+  const out = new ArrayBuffer(view.byteLength);
+  new Uint8Array(out).set(view);
+  return out;
+}
+
+// Split text into overlapping windows (~chunk chars, overlap chars carried over)
+// on whitespace boundaries where possible. bge-base handles ~512 tokens, so a
+// 1200-char window stays comfortably under the limit.
+function chunkText(text: string, chunk: number, overlap: number): string[] {
+  const t = text.trim();
+  if (t.length <= chunk) return t.length ? [t] : [];
+  const out: string[] = [];
+  let start = 0;
+  while (start < t.length) {
+    let end = Math.min(start + chunk, t.length);
+    if (end < t.length) {
+      const ws = t.lastIndexOf(" ", end);
+      if (ws > start + chunk * 0.5) end = ws;
+    }
+    out.push(t.slice(start, end).trim());
+    if (end >= t.length) break;
+    start = end - overlap;
+  }
+  return out.filter(Boolean);
+}
 
 async function sha256hex(input: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
@@ -125,6 +201,11 @@ function extractSpfResult(header: string): string {
 
 function extractDkimResult(authResults: string): string {
   const m = authResults.match(/dkim=(pass|fail|neutral|none|policy|temperror|permerror)/i);
+  return m ? m[1].toLowerCase() : "none";
+}
+
+function extractDmarcResult(authResults: string): string {
+  const m = authResults.match(/dmarc=(pass|fail|none|bestguesspass|temperror|permerror)/i);
   return m ? m[1].toLowerCase() : "none";
 }
 
