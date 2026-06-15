@@ -8,21 +8,21 @@ Two components in one repo:
 - **`worker/`** — a Cloudflare Worker that actually sends mail (from
   `@skyphusion.org`). It exposes an RPC entrypoint for same-account Workers and
   a token-gated public `POST /send` endpoint for everything else.
-- **`relay/`** — a small Go SMTP daemon for `mindcrime-ci`. Local services that
+- **`relay/`** — a small Go SMTP daemon for `dischord`. Local services that
   can only speak SMTP hand it a message; it parses the MIME and relays it to the
   worker's public endpoint over HTTPS.
 
 ```
 skyphusion-llm-public ──(service binding RPC: env.EMAIL.send)──┐
                                                                ├──► worker ──► CF Email Sending ──► inbox
-mindcrime services ──SMTP──► relay ──(HTTPS + Bearer token)────┘
+dischord services ──SMTP──► relay ──(HTTPS + Bearer token)────┘
    (cron, scripts,           (127.0.0.1:2525,
     backups, etc.)            systemd on the box)
 ```
 
 Why the split: same-account Workers get a typed, tokenless, no-network-hop RPC
 call. Anything that can't be a Worker (cron jobs, shell scripts, backup tooling
-on mindcrime) speaks plain SMTP to a localhost relay and never has to learn the
+on dischord) speaks plain SMTP to a localhost relay and never has to learn the
 HTTP API.
 
 ## Worker
@@ -62,9 +62,9 @@ the relay's `EMAIL_RELAY_TOKEN` (see below).
 See [docs/INTEGRATION.md](docs/INTEGRATION.md) for the service binding setup,
 the request schema, and response/error codes.
 
-## Relay (mindcrime-ci)
+## Relay (dischord)
 
-Go is not on the laptop; build on `mindcrime` (or any box with Go >= 1.22):
+Go is not on the laptop; build on `dischord` (or any box with Go >= 1.22):
 
 ```bash
 cd relay
@@ -89,11 +89,11 @@ Point local services at `127.0.0.1:2525` (no auth, loopback only). Examples:
 # msmtp / sendmail-style tools: set host=127.0.0.1 port=2525, no TLS, no auth.
 # Quick test with swaks:
 swaks --server 127.0.0.1:2525 --from cron@skyphusion.org \
-      --to you@example.com --header "Subject: relay test" --body "hello from mindcrime"
+      --to you@example.com --header "Subject: relay test" --body "hello from dischord"
 ```
 
 The relay uses the envelope `RCPT TO` for recipients. If a message's `From`
-isn't on `skyphusion.org` (e.g. `root@mindcrime`), the relay rewrites it to
+isn't on `skyphusion.org` (e.g. `root@dischord`), the relay rewrites it to
 `DEFAULT_FROM` and preserves the original as `Reply-To`, because the worker only
 accepts senders on the allowed domain.
 
@@ -117,7 +117,7 @@ docs/
 
 ## CI / deploy
 
-A Jenkins multibranch job (`skyphusion-email` on mindcrime-ci, mirroring
+A Jenkins multibranch job (`skyphusion-email` on dischord, mirroring
 `skyphusion-ci`) builds every branch and PR: it typechecks the worker and
 `go vet` + builds the relay. Every green build on `main` auto-deploys the
 worker via `wrangler deploy` (using the `CLOUDFLARE_API_TOKEN` Jenkins
@@ -126,7 +126,7 @@ secret untouched by deploy). So a plain `git push origin main` ships the worker,
 no manual deploy needed. A GitHub push webhook triggers builds immediately, with
 a 4h periodic scan as fallback.
 
-The relay is **not** auto-deployed; rebuild and reinstall it on mindcrime when
+The relay is **not** auto-deployed; rebuild and reinstall it on dischord when
 `relay/` changes (see the Relay section above).
 
 ## Conventions
