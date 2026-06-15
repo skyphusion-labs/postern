@@ -3,6 +3,8 @@ interface Env {
   DB: D1Database;
   /** Vectorize index for semantic search over message bodies. */
   VECTORIZE: VectorizeIndex;
+  /** R2 bucket holding inbound attachment bytes (keys referenced in D1.attachments). */
+  ATTACHMENTS: R2Bucket;
   /** AI binding for embeddings (routed through AI Gateway). */
   AI: Ai;
   /**

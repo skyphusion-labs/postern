@@ -25,6 +25,12 @@
     }
   ],
 
+  // R2 bucket for inbound attachment bytes (metadata + key go in D1.attachments).
+  // Create once: wrangler r2 bucket create skyphusion-mail-attachments
+  "r2_buckets": [
+    { "binding": "ATTACHMENTS", "bucket_name": "skyphusion-mail-attachments" }
+  ],
+
   // AI binding for bge-base embeddings, routed through the AI Gateway.
   "ai": {
     "binding": "AI",
