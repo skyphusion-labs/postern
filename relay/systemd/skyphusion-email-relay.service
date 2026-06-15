@@ -1,8 +1,10 @@
 [Unit]
 Description=Skyphusion Email SMTP-to-API relay
-Documentation=https://github.com/skyphusion/skyphusion-email
-After=network-online.target
+Documentation=https://github.com/skyphusion-labs/skyphusion-email
+After=network-online.target docker.service
 Wants=network-online.target
+# docker.service: the relay binds a docker-bridge IP (host.docker.internal) so
+# the Jenkins container can reach it; that interface must exist first.
 
 [Service]
 Type=simple
@@ -11,7 +13,7 @@ ExecStart=/usr/local/bin/skyphusion-email-relay
 Restart=on-failure
 RestartSec=5
 
-# The relay needs no persistent state and only binds loopback. Lock it down.
+# The relay needs no persistent state and binds loopback + a docker-bridge IP. Lock it down.
 DynamicUser=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -19,7 +21,7 @@ ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
-# Binds loopback for SMTP; needs outbound for the HTTPS relay to the worker.
+# Binds private IPs for SMTP; needs outbound for the HTTPS relay to the worker.
 RestrictAddressFamilies=AF_INET AF_INET6
 
 [Install]
