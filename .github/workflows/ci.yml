@@ -1,0 +1,36 @@
+name: ci (self-hosted)
+
+# Full CI (typecheck + tests) on the self-hosted dischord runner.
+# The GitHub-hosted typecheck.yml stays as the safe path for untrusted fork PRs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege: CI only needs to read the repo. No write scopes on the token.
+permissions:
+  contents: read
+
+# Supersede in-flight runs on the same ref so a self-hosted runner is never
+# queued up behind stale commits.
+concurrency:
+  group: ci-self-hosted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    # SECURITY: this repo is PUBLIC and the runner is self-hosted. Never let an
+    # untrusted fork PR execute on the box. Run for pushes (trusted) and only for
+    # same-repo (non-fork) PRs; fork PRs still get typecheck via the hosted workflow.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
