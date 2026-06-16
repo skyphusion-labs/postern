@@ -1,6 +1,6 @@
 module github.com/skyphusion/skyphusion-email/relay
 
-go 1.23.0
+go 1.22
 
 require (
 	github.com/emersion/go-smtp v0.21.3
@@ -17,6 +17,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/ssor/bom v0.0.0-20170718123548-6386211fdfcf // indirect
-	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/net v0.23.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 )
