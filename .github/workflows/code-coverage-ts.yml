@@ -47,6 +47,10 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
+          cache-dependency-path: |
+            worker/package-lock.json
+            inbound/package-lock.json
+
 
       # -- Execute Worker Coverage --
       - name: Install & Run Worker Tests
