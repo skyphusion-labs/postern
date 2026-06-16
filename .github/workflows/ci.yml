@@ -31,6 +31,9 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+      - run: npm ci --prefix ./worker
+      - run: npm ci --prefix ./inbound
+      - run: npm run typecheck --prefix ./worker
+      - run: npm run typecheck --prefix ./inbound
+      - run: npm test --prefix ./worker
+      = run: npm test --prefix ./inbound

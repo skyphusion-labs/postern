@@ -23,5 +23,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
-      - run: npm ci
-      - run: npm run typecheck
+      - run: npm ci --prefix ./worker
+      - run: npm ci --prefix ./inbound
+      - run: npm run typecheck --prefix ./worker
+      - run: npm run typecheck --prefix ./inbound
