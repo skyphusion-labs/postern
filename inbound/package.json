@@ -13,7 +13,9 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250505.0",
+    "@vitest/coverage-istanbul": "^4.1.9",
     "typescript": "^5.5.4",
+    "vitest": "^4.1.9",
     "wrangler": "^4.0.0"
   }
 }

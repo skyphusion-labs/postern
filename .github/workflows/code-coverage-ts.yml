@@ -1,10 +1,77 @@
-            - name: TypeScript report
-  # You may pin to the exact commit or the version.
-  # uses: fersilva16/ts-report-action@15216c4c8228e6d246265f3136a375d04eb8e578
-  uses: fersilva16/ts-report-action@1.2.1
-  with:
-    # TypeScript project file
-    project: # optional
-    # Files to check
-    files: # optional
-          
+name: Test and Native Code Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write      
+      code-quality: write    # Required for GitHub Enterprise Code Coverage API
+      pull-requests: write   # Allows appending the widget inside the PR
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Go Environment Configuration Setup (`relay`)
+      # -----------------------------------------------------------------------
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: relay/go.sum
+
+      - name: Run Go Tests with Coverage
+        run: |
+          cd relay
+          go test -v -coverprofile=coverage.out ./...
+
+      - name: Upload Go Coverage Report
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-code-coverage@v1
+        with:
+          file: ./relay/coverage.out
+          language: go
+
+      # -----------------------------------------------------------------------
+      # Node.js Environment Configuration Setup (`worker` & `inbound`)
+      # -----------------------------------------------------------------------
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # -- Execute Worker Coverage --
+      - name: Install & Run Worker Tests
+        run: |
+          cd worker
+          npm ci
+          npx vitest run --coverage.enabled=true --coverage.provider=istanbul --coverage.reporter=cobertura --passWithNoTests --teardownTimeout=1
+
+      - name: Upload Worker Coverage Report
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-code-coverage@v1
+        with:
+          file: ./worker/coverage/cobertura-coverage.xml
+          language: javascript
+
+      # -- Execute Inbound Worker Coverage --
+      - name: Install & Run Inbound Worker Tests
+        run: |
+          cd inbound
+          npm ci
+          npx vitest run --coverage.enabled=true --coverage.provider=istanbul --coverage.reporter=cobertura --passWithNoTests --teardownTimeout=1
+
+      - name: Upload Inbound Worker Coverage Report
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-code-coverage@v1
+        with:
+          file: ./inbound/coverage/cobertura-coverage.xml
+          language: javascript
