@@ -1,0 +1,10 @@
+            - name: TypeScript report
+  # You may pin to the exact commit or the version.
+  # uses: fersilva16/ts-report-action@15216c4c8228e6d246265f3136a375d04eb8e578
+  uses: fersilva16/ts-report-action@1.2.1
+  with:
+    # TypeScript project file
+    project: # optional
+    # Files to check
+    files: # optional
+          
