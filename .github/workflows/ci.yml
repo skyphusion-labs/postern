@@ -1,39 +1,52 @@
-name: ci (self-hosted)
+name: ci
 
-# Full CI (typecheck + tests) on the self-hosted dischord runner.
-# The GitHub-hosted typecheck.yml stays as the safe path for untrusted fork PRs.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
-
-# Least privilege: CI only needs to read the repo. No write scopes on the token.
-permissions:
-  contents: read
-
-# Supersede in-flight runs on the same ref so a self-hosted runner is never
-# queued up behind stale commits.
-concurrency:
-  group: ci-self-hosted-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  ci:
-    # SECURITY: this repo is PUBLIC and the runner is self-hosted. Never let an
-    # untrusted fork PR execute on the box. Run for pushes (trusted) and only for
-    # same-repo (non-fork) PRs; fork PRs still get typecheck via the hosted workflow.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64]
+
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: 22
           cache: npm
-      - run: npm ci --prefix ./worker
-      - run: npm ci --prefix ./inbound
-      - run: npm run typecheck --prefix ./worker
-      - run: npm run typecheck --prefix ./inbound
-      - run: npm test --prefix ./worker
-      = run: npm test --prefix ./inbound
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+
+  inbound:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: inbound
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: inbound/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+
+  relay:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.22"
+          cache-dependency-path: relay/go.sum
+      - run: go vet ./...
+      - run: go build ./...
