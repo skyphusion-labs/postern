@@ -1,6 +1,6 @@
-# skyphusion-email
+# postern
 
-Transactional email for the Skyphusion / Vivijure stack, sent through
+Email, for humans and agents, introducing Postern, emails sent through
 [Cloudflare Email Sending](https://developers.cloudflare.com/email-service/).
 
 Two components in one repo:
