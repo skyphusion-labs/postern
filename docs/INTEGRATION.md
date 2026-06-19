@@ -62,6 +62,7 @@ Responses:
 | 200 | `{"ok":true,"messageId":"..."}` | Sent |
 | 400 | `{"ok":false,"error":"E_...","message":"..."}` | Bad request, do not retry |
 | 401 | `{"ok":false,"error":"unauthorized"}` | Missing/wrong bearer token |
+| 413 | `{"ok":false,"error":"E_PAYLOAD_TOO_LARGE","message":"..."}` | Body exceeds the size cap |
 | 502 | `{"ok":false,"error":"E_...","message":"..."}` | Transient upstream, retry with backoff |
 
 ## Request fields
@@ -74,4 +75,4 @@ Responses:
 | `from` | string \| `{email,name}` | no | Defaults to `DEFAULT_FROM`; must be `@skyphusion.org` |
 | `replyTo` | string \| `{email,name}` | no | |
 | `cc` / `bcc` | string \| string[] | no | to+cc+bcc <= 50 |
-| `headers` | object | no | Whitelisted headers only |
+| `headers` | object | no | String values only; CR/LF rejected (no header injection) |

@@ -3,14 +3,18 @@
 Email, for humans and agents, introducing Postern, emails sent through
 [Cloudflare Email Sending](https://developers.cloudflare.com/email-service/).
 
-Two components in one repo:
+Three components in one repo:
 
-- **`worker/`** — a Cloudflare Worker that actually sends mail (from
+- **`worker/`**: a Cloudflare Worker that actually sends mail (from
   `@skyphusion.org`). It exposes an RPC entrypoint for same-account Workers and
-  a token-gated public `POST /send` endpoint for everything else.
-- **`relay/`** — a small Go SMTP daemon for `dischord`. Local services that
+  a token-gated public `POST /send` endpoint for everything else. It also has an
+  `email()` handler that forwards inbound Email Routing mail to `FORWARD_TO`.
+- **`relay/`**: a small Go SMTP daemon for `dischord`. Local services that
   can only speak SMTP hand it a message; it parses the MIME and relays it to the
   worker's public endpoint over HTTPS.
+- **`inbound/`**: a separate Cloudflare Worker that ingests inbound mail via
+  Email Routing: it forwards to `FORWARD_TO`, then parses and stores the message
+  in D1 (full-text search), R2 (attachments), and Vectorize (embeddings for RAG).
 
 ```
 skyphusion-llm-public ──(service binding RPC: env.EMAIL.send)──┐
@@ -56,8 +60,8 @@ the relay's `EMAIL_RELAY_TOKEN` (see below).
 
 ### Endpoints
 
-- `GET /` or `/health` — liveness, no auth.
-- `POST /send` — send mail. Requires `Authorization: Bearer <RELAY_TOKEN>`.
+- `GET /` or `/health`: liveness, no auth.
+- `POST /send`: send mail. Requires `Authorization: Bearer <RELAY_TOKEN>`.
 
 See [docs/INTEGRATION.md](docs/INTEGRATION.md) for the service binding setup,
 the request schema, and response/error codes.
@@ -111,6 +115,10 @@ relay/
   smtp.go        go-smtp backend, MIME parse, payload build
   client.go      HTTPS POST to the worker
   systemd/       service unit
+inbound/
+  src/index.ts   Email Routing handler: forward + parse + store (D1/R2/Vectorize)
+  schema.sql     D1 schema (messages, attachments, FTS5)
+  wrangler.jsonc bindings (DB, ATTACHMENTS, VECTORIZE, AI) + vars
 docs/
   INTEGRATION.md caller setup (service binding + REST)
 ```
