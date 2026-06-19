@@ -223,9 +223,9 @@ The RPC entrypoint mirrors the read + write operations as typed methods (`list`,
   so deployed relays keep working through the rename.
 - Scoped / multi tokens are a post-v1 enhancement: noted, not built.
 
-`POST /ingest` and `dispatch`-to-relay are infra seams, not API clients. Lean: they use a
+`POST /ingest` and `dispatch`-to-relay are infra seams, not API clients. They use a
 **separate** transport token (`POSTERN_TRANSPORT_TOKEN`), not the API token, so an API
-credential leak cannot inject mail and vice versa. (Open item, section 8.)
+credential leak cannot inject mail and vice versa. (Decided, section 8.)
 
 ---
 
@@ -280,9 +280,9 @@ Scripted, with zero skyphusion-specific assumptions. That green run is the launc
 
 ---
 
-## 8. Decisions: made vs. open
+## 8. Decisions
 
-**Made** (push back in a #33 comment if you disagree, cheaper now than after code):
+All M1 contract decisions are locked. The list below is authoritative; build against it.
 
 - One Worker, not two (rationale above).
 - CF Email = default transport behind `dispatch` / `ingest`, never a hard dependency.
@@ -290,15 +290,15 @@ Scripted, with zero skyphusion-specific assumptions. That green run is the launc
 - `thread_id` denormalized onto `messages` (simple, indexable) over a separate threads table.
 - API secret renamed `RELAY_TOKEN` -> `POSTERN_API_TOKEN`, with `RELAY_TOKEN` honored as a
   fallback for one release.
+- **Transport auth (DECIDED):** `/ingest` and `dispatch`-to-relay use a **separate**
+  `POSTERN_TRANSPORT_TOKEN`, never the mailbox API token. Transports are infra, not API clients,
+  so an API-token leak cannot inject mail and a transport-token leak cannot read the mailbox.
+- **Attachment delivery (DECIDED):** stream **bytes** for v1, base64-encoded over JSON on the
+  `/ingest` body (`ParsedInbound.attachments[].content`) and as raw bytes on
+  `GET /api/messages/{messageId}/attachments/{i}`. A short-lived signed R2 URL for large files
+  is a post-v1 enhancement, not built now.
+- **Runtime deps (DECIDED):** `postal-mime` is accepted in `core` (the store/ingest path needs
+  it). The Go relay stays dependency-free (`go-smtp` + `enmime` only, no new deps).
 
-**Open** (lock during M1):
-
-- **Attachment delivery:** stream bytes through the Worker vs. a short-lived signed R2 URL.
-  Lean: bytes for v1 (simpler), signed URL later for large files.
-- **Transport auth:** reuse `POSTERN_API_TOKEN` for `/ingest` + relay dispatch, or a separate
-  `POSTERN_TRANSPORT_TOKEN`. Lean: separate token (transports are infra, not API clients).
-- **Zero-runtime-dep rule after the merge:** `core` pulls in `postal-mime` via the store.
-  Lean: accept it in `core`, keep the *relay* dependency-light.
-
-Lane split once locked: Strummer = transports / #23 + relay; Rollins = store + API + send /
-#25 / #26 / #27; Joan = the API client surface (#32). Mackaye owns this contract end to end.
+Lane split: Strummer = transports / #23 + relay; Rollins = store + API + send / #25 / #26 /
+#27; Joan = the API client surface (#32). Mackaye owns this contract end to end.
