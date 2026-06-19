@@ -1,5 +1,5 @@
 // Core send logic shared by the RPC entrypoint (service-binding callers) and
-// the public HTTP endpoint (the mindcrime SMTP relay). Validation lives here so
+// the public HTTP endpoint (the dischord SMTP relay). Validation lives here so
 // both surfaces behave identically.
 
 export interface EmailAddress {
@@ -40,6 +40,20 @@ export class EmailError extends Error {
 // We only reject obviously malformed addresses to fail fast with a clear code.
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const MAX_RECIPIENTS = 50;
+// Defense in depth against header injection: any CR or LF in a single-line
+// field (subject, from/reply-to display name, custom header key/value) could let
+// a caller smuggle extra headers or split the message. Reject them outright.
+const CRLF_RE = /[\r\n]/;
+// Cap the JSON-serialized body so a single request can't exhaust worker memory.
+// Cloudflare Email Sending caps a message near 25 MiB; we bound the request a
+// little above that so a legitimate max-size message still passes.
+export const MAX_BODY_BYTES = 30 * 1024 * 1024;
+
+function rejectCRLF(label: string, value: string): void {
+  if (CRLF_RE.test(value)) {
+    throw new EmailError("E_VALIDATION_ERROR", `${label} must not contain line breaks`);
+  }
+}
 
 function asArray(v: string | string[] | undefined): string[] {
   if (v === undefined) return [];
@@ -82,6 +96,7 @@ function resolveFrom(env: Env, from: EmailRequest["from"]): EmailAddress {
       403,
     );
   }
+  if (name !== undefined) rejectCRLF("from name", name);
   return name ? { email, name } : { email };
 }
 
@@ -92,6 +107,7 @@ export async function sendEmail(env: Env, req: EmailRequest): Promise<SendResult
   if (typeof req.subject !== "string" || req.subject.trim() === "") {
     throw new EmailError("E_FIELD_MISSING", "subject is required");
   }
+  rejectCRLF("subject", req.subject);
   if (!req.html && !req.text) {
     throw new EmailError("E_FIELD_MISSING", "at least one of html or text is required");
   }
@@ -113,6 +129,30 @@ export async function sendEmail(env: Env, req: EmailRequest): Promise<SendResult
   }
 
   const from = resolveFrom(env, req.from);
+
+  if (req.replyTo !== undefined) {
+    const replyTo = req.replyTo;
+    const replyEmail = (typeof replyTo === "string" ? replyTo : replyTo?.email ?? "").trim();
+    if (!EMAIL_RE.test(replyEmail)) {
+      throw new EmailError("E_VALIDATION_ERROR", `invalid replyTo address: ${replyEmail}`);
+    }
+    if (typeof replyTo !== "string" && replyTo.name !== undefined) {
+      rejectCRLF("replyTo name", replyTo.name);
+    }
+  }
+
+  if (req.headers) {
+    if (typeof req.headers !== "object" || Array.isArray(req.headers)) {
+      throw new EmailError("E_VALIDATION_ERROR", "headers must be an object");
+    }
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (typeof value !== "string") {
+        throw new EmailError("E_VALIDATION_ERROR", `header ${key} must be a string`);
+      }
+      rejectCRLF(`header ${key}`, key);
+      rejectCRLF(`header ${key}`, value);
+    }
+  }
 
   const message: SendEmailMessage = {
     to,

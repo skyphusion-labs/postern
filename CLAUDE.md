@@ -14,14 +14,18 @@ that also lives, generically, in the sibling `cf-email-relay` repo. Two componen
     through a service binding (typed, no token, no network hop). Class is
     `EmailService extends WorkerEntrypoint<Env>`.
   - **Public HTTPS**: `POST /send`, gated by a `RELAY_TOKEN` Bearer secret.
-- `relay/` -- a Go SMTP daemon (`go-smtp` + `enmime`) that runs on **mindcrime** for services
+- `relay/` -- a Go SMTP daemon (`go-smtp` + `enmime`) that runs on **dischord** for services
   that can only speak SMTP (cron, scripts, backups, Jenkins failure mail). It accepts MIME on
   `127.0.0.1:2525`, parses it, and POSTs it to the worker over HTTPS.
+- `inbound/` -- a separate Cloudflare Worker that ingests inbound mail via Email Routing: it
+  forwards to `FORWARD_TO`, then parses the MIME and stores it in D1 (`messages`/`attachments`,
+  FTS5 search), R2 (attachment bytes), and Vectorize (chunked embeddings for crew RAG). This is
+  receive-side and independent of the send-side `worker/`.
 
 ```
 skyphusion-llm-public ──(service binding RPC: env.EMAIL.send)──┐
                                                                ├──► worker ──► CF Email Sending ──► inbox
-mindcrime services ──SMTP──► relay ──(HTTPS + Bearer token)────┘
+dischord services ──SMTP──► relay ──(HTTPS + Bearer token)─────┘
    (cron, backups, CI mail)   (127.0.0.1:2525, systemd)
 ```
 
@@ -42,12 +46,14 @@ First-time secret: `npx wrangler secret put RELAY_TOKEN`. Both `skyphusion.org` 
 go vet ./...                              # lint (runs in CI)
 go build -o skyphusion-email-relay .      # build (runs in CI)
 ```
-Install on mindcrime: binary to `/usr/local/bin/`, env to `/etc/skyphusion-email-relay.env`
+Install on dischord: binary to `/usr/local/bin/`, env to `/etc/skyphusion-email-relay.env`
 (mode 0600, set `EMAIL_WORKER_URL` + `EMAIL_RELAY_TOKEN`), unit to `/etc/systemd/system/`, then
 `systemctl enable --now skyphusion-email-relay`. See `README.md`.
 
-There is **no automated test suite**. Verify the worker with `npm run dev` / `curl .../send`,
-the relay on the box with `swaks --server 127.0.0.1:2525 ...`.
+Tests: the worker has a vitest suite (`worker/smoke.test.ts`) covering `sendEmail()` validation;
+run it with `npx vitest run` (the `ci` workflow gates on `typecheck` only, the
+`code-coverage-ts` workflow runs vitest + `go test`). For end-to-end checks, verify the worker
+with `npm run dev` / `curl .../send` and the relay on the box with `swaks --server 127.0.0.1:2525 ...`.
 
 ## Architecture
 
@@ -68,7 +74,7 @@ Both front doors funnel through one function so behavior can't drift:
 
 ### Sender-domain rewriting (load-bearing)
 The worker only accepts `from` on `ALLOWED_FROM_DOMAIN` (`skyphusion.org`). The relay's
-`FROM_DOMAIN` rewrites off-domain senders (e.g. `root@mindcrime`) to `DEFAULT_FROM` and moves
+`FROM_DOMAIN` rewrites off-domain senders (e.g. `root@dischord`) to `DEFAULT_FROM` and moves
 the original into `Reply-To`, so CI/cron mail does not get rejected.
 
 ## Bindings, vars, secrets
@@ -97,14 +103,19 @@ the original into `Reply-To`, so CI/cron mail does not get rejected.
   `127.0.0.1:2525`), so breaking the relay can silence CI alerts.
 
 ## CI / deploy
-Jenkins multibranch pipeline (`Jenkinsfile`, host **mindcrime**), all stages in Docker:
+Jenkins multibranch pipeline (`Jenkinsfile`, host **dischord**), all stages in Docker:
 - Worker typecheck (`node:22`): `cd worker && npm ci && npm run typecheck` -- all branches.
+- Inbound typecheck (`node:22`): `cd inbound && npm ci && npm run typecheck` -- all branches.
 - Relay vet + build (`golang:1.23`): `cd relay && go vet ./... && go build` -- all branches.
-- Deploy worker (`node:22`): `npx wrangler deploy` -- **main only** (needs the
-  `CLOUDFLARE_API_TOKEN` Jenkins credential).
+- Deploy (`node:22`): `npx wrangler deploy` for **both** `worker/` (skyphusion-email) and
+  `inbound/` (skyphusion-email-inbound) -- **main only** (needs the `CLOUDFLARE_API_TOKEN`
+  Jenkins credential).
 
-**Only the worker auto-deploys on green `main`.** The relay must be rebuilt and reinstalled on
-mindcrime by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
+There is also a GitHub Actions `ci` workflow (typecheck for worker + inbound, `go vet` + build
+for relay) and a `code-coverage-ts` workflow (vitest + `go test` coverage).
+
+**Both Workers auto-deploy on green `main`.** The relay must be rebuilt and reinstalled on
+dischord by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
 
 ## Conventions (SkyPhusion house style)
 - Default handle/username for any service is `skyphusion`.
