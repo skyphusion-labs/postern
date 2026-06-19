@@ -251,9 +251,14 @@
     // escaped + linkified and shown pre-wrap.
     var hasHtml = !!(m && m.bodyHtml);
     var inner = hasHtml ? String(m.bodyHtml) : linkify(escapeHtml((m && m.bodyText) || ""));
+    // HTML email authors its own colors for a LIGHT background (every mail client
+    // renders HTML mail on white), so use white + dark text for the HTML case to
+    // avoid dark-on-dark unreadable bodies. Plain text keeps the app's dark theme.
     var bodyCss = "margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;" +
-      "color:#e7e9ee;background:#1c1f26;word-wrap:break-word;padding:2px" +
-      (hasHtml ? "" : ";white-space:pre-wrap");
+      "word-wrap:break-word;padding:10px" +
+      (hasHtml
+        ? ";color:#1a1a1a;background:#ffffff"
+        : ";color:#e7e9ee;background:#1c1f26;white-space:pre-wrap");
     var doc = '<!doctype html><html><head><meta charset="utf-8">' +
       '<style>body{' + bodyCss + '}a{color:#6ea8fe}img{max-width:100%;height:auto}</style>' +
       '</head><body>' + inner + '</body></html>';
