@@ -122,8 +122,15 @@ stable under concurrent inserts; `cursor: null` means no more rows. Read endpoin
 `limit + 1` rows to decide whether a next cursor exists. The `q` / search text is **sanitized**
 into a phrase expression before it reaches FTS5 `MATCH` (word tokens, each quoted, OR-joined),
 so caller input cannot inject FTS operators or break the query; an all-punctuation query matches
-nothing. All filter values are bound params. `search` ships `mode: "fts"` only in M1; `semantic`
-and `hybrid` return `E_VALIDATION_ERROR` until M4 wires Vectorize.
+nothing. All filter values are bound params. `search` modes: `fts` (M1, date-ordered + cursor-paged), `semantic` and `hybrid` (M4, over the
+Vectorize index ingest already populates). `semantic` embeds the query with the same model
+(`@cf/baai/bge-base-en-v1.5`) and queries Vectorize, collapsing chunk-hits to unique messages
+(best chunk score wins) and hydrating from D1; `hybrid` blends the fts and semantic result sets
+by `message_id` on a normalized score. semantic/hybrid are SCORE-ranked, so they return a single
+ranked page (`cursor` always null) of up to `limit` hits -- a date keyset cursor does not apply;
+paging a re-ranked semantic set is a post-v1 nicety. If the AI/Vectorize bindings are not
+configured, semantic/hybrid degrade to empty rather than erroring (ingest skips indexing too). An
+unknown mode returns `E_VALIDATION_ERROR`.
 
 ---
 
@@ -245,7 +252,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
-| GET | `/api/search?q=&mode=fts\|semantic\|hybrid` | search (fts done; semantic/hybrid land in M4) | M1 (done) / M4 |
+| GET | `/api/search?q=&mode=fts\|semantic\|hybrid` | search (fts + semantic + hybrid) | M1 / M4 (done) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
 
@@ -354,6 +361,15 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
   is a post-v1 enhancement, not built now.
 - **Runtime deps (DECIDED):** `postal-mime` is accepted in `core` (the store/ingest path needs
   it). The Go relay stays dependency-free (`go-smtp` + `enmime` only, no new deps).
+- **AI Search: hand-rolled Vectorize query, not managed AutoRAG (DECIDED, #31).** Ingest already
+  populates a Vectorize index (one vector per body chunk, `@cf/baai/bge-base-en-v1.5`, metadata
+  carries `message_id`). M4 semantic/hybrid query THAT index directly (embed query -> Vectorize
+  query -> collapse chunks to messages -> hydrate from D1) rather than standing up managed CF AI
+  Search / AutoRAG. Rationale: AutoRAG would re-index from a separate data source, duplicating
+  storage + embeddings and adding a managed dependency, against the no-rent/no-lock-in thesis. The
+  hand-rolled path reuses the existing index, the existing `SearchHit`/`Page` read shape, and adds
+  zero dependencies. If a deployment omits the AI/Vectorize bindings, semantic/hybrid degrade to
+  empty (fts still works).
 
 Lane split: Strummer = transports / #23 + relay; Rollins = store + API + send / #25 / #26 /
 #27; Joan = the API client surface (#32). Mackaye owns this contract end to end.
