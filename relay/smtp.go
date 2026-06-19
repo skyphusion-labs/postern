@@ -28,7 +28,7 @@ func (b *Backend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
 }
 
 // Session accumulates the envelope (MAIL FROM / RCPT TO) and, on DATA, parses
-// the MIME body and relays it to the worker.
+// the MIME body and delivers it to core (the inbound transport seam).
 type Session struct {
 	cfg    Config
 	client *Client
@@ -64,6 +64,19 @@ func (s *Session) Data(r io.Reader) error {
 		return &smtp.SMTPError{Code: 554, EnhancedCode: smtp.EnhancedCode{5, 6, 0}, Message: "parse failed: " + err.Error()}
 	}
 
+	// Inbound transport seam (CONTRACT section 2): normalize to ParsedInbound and
+	// POST to core /ingest. Legacy deployments without /ingest configured fall
+	// back to posting an EmailPayload to the worker /send endpoint.
+	if s.client.usesIngest() {
+		p := buildParsedInbound(s.rcpts, s.from, env)
+		if err := s.client.PostIngest(p); err != nil {
+			log.Printf("ingest failed to=%s from=%s subject=%q: %v", p.To, p.From, p.Subject, err)
+			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "ingest to core failed"}
+		}
+		log.Printf("ingested to=%s from=%s subject=%q attachments=%d", p.To, p.From, p.Subject, len(p.Attachments))
+		return nil
+	}
+
 	payload := s.buildPayload(env)
 	if err := s.client.Send(payload); err != nil {
 		// 451 = transient; the sending MTA may retry.
@@ -81,12 +94,14 @@ func (s *Session) Reset() {
 
 func (s *Session) Logout() error { return nil }
 
-// buildPayload turns the SMTP envelope + parsed MIME into the worker's JSON
-// request. Recipients come from RCPT TO (the real envelope), not the headers.
+// buildPayload turns the SMTP envelope + parsed MIME into the worker's legacy
+// /send JSON request. Recipients come from RCPT TO (the real envelope), not the
+// headers.
 //
 // The worker only accepts From addresses on FromDomain. Local services often
 // send as cron@localhost or root@host, so any off-domain sender is rewritten to
-// DefaultFrom with the original preserved as Reply-To.
+// DefaultFrom with the original preserved as Reply-To. (Legacy path only; the
+// /ingest seam stores mail verbatim and does no rewriting.)
 func (s *Session) buildPayload(env *enmime.Envelope) EmailPayload {
 	p := EmailPayload{
 		To:      append([]string(nil), s.rcpts...),
@@ -138,10 +153,23 @@ func run(cfg Config) error {
 		return fmt.Errorf("no listen address configured (SMTP_LISTEN)")
 	}
 
+	// The function blocks until any listener exits. Size the channel for the SMTP
+	// listeners plus the optional outbound /dispatch bridge.
+	errc := make(chan error, len(addrs)+1)
+
+	// Optional outbound bridge (CONTRACT section 3): core POSTs OutboundMessages
+	// here and the relay sends them via bring-your-own SMTP.
+	if cfg.HTTPListen != "" {
+		transport, err := newTransport(cfg)
+		if err != nil {
+			return fmt.Errorf("outbound transport: %w", err)
+		}
+		go func() { errc <- startDispatchServer(cfg, transport) }()
+	}
+
 	// One go-smtp server per address (e.g. loopback for host services plus a
 	// docker-bridge IP for a containerized caller like Uptime Kuma). They share
-	// the stateless Backend. The function blocks until any listener exits.
-	errc := make(chan error, len(addrs))
+	// the stateless Backend.
 	for _, addr := range addrs {
 		srv := smtp.NewServer(be)
 		srv.Addr = addr
@@ -149,10 +177,10 @@ func run(cfg Config) error {
 		srv.MaxMessageBytes = cfg.MaxSize
 		srv.MaxRecipients = MaxRecipients
 		srv.AllowInsecureAuth = true // plaintext on trusted interfaces only (no STARTTLS)
-		log.Printf("skyphusion-email-relay listening on %s -> %s (from-domain=%s)", addr, cfg.WorkerURL, cfg.FromDomain)
+		log.Printf("skyphusion-email-relay listening on %s (inbound mode=%s)", addr, cfg.inboundMode())
 		go func(s *smtp.Server) { errc <- s.ListenAndServe() }(srv)
 	}
-	return fmt.Errorf("smtp server: %w", <-errc)
+	return fmt.Errorf("relay server: %w", <-errc)
 }
 
 // splitListen parses a comma-separated SMTP_LISTEN into trimmed addresses.
