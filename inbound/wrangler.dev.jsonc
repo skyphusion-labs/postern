@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "postern-dev",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-05",
+  "d1_databases": [
+    { "binding": "DB", "database_name": "postern-dev", "database_id": "local-dev-screenshots" }
+  ],
+  "vars": {
+    "TRUSTED_SENDER_DOMAINS": "",
+    "FORWARD_TO": "",
+    "FORWARD_FOR": "",
+    "VECTORIZE_FOR": "",
+    "DEFAULT_FROM": "noreply@example.com",
+    "DEFAULT_FROM_NAME": "Postern",
+    "ALLOWED_FROM_DOMAIN": "example.com",
+    "OUTBOUND_TRANSPORT": "cf"
+  }
+}
