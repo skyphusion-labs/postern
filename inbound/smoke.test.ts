@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-// The transport-side helpers (header verdict parsing + content coercion) stay in
-// the CF email() driver; the storage-side pure helpers moved to ingest.ts when
-// the ingest() seam was extracted (#21/#22). Imports follow the code.
-import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer } from "./src/index";
+// Imports follow the code: the transport-side helpers live in headers.ts (kept
+// out of index.ts so this suite need not import the worker entrypoint); the
+// storage-side pure helpers live in ingest.ts.
+import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer } from "./src/headers";
 import { isTrusted, cleanBody, htmlToText, chunkText, sha256hex } from "./src/ingest";
 
 // These cover the pure ingestion helpers: auth-verdict parsing, the allowlist
