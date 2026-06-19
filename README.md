@@ -42,6 +42,13 @@ both clients of that API (never a second store):
 
 Both are read-only; sending stays the structured API's job.
 
+An HTML email rendered in the webmail (safely, in a sandboxed iframe; no scripts,
+no remote trackers running):
+
+![Postern webmail rendering an HTML email](webmail/screenshots/webmail-html-email.png)
+
+The inbox list, a message read view, and search:
+
 ![Postern webmail: inbox list, message read view, and thread](webmail/screenshots/webmail-inbox.png)
 
 | Read a message (trust verdict + attachments) | Search the mailbox |
