@@ -9,6 +9,21 @@ a person browse and read the one Postern mailbox in a web browser.
 One self-contained `index.html`: vanilla HTML/CSS/JS, **no framework and no build
 step**, zero runtime dependencies.
 
+## Screenshots
+
+The inbox list, a single message (headers, trust verdict, body, attachments), and
+the thread view:
+
+![Webmail: list + read + thread](screenshots/webmail-inbox.png)
+
+Reading a message with an attachment listing, and search:
+
+| Read view | Search |
+|---|---|
+| ![Read view](screenshots/webmail-message.png) | ![Search](screenshots/webmail-search.png) |
+
+(Synthetic example data; no real mail.)
+
 ## What it does (v1)
 
 - **Message list** with an Inbox / Sent / All folder filter (the API's

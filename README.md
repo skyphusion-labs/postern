@@ -29,6 +29,29 @@ See [docs/CONTRACT.md](docs/CONTRACT.md) for the authoritative data model and
 transport seams, and [docs/INTEGRATION.md](docs/INTEGRATION.md) for caller setup
 (service binding + REST).
 
+## Email for humans, too: webmail and IMAP
+
+Agents speak the structured API; humans get two read doors onto the same mailbox,
+both clients of that API (never a second store):
+
+- **Webmail** (`webmail/`): a single self-contained page (vanilla HTML/CSS/JS, no
+  build step) served by the worker at **`/webmail`**. Paste your API origin and
+  token and browse the mailbox: list, read, threads, search.
+- **IMAP proxy** (`imap/`): a small Twisted server that fronts the read API as
+  read-only IMAP, so Thunderbird / mutt / iOS Mail can open the mailbox too.
+
+Both are read-only; sending stays the structured API's job.
+
+![Postern webmail: inbox list, message read view, and thread](webmail/screenshots/webmail-inbox.png)
+
+| Read a message (trust verdict + attachments) | Search the mailbox |
+|---|---|
+| ![Reading a message](webmail/screenshots/webmail-message.png) | ![Searching](webmail/screenshots/webmail-search.png) |
+
+> The shots above use synthetic example data. See [webmail/README.md](webmail/README.md)
+> for setup and the security model (BYO-token, token in `sessionStorage` only, no
+> `innerHTML` of message content, locked-down CSP).
+
 ## Quick start
 
 Full steps in [DEPLOY.md](DEPLOY.md). In short:
