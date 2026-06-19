@@ -118,6 +118,64 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id));
           return { results: matched as unknown as T[] };
         }
+        // list() / search(): FROM messages m with optional WHERE fragments. We
+        // walk the bound params in the SAME order store.ts appends them (fts, to,
+        // from, thread, direction, cursor tuple, then limit+1) so the fake stays
+        // a faithful interpreter of the two query shapes the store emits.
+        if (/FROM messages m/i.test(sql)) {
+          let i = 0;
+          let work = rows.slice();
+          if (/messages_fts MATCH \?/i.test(sql)) {
+            const expr = String(bound[i++]); // phrase OR expression: "a" OR "b"
+            const terms = (expr.match(/"([^"]+)"/g) ?? []).map((t) => t.replace(/"/g, "").toLowerCase());
+            work = work.filter((r) =>
+              terms.some(
+                (t) => r.subject.toLowerCase().includes(t) || r.body_text.toLowerCase().includes(t),
+              ),
+            );
+          }
+          if (/lower\(m\.to_addr\) LIKE \?/i.test(sql)) {
+            const v = String(bound[i++]).replace(/%/g, "").toLowerCase();
+            work = work.filter((r) => r.to_addr.toLowerCase().includes(v));
+          }
+          if (/lower\(m\.from_addr\) LIKE \?/i.test(sql)) {
+            const v = String(bound[i++]).replace(/%/g, "").toLowerCase();
+            work = work.filter((r) => r.from_addr.toLowerCase().includes(v));
+          }
+          if (/m\.thread_id = \?/i.test(sql)) {
+            const v = String(bound[i++]);
+            work = work.filter((r) => r.thread_id === v);
+          }
+          if (/m\.direction = \?/i.test(sql)) {
+            const v = String(bound[i++]);
+            work = work.filter((r) => r.direction === v);
+          }
+          if (/m\.date < \?/i.test(sql)) {
+            const d = String(bound[i++]);
+            const d2 = String(bound[i++]);
+            const cid = Number(bound[i++]);
+            void d2;
+            work = work.filter((r) => r.date < d || (r.date === d && r.id < cid));
+          }
+          const limit = Number(bound[i++]);
+          work.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
+          const limited = work.slice(0, limit);
+          const results = limited.map((r) => ({
+            id: r.id,
+            message_id: r.message_id,
+            direction: r.direction,
+            thread_id: r.thread_id,
+            from_addr: r.from_addr,
+            to_addr: r.to_addr,
+            subject: r.subject,
+            date: r.date,
+            in_reply_to: r.in_reply_to,
+            trusted: r.trusted,
+            received_at: r.received_at,
+            attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
+          }));
+          return { results: results as unknown as T[] };
+        }
         return { results: [] as T[] };
       },
     };

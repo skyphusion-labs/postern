@@ -28,6 +28,53 @@ export interface AttachmentMeta {
   size: number;
 }
 
+/** List view: a message without its body or attachment bytes; carries a count. */
+export interface StoredMessageSummary {
+  messageId: string;
+  direction: "inbound" | "outbound";
+  threadId: string;
+  from: string;
+  to: string;
+  subject: string;
+  date: string;
+  inReplyTo: string | null;
+  trusted: boolean;
+  receivedAt: string;
+  attachmentCount: number;
+}
+
+export interface ListQuery {
+  to?: string;
+  from?: string;
+  thread?: string;
+  direction?: "inbound" | "outbound";
+  q?: string; // FTS over subject + body
+  limit?: number; // default 50, max 200
+  cursor?: string; // opaque; encodes (date, id) of the last row
+}
+
+export interface SearchQuery {
+  q: string;
+  mode?: "fts" | "semantic" | "hybrid"; // semantic/hybrid land in M4
+  limit?: number;
+  cursor?: string;
+}
+
+/** One page of results. cursor=null means there are no more. */
+export interface Page<T> {
+  items: T[];
+  cursor: string | null;
+}
+
+export interface SearchHit {
+  message: StoredMessageSummary;
+  score?: number;
+  snippet?: string;
+}
+
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+
 /**
  * Normalized input to store.put(). messageId is already normalized (<>-stripped,
  * sha256 if >64 chars) by the caller. references is the parsed References list
@@ -266,4 +313,191 @@ export async function thread(env: Env, threadId: string): Promise<StoredMessage[
     out.push(rowToMessage(row, await attachmentsFor(env.DB, row.message_id)));
   }
   return out;
+}
+
+// --- List / search (CONTRACT section 1 / section 4) ---
+
+// Summary rows carry the rowid for keyset pagination + an attachment count, but
+// not the body. Ordering is (date DESC, id DESC); the cursor encodes the last
+// (date, id) so the next page is a strict keyset seek, stable under inserts.
+interface SummaryRow {
+  id: number;
+  message_id: string;
+  direction: string;
+  thread_id: string | null;
+  from_addr: string;
+  to_addr: string;
+  subject: string;
+  date: string;
+  in_reply_to: string | null;
+  trusted: number;
+  received_at: string;
+  attachment_count: number;
+}
+
+function rowToSummary(row: SummaryRow): StoredMessageSummary {
+  return {
+    messageId: row.message_id,
+    direction: row.direction === "outbound" ? "outbound" : "inbound",
+    threadId: row.thread_id ?? row.message_id,
+    from: row.from_addr,
+    to: row.to_addr,
+    subject: row.subject,
+    date: row.date,
+    inReplyTo: row.in_reply_to,
+    trusted: row.trusted === 1,
+    receivedAt: row.received_at,
+    attachmentCount: row.attachment_count,
+  };
+}
+
+function clampLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit) || limit < 1) return DEFAULT_LIMIT;
+  return Math.min(Math.floor(limit), MAX_LIMIT);
+}
+
+function encodeCursor(date: string, id: number): string {
+  // Opaque to callers; base64url of the keyset tuple.
+  return btoa(JSON.stringify([date, id])).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeCursor(cursor: string | undefined): { date: string; id: number } | null {
+  if (!cursor) return null;
+  try {
+    const b64 = cursor.replace(/-/g, "+").replace(/_/g, "/");
+    const parsed = JSON.parse(atob(b64)) as unknown;
+    if (Array.isArray(parsed) && typeof parsed[0] === "string" && typeof parsed[1] === "number") {
+      return { date: parsed[0], id: parsed[1] };
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+// Turn arbitrary user text into a safe FTS5 MATCH expression. FTS5 query syntax
+// would otherwise throw on quotes/operators (and could be abused), so we extract
+// word tokens and quote each as a phrase, OR-joined. Empty input -> no MATCH.
+function toFtsQuery(q: string): string {
+  const tokens = (q.match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, 16);
+  if (tokens.length === 0) return "";
+  return tokens.map((t) => `"${t}"`).join(" OR ");
+}
+
+/**
+ * List / filter messages, newest first, keyset-paginated. q (when present) is an
+ * FTS match over subject + body. All filter values are bound params; the FTS
+ * query is sanitized to a phrase expression (no injection, no syntax errors).
+ */
+export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSummary>> {
+  const limit = clampLimit(q.limit);
+  const where: string[] = [];
+  const binds: unknown[] = [];
+
+  const useFts = typeof q.q === "string" && q.q.trim().length > 0;
+  const ftsExpr = useFts ? toFtsQuery(q.q as string) : "";
+
+  if (useFts && ftsExpr) {
+    where.push("m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)");
+    binds.push(ftsExpr);
+  } else if (useFts && !ftsExpr) {
+    // q was all punctuation/whitespace: matches nothing.
+    return { items: [], cursor: null };
+  }
+
+  if (q.to) {
+    where.push("lower(m.to_addr) LIKE ?");
+    binds.push(`%${q.to.toLowerCase()}%`);
+  }
+  if (q.from) {
+    where.push("lower(m.from_addr) LIKE ?");
+    binds.push(`%${q.from.toLowerCase()}%`);
+  }
+  if (q.thread) {
+    where.push("m.thread_id = ?");
+    binds.push(q.thread);
+  }
+  if (q.direction === "inbound" || q.direction === "outbound") {
+    where.push("m.direction = ?");
+    binds.push(q.direction);
+  }
+
+  const cur = decodeCursor(q.cursor);
+  if (cur) {
+    // Keyset seek: rows strictly older than the cursor tuple (date, id).
+    where.push("(m.date < ? OR (m.date = ? AND m.id < ?))");
+    binds.push(cur.date, cur.date, cur.id);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const sql =
+    `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
+            m.date, m.in_reply_to, m.trusted, m.received_at,
+            (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
+       FROM messages m ${whereSql}
+      ORDER BY m.date DESC, m.id DESC
+      LIMIT ?`;
+  // Fetch one extra row to know whether another page exists.
+  binds.push(limit + 1);
+
+  const res = await env.DB.prepare(sql).bind(...binds).all<SummaryRow>();
+  const rows = res.results ?? [];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const items = page.map(rowToSummary);
+  const last = page[page.length - 1];
+  const cursor = hasMore && last ? encodeCursor(last.date, last.id) : null;
+  return { items, cursor };
+}
+
+/**
+ * Search messages. M1 ships FTS mode (subject + body); semantic/hybrid land in
+ * M4 over the Vectorize index. Returns hits wrapping the summary (no body) plus
+ * a snippet from the FTS match.
+ */
+export async function search(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
+  const mode = q.mode ?? "fts";
+  if (mode !== "fts") {
+    throw new SearchModeUnsupported(mode);
+  }
+  const limit = clampLimit(q.limit);
+  const ftsExpr = toFtsQuery(q.q ?? "");
+  if (!ftsExpr) return { items: [], cursor: null };
+
+  const binds: unknown[] = [ftsExpr];
+  const where: string[] = ["m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"];
+
+  const cur = decodeCursor(q.cursor);
+  if (cur) {
+    where.push("(m.date < ? OR (m.date = ? AND m.id < ?))");
+    binds.push(cur.date, cur.date, cur.id);
+  }
+
+  const sql =
+    `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
+            m.date, m.in_reply_to, m.trusted, m.received_at,
+            (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
+       FROM messages m WHERE ${where.join(" AND ")}
+      ORDER BY m.date DESC, m.id DESC
+      LIMIT ?`;
+  binds.push(limit + 1);
+
+  const res = await env.DB.prepare(sql).bind(...binds).all<SummaryRow>();
+  const rows = res.results ?? [];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const items: SearchHit[] = page.map((row) => ({ message: rowToSummary(row) }));
+  const last = page[page.length - 1];
+  const cursor = hasMore && last ? encodeCursor(last.date, last.id) : null;
+  return { items, cursor };
+}
+
+/** Thrown when a search mode is requested before it ships (semantic/hybrid = M4). */
+export class SearchModeUnsupported extends Error {
+  readonly code = "E_VALIDATION_ERROR";
+  readonly status = 400;
+  constructor(mode: string) {
+    super(`search mode '${mode}' is not supported yet (fts only until M4)`);
+    this.name = "SearchModeUnsupported";
+  }
 }
