@@ -13,6 +13,7 @@ interface Row {
   date: string;
   in_reply_to: string | null;
   body_text: string;
+  body_html: string | null;
   spf: string;
   dkim: string;
   dmarc: string;
@@ -74,15 +75,15 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
       async run() {
         if (/INSERT OR IGNORE INTO messages/i.test(sql)) {
           const [
-            message_id, from_addr, to_addr, subject, date, in_reply_to, body_text,
+            message_id, from_addr, to_addr, subject, date, in_reply_to, body_text, body_html,
             spf, dkim, dmarc, trusted, received_at, direction, thread_id,
-          ] = bound as [string, string, string, string, string, string | null, string, string, string, string, number, string, string, string];
+          ] = bound as [string, string, string, string, string, string | null, string, string | null, string, string, string, number, string, string, string];
           if (rows.some((r) => r.message_id === message_id)) {
             return { meta: { changes: 0 } };
           }
           rows.push({
             id: seq++, message_id, from_addr, to_addr, subject, date, in_reply_to,
-            body_text, spf, dkim, dmarc, trusted, received_at, direction, thread_id,
+            body_text, body_html, spf, dkim, dmarc, trusted, received_at, direction, thread_id,
           });
           return { meta: { changes: 1 } };
         }

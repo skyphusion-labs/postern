@@ -63,6 +63,12 @@ export async function ingest(
   const rawBody = parsed.text ?? htmlToText(parsed.html ?? "");
   const bodyText = cleanBody(rawBody).slice(0, 32_000);
 
+  // Keep the original HTML body so the webmail can render it in a sandboxed
+  // iframe (#57); bodyText stays the FTS source + plain-text fallback. Stored
+  // raw (the iframe sandbox is the isolation boundary, not sanitization) and
+  // size-capped to bound storage / render cost on very large messages.
+  const bodyHtml = parsed.html ? parsed.html.slice(0, 512_000) : null;
+
   // Dedup key -- use Message-ID or generate a stable fallback. D1 stores the
   // full raw ID; Vectorize requires max 64 chars so we SHA-256 hash anything
   // longer (32 bytes = 64 hex chars exactly).
@@ -89,6 +95,7 @@ export async function ingest(
       inReplyTo: parsed.inReplyTo ?? null,
       references: parsed.references,
       bodyText,
+      bodyHtml,
       auth: { spf, dkim, dmarc },
       trusted,
       attachments: parsed.attachments,
