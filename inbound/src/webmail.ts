@@ -95,13 +95,14 @@ export const WEBMAIL_HTML = `<!doctype html>
   .msg-head h2 { margin: 0 0 8px; font-size: 20px; }
   .msg-head .kv { color: var(--muted); font-size: 13px; }
   .msg-head .kv b { color: var(--fg); font-weight: 600; }
-  .msg-body {
-    margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line);
-    white-space: pre-wrap; word-wrap: break-word; font-size: 14px;
+  .msg-body-frame {
+    margin-top: 18px; padding-top: 18px; border: none; border-top: 1px solid var(--line);
+    width: 100%; min-height: 220px; background: var(--panel-2);
   }
   .attachments { margin-top: 18px; }
   .attachments h3 { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
-  .attachments li { font-size: 13px; }
+  .attachments li { font-size: 13px; margin-bottom: 4px; }
+  .attachments .dl { font-size: 12px; padding: 2px 8px; margin-left: 6px; }
   .thread { margin-top: 24px; }
   .thread h3 { font-size: 13px; color: var(--muted); }
   .thread .t-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; cursor: pointer; }
@@ -211,6 +212,65 @@ export const WEBMAIL_HTML = `<!doctype html>
           return body;
         });
     });
+  }
+
+  // --- attachment download (Bearer fetch -> Blob -> object URL) --------------
+  // The API is token-gated and the token rides in the Authorization header, so a
+  // plain <a href> cannot carry it (and we never put the token in a URL). Fetch
+  // the bytes with the header, then trigger a download from an object URL.
+  function downloadAttachment(messageId, index, filename, btn) {
+    var url = state.origin.replace(/\\/+$/, "") +
+      "/api/messages/" + encodeURIComponent(messageId) + "/attachments/" + index;
+    var label = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "Downloading..."; }
+    fetch(url, {
+      headers: { "authorization": "Bearer " + state.token },
+      credentials: "omit", referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      if (r.status === 401) { logout(); throw new Error("unauthorized"); }
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.blob();
+    }).then(function (blob) {
+      var obj = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = obj; a.download = filename || ("attachment-" + index);
+      document.body.appendChild(a); a.click(); a.remove();
+      // Revoke on the next tick so the download has started.
+      setTimeout(function () { URL.revokeObjectURL(obj); }, 0);
+    }).catch(function (e) {
+      if (e.message !== "unauthorized") alert("Download failed: " + e.message);
+    }).then(function () {
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+    });
+  }
+
+  // Render a (plain-text) message body inside a sandboxed iframe: sandbox="" is
+  // maximally restrictive (no scripts, no same-origin, no forms), so even if the
+  // stored body contained markup it cannot execute or reach the API/token. We
+  // escape the text and linkify bare URLs; the result is the iframe's srcdoc.
+  function escapeHtml(t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function linkify(escaped) {
+    // Operates on ALREADY-escaped text, so we only ever match plain URL chars and
+    // emit an anchor whose href is itself escaped. No raw input reaches the DOM.
+    return escaped.replace(/(https?:\\/\\/[^\\s<>"']+)/g, function (u) {
+      return '<a href="' + u + '" target="_blank" rel="noopener noreferrer nofollow">' + u + '</a>';
+    });
+  }
+  function bodyIframe(text) {
+    var safe = linkify(escapeHtml(text || ""));
+    var doc = '<!doctype html><html><head><meta charset="utf-8">' +
+      '<style>body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;' +
+      'color:#e7e9ee;background:#1c1f26;white-space:pre-wrap;word-wrap:break-word;padding:2px}' +
+      'a{color:#6ea8fe}</style></head><body>' + safe + '</body></html>';
+    var f = document.createElement("iframe");
+    f.className = "msg-body-frame";
+    f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
+    f.setAttribute("referrerpolicy", "no-referrer");
+    f.setAttribute("srcdoc", doc);
+    return f;
   }
 
   // --- formatting (pure, returns strings; rendered via text nodes) -----------
@@ -367,17 +427,23 @@ export const WEBMAIL_HTML = `<!doctype html>
     ]);
     r.appendChild(head);
 
-    // Body: plain text only, inserted as a text node into a pre-wrap container.
-    // We never set innerHTML with stored content, so message bytes cannot run.
-    r.appendChild(el("div", { class: "msg-body", text: m.bodyText || "" }));
+    // Body: rendered inside a sandboxed iframe (sandbox="" = no scripts, no
+    // same-origin), so stored content cannot execute or reach the token/API.
+    r.appendChild(bodyIframe(m.bodyText || ""));
 
     if (m.attachments && m.attachments.length) {
       var ul = el("ul");
-      m.attachments.forEach(function (a) {
-        ul.appendChild(el("li", { text: (a.filename || "(unnamed)") + " (" + (a.mime || "?") + ", " + (a.size || 0) + " bytes)" }));
+      m.attachments.forEach(function (a, i) {
+        var name = a.filename || "(unnamed)";
+        var btn = el("button", { class: "dl", text: "Download" });
+        btn.addEventListener("click", function () { downloadAttachment(m.messageId, i, name, btn); });
+        ul.appendChild(el("li", {}, [
+          document.createTextNode(name + " (" + (a.mime || "?") + ", " + (a.size || 0) + " bytes) "),
+          btn
+        ]));
       });
       r.appendChild(el("div", { class: "attachments" }, [
-        el("h3", { text: "Attachments (fetch via the API)" }), ul
+        el("h3", { text: "Attachments" }), ul
       ]));
     }
 
@@ -434,7 +500,11 @@ const SECURITY_HEADERS: Record<string, string> = {
   // exfiltrate the pasted token to another host.
   "content-security-policy":
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
-    "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    // frame-src 'self' permits the sandboxed srcdoc iframe the reading pane uses
+    // to render message bodies in an isolated context (sandbox="" = no scripts,
+    // no same-origin), so stored body content can never execute or reach the API.
+    "connect-src 'self'; img-src 'self' data:; frame-src 'self'; " +
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
 };

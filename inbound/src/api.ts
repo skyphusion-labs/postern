@@ -75,6 +75,33 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return json({ ok: true, ...page });
     }
 
+    // --- read: attachment bytes ---
+    // GET /api/messages/{id}/attachments/{i} -- stream the i-th attachment from R2.
+    // Matched before the single-message handler since that one also starts with
+    // /api/messages/. The id may itself contain no slash (message-ids are addr-like),
+    // so split on the literal /attachments/ segment.
+    const attMatch = request.method === "GET" ? /^\/api\/messages\/(.+)\/attachments\/(\d+)$/.exec(path) : null;
+    if (attMatch) {
+      const id = decodeURIComponent(attMatch[1]);
+      const index = Number(attMatch[2]);
+      const att = await store.getAttachment(env, id, index);
+      if (!att) return json({ ok: false, error: "E_NOT_FOUND", message: "attachment not found" }, 404);
+      // Force a download with a sanitized filename; never echo the raw filename
+      // into the header unescaped (header-injection / quote-break safe).
+      const safeName = (att.filename || `attachment-${index}`).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100);
+      return new Response(att.body, {
+        status: 200,
+        headers: {
+          "content-type": att.mime || "application/octet-stream",
+          "content-disposition": `attachment; filename="${safeName}"`,
+          "content-length": String(att.size),
+          // Untrusted bytes: do not let the browser sniff/execute them inline.
+          "x-content-type-options": "nosniff",
+          "content-security-policy": "default-src 'none'; sandbox",
+        },
+      });
+    }
+
     // --- read: one message ---
     if (request.method === "GET" && path.startsWith("/api/messages/")) {
       const id = decodeURIComponent(path.slice("/api/messages/".length));

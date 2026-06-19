@@ -104,6 +104,13 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           const row = rows.find((r) => r.message_id === id);
           return (row ?? null) as T | null;
         }
+        // getAttachment: i-th attachment row, ORDER BY id, LIMIT 1 OFFSET ?.
+        if (/FROM attachments\s+WHERE message_id = \? ORDER BY id LIMIT 1 OFFSET/i.test(sql)) {
+          const id = bound[0] as string;
+          const offset = Number(bound[1]);
+          const matched = atts.filter((a) => a.message_id === id).sort((a, b) => a.id - b.id);
+          return ((matched[offset] ?? null) as unknown) as T | null;
+        }
         return null as T | null;
       },
       async all<T>() {
@@ -213,6 +220,17 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
     ATTACHMENTS: {
       async put(key: string, bytes: ArrayBuffer) {
         r2.push({ key, bytes });
+      },
+      async get(key: string) {
+        const obj = r2.find((o) => o.key === key);
+        if (!obj) return null;
+        // Minimal R2ObjectBody shape: getAttachment only reads .body (a stream).
+        return {
+          body: new Response(obj.bytes).body,
+          async arrayBuffer() {
+            return obj.bytes;
+          },
+        };
       },
     },
     VECTORIZE: {
