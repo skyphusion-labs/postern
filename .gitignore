@@ -8,6 +8,10 @@ worker/worker-configuration.d.ts
 # Relay (Go)
 relay/skyphusion-email-relay
 /relay/skyphusion-email-relay
+relay/postern-relay
+/relay/postern-relay
+relay/relay
+/relay/relay
 *.test
 
 # Local env / secrets
