@@ -1,15 +1,9 @@
 import { describe, it, expect } from "vitest";
-import {
-  extractSpfResult,
-  extractDkimResult,
-  extractDmarcResult,
-  isTrusted,
-  cleanBody,
-  htmlToText,
-  chunkText,
-  sha256hex,
-  toArrayBuffer,
-} from "./src/index";
+// The transport-side helpers (header verdict parsing + content coercion) stay in
+// the CF email() driver; the storage-side pure helpers moved to ingest.ts when
+// the ingest() seam was extracted (#21/#22). Imports follow the code.
+import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer } from "./src/index";
+import { isTrusted, cleanBody, htmlToText, chunkText, sha256hex } from "./src/ingest";
 
 // These cover the pure ingestion helpers: auth-verdict parsing, the allowlist
 // trust decision (the security-sensitive bit), body cleaning, chunking (the
@@ -133,6 +127,29 @@ describe("htmlToText", () => {
 
   it("decodes the common named entities", () => {
     expect(htmlToText("Tom &amp; Jerry &lt;3 &quot;hi&quot;")).toBe('Tom & Jerry <3 "hi"');
+  });
+
+  it("strips a script block even with whitespace before the end tag", () => {
+    // js/bad-tag-filter: "</script >" must still be removed.
+    expect(htmlToText("a<script>evil()</script >b")).toBe("ab");
+  });
+
+  it("strips nested/obfuscated tags that defeat a single pass", () => {
+    // js/incomplete-multi-character-sanitization: stripping the inner tag once
+    // could re-form an outer tag; looping to a fixpoint leaves no live tag. We
+    // assert the security property (no surviving <script/<style/< marker), not
+    // an exact string on these pathological inputs.
+    const a = htmlToText("x<scr<script>ipt>alert(1)y");
+    expect(a.toLowerCase()).not.toContain("<script");
+    expect(a).not.toContain("<");
+    const b = htmlToText("<<style>>z");
+    expect(b.toLowerCase()).not.toContain("<style");
+    expect(b).not.toContain("<");
+  });
+
+  it("does not double-unescape entities revealed by decoding", () => {
+    // js/double-escaping: "&amp;lt;" decodes to the literal "&lt;", not "<".
+    expect(htmlToText("5 &amp;lt; 6")).toBe("5 &lt; 6");
   });
 });
 

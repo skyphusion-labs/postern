@@ -13,14 +13,16 @@
     { "name": "EMAIL" }
   ],
 
+  // Operator config. A stranger deploying Postern changes these three to their
+  // own domain; nothing else is skyphusion-specific (issue #13). ALLOWED_FROM_DOMAIN
+  // is the only sender domain the worker accepts; DEFAULT_FROM must be on it.
   "vars": {
     "DEFAULT_FROM": "noreply@skyphusion.org",
     "DEFAULT_FROM_NAME": "Skyphusion",
-    "ALLOWED_FROM_DOMAIN": "skyphusion.org",
-    // Destination for inbound Email Routing forwards.
-    "FORWARD_TO": "conrad@rockenhaus.net"
+    "ALLOWED_FROM_DOMAIN": "skyphusion.org"
   }
 
-  // RELAY_TOKEN is a secret, not a var:
-  //   npx wrangler secret put RELAY_TOKEN
+  // POSTERN_API_TOKEN is a secret, not a var:
+  //   npx wrangler secret put POSTERN_API_TOKEN
+  // (RELAY_TOKEN is still read as a fallback for one release through the rename.)
 }
