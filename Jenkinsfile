@@ -63,8 +63,8 @@ pipeline {
     }
 
     stage('Relay: vet + build + test') {
-      // Pin to the go.mod toolchain (1.22); matches the GitHub Actions setup-go.
-      agent { docker { image 'golang:1.22' } }
+      // Pin to the go.mod toolchain (1.23); matches the GitHub Actions setup-go.
+      agent { docker { image 'golang:1.23' } }
       environment {
         HOME = "${env.WORKSPACE}"
         GOCACHE = "${env.WORKSPACE}/.gocache"
