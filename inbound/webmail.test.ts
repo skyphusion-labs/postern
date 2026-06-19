@@ -51,6 +51,12 @@ describe("the page is XSS-conscious by construction", () => {
     expect(WEBMAIL_HTML).not.toContain("allow-scripts");
     expect(WEBMAIL_HTML).not.toContain("allow-same-origin");
   });
+  it("renders bodyHtml when present, into the sandboxed iframe via srcdoc", () => {
+    // The body iframe prefers the stored HTML body; it is placed into srcdoc
+    // (sandboxed), never via innerHTML, so it cannot execute or reach the API.
+    expect(WEBMAIL_HTML).toContain("m.bodyHtml");
+    expect(WEBMAIL_HTML).toContain('f.setAttribute("srcdoc"');
+  });
   it("downloads attachments via a Bearer fetch, not a tokenized URL", () => {
     // The attachment download fetches with the Authorization header and builds an
     // object URL; the token must never be placed into the attachment URL.

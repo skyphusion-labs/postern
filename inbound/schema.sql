@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS messages (
   date        TEXT,
   in_reply_to TEXT,
   body_text   TEXT,
+  body_html   TEXT,
   spf         TEXT,
   dkim        TEXT,
   dmarc       TEXT,

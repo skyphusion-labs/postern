@@ -259,12 +259,20 @@ export const WEBMAIL_HTML = `<!doctype html>
       return '<a href="' + u + '" target="_blank" rel="noopener noreferrer nofollow">' + u + '</a>';
     });
   }
-  function bodyIframe(text) {
-    var safe = linkify(escapeHtml(text || ""));
+  function bodyIframe(m) {
+    // Prefer the stored HTML body when present, else the plain-text body. Either
+    // way the content goes into a sandbox="" iframe (no scripts, no same-origin,
+    // no forms), so it cannot execute or reach the token/API. HTML is placed raw
+    // (the sandbox is the isolation boundary, not sanitization); plain text is
+    // escaped + linkified and shown pre-wrap.
+    var hasHtml = !!(m && m.bodyHtml);
+    var inner = hasHtml ? String(m.bodyHtml) : linkify(escapeHtml((m && m.bodyText) || ""));
+    var bodyCss = "margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;" +
+      "color:#e7e9ee;background:#1c1f26;word-wrap:break-word;padding:2px" +
+      (hasHtml ? "" : ";white-space:pre-wrap");
     var doc = '<!doctype html><html><head><meta charset="utf-8">' +
-      '<style>body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;' +
-      'color:#e7e9ee;background:#1c1f26;white-space:pre-wrap;word-wrap:break-word;padding:2px}' +
-      'a{color:#6ea8fe}</style></head><body>' + safe + '</body></html>';
+      '<style>body{' + bodyCss + '}a{color:#6ea8fe}img{max-width:100%;height:auto}</style>' +
+      '</head><body>' + inner + '</body></html>';
     var f = document.createElement("iframe");
     f.className = "msg-body-frame";
     f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
@@ -429,7 +437,7 @@ export const WEBMAIL_HTML = `<!doctype html>
 
     // Body: rendered inside a sandboxed iframe (sandbox="" = no scripts, no
     // same-origin), so stored content cannot execute or reach the token/API.
-    r.appendChild(bodyIframe(m.bodyText || ""));
+    r.appendChild(bodyIframe(m));
 
     if (m.attachments && m.attachments.length) {
       var ul = el("ul");

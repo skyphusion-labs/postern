@@ -35,8 +35,8 @@ apply `schema.sql` then `seed.dev.sql` to a local D1, `wrangler dev`, open
 - **Message list** with an Inbox / Sent / All folder filter (the API's
   `direction` filter).
 - **Read view** for a single message: headers, trust verdict (spf/dkim/dmarc),
-  the body (rendered in a sandboxed iframe), and attachments with a **Download**
-  button each.
+  the body (HTML or plain text, rendered in a sandboxed iframe), and attachments
+  with a **Download** button each.
 - **Thread view**: sibling messages in the same thread, click to jump.
 - **Search** over the mailbox (the `/api/search` endpoint).
 - **Read-only.** No compose / send / reply. Sending stays the structured API's
@@ -88,9 +88,11 @@ XSS is the main surface. The page is built to neutralize it:
   `innerHTML =` ever appears in the page.
 - **Body in a sandboxed iframe.** The message body is rendered inside an
   `<iframe sandbox="">` (empty sandbox = no scripts, no same-origin, no forms)
-  via `srcdoc`. Even if a body contained markup it cannot execute or reach the
-  token / API. The body text is escaped and bare URLs are linkified before going
-  into the iframe.
+  via `srcdoc`, so even a malicious HTML email cannot execute script or reach the
+  token / API. When the message has an HTML body (`bodyHtml`) it is rendered
+  there; otherwise the plain text is escaped and bare URLs linkified. The
+  `<script>`, `onerror`, `onload`, etc. in an HTML body are inert under the
+  sandbox.
 - **Locked-down CSP** on the served page: `default-src 'none'`,
   `connect-src 'self'` (a hijacked page cannot exfiltrate the token to another
   host), `frame-src 'self'` (only the sandboxed srcdoc body frame), no
@@ -105,8 +107,10 @@ XSS is the main surface. The page is built to neutralize it:
   `referrer-policy: no-referrer`.
 
 These were verified end to end in a headless browser against a real `wrangler dev`
-worker: stored `<script>` payloads render as literal text and never execute, the
-body iframe is sandboxed, and the attachment download carries the token as a
+worker: an HTML body carrying `<script>`, `<img onerror>`, `<svg onload>`, and a
+`javascript:` link renders its benign markup while NONE of the payloads execute
+(the sandbox blocks them, and a click on the `javascript:` link does nothing); the
+body iframe is `sandbox=""`; and the attachment download carries the token as a
 header (never in the URL).
 
 ## Tests
@@ -135,9 +139,5 @@ constant); the sync test enforces they match.
 - **Compose / reply / send.** Read-only by design for v1; sending is the
   structured API's job. A compose surface (calling `POST /api/send` / `/api/reply`)
   is the natural next step.
-- **HTML email bodies.** The store currently keeps only the cleaned plain-text
-  body (no `body_html` column); the sandboxed-iframe body view is ready to render
-  HTML the moment the store persists it. Adding HTML storage (a schema migration
-  + ingest change) is the follow-up; the safe render path already exists here.
 - **Keyset pagination polish** and richer search (mode selector for
   fts/semantic/hybrid).

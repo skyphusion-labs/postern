@@ -16,6 +16,9 @@ export interface StoredMessage {
   date: string; // ISO
   inReplyTo: string | null;
   bodyText: string;
+  /** Original HTML body when the message had one (null otherwise). The webmail
+   * renders this in a sandboxed iframe; bodyText stays the FTS + fallback source. */
+  bodyHtml: string | null;
   auth: { spf: string; dkim: string; dmarc: string };
   trusted: boolean;
   receivedAt: string; // ISO
@@ -90,6 +93,8 @@ export interface StoreInput {
   inReplyTo?: string | null;
   references?: string[];
   bodyText: string;
+  /** Original HTML body to persist, if any (null/undefined when text-only). */
+  bodyHtml?: string | null;
   auth: { spf: string; dkim: string; dmarc: string };
   trusted: boolean;
   attachments?: { filename?: string; mimeType?: string; content: ArrayBuffer }[];
@@ -148,8 +153,8 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
   const result = await env.DB.prepare(
     `INSERT OR IGNORE INTO messages
        (message_id, from_addr, to_addr, subject, date, in_reply_to,
-        body_text, spf, dkim, dmarc, trusted, received_at, direction, thread_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        body_text, body_html, spf, dkim, dmarc, trusted, received_at, direction, thread_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       input.messageId,
@@ -159,6 +164,7 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
       input.date,
       input.inReplyTo ?? null,
       input.bodyText,
+      input.bodyHtml ?? null,
       input.auth.spf,
       input.auth.dkim,
       input.auth.dmarc,
@@ -256,6 +262,7 @@ interface MessageRow {
   date: string;
   in_reply_to: string | null;
   body_text: string;
+  body_html: string | null;
   spf: string;
   dkim: string;
   dmarc: string;
@@ -274,6 +281,7 @@ function rowToMessage(row: MessageRow, attachments: AttachmentMeta[]): StoredMes
     date: row.date,
     inReplyTo: row.in_reply_to,
     bodyText: row.body_text,
+    bodyHtml: row.body_html ?? null,
     auth: { spf: row.spf, dkim: row.dkim, dmarc: row.dmarc },
     trusted: row.trusted === 1,
     receivedAt: row.received_at,
@@ -323,7 +331,7 @@ export async function getAttachment(
 export async function get(env: Env, messageId: string): Promise<StoredMessage | null> {
   const row = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
-            in_reply_to, body_text, spf, dkim, dmarc, trusted, received_at
+            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at
        FROM messages WHERE message_id = ? LIMIT 1`,
   )
     .bind(messageId)
@@ -336,7 +344,7 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
 export async function thread(env: Env, threadId: string): Promise<StoredMessage[]> {
   const res = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
-            in_reply_to, body_text, spf, dkim, dmarc, trusted, received_at
+            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at
        FROM messages WHERE thread_id = ? ORDER BY date, id`,
   )
     .bind(threadId)
