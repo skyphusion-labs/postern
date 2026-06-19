@@ -6,6 +6,8 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage.enabled=true --coverage.provider=istanbul --coverage.reporter=cobertura --coverage.reporter=text",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
