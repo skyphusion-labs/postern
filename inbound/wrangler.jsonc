@@ -1,89 +1,94 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "skyphusion-email-inbound",
+  // Operator: this is your Worker name (any unique name in your account).
+  "name": "postern",
   "main": "src/index.ts",
   "compatibility_date": "2025-05-05",
   "observability": { "enabled": true },
 
-  // D1 database for message storage.
-  // Create once: wrangler d1 create skyphusion-mail
-  // Apply schema: wrangler d1 execute skyphusion-mail --file=schema.sql
+  // D1 database for message storage. The store (D1 + R2 + Vectorize) is the
+  // heart of Postern, so this binding is required.
+  //   Create once:  wrangler d1 create postern
+  //   Apply schema: wrangler d1 execute postern --remote --file=schema.sql
+  // Paste the database_id the create command prints below. There is no shared
+  // default: every account gets its own database, so this MUST be your own id.
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "skyphusion-mail",
-      "database_id": "512c44f1-008b-43f7-8572-208aaaf55546"
-    }
-  ],
-
-  // Vectorize index for semantic recall.
-  // Create once: wrangler vectorize create skyphusion-mail-vec --dimensions=768 --metric=cosine
-  "vectorize": [
-    {
-      "binding": "VECTORIZE",
-      "index_name": "skyphusion-mail-vec"
+      "database_name": "postern",
+      "database_id": "<your-d1-database-id>"
     }
   ],
 
   // R2 bucket for inbound attachment bytes (metadata + key go in D1.attachments).
-  // Create once: wrangler r2 bucket create skyphusion-mail-attachments
+  //   Create once: wrangler r2 bucket create postern-attachments
   "r2_buckets": [
-    { "binding": "ATTACHMENTS", "bucket_name": "skyphusion-mail-attachments" }
+    { "binding": "ATTACHMENTS", "bucket_name": "postern-attachments" }
   ],
 
-  // AI binding for bge-base embeddings, routed through the AI Gateway.
-  "ai": {
-    "binding": "AI",
-    "gateway": {
-      "id": "skyphusion-llm"
-    }
-  },
+  // OPTIONAL: Vectorize index for semantic recall (search mode=semantic|hybrid).
+  // Omit this block (and the AI block below) to run fts-only; semantic search
+  // then degrades to empty instead of erroring. To enable:
+  //   wrangler vectorize create postern-vec --dimensions=768 --metric=cosine
+  // "vectorize": [
+  //   { "binding": "VECTORIZE", "index_name": "postern-vec" }
+  // ],
 
-  // Cloudflare Email Sending binding (M2: #23). The default outbound transport
-  // for the mailbox send/reply API. Same binding the standalone send worker
-  // uses; here it lives alongside the store so a sent copy is written in the
-  // same isolate (CONTRACT section 6).
+  // OPTIONAL: AI binding for bge-base embeddings. Pair with the Vectorize block
+  // above. Add a "gateway": { "id": "<your-ai-gateway>" } key to route through
+  // your own AI Gateway, or leave it out to call Workers AI directly. Omit the
+  // whole block to disable semantic recall.
+  // "ai": {
+  //   "binding": "AI"
+  // },
+
+  // Cloudflare Email Sending binding: the default outbound transport for the
+  // mailbox send/reply API. Lives alongside the store so a sent copy is written
+  // in the same isolate (CONTRACT section 6).
   "send_email": [
     { "name": "EMAIL" }
   ],
 
+  // Operator config. Change these to your own domain. DEFAULT_FROM must be on
+  // ALLOWED_FROM_DOMAIN, and that domain must be onboarded to Cloudflare Email
+  // Sending (SPF/DKIM/bounce records in your DNS). Nothing else is operator-
+  // specific.
   "vars": {
-    // Comma-separated list of trusted sender domains or full addresses.
-    // Senders must also pass SPF or DKIM to get trusted=1.
-    "TRUSTED_SENDER_DOMAINS": "skyphusion.org,skyphusion.net,rockenhaus.net,cloudflare.com,notify.cloudflare.com,github.com,notifications.github.com,healthchecks.io,hetzner.com,runpod.io",
+    // Comma-separated trusted sender domains or full addresses. A sender is
+    // trusted=1 only if it is on this list AND passes SPF or DKIM.
+    "TRUSTED_SENDER_DOMAINS": "",
 
-    // Transparent forward destination. Worker stores every inbound message in
-    // D1 + Vectorize, then re-delivers the original envelope here. Set to "" to
-    // disable forwarding (store-only mode).
-    "FORWARD_TO": "conrad@rockenhaus.net",
+    // Transparent forward destination. Every inbound message is stored, then the
+    // original envelope is re-delivered here. Set to "" for store-only mode.
+    "FORWARD_TO": "",
 
-    // Only forward when message.to matches one of these addresses (comma-separated).
-    // Crew addresses are stored in D1 but not forwarded -- their mail is their own.
-    "FORWARD_FOR": "conrad@skyphusion.org,alerts@skyphusion.org",
+    // Only forward when message.to matches one of these (comma-separated). Empty
+    // = forward everything (subject to FORWARD_TO being set).
+    "FORWARD_FOR": "",
 
-    // Addresses whose mail is embedded + indexed in Vectorize for crew RAG.
-    // Crew members opt in by adding their own address here.
-    "VECTORIZE_FOR": "conrad@skyphusion.org,alerts@skyphusion.org,strummer@skyphusion.org,rollins@skyphusion.org,mackaye@skyphusion.org",
+    // Addresses whose mail is embedded + indexed in Vectorize for RAG. Empty =
+    // index everything (only matters when the Vectorize/AI bindings are present).
+    "VECTORIZE_FOR": "",
 
-    // Outbound send/reply (M2). DEFAULT_FROM must be on ALLOWED_FROM_DOMAIN.
+    // Outbound send/reply defaults. DEFAULT_FROM must be on ALLOWED_FROM_DOMAIN.
     // OUTBOUND_TRANSPORT unset/"cf" = Cloudflare Email Sending (default).
-    "DEFAULT_FROM": "noreply@skyphusion.org",
-    "DEFAULT_FROM_NAME": "Skyphusion",
-    "ALLOWED_FROM_DOMAIN": "skyphusion.org",
+    "DEFAULT_FROM": "noreply@example.com",
+    "DEFAULT_FROM_NAME": "Postern",
+    "ALLOWED_FROM_DOMAIN": "example.com",
     "OUTBOUND_TRANSPORT": "cf"
   }
 
   // To send via bring-your-own SMTP instead of Cloudflare Email Sending, set
   //   "OUTBOUND_TRANSPORT": "relay" and "RELAY_DISPATCH_URL": "https://<relay>/dispatch"
   // above, then put the transport token (NOT the API token):
-  //   npx wrangler secret put POSTERN_TRANSPORT_TOKEN
+  //   wrangler secret put POSTERN_TRANSPORT_TOKEN
 
   // POSTERN_API_TOKEN is a secret, not a var (gates the send/reply + read API):
-  //   npx wrangler secret put POSTERN_API_TOKEN
+  //   wrangler secret put POSTERN_API_TOKEN
   // (RELAY_TOKEN is still read as a fallback for one release through the rename.)
 
   // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):
-  //   Route ALL addresses (including catch-all) to Worker skyphusion-email-inbound.
-  //   The worker handles forwarding to FORWARD_TO after ingestion.
-  //   Remove any direct "Forward to email" rules -- everything goes through the worker.
+  //   Route ALL addresses (including catch-all) to this Worker. The worker
+  //   handles forwarding to FORWARD_TO after ingestion. Remove any direct
+  //   "Forward to email" rules so everything goes through the worker.
 }
