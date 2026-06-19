@@ -218,6 +218,10 @@ async function storeAttachments(
 }
 
 async function indexVectors(env: Env, input: StoreInput): Promise<void> {
+  // Skip cleanly when the AI/Vectorize bindings are not configured (a deployment
+  // that does not want semantic recall just omits them); never throw from the
+  // best-effort indexing path.
+  if (!env.AI || !env.VECTORIZE) return;
   try {
     const chunks = chunkText(input.bodyText, 1200, 150).slice(0, 24); // bound cost on huge mail
     const base = (await sha256hex(input.messageId)).slice(0, 56);
@@ -451,15 +455,34 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
 }
 
 /**
- * Search messages. M1 ships FTS mode (subject + body); semantic/hybrid land in
- * M4 over the Vectorize index. Returns hits wrapping the summary (no body) plus
- * a snippet from the FTS match.
+ * Search messages (CONTRACT section 4). Three modes:
+ *   - fts (default): SQLite FTS5 over subject + body, newest-first, keyset-paged.
+ *   - semantic (M4): query the Vectorize index that ingest already populates --
+ *     embed the query with the same model, find the nearest chunk vectors,
+ *     collapse to unique messages (best chunk score wins), hydrate from D1.
+ *   - hybrid (M4): run both and merge by message_id on a normalized score.
+ * Returns SearchHit (the #24 summary, no body) so the read shape is uniform.
+ *
+ * fts is date-ordered and cursor-paged. semantic/hybrid are SCORE-ranked, so a
+ * date keyset cursor does not apply: they return a single ranked page (cursor
+ * always null) of up to `limit` hits. Paging a re-ranked semantic set is a
+ * post-v1 nicety, noted not built.
  */
 export async function search(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const mode = q.mode ?? "fts";
-  if (mode !== "fts") {
-    throw new SearchModeUnsupported(mode);
+  switch (mode) {
+    case "fts":
+      return ftsSearch(env, q);
+    case "semantic":
+      return semanticSearch(env, q);
+    case "hybrid":
+      return hybridSearch(env, q);
+    default:
+      throw new SearchModeUnsupported(mode);
   }
+}
+
+async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const limit = clampLimit(q.limit);
   const ftsExpr = toFtsQuery(q.q ?? "");
   if (!ftsExpr) return { items: [], cursor: null };
@@ -490,6 +513,115 @@ export async function search(env: Env, q: SearchQuery): Promise<Page<SearchHit>>
   const last = page[page.length - 1];
   const cursor = hasMore && last ? encodeCursor(last.date, last.id) : null;
   return { items, cursor };
+}
+
+// Embed a query string with the same model + binding ingest uses, so the query
+// vector lives in the same space as the indexed chunk vectors.
+async function embedQuery(env: Env, text: string): Promise<number[] | null> {
+  if (!env.AI) return null;
+  const embed = (await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [text] })) as { data: number[][] };
+  const vec = embed?.data?.[0];
+  return Array.isArray(vec) && vec.length > 0 ? vec : null;
+}
+
+interface VectorizeMatch {
+  id: string;
+  score: number;
+  metadata?: { message_id?: string } | null;
+}
+
+// Nearest message ids for a query, best chunk-score per message. Vectorize is
+// chunk-granular (ingest upserts one vector per body window), so we collapse to
+// unique message_id keeping the max score, then take the top `limit` messages.
+async function nearestMessageIds(
+  env: Env,
+  queryVec: number[],
+  limit: number,
+): Promise<{ messageId: string; score: number }[]> {
+  if (!env.VECTORIZE) return [];
+  // Over-fetch chunks so collapsing to messages still yields ~limit of them.
+  const topK = Math.min(50, Math.max(limit * 3, limit));
+  const res = (await env.VECTORIZE.query(queryVec, {
+    topK,
+    returnMetadata: "all",
+  })) as { matches?: VectorizeMatch[] };
+  const best = new Map<string, number>();
+  for (const m of res.matches ?? []) {
+    const id = m.metadata?.message_id;
+    if (!id) continue;
+    const prev = best.get(id);
+    if (prev === undefined || m.score > prev) best.set(id, m.score);
+  }
+  return [...best.entries()]
+    .map(([messageId, score]) => ({ messageId, score }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+// Hydrate summaries for a set of message ids in one query, returned as a map so
+// callers can preserve their own (score) ordering. Ids are bound params.
+async function summariesByIds(env: Env, ids: string[]): Promise<Map<string, StoredMessageSummary>> {
+  const out = new Map<string, StoredMessageSummary>();
+  if (ids.length === 0) return out;
+  const placeholders = ids.map(() => "?").join(", ");
+  const sql =
+    `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
+            m.date, m.in_reply_to, m.trusted, m.received_at,
+            (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
+       FROM messages m WHERE m.message_id IN (${placeholders})`;
+  const res = await env.DB.prepare(sql).bind(...ids).all<SummaryRow>();
+  for (const row of res.results ?? []) out.set(row.message_id, rowToSummary(row));
+  return out;
+}
+
+async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
+  const limit = clampLimit(q.limit);
+  const text = (q.q ?? "").trim();
+  if (!text) return { items: [], cursor: null };
+
+  const queryVec = await embedQuery(env, text);
+  if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
+
+  const ranked = await nearestMessageIds(env, queryVec, limit);
+  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId));
+  const items: SearchHit[] = [];
+  for (const r of ranked) {
+    const message = summaries.get(r.messageId);
+    if (message) items.push({ message, score: r.score });
+  }
+  // Score-ranked: single page, no date cursor.
+  return { items, cursor: null };
+}
+
+async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
+  const limit = clampLimit(q.limit);
+  // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
+  const [ftsPage, semPage] = await Promise.all([
+    ftsSearch(env, { q: q.q, mode: "fts", limit }),
+    semanticSearch(env, { q: q.q, mode: "semantic", limit }),
+  ]);
+
+  const merged = new Map<string, SearchHit & { score: number }>();
+  // FTS hits are date-ranked, not scored; give them a uniform rank-decayed score
+  // so order is preserved within the FTS contribution.
+  ftsPage.items.forEach((hit, i) => {
+    const score = (ftsPage.items.length - i) / ftsPage.items.length; // 1..~0
+    merged.set(hit.message.messageId, { message: hit.message, score });
+  });
+  // Vectorize cosine scores are already ~0..1; add into the blend.
+  for (const hit of semPage.items) {
+    const id = hit.message.messageId;
+    const add = hit.score ?? 0;
+    const existing = merged.get(id);
+    if (existing) existing.score += add;
+    else merged.set(id, { message: hit.message, score: add });
+  }
+
+  const items: SearchHit[] = [...merged.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((h) => ({ message: h.message, score: h.score }));
+  return { items, cursor: null };
 }
 
 /** Thrown when a search mode is requested before it ships (semantic/hybrid = M4). */

@@ -73,6 +73,11 @@
     "OUTBOUND_TRANSPORT": "cf"
   }
 
+  // To send via bring-your-own SMTP instead of Cloudflare Email Sending, set
+  //   "OUTBOUND_TRANSPORT": "relay" and "RELAY_DISPATCH_URL": "https://<relay>/dispatch"
+  // above, then put the transport token (NOT the API token):
+  //   npx wrangler secret put POSTERN_TRANSPORT_TOKEN
+
   // POSTERN_API_TOKEN is a secret, not a var (gates the send/reply + read API):
   //   npx wrangler secret put POSTERN_API_TOKEN
   // (RELAY_TOKEN is still read as a fallback for one release through the rename.)

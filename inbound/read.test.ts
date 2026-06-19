@@ -112,9 +112,12 @@ describe("store.search", () => {
     expect(res.cursor).toBeNull();
   });
 
-  it("rejects an unsupported (semantic/hybrid) mode until M4", async () => {
+  it("rejects an unknown search mode", async () => {
     const { env } = makeFakeEnv();
-    await expect(store.search(env, { q: "x", mode: "semantic" })).rejects.toMatchObject({ code: "E_VALIDATION_ERROR" });
+    // semantic/hybrid are supported as of M4; only a bogus mode is rejected.
+    await expect(store.search(env, { q: "x", mode: "telepathy" as unknown as "fts" })).rejects.toMatchObject({
+      code: "E_VALIDATION_ERROR",
+    });
   });
 });
 

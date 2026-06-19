@@ -6,6 +6,7 @@
 
 import type { EmailAddress } from "../mailbox";
 import { CfEmailTransport } from "./cf";
+import { RelayTransport } from "./relay";
 
 /** Normalized, post-validation message ready to hand to a Transport. */
 export interface OutboundMessage {
@@ -32,9 +33,9 @@ export interface Transport {
 
 /**
  * Select the outbound transport. Default (unset or "cf") is Cloudflare Email
- * Sending. "relay" (and future providers) are the bring-your-own escape hatch;
- * the RelayTransport lands with #28 -- until then an explicit relay selection
- * fails loudly rather than silently sending via CF.
+ * Sending. "relay" is the bring-your-own-SMTP escape hatch (#28): it POSTs to the
+ * postern-relay /dispatch bridge instead of env.EMAIL.send(). An unknown value
+ * fails loudly rather than silently falling back to CF.
  */
 export function selectTransport(env: Env): Transport {
   const choice = (env.OUTBOUND_TRANSPORT || "cf").toLowerCase();
@@ -42,6 +43,8 @@ export function selectTransport(env: Env): Transport {
     case "cf":
     case "":
       return new CfEmailTransport(env);
+    case "relay":
+      return new RelayTransport(env);
     default:
       throw new Error(`unsupported OUTBOUND_TRANSPORT: ${choice}`);
   }
