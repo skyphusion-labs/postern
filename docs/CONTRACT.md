@@ -117,6 +117,14 @@ interface Page<T> { items: T[]; cursor: string | null }   // cursor=null means n
 interface SearchHit { message: StoredMessageSummary; score?: number; snippet?: string }
 ```
 
+The `cursor` is opaque: keyset pagination on `(date DESC, id DESC)` (the encoded last tuple),
+stable under concurrent inserts; `cursor: null` means no more rows. Read endpoints fetch
+`limit + 1` rows to decide whether a next cursor exists. The `q` / search text is **sanitized**
+into a phrase expression before it reaches FTS5 `MATCH` (word tokens, each quoted, OR-joined),
+so caller input cannot inject FTS operators or break the query; an all-punctuation query matches
+nothing. All filter values are bound params. `search` ships `mode: "fts"` only in M1; `semantic`
+and `hybrid` return `E_VALIDATION_ERROR` until M4 wires Vectorize.
+
 ---
 
 ## 2. Inbound transport contract: `ingest()` (#22)
@@ -229,11 +237,11 @@ none touches D1 directly (#25, #26).
 
 | Method | Route | Purpose | Milestone |
 |---|---|---|---|
-| GET | `/api/messages?to=&from=&thread=&direction=&q=&limit=&cursor=` | list / filter (`q` = FTS) | M1 |
-| GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 |
+| GET | `/api/messages?to=&from=&thread=&direction=&q=&limit=&cursor=` | list / filter (`q` = FTS) | M1 (done) |
+| GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
-| GET | `/api/threads/{threadId}` | ordered thread | M1 |
-| GET | `/api/search?q=&mode=fts\|semantic\|hybrid` | search (semantic/hybrid land in M4) | M1 / M4 |
+| GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
+| GET | `/api/search?q=&mode=fts\|semantic\|hybrid` | search (fts done; semantic/hybrid land in M4) | M1 (done) / M4 |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
 

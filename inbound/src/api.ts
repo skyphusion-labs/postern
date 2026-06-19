@@ -47,6 +47,26 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return json({ ok: true, ...result });
     }
 
+    // --- read: list / filter ---
+    if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
+      const page = await store.list(env, parseListQuery(url));
+      return json({ ok: true, ...page });
+    }
+
+    // --- read: search ---
+    if (request.method === "GET" && path === "/api/search") {
+      const q = (url.searchParams.get("q") ?? "").trim();
+      if (!q) return json({ ok: false, error: "E_FIELD_MISSING", message: "q is required" }, 400);
+      const modeParam = url.searchParams.get("mode") ?? undefined;
+      const page = await store.search(env, {
+        q,
+        mode: modeParam as "fts" | "semantic" | "hybrid" | undefined,
+        limit: parseLimit(url),
+        cursor: url.searchParams.get("cursor") ?? undefined,
+      });
+      return json({ ok: true, ...page });
+    }
+
     // --- read: one message ---
     if (request.method === "GET" && path.startsWith("/api/messages/")) {
       const id = decodeURIComponent(path.slice("/api/messages/".length));
@@ -68,6 +88,27 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   } catch (err) {
     return errorResponse(err);
   }
+}
+
+function parseLimit(url: URL): number | undefined {
+  const raw = url.searchParams.get("limit");
+  if (raw === null) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function parseListQuery(url: URL): import("./store").ListQuery {
+  const p = url.searchParams;
+  const dir = p.get("direction");
+  return {
+    to: p.get("to") ?? undefined,
+    from: p.get("from") ?? undefined,
+    thread: p.get("thread") ?? undefined,
+    direction: dir === "inbound" || dir === "outbound" ? dir : undefined,
+    q: p.get("q") ?? undefined,
+    limit: parseLimit(url),
+    cursor: p.get("cursor") ?? undefined,
+  };
 }
 
 function authorized(request: Request, env: Env): boolean {

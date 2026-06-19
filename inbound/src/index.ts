@@ -4,7 +4,7 @@ import { ingest, type ParsedInbound } from "./ingest";
 import { handleApi } from "./api";
 import { send, reply, type SendRequest, type ReplyRequest, type SendResult } from "./mailbox";
 import * as store from "./store";
-import type { StoredMessage } from "./store";
+import type { StoredMessage, StoredMessageSummary, ListQuery, SearchQuery, Page, SearchHit } from "./store";
 import { toArrayBuffer, extractSpfResult, extractDkimResult, extractDmarcResult } from "./headers";
 
 // The in-Worker inbound transport driver (issue #21): the one surviving email()
@@ -110,6 +110,12 @@ export class MailboxService extends WorkerEntrypoint<Env> {
   }
   thread(threadId: string): Promise<StoredMessage[]> {
     return store.thread(this.env, threadId);
+  }
+  list(query: ListQuery): Promise<Page<StoredMessageSummary>> {
+    return store.list(this.env, query);
+  }
+  search(query: SearchQuery): Promise<Page<SearchHit>> {
+    return store.search(this.env, query);
   }
 }
 
