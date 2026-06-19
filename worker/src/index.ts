@@ -35,10 +35,6 @@ export class EmailService extends WorkerEntrypoint<Env> {
 }
 
 export default {
-  async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
-    await message.forward(env.FORWARD_TO);
-  },
-
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
@@ -51,10 +47,13 @@ export default {
     }
 
     // Bearer-token gate for the public endpoint (used by the dischord SMTP
-    // relay and any external caller that can't use a service binding).
+    // relay and any external caller that can't use a service binding). The
+    // secret is POSTERN_API_TOKEN; RELAY_TOKEN is honored as a fallback for one
+    // release through the rename (see docs/CONTRACT.md section 5).
+    const apiToken = env.POSTERN_API_TOKEN || env.RELAY_TOKEN || "";
     const auth = request.headers.get("authorization") ?? "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (!env.RELAY_TOKEN || !timingSafeEqual(token, env.RELAY_TOKEN)) {
+    if (!apiToken || !timingSafeEqual(token, apiToken)) {
       return json({ ok: false, error: "unauthorized" }, 401);
     }
 

@@ -22,14 +22,17 @@ interface EmailSendBinding {
 interface Env {
   /** send_email binding (wrangler.jsonc -> send_email[].name = "EMAIL"). */
   EMAIL: EmailSendBinding;
-  /** Shared secret for the public /send endpoint. `wrangler secret put RELAY_TOKEN`. */
-  RELAY_TOKEN: string;
-  /** Default From address when a request omits `from`. */
+  /**
+   * Shared secret for the public /send endpoint. `wrangler secret put POSTERN_API_TOKEN`.
+   * RELAY_TOKEN is read as a fallback for one release through the rename.
+   */
+  POSTERN_API_TOKEN?: string;
+  /** @deprecated Back-compat fallback for POSTERN_API_TOKEN; remove next release. */
+  RELAY_TOKEN?: string;
+  /** Default From address when a request omits `from`. Required for the public release. */
   DEFAULT_FROM?: string;
   /** Optional display name paired with DEFAULT_FROM. */
   DEFAULT_FROM_NAME?: string;
-  /** Only From addresses on this domain are permitted. */
+  /** Only From addresses on this domain are permitted. Required for the public release. */
   ALLOWED_FROM_DOMAIN?: string;
-  /** Destination address for inbound email forwarding via Email Routing. */
-  FORWARD_TO: string;
 }
