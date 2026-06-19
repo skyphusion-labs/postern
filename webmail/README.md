@@ -24,6 +24,12 @@ Reading a message with an attachment listing, and search:
 
 (Synthetic example data; no real mail.)
 
+The shots are captured against a real local `wrangler dev` instance of the inbound
+worker, seeded with the synthetic messages in `inbound/seed.dev.sql` via
+`inbound/wrangler.dev.jsonc` (a local D1, no remote bindings). To regenerate:
+apply `schema.sql` then `seed.dev.sql` to a local D1, `wrangler dev`, open
+`/webmail`, and point it at the dev origin with the dev `POSTERN_API_TOKEN`.
+
 ## What it does (v1)
 
 - **Message list** with an Inbox / Sent / All folder filter (the API's
