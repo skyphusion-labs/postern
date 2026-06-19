@@ -178,7 +178,7 @@ export async function sha256hex(input: string): Promise<string> {
 // Split text into overlapping windows (~chunk chars, overlap chars carried over)
 // on whitespace boundaries where possible. bge-base handles ~512 tokens, so a
 // 1200-char window stays comfortably under the limit.
-function chunkText(text: string, chunk: number, overlap: number): string[] {
+export function chunkText(text: string, chunk: number, overlap: number): string[] {
   const t = text.trim();
   if (t.length <= chunk) return t.length ? [t] : [];
   const out: string[] = [];
@@ -196,7 +196,7 @@ function chunkText(text: string, chunk: number, overlap: number): string[] {
   return out.filter(Boolean);
 }
 
-function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string): boolean {
+export function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string): boolean {
   const domains = allowlistEnv
     .split(",")
     .map((s) => s.trim().toLowerCase())
@@ -215,7 +215,7 @@ function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string
 
 // --- Body cleaning ---
 
-function cleanBody(raw: string): string {
+export function cleanBody(raw: string): string {
   // Strip sig block (RFC 3676 "-- \n" delimiter)
   const sigIdx = raw.indexOf("\n-- \n");
   const stripped = sigIdx !== -1 ? raw.slice(0, sigIdx) : raw;
@@ -227,7 +227,7 @@ function cleanBody(raw: string): string {
     .trim();
 }
 
-function htmlToText(html: string): string {
+export function htmlToText(html: string): string {
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
