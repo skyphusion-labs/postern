@@ -79,6 +79,24 @@ pipeline {
       }
     }
 
+    stage('IMAP: typecheck + test') {
+      // python:3.12 matches the GitHub Actions setup-python pin. Twisted is the
+      // only runtime dep; mypy is the type gate, trial runs the suite (incl. the
+      // e2e IMAP server round-trip). pip caches under WORKSPACE so no root files.
+      agent { docker { image 'python:3.12' } }
+      environment {
+        HOME = "${env.WORKSPACE}"
+        PIP_CACHE_DIR = "${env.WORKSPACE}/.pipcache"
+      }
+      steps {
+        dir('imap') {
+          sh 'pip install -e .[dev]'
+          sh 'python -m mypy'
+          sh 'python -m twisted.trial posternimap.tests'
+        }
+      }
+    }
+
     stage('Deploy') {
       when { branch 'main' }
       agent { docker { image 'node:22' } }
