@@ -72,6 +72,13 @@ interface Env {
   DEFAULT_FROM_NAME?: string;
   /** Only From addresses on this domain are permitted for outbound. */
   ALLOWED_FROM_DOMAIN?: string;
-  /** Outbound transport selector: unset/"cf" = Cloudflare Email (default), "relay" = #28. */
+  /** Outbound transport selector: unset/"cf" = Cloudflare Email (default), "relay" = postern-relay. */
   OUTBOUND_TRANSPORT?: string;
+  /** RelayTransport: the postern-relay /dispatch URL (used when OUTBOUND_TRANSPORT=relay). */
+  RELAY_DISPATCH_URL?: string;
+  /**
+   * RelayTransport bearer token for /dispatch -- the TRANSPORT token, NOT the
+   * mailbox API token (CONTRACT section 5). wrangler secret put POSTERN_TRANSPORT_TOKEN.
+   */
+  POSTERN_TRANSPORT_TOKEN?: string;
 }
