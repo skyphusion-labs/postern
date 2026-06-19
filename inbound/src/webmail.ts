@@ -95,9 +95,9 @@ export const WEBMAIL_HTML = `<!doctype html>
   .msg-head h2 { margin: 0 0 8px; font-size: 20px; }
   .msg-head .kv { color: var(--muted); font-size: 13px; }
   .msg-head .kv b { color: var(--fg); font-weight: 600; }
-  .msg-body-frame {
-    margin-top: 18px; padding-top: 18px; border: none; border-top: 1px solid var(--line);
-    width: 100%; min-height: 220px; background: var(--panel-2);
+  .msg-body {
+    margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line);
+    white-space: pre-wrap; word-wrap: break-word; font-size: 14px;
   }
   .attachments { margin-top: 18px; }
   .attachments h3 { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
@@ -242,35 +242,6 @@ export const WEBMAIL_HTML = `<!doctype html>
     }).then(function () {
       if (btn) { btn.disabled = false; btn.textContent = label; }
     });
-  }
-
-  // Render a (plain-text) message body inside a sandboxed iframe: sandbox="" is
-  // maximally restrictive (no scripts, no same-origin, no forms), so even if the
-  // stored body contained markup it cannot execute or reach the API/token. We
-  // escape the text and linkify bare URLs; the result is the iframe's srcdoc.
-  function escapeHtml(t) {
-    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  }
-  function linkify(escaped) {
-    // Operates on ALREADY-escaped text, so we only ever match plain URL chars and
-    // emit an anchor whose href is itself escaped. No raw input reaches the DOM.
-    return escaped.replace(/(https?:\\/\\/[^\\s<>"']+)/g, function (u) {
-      return '<a href="' + u + '" target="_blank" rel="noopener noreferrer nofollow">' + u + '</a>';
-    });
-  }
-  function bodyIframe(text) {
-    var safe = linkify(escapeHtml(text || ""));
-    var doc = '<!doctype html><html><head><meta charset="utf-8">' +
-      '<style>body{margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;' +
-      'color:#e7e9ee;background:#1c1f26;white-space:pre-wrap;word-wrap:break-word;padding:2px}' +
-      'a{color:#6ea8fe}</style></head><body>' + safe + '</body></html>';
-    var f = document.createElement("iframe");
-    f.className = "msg-body-frame";
-    f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
-    f.setAttribute("referrerpolicy", "no-referrer");
-    f.setAttribute("srcdoc", doc);
-    return f;
   }
 
   // --- formatting (pure, returns strings; rendered via text nodes) -----------
@@ -427,9 +398,9 @@ export const WEBMAIL_HTML = `<!doctype html>
     ]);
     r.appendChild(head);
 
-    // Body: rendered inside a sandboxed iframe (sandbox="" = no scripts, no
-    // same-origin), so stored content cannot execute or reach the token/API.
-    r.appendChild(bodyIframe(m.bodyText || ""));
+    // Body: plain text only, inserted as a text node into a pre-wrap container.
+    // We never set innerHTML with stored content, so message bytes cannot run.
+    r.appendChild(el("div", { class: "msg-body", text: m.bodyText || "" }));
 
     if (m.attachments && m.attachments.length) {
       var ul = el("ul");
@@ -500,11 +471,7 @@ const SECURITY_HEADERS: Record<string, string> = {
   // exfiltrate the pasted token to another host.
   "content-security-policy":
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
-    // frame-src 'self' permits the sandboxed srcdoc iframe the reading pane uses
-    // to render message bodies in an isolated context (sandbox="" = no scripts,
-    // no same-origin), so stored body content can never execute or reach the API.
-    "connect-src 'self'; img-src 'self' data:; frame-src 'self'; " +
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
 };

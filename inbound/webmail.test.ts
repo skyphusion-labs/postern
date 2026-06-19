@@ -26,8 +26,6 @@ describe("serveWebmail", () => {
     // cannot ship the pasted token to another host.
     expect(csp).toContain("connect-src 'self'");
     expect(csp).toContain("default-src 'none'");
-    // frame-src 'self' permits the sandboxed srcdoc iframe the body view uses.
-    expect(csp).toContain("frame-src 'self'");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
   });
@@ -42,14 +40,6 @@ describe("the page is XSS-conscious by construction", () => {
   });
   it("requests the token as a Bearer header, never places it in a URL", () => {
     expect(WEBMAIL_HTML).toContain('"authorization": "Bearer "');
-  });
-  it("renders the message body in a sandbox=\"\" iframe (no scripts, no same-origin)", () => {
-    // The body iframe must be sandboxed with an EMPTY sandbox (no allow-scripts,
-    // no allow-same-origin), so stored body content cannot execute or reach the
-    // token/API even though it is rendered as HTML via srcdoc.
-    expect(WEBMAIL_HTML).toContain('f.setAttribute("sandbox", "")');
-    expect(WEBMAIL_HTML).not.toContain("allow-scripts");
-    expect(WEBMAIL_HTML).not.toContain("allow-same-origin");
   });
   it("downloads attachments via a Bearer fetch, not a tokenized URL", () => {
     // The attachment download fetches with the Authorization header and builds an
