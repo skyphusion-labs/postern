@@ -1,5 +1,11 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { sendEmail, EmailError, type EmailRequest, type SendResult } from "./email";
+import {
+  sendEmail,
+  EmailError,
+  MAX_BODY_BYTES,
+  type EmailRequest,
+  type SendResult,
+} from "./email";
 
 export type { EmailRequest, SendResult, EmailAddress } from "./email";
 
@@ -44,12 +50,19 @@ export default {
       return json({ ok: false, error: "not_found" }, 404);
     }
 
-    // Bearer-token gate for the public endpoint (used by the mindcrime SMTP
+    // Bearer-token gate for the public endpoint (used by the dischord SMTP
     // relay and any external caller that can't use a service binding).
     const auth = request.headers.get("authorization") ?? "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
     if (!env.RELAY_TOKEN || !timingSafeEqual(token, env.RELAY_TOKEN)) {
       return json({ ok: false, error: "unauthorized" }, 401);
+    }
+
+    // Reject oversized bodies before reading them into memory. The relay caps
+    // SMTP messages, but a direct public caller is otherwise unbounded.
+    const declaredLen = Number(request.headers.get("content-length") ?? "");
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_BODY_BYTES) {
+      return json({ ok: false, error: "E_PAYLOAD_TOO_LARGE", message: "request body too large" }, 413);
     }
 
     let body: EmailRequest;

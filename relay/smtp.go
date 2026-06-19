@@ -12,6 +12,11 @@ import (
 	"github.com/jhillyerd/enmime"
 )
 
+// MaxRecipients caps the number of envelope recipients (to + cc + bcc) the
+// go-smtp server accepts per message. Keep this in sync with the worker's
+// MAX_RECIPIENTS in worker/src/email.ts.
+const MaxRecipients = 50
+
 // Backend hands out a fresh Session per SMTP connection.
 type Backend struct {
 	cfg    Config
@@ -142,7 +147,7 @@ func run(cfg Config) error {
 		srv.Addr = addr
 		srv.Domain = "localhost"
 		srv.MaxMessageBytes = cfg.MaxSize
-		srv.MaxRecipients = 50
+		srv.MaxRecipients = MaxRecipients
 		srv.AllowInsecureAuth = true // plaintext on trusted interfaces only (no STARTTLS)
 		log.Printf("skyphusion-email-relay listening on %s -> %s (from-domain=%s)", addr, cfg.WorkerURL, cfg.FromDomain)
 		go func(s *smtp.Server) { errc <- s.ListenAndServe() }(srv)
