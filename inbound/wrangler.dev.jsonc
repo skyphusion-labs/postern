@@ -6,6 +6,10 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "postern-dev", "database_id": "local-dev-screenshots" }
   ],
+  // Local R2 for the attachment-download endpoint (GET /api/messages/{id}/attachments/{i}).
+  "r2_buckets": [
+    { "binding": "ATTACHMENTS", "bucket_name": "postern-attachments-dev" }
+  ],
   "vars": {
     "TRUSTED_SENDER_DOMAINS": "",
     "FORWARD_TO": "",

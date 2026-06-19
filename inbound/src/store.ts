@@ -289,6 +289,36 @@ async function attachmentsFor(db: D1Database, messageId: string): Promise<Attach
   return (res.results ?? []).map((a) => ({ filename: a.filename, mime: a.mime, size: a.size }));
 }
 
+/** One attachment's bytes + metadata, addressed by its 0-based index in the
+ * message's attachment list (the same order store.get returns: ORDER BY id).
+ * Returns null if the message/index does not exist or the R2 object is gone. */
+export interface AttachmentBytes {
+  body: ReadableStream;
+  filename: string | null;
+  mime: string | null;
+  size: number;
+}
+
+export async function getAttachment(
+  env: Env,
+  messageId: string,
+  index: number,
+): Promise<AttachmentBytes | null> {
+  if (!Number.isInteger(index) || index < 0) return null;
+  // LIMIT 1 OFFSET index over the same ORDER BY id the metadata list uses, so the
+  // API index lines up 1:1 with the attachments[] the caller saw in store.get.
+  const row = await env.DB.prepare(
+    `SELECT filename, mime, size, r2_key FROM attachments
+       WHERE message_id = ? ORDER BY id LIMIT 1 OFFSET ?`,
+  )
+    .bind(messageId, index)
+    .first<{ filename: string | null; mime: string | null; size: number; r2_key: string }>();
+  if (!row) return null;
+  const obj = await env.ATTACHMENTS.get(row.r2_key);
+  if (!obj) return null;
+  return { body: obj.body, filename: row.filename, mime: row.mime, size: row.size };
+}
+
 /** Full message + attachment metadata, or null if not found. */
 export async function get(env: Env, messageId: string): Promise<StoredMessage | null> {
   const row = await env.DB.prepare(

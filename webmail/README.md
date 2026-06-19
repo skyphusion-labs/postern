@@ -35,7 +35,8 @@ apply `schema.sql` then `seed.dev.sql` to a local D1, `wrangler dev`, open
 - **Message list** with an Inbox / Sent / All folder filter (the API's
   `direction` filter).
 - **Read view** for a single message: headers, trust verdict (spf/dkim/dmarc),
-  the plain-text body, and an attachment listing.
+  the body (rendered in a sandboxed iframe), and attachments with a **Download**
+  button each.
 - **Thread view**: sibling messages in the same thread, click to jump.
 - **Search** over the mailbox (the `/api/search` endpoint).
 - **Read-only.** No compose / send / reply. Sending stays the structured API's
@@ -85,15 +86,28 @@ XSS is the main surface. The page is built to neutralize it:
   nodes** / `setAttribute`, never parsed as HTML. Stored bytes cannot inject
   markup or script. A test (`inbound/webmail.test.ts`) fails the build if
   `innerHTML =` ever appears in the page.
+- **Body in a sandboxed iframe.** The message body is rendered inside an
+  `<iframe sandbox="">` (empty sandbox = no scripts, no same-origin, no forms)
+  via `srcdoc`. Even if a body contained markup it cannot execute or reach the
+  token / API. The body text is escaped and bare URLs are linkified before going
+  into the iframe.
 - **Locked-down CSP** on the served page: `default-src 'none'`,
   `connect-src 'self'` (a hijacked page cannot exfiltrate the token to another
-  host), no third-party resources, `frame-ancestors 'none'`, plus `nosniff` and
+  host), `frame-src 'self'` (only the sandboxed srcdoc body frame), no
+  third-party resources, `frame-ancestors 'none'`, plus `nosniff` and
   `no-referrer`.
+- **Attachment download via a Bearer fetch.** The API is token-gated, so a
+  download fetches the bytes with the `Authorization` header and saves them from
+  an object URL; the token is never placed in a URL. The endpoint returns the
+  bytes with `Content-Disposition: attachment`, a sanitized filename, and
+  `nosniff`, so attachments are never rendered inline.
 - The token rides as a header, with `credentials: omit` (no ambient cookies) and
   `referrer-policy: no-referrer`.
 
-These were verified end to end in a headless browser: stored `<script>` payloads
-in a subject and body render as literal text and never execute.
+These were verified end to end in a headless browser against a real `wrangler dev`
+worker: stored `<script>` payloads render as literal text and never execute, the
+body iframe is sandboxed, and the attachment download carries the token as a
+header (never in the URL).
 
 ## Tests
 
@@ -121,9 +135,9 @@ constant); the sync test enforces they match.
 - **Compose / reply / send.** Read-only by design for v1; sending is the
   structured API's job. A compose surface (calling `POST /api/send` / `/api/reply`)
   is the natural next step.
-- **Attachment download.** Attachments are listed; fetching their bytes
-  (`GET /api/messages/{id}/attachments/{i}`) and rendering inline is a follow-up.
-- **HTML-body rendering.** v1 shows the stored plain-text body. Rendering the HTML
-  part safely would require a sanitizer; deferred to keep v1 dependency-free.
+- **HTML email bodies.** The store currently keeps only the cleaned plain-text
+  body (no `body_html` column); the sandboxed-iframe body view is ready to render
+  HTML the moment the store persists it. Adding HTML storage (a schema migration
+  + ingest change) is the follow-up; the safe render path already exists here.
 - **Keyset pagination polish** and richer search (mode selector for
   fts/semantic/hybrid).
