@@ -26,7 +26,23 @@ export class CfEmailTransport implements Transport {
         ? { email: msg.replyTo.email, name: msg.replyTo.name }
         : msg.replyTo.email;
     }
-    if (msg.headers && Object.keys(msg.headers).length) message.headers = msg.headers;
+    // Cloudflare Email Sending generates its own Message-ID and REJECTS a custom
+    // one (only whitelisted + X-* headers are accepted). The mailbox stamps a
+    // core-generated Message-ID for the store + threading; that lives in our
+    // store, not on the CF wire. Strip it (and any other non-whitelisted header)
+    // here, the transport-specific seam, so a default CF deploy can send. CF
+    // accepts In-Reply-To / References, so reply threading on the wire survives.
+    if (msg.headers) {
+      const allowed: Record<string, string> = {};
+      for (const [k, v] of Object.entries(msg.headers)) {
+        const key = k.toLowerCase();
+        if (key === "message-id") continue; // CF sets its own
+        if (key === "in-reply-to" || key === "references" || key.startsWith("x-")) {
+          allowed[k] = v;
+        }
+      }
+      if (Object.keys(allowed).length) message.headers = allowed;
+    }
 
     // env.EMAIL throws an Error carrying a .code (E_* string) on failure; the
     // caller maps that to the {ok:false,error} response shape.

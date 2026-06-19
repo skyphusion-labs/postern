@@ -20,8 +20,11 @@ describe("mailbox.send", () => {
     expect(rows[0].direction).toBe("outbound");
     expect(res.messageId).toBe(rows[0].message_id);
     expect(res.threadId).toBe(res.messageId);
-    // The generated Message-ID is stamped as a header so the recipient + store agree.
-    expect(sent[0].headers?.["Message-ID"]).toBe(`<${res.messageId}>`);
+    // The core Message-ID lives in the store for threading; it is NOT sent as a
+    // header to the CF transport (Cloudflare Email rejects a custom Message-ID and
+    // sets its own). CfEmailTransport strips it, so the wire message carries no
+    // Message-ID header.
+    expect(sent[0].headers?.["Message-ID"]).toBeUndefined();
   });
 
   it("rejects an off-domain from", async () => {
