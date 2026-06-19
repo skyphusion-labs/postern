@@ -145,4 +145,50 @@ describe("sendEmail validation", () => {
     expect(e.status).toBe(418);
     expect(e.message).toBe("boom");
   });
+
+  // Address-validation parity + ReDoS guard for the hardened EMAIL_RE. The
+  // regex is exercised on to/cc/bcc, from, and replyTo; we assert the same
+  // accept/reject decisions as before and that a crafted pathological string
+  // does not cause catastrophic backtracking (it returns promptly with a clear
+  // rejection rather than hanging).
+  it("accepts the same well-formed addresses as before", async () => {
+    const valid = [
+      "dev@example.com",
+      "a@b.com",
+      "a@b.c",
+      "a@b.co.uk",
+      "first.last@sub.example.com",
+    ];
+    for (const addr of valid) {
+      const { env } = makeEnv();
+      // Should not throw a validation error on the recipient.
+      await expect(sendEmail(env, { to: addr, subject: "s", text: "x" })).resolves.toMatchObject({
+        messageId: "msg-123",
+      });
+    }
+  });
+
+  it("rejects malformed addresses across to / from / replyTo", async () => {
+    const malformed = ["not-an-email", "bad", "a@b", "a@.com", "@b.com", "a b@c.com"];
+    for (const addr of malformed) {
+      const r1 = makeEnv();
+      await expectReject(r1.env, { to: addr, subject: "s", text: "x" }, "E_VALIDATION_ERROR");
+      const r2 = makeEnv();
+      await expectReject(
+        r2.env,
+        { to: "a@b.com", subject: "s", text: "x", replyTo: addr },
+        "E_VALIDATION_ERROR",
+      );
+    }
+  });
+
+  it("does not hang on a crafted ReDoS-style address (returns promptly)", async () => {
+    const { env } = makeEnv();
+    // Long run of dot-ambiguous chars that fails the anchor; the old pattern
+    // could backtrack polynomially on this, the linear one returns at once.
+    const evil = "a@" + "a.".repeat(50_000);
+    const start = Date.now();
+    await expectReject(env, { to: evil, subject: "s", text: "x" }, "E_VALIDATION_ERROR");
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
 });

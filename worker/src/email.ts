@@ -38,7 +38,13 @@ export class EmailError extends Error {
 
 // Deliberately permissive; the real validation is done by the upstream service.
 // We only reject obviously malformed addresses to fail fast with a clear code.
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// The domain is matched as dot-free labels joined by literal dots, so no two
+// adjacent quantifiers share a character class -- that keeps matching linear and
+// avoids the polynomial backtracking (ReDoS) a pattern like `[^@\s]+\.[^@\s]+`
+// invites on crafted input. Behavior is unchanged for valid addresses; the only
+// difference is that malformed forms with empty labels (e.g. "a@b..com",
+// "a@b.com.") are now correctly rejected instead of accepted.
+const EMAIL_RE = /^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$/;
 const MAX_RECIPIENTS = 50;
 // Defense in depth against header injection: any CR or LF in a single-line
 // field (subject, from/reply-to display name, custom header key/value) could let
