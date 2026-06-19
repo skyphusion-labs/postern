@@ -1,0 +1,57 @@
+name: Deploy (main only)
+
+# Mirrors the Jenkinsfile Deploy stage: deploy both workers to production on
+# push to main. CI suite (worker/inbound/relay/imap) gates PRs via ci.yml;
+# this workflow handles the main deploy. Jenkins job (skyphusion-email) has
+# never built -- this becomes the active deploy path on merge.
+#
+# Workers deployed:
+#   worker/   -> skyphusion-email          (outbound sending)
+#   inbound/  -> skyphusion-email-inbound  (CF Email Routing ingestion)
+#
+# Required secrets (skyphusion-labs/skyphusion-email repo settings):
+#   CLOUDFLARE_API_TOKEN   -- CF API token with Workers + D1 + Vectorize edit perms
+#   CLOUDFLARE_ACCOUNT_ID  -- Cloudflare account ID
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-skyphusion-email-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy workers to Cloudflare
+    runs-on: [self-hosted, fleet]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Deploy worker (skyphusion-email)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: worker
+        run: |
+          npm ci
+          npx wrangler deploy
+
+      - name: Deploy inbound (skyphusion-email-inbound)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: inbound
+        run: |
+          npm ci
+          npx wrangler deploy
