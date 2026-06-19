@@ -11,6 +11,11 @@ step**, zero runtime dependencies.
 
 ## Screenshots
 
+An HTML email rendered safely in the sandboxed iframe (no scripts, no remote
+trackers; author colors on a white background, like any mail client):
+
+![HTML email render](screenshots/webmail-html-email.png)
+
 The inbox list, a single message (headers, trust verdict, body, attachments), and
 the thread view:
 
