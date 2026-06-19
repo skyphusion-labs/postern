@@ -228,17 +228,39 @@ export function cleanBody(raw: string): string {
 }
 
 export function htmlToText(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+  // Drop <script>/<style> blocks and their contents. Loop until the string is
+  // stable so nested or reordered tags can't survive a single pass (a one-shot
+  // .replace is defeated by e.g. "<scr<script>ipt>"); the end-tag patterns allow
+  // whitespace before ">" so "</script >" is matched too. Body is stored for FTS
+  // and embeddings, not rendered, but we strip thoroughly regardless.
+  let out = html;
+  const blockTag = /<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(blockTag, "");
+  } while (out !== prev);
+
+  out = out
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
+    .replace(/<\/p\s*>/gi, "\n");
+
+  // Strip any remaining tags, looping so overlapping "<<>>" forms can't leave a
+  // partial tag behind after one pass.
+  do {
+    prev = out;
+    out = out.replace(/<[^>]+>/g, "");
+  } while (out !== prev);
+
+  // Decode named entities. Decode &amp; LAST so an entity revealed by an earlier
+  // pass (e.g. "&amp;lt;" -> "&lt;") is not then itself re-decoded.
+  out = out
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, " ")
-    .trim();
+    .replace(/&amp;/g, "&");
+
+  return out.trim();
 }
