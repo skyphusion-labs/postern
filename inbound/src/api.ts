@@ -6,6 +6,7 @@
 
 import * as store from "./store";
 import { send, reply, MailboxError, type SendRequest, type ReplyRequest } from "./mailbox";
+import { serveWebmail } from "./webmail";
 
 // Failure codes that represent a transient upstream condition (the transport /
 // provider) rather than a bad request; mapped to 502 so callers can retry.
@@ -22,6 +23,13 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
 
   if (request.method === "GET" && (path === "/" || path === "/health")) {
     return json({ ok: true, service: "postern" });
+  }
+
+  // The read-only webmail (the human browser door, complementing the IMAP proxy).
+  // Public: the page carries no secret; the operator enters their API origin +
+  // token client-side and it is used only for the token-gated /api calls below.
+  if (request.method === "GET" && (path === "/webmail" || path === "/webmail/")) {
+    return serveWebmail();
   }
 
   // Everything under /api (and the back-compat /send alias) requires the token.
