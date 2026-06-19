@@ -49,6 +49,10 @@ npm run deploy
 `npm run deploy` prints the deployed URL, e.g.
 `https://postern.<your-account>.workers.dev`.
 
+Open `https://postern.<your-account>.workers.dev/webmail` to browse the mailbox
+in a browser (paste that origin + your `POSTERN_API_TOKEN`); IMAP clients can use
+the `imap/` proxy. Both are read-only (see `webmail/README.md` and `imap/README.md`).
+
 ## 3. Wire inbound mail (for the receive leg)
 
 In the Dashboard -> Email -> Email Routing -> Routing Rules, route all addresses
