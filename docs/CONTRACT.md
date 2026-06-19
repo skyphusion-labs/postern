@@ -205,8 +205,12 @@ as failure, and must thread/store on the core-generated `messageId`, never on `p
 
 - **`CfEmailTransport` (default).** Wraps `env.EMAIL.send()`, byte-for-byte the current
   behavior. Selected when `OUTBOUND_TRANSPORT` is unset or `cf`.
-- **`RelayTransport` and others.** POST the `OutboundMessage` to an SMTP bridge or another
-  provider. The "not locked into CF" escape hatch (#28). Selected by `OUTBOUND_TRANSPORT=relay`.
+- **`RelayTransport` (done) and others.** POST the `OutboundMessage` to the postern-relay
+  `/dispatch` bridge (or another provider). The "not locked into CF" escape hatch (#28),
+  selected by `OUTBOUND_TRANSPORT=relay`. Config: `RELAY_DISPATCH_URL` + the transport token
+  `POSTERN_TRANSPORT_TOKEN` (NOT the mailbox API token). It maps the relay'"'"'s status back to the
+  `E_*` vocabulary: 401/missing-config -> `E_INTERNAL_SERVER_ERROR`, 400 -> `E_VALIDATION_ERROR`,
+  413 -> `E_PAYLOAD_TOO_LARGE`, 5xx / network failure -> `E_DELIVERY_FAILED` (retryable -> 502).
 
 **The `/dispatch` wire shape** (pinned against the M3 relay, `relay/http.go`). A relay-style
 transport POSTs the `OutboundMessage` as JSON to `POST /dispatch`, gated by
