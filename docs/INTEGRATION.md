@@ -82,6 +82,10 @@ curl "https://<your-worker>.<account>.workers.dev/api/messages?direction=inbound
 curl "https://<your-worker>.<account>.workers.dev/api/messages/<messageId>" \
   -H "Authorization: Bearer $POSTERN_API_TOKEN"
 
+# attachment bytes (i = 0-based index into the message's attachments[])
+curl "https://<your-worker>.<account>.workers.dev/api/messages/<messageId>/attachments/0" \
+  -H "Authorization: Bearer $POSTERN_API_TOKEN" -OJ
+
 # search (mode = fts | semantic | hybrid; semantic/hybrid need the AI+Vectorize bindings)
 curl "https://<your-worker>.<account>.workers.dev/api/search?q=invoice&mode=fts" \
   -H "Authorization: Bearer $POSTERN_API_TOKEN"
