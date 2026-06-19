@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: every job here only checks out and builds/typechecks, so the
+# GITHUB_TOKEN needs nothing beyond reading the repo. Pinned at the top level so
+# all three jobs inherit it (fixes CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
 
   worker:
