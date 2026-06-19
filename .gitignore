@@ -14,3 +14,11 @@ relay/skyphusion-email-relay
 *.env
 !*.env.example
 .DS_Store
+
+# IMAP proxy (Python)
+imap/.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+imap/*.egg-info/
