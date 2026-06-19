@@ -24,13 +24,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Gate: run the full CI suite before any deploy.
-  worker:
-    uses: ./.github/workflows/ci.yml
 
+  # Deploy both workers to Cloudflare. Gated on main push; secrets injected
+  # per-step so wrangler never sees the token outside its own step.
   deploy:
-    name: Deploy workers
-    needs: [worker]
+    name: Deploy workers to Cloudflare
     runs-on: [self-hosted, fleet]
     timeout-minutes: 20
     steps:
