@@ -5,9 +5,9 @@ on:
     branches: [main]
   pull_request:
 
-# Least privilege: every job here only checks out and builds/typechecks, so the
-# GITHUB_TOKEN needs nothing beyond reading the repo. Pinned at the top level so
-# all three jobs inherit it (fixes CodeQL actions/missing-workflow-permissions).
+# Least privilege: every job here only checks out, typechecks, builds, and tests,
+# so the GITHUB_TOKEN needs nothing beyond reading the repo. Pinned at the top
+# level so all jobs inherit it (CodeQL actions/missing-workflow-permissions).
 permissions:
   contents: read
 
@@ -27,6 +27,7 @@ jobs:
           cache-dependency-path: worker/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
 
   inbound:
     runs-on: ubuntu-latest
@@ -42,6 +43,7 @@ jobs:
           cache-dependency-path: inbound/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
 
   relay:
     runs-on: ubuntu-latest
@@ -58,5 +60,5 @@ jobs:
       - run: go build ./...
       # Run the unit suite (incl. the email-injection regression guards) under
       # the race detector. Without this, those tests never execute in CI and the
-      # guard for the go/email-injection fix would be decorative.
+      # regression guard for the go/email-injection fix would be decorative.
       - run: go test -race ./...

@@ -3,6 +3,10 @@
 // Every green build on `main` deploys both Workers to production via
 // `wrangler deploy`. Branch/PR builds run the checks but never deploy.
 //
+// "Green" means typecheck AND the test suites pass: worker (vitest), inbound
+// (vitest), relay (go test -race). Deploy is gated behind all of them, so a
+// regression cannot reach production on a green build.
+//
 // Required Jenkins credentials (Manage Jenkins -> Credentials):
 //   - CLOUDFLARE_API_TOKEN  (Secret text)  CF API token with Workers + D1 +
 //                                          Vectorize edit permissions.
@@ -26,7 +30,7 @@ pipeline {
   }
 
   stages {
-    stage('Worker: typecheck') {
+    stage('Worker: typecheck + test') {
       agent { docker { image 'node:22' } }
       environment {
         HOME = "${env.WORKSPACE}"
@@ -37,11 +41,12 @@ pipeline {
         dir('worker') {
           sh 'npm ci'
           sh 'npm run typecheck'
+          sh 'npm test'
         }
       }
     }
 
-    stage('Inbound: typecheck') {
+    stage('Inbound: typecheck + test') {
       agent { docker { image 'node:22' } }
       environment {
         HOME = "${env.WORKSPACE}"
@@ -52,12 +57,14 @@ pipeline {
         dir('inbound') {
           sh 'npm ci'
           sh 'npm run typecheck'
+          sh 'npm test'
         }
       }
     }
 
-    stage('Relay: vet + build') {
-      agent { docker { image 'golang:1.23' } }
+    stage('Relay: vet + build + test') {
+      // Pin to the go.mod toolchain (1.22); matches the GitHub Actions setup-go.
+      agent { docker { image 'golang:1.22' } }
       environment {
         HOME = "${env.WORKSPACE}"
         GOCACHE = "${env.WORKSPACE}/.gocache"
@@ -67,6 +74,7 @@ pipeline {
         dir('relay') {
           sh 'go vet ./...'
           sh 'go build -o /tmp/skyphusion-email-relay .'
+          sh 'go test -race ./...'
         }
       }
     }

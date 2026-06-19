@@ -1,81 +1,68 @@
-name: Test and Native Code Coverage
+name: coverage
+
+# Produces real, inspectable coverage for all three components and uploads it as
+# build artifacts. The previous version used actions/upload-code-coverage@v1 and a
+# code-quality:write permission, both GitHub Enterprise only; on github.com those
+# steps were green no-ops, so "coverage" reflected nothing. This runs the real
+# suites and keeps the reports as downloadable artifacts instead.
 
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write      
-      code-quality: write    # Required for GitHub Enterprise Code Coverage API
-      pull-requests: write   # Allows appending the widget inside the PR
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      # -----------------------------------------------------------------------
-      # Go Environment Configuration Setup (`relay`)
-      # -----------------------------------------------------------------------
-      - name: Setup Go environment
-        uses: actions/setup-go@v5
+      # ---- Relay (Go) ----
+      - name: Setup Go
+        uses: actions/setup-go@v6
         with:
           go-version: "1.22"
           cache-dependency-path: relay/go.sum
 
-      - name: Run Go Tests with Coverage
+      - name: Relay coverage
+        working-directory: relay
         run: |
-          cd relay
-          go test -v -coverprofile=coverage.out ./...
+          go test -race -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out | tail -1
 
-      - name: Upload Go Coverage Report
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-code-coverage@v1
+      # ---- Node (worker + inbound) ----
+      - name: Setup Node
+        uses: actions/setup-node@v6
         with:
-          file: ./relay/coverage.out
-          language: go
-
-      # -----------------------------------------------------------------------
-      # Node.js Environment Configuration Setup (`worker` & `inbound`)
-      # -----------------------------------------------------------------------
-      - name: Setup Node.js environment
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
+          node-version: 22
+          cache: npm
           cache-dependency-path: |
             worker/package-lock.json
             inbound/package-lock.json
 
-
-      # -- Execute Worker Coverage --
-      - name: Install & Run Worker Tests
+      - name: Worker coverage
+        working-directory: worker
         run: |
-          cd worker
           npm ci
-          npx vitest run --coverage.enabled=true --coverage.provider=istanbul --coverage.reporter=cobertura --passWithNoTests --teardownTimeout=1
+          npm run test:coverage
 
-      - name: Upload Worker Coverage Report
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-code-coverage@v1
-        with:
-          file: ./worker/coverage/cobertura-coverage.xml
-          language: javascript
-
-      # -- Execute Inbound Worker Coverage --
-      - name: Install & Run Inbound Worker Tests
+      - name: Inbound coverage
+        working-directory: inbound
         run: |
-          cd inbound
           npm ci
-          npx vitest run --coverage.enabled=true --coverage.provider=istanbul --coverage.reporter=cobertura --passWithNoTests --teardownTimeout=1
+          npm run test:coverage
 
-      - name: Upload Inbound Worker Coverage Report
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-code-coverage@v1
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
         with:
-          file: ./inbound/coverage/cobertura-coverage.xml
-          language: javascript
+          name: coverage-reports
+          path: |
+            relay/coverage.out
+            worker/coverage/
+            inbound/coverage/
+          if-no-files-found: warn
+          retention-days: 14
