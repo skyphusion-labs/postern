@@ -118,6 +118,27 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id));
           return { results: matched as unknown as T[] };
         }
+        // summariesByIds(): FROM messages m WHERE m.message_id IN (?, ?, ...).
+        // All binds are message ids; no ordering guarantee (caller re-orders).
+        if (/FROM messages m WHERE m\.message_id IN \(/i.test(sql)) {
+          const ids = bound.map((b) => String(b));
+          const matched = rows.filter((r) => ids.includes(r.message_id));
+          const results = matched.map((r) => ({
+            id: r.id,
+            message_id: r.message_id,
+            direction: r.direction,
+            thread_id: r.thread_id,
+            from_addr: r.from_addr,
+            to_addr: r.to_addr,
+            subject: r.subject,
+            date: r.date,
+            in_reply_to: r.in_reply_to,
+            trusted: r.trusted,
+            received_at: r.received_at,
+            attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
+          }));
+          return { results: results as unknown as T[] };
+        }
         // list() / search(): FROM messages m with optional WHERE fragments. We
         // walk the bound params in the SAME order store.ts appends them (fts, to,
         // from, thread, direction, cursor tuple, then limit+1) so the fake stays
@@ -198,10 +219,24 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
       async upsert(v: unknown[]) {
         vectors.push(...v);
       },
+      // Cosine-similarity nearest-neighbour over whatever upsert() stored, so
+      // semantic-search tests rank by real vector closeness (paired with the
+      // deterministic embedder in AI.run below).
+      async query(vec: number[], opts?: { topK?: number }) {
+        const topK = opts?.topK ?? 10;
+        const scored = (vectors as { id: string; values: number[]; metadata?: unknown }[])
+          .map((v) => ({ id: v.id, score: cosine(vec, v.values), metadata: v.metadata }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, topK);
+        return { matches: scored };
+      },
     },
     AI: {
-      async run() {
-        return { data: [[0.1, 0.2, 0.3]] };
+      // Deterministic bag-of-words embedding over a tiny fixed vocabulary, so the
+      // same words map to the same vector in both ingest and query -- enough for
+      // tests to assert that semantically-overlapping text ranks higher.
+      async run(_model: string, input: { text: string[] }) {
+        return { data: input.text.map((t) => embedText(t)) };
       },
     },
     EMAIL: {
@@ -221,4 +256,39 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
   } as unknown as ExecutionContext;
 
   return { env, ctx, settle: () => Promise.all(pending), rows, atts, r2, vectors, sent };
+}
+
+
+// --- Deterministic embedding helpers for the fakes (test-only) ---
+
+const VOCAB = [
+  "invoice", "payment", "money", "billing", "lunch", "tacos", "food",
+  "deploy", "release", "green", "build", "meeting", "schedule", "calendar",
+  "bug", "error", "crash", "fix", "render", "video", "gpu",
+];
+
+function embedText(text: string): number[] {
+  const words = (text.toLowerCase().match(/[a-z]+/g) ?? []);
+  const vec = new Array(VOCAB.length).fill(0) as number[];
+  for (const w of words) {
+    const i = VOCAB.indexOf(w);
+    if (i >= 0) vec[i] += 1;
+  }
+  // Add a tiny constant so all-zero vectors still have a defined direction.
+  for (let i = 0; i < vec.length; i++) vec[i] += 0.01;
+  return vec;
+}
+
+function cosine(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length);
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < n; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }

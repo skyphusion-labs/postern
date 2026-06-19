@@ -25,12 +25,12 @@ interface Env {
    * store/ingest path still typechecks where sending is not configured.
    */
   EMAIL?: EmailSendBinding;
-  /** Vectorize index for semantic search over message bodies. */
-  VECTORIZE: VectorizeIndex;
+  /** Vectorize index for semantic search over message bodies. Optional: omit to disable semantic recall. */
+  VECTORIZE?: VectorizeIndex;
   /** R2 bucket holding inbound attachment bytes (keys referenced in D1.attachments). */
   ATTACHMENTS: R2Bucket;
-  /** AI binding for embeddings (routed through AI Gateway). */
-  AI: Ai;
+  /** AI binding for embeddings (routed through AI Gateway). Optional: omit to disable semantic recall. */
+  AI?: Ai;
   /**
    * Comma-separated list of trusted sender domains/addresses.
    * Only senders on this list that also pass SPF or DKIM get trusted=1.
