@@ -63,3 +63,20 @@ jobs:
       # the race detector. Without this, those tests never execute in CI and the
       # regression guard for the go/email-injection fix would be decorative.
       - run: go test -race ./...
+
+  imap:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: imap
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Twisted is the only runtime dep; mypy is the type gate (mirrors the
+      # Node typecheck convention). The pure layers test without Twisted, but
+      # the e2e server test needs it, so install the package + dev extras.
+      - run: pip install -e '.[dev]'
+      - run: python -m mypy
+      - run: python -m twisted.trial posternimap.tests

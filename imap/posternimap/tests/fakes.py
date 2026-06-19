@@ -1,0 +1,117 @@
+"""Test doubles for postern-imap: a fake HTTP transport and sample messages.
+
+The fake transport plugs into PosternClient (its injectable `transport`) so the
+client + everything above it can be tested without a live Postern API or network.
+It speaks the real wire shapes from CONTRACT section 4.
+"""
+
+from __future__ import annotations
+
+import json
+import urllib.parse
+from typing import Any, Dict, List, Optional
+
+
+def make_summary(message_id: str, *, direction: str = "inbound", **over: Any) -> Dict[str, Any]:
+    d = {
+        "messageId": message_id,
+        "direction": direction,
+        "threadId": message_id,
+        "from": f"{message_id}@example.com",
+        "to": "agent@skyphusion.org",
+        "subject": f"Subject {message_id}",
+        "date": "2026-06-18T12:00:00Z",
+        "inReplyTo": None,
+        "trusted": True,
+        "receivedAt": "2026-06-18T12:00:01Z",
+        "attachmentCount": 0,
+    }
+    d.update(over)
+    return d
+
+
+def make_message(message_id: str, *, body: str = "hello body", **over: Any) -> Dict[str, Any]:
+    d = dict(make_summary(message_id, **over))
+    d.pop("attachmentCount", None)
+    d["bodyText"] = body
+    d["attachments"] = over.get("attachments", [])
+    return d
+
+
+class FakeTransport:
+    """Mimics PosternClient's transport: (urllib.request.Request) -> (status, bytes).
+
+    Seeded with a list of message dicts (newest-first, as the API returns). It
+    routes GET /api/messages (with cursor paging), /api/messages/{id},
+    /api/threads/{id}, and /api/search. `expected_token` enforces auth: a wrong or
+    missing Bearer returns 401, so token-mode auth + ping() are exercised.
+    """
+
+    def __init__(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        *,
+        expected_token: Optional[str] = "good-token",
+        page_size: int = 2,
+    ) -> None:
+        self.messages = messages or []
+        self.expected_token = expected_token
+        self.page_size = page_size
+        self.calls: List[str] = []
+
+    def __call__(self, req):
+        self.calls.append(req.full_url)
+        auth = req.get_header("Authorization") or ""
+        if self.expected_token is not None and auth != f"Bearer {self.expected_token}":
+            return 401, json.dumps({"ok": False, "error": "unauthorized"}).encode()
+
+        parsed = urllib.parse.urlparse(req.full_url)
+        path = parsed.path
+        params = dict(urllib.parse.parse_qsl(parsed.query))
+
+        if path == "/api/messages":
+            return self._list(params)
+        if path.startswith("/api/messages/"):
+            mid = urllib.parse.unquote(path[len("/api/messages/"):])
+            return self._get(mid)
+        if path.startswith("/api/threads/"):
+            tid = urllib.parse.unquote(path[len("/api/threads/"):])
+            return self._thread(tid)
+        if path == "/api/search":
+            return self._search(params)
+        return 404, json.dumps({"ok": False, "error": "not_found"}).encode()
+
+    def _summary_of(self, m: Dict[str, Any]) -> Dict[str, Any]:
+        s = {k: v for k, v in m.items() if k not in ("bodyText", "attachments")}
+        s["attachmentCount"] = len(m.get("attachments", []))
+        return s
+
+    def _list(self, params):
+        direction = params.get("direction")
+        rows = [m for m in self.messages if not direction or m["direction"] == direction]
+        start = int(params.get("cursor", "0"))
+        limit = int(params.get("limit", str(self.page_size)))
+        chunk = rows[start : start + limit]
+        nxt = start + limit
+        cursor = str(nxt) if nxt < len(rows) else None
+        body = {"ok": True, "items": [self._summary_of(m) for m in chunk], "cursor": cursor}
+        return 200, json.dumps(body).encode()
+
+    def _get(self, mid):
+        for m in self.messages:
+            if m["messageId"] == mid:
+                return 200, json.dumps({"ok": True, "message": m}).encode()
+        return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
+
+    def _thread(self, tid):
+        msgs = [m for m in self.messages if m.get("threadId") == tid]
+        return 200, json.dumps({"ok": True, "threadId": tid, "messages": msgs}).encode()
+
+    def _search(self, params):
+        q = params.get("q", "").lower()
+        hits = [
+            {"message": self._summary_of(m)}
+            for m in self.messages
+            if q in m.get("subject", "").lower() or q in m.get("bodyText", "").lower()
+        ]
+        return 200, json.dumps({"ok": True, "items": hits, "cursor": None}).encode()

@@ -22,3 +22,5 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 imap/*.egg-info/
+imap/_trial_temp/
+_trial_temp/

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "posternimap"
+version = "0.1.0"
+description = "IMAP proxy frontend for Postern: a read-only IMAP view over the Postern mailbox API."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "skyphusion" }]
+# Runtime dep is Twisted (the IMAP4 server) only; the client + renderer + auth
+# core are pure stdlib, so the testable surface needs nothing extra.
+dependencies = ["Twisted>=22.10"]
+
+[project.optional-dependencies]
+# Tests use stdlib unittest only; mypy is the type gate (mirrors the worker's
+# `tsc --noEmit` CI gate, house convention).
+dev = ["mypy>=1.8"]
+
+[project.scripts]
+postern-imap = "posternimap.__main__:main"
+
+[tool.setuptools]
+packages = ["posternimap"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+# Twisted ships partial stubs; do not fail the gate on its untyped internals.
+ignore_missing_imports = true
+# The type gate covers the proxy source; tests use kwargs dicts mypy cannot infer.
+files = ["posternimap"]
+exclude = "posternimap/tests/"

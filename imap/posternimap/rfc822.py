@@ -32,22 +32,31 @@ def _fmt_date(iso: str) -> str:
             return iso
 
 
+def _hdr(value: str) -> str:
+    """Strip CR/LF from a header value. EmailMessage rejects embedded newlines
+    (raising ValueError), so a malicious stored Subject/From could otherwise
+    crash the render; collapsing them to spaces keeps the projection robust and
+    injection-safe regardless of what the store holds.
+    """
+    return value.replace("\r", " ").replace("\n", " ")
+
+
 def render_rfc822(msg: Message) -> bytes:
     """Build a valid RFC822 message from a stored Message. Header values are set
     via EmailMessage, which folds/encodes them safely (no header injection)."""
     em = EmailMessage()
     if msg.from_addr:
-        em["From"] = msg.from_addr
+        em["From"] = _hdr(msg.from_addr)
     if msg.to_addr:
-        em["To"] = msg.to_addr
-    em["Subject"] = msg.subject or ""
+        em["To"] = _hdr(msg.to_addr)
+    em["Subject"] = _hdr(msg.subject or "")
     date = _fmt_date(msg.date)
     if date:
         em["Date"] = date
     if msg.message_id:
-        em["Message-ID"] = f"<{msg.message_id}>"
+        em["Message-ID"] = _hdr(f"<{msg.message_id}>")
     if msg.in_reply_to:
-        em["In-Reply-To"] = f"<{msg.in_reply_to}>"
+        em["In-Reply-To"] = _hdr(f"<{msg.in_reply_to}>")
 
     body = msg.body_text or ""
     if msg.attachments:
