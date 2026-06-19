@@ -150,8 +150,11 @@ export default {
 };
 
 // --- Helpers ---
+// The pure helpers below are exported so the unit suite (smoke.test.ts) can
+// exercise the auth-verdict, body-cleaning, and chunking logic directly without
+// a live Email Routing event. They have no I/O and no env dependency.
 
-function toArrayBuffer(content: unknown): ArrayBuffer | null {
+export function toArrayBuffer(content: unknown): ArrayBuffer | null {
   if (content instanceof ArrayBuffer) return content;
   // Copy into a fresh ArrayBuffer so the type is unambiguously ArrayBuffer
   // (Uint8Array.buffer / TextEncoder().buffer are typed as ArrayBufferLike).
@@ -167,7 +170,7 @@ function toArrayBuffer(content: unknown): ArrayBuffer | null {
 // Split text into overlapping windows (~chunk chars, overlap chars carried over)
 // on whitespace boundaries where possible. bge-base handles ~512 tokens, so a
 // 1200-char window stays comfortably under the limit.
-function chunkText(text: string, chunk: number, overlap: number): string[] {
+export function chunkText(text: string, chunk: number, overlap: number): string[] {
   const t = text.trim();
   if (t.length <= chunk) return t.length ? [t] : [];
   const out: string[] = [];
@@ -185,7 +188,7 @@ function chunkText(text: string, chunk: number, overlap: number): string[] {
   return out.filter(Boolean);
 }
 
-async function sha256hex(input: string): Promise<string> {
+export async function sha256hex(input: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
   return Array.from(new Uint8Array(buf))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -194,22 +197,22 @@ async function sha256hex(input: string): Promise<string> {
 
 // --- Auth verdict helpers ---
 
-function extractSpfResult(header: string): string {
+export function extractSpfResult(header: string): string {
   const m = header.match(/^(pass|fail|softfail|neutral|none|temperror|permerror)/i);
   return m ? m[1].toLowerCase() : "none";
 }
 
-function extractDkimResult(authResults: string): string {
+export function extractDkimResult(authResults: string): string {
   const m = authResults.match(/dkim=(pass|fail|neutral|none|policy|temperror|permerror)/i);
   return m ? m[1].toLowerCase() : "none";
 }
 
-function extractDmarcResult(authResults: string): string {
+export function extractDmarcResult(authResults: string): string {
   const m = authResults.match(/dmarc=(pass|fail|none|bestguesspass|temperror|permerror)/i);
   return m ? m[1].toLowerCase() : "none";
 }
 
-function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string): boolean {
+export function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string): boolean {
   const domains = allowlistEnv
     .split(",")
     .map((s) => s.trim().toLowerCase())
@@ -228,7 +231,7 @@ function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string
 
 // --- Body cleaning ---
 
-function cleanBody(raw: string): string {
+export function cleanBody(raw: string): string {
   // Strip sig block (RFC 3676 "-- \n" delimiter)
   const sigIdx = raw.indexOf("\n-- \n");
   const stripped = sigIdx !== -1 ? raw.slice(0, sigIdx) : raw;
@@ -240,7 +243,7 @@ function cleanBody(raw: string): string {
     .trim();
 }
 
-function htmlToText(html: string): string {
+export function htmlToText(html: string): string {
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
