@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"net/textproto"
 	"sort"
@@ -50,6 +51,19 @@ func (t *SMTPTransport) Dispatch(msg OutboundMessage) (DispatchResult, error) {
 	}
 	if mailFrom == "" {
 		return DispatchResult{}, fmt.Errorf("no From address and no POSTERN_OUTBOUND_FROM fallback")
+	}
+
+	// Validate the envelope MAIL FROM and every RCPT TO as well-formed addresses
+	// before they reach the SMTP conversation. A bare address must contain no
+	// CR/LF or stray control characters; SMTP command smuggling and message
+	// injection both start here.
+	if _, err := parseHeaderAddress(mailFrom); err != nil {
+		return DispatchResult{}, fmt.Errorf("invalid envelope From %q: %w", mailFrom, err)
+	}
+	for _, r := range rcpts {
+		if _, err := parseHeaderAddress(r); err != nil {
+			return DispatchResult{}, fmt.Errorf("invalid recipient %q: %w", r, err)
+		}
 	}
 
 	raw, err := renderMIME(msg, mailFrom)
@@ -121,18 +135,42 @@ func (t *SMTPTransport) send(from string, rcpts []string, raw []byte) error {
 
 // renderMIME produces the RFC 5322 message bytes for an OutboundMessage.
 // text-only -> text/plain; html-only -> text/html; both -> multipart/alternative.
-// Header values are sanitized so a caller cannot inject extra headers via CR/LF.
+//
+// Every header value derived from caller input is validated or sanitized before
+// it is written: address headers (From/To/Cc/Reply-To) are parsed as RFC 5322
+// addresses and re-rendered from the parsed result, so a malformed value (CR/LF,
+// extra headers, command smuggling) is rejected rather than emitted; text headers
+// (Subject/Message-ID/custom) have CR/LF stripped. This is what breaks the
+// go/email-injection taint flow into the SMTP DATA write.
 func renderMIME(msg OutboundMessage, mailFrom string) ([]byte, error) {
 	var b bytes.Buffer
 
-	writeHeader(&b, "From", formatAddress(msg.From, mailFrom))
-	writeHeader(&b, "To", strings.Join(msg.To, ", "))
+	fromHdr, err := formatAddress(msg.From, mailFrom)
+	if err != nil {
+		return nil, fmt.Errorf("invalid From: %w", err)
+	}
+	writeHeader(&b, "From", fromHdr)
+
+	toHdr, err := headerAddressList(msg.To)
+	if err != nil {
+		return nil, fmt.Errorf("invalid To: %w", err)
+	}
+	writeHeader(&b, "To", toHdr)
+
 	if len(msg.CC) > 0 {
-		writeHeader(&b, "Cc", strings.Join(msg.CC, ", "))
+		ccHdr, err := headerAddressList(msg.CC)
+		if err != nil {
+			return nil, fmt.Errorf("invalid Cc: %w", err)
+		}
+		writeHeader(&b, "Cc", ccHdr)
 	}
 	// BCC is intentionally never written as a header (envelope-only).
 	if msg.ReplyTo != nil && msg.ReplyTo.Email != "" {
-		writeHeader(&b, "Reply-To", formatAddress(*msg.ReplyTo, ""))
+		replyHdr, err := formatAddress(*msg.ReplyTo, "")
+		if err != nil {
+			return nil, fmt.Errorf("invalid Reply-To: %w", err)
+		}
+		writeHeader(&b, "Reply-To", replyHdr)
 	}
 	writeHeader(&b, "Subject", mime.QEncoding.Encode("utf-8", sanitizeHeader(msg.Subject)))
 	if msg.MessageID != "" {
@@ -217,22 +255,87 @@ func writeHeader(b *bytes.Buffer, key, value string) {
 	b.WriteString("\r\n")
 }
 
-// formatAddress renders an EmailAddress as a header value, falling back to the
-// envelope From when no address is set.
-func formatAddress(a EmailAddress, fallback string) string {
+// parseHeaderAddress validates a single address. It rejects anything that is not
+// a well-formed RFC 5322 address (which inherently rejects embedded CR/LF and
+// header/command injection) and additionally rejects any residual control
+// characters as defense in depth. It returns the parsed, canonical address.
+func parseHeaderAddress(addr string) (*mail.Address, error) {
+	if strings.ContainsAny(addr, "\r\n") || hasControlRunes(addr) {
+		return nil, fmt.Errorf("address contains control characters")
+	}
+	a, err := mail.ParseAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+	// The parsed address itself must be control-char free (paranoia: a display
+	// name could in theory carry one through some inputs).
+	if strings.ContainsAny(a.Address, "\r\n") || hasControlRunes(a.Address) {
+		return nil, fmt.Errorf("parsed address contains control characters")
+	}
+	return a, nil
+}
+
+// headerAddressList validates each address and re-renders the list from the
+// parsed results, so the emitted header can only ever contain canonical,
+// CR/LF-free addresses. Any malformed entry rejects the whole message.
+func headerAddressList(addrs []string) (string, error) {
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("empty address list")
+	}
+	parts := make([]string, 0, len(addrs))
+	for _, raw := range addrs {
+		a, err := parseHeaderAddress(raw)
+		if err != nil {
+			return "", fmt.Errorf("%q: %w", raw, err)
+		}
+		// a.String() emits a safe, RFC-5322-encoded form (Q-encoding any display
+		// name, angle-bracketing the address); it never contains a bare CR/LF.
+		parts = append(parts, a.String())
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+// hasControlRunes reports whether s contains any ASCII control character
+// (below 0x20, excluding the tab it never needs) or DEL. Used to reject
+// smuggling attempts that a lenient parser might otherwise let through.
+func hasControlRunes(s string) bool {
+	for _, r := range s {
+		if r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// formatAddress renders an EmailAddress as a validated header value, falling back
+// to the envelope From when no address is set. It parses the resulting address so
+// a malformed email or display name is rejected, not emitted.
+func formatAddress(a EmailAddress, fallback string) (string, error) {
 	email := a.Email
 	if email == "" {
 		email = fallback
 	}
-	email = sanitizeHeader(email)
-	if a.Name == "" {
-		return email
+	parsed, err := parseHeaderAddress(email)
+	if err != nil {
+		return "", err
 	}
-	return mime.QEncoding.Encode("utf-8", sanitizeHeader(a.Name)) + " <" + email + ">"
+	out := EmailAddress{Email: parsed.Address, Name: a.Name}
+	// Build through mail.Address so the rendered form is always canonical and
+	// CR/LF-free; the display name is Q-encoded by Address.String().
+	ma := mail.Address{Name: sanitizeHeader(out.Name), Address: out.Email}
+	rendered := ma.String()
+	if strings.ContainsAny(rendered, "\r\n") {
+		return "", fmt.Errorf("rendered address contains control characters")
+	}
+	return rendered, nil
 }
 
 // sanitizeHeader strips CR and LF so a value can never inject another header or
-// terminate the header block early (header-injection defense).
+// terminate the header block early (header-injection defense for non-address
+// header values like Subject and custom headers).
 func sanitizeHeader(v string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(v)
 }
