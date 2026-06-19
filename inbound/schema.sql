@@ -15,12 +15,18 @@ CREATE TABLE IF NOT EXISTS messages (
   dkim        TEXT,
   dmarc       TEXT,
   trusted     INTEGER DEFAULT 0,
-  received_at TEXT
+  received_at TEXT,
+  -- M2 (#27): two-way + threaded. direction = 'inbound' (received) | 'outbound' (sent
+  -- copies the mailbox stores back). thread_id groups a conversation, resolved on
+  -- every store from in_reply_to / References (see store.ts), else this message_id.
+  direction   TEXT NOT NULL DEFAULT 'inbound',
+  thread_id   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_from ON messages(from_addr);
 CREATE INDEX IF NOT EXISTS idx_date ON messages(date);
 CREATE INDEX IF NOT EXISTS idx_trusted ON messages(trusted, received_at);
+CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
 
 -- Attachments: bytes stored in R2 (ATTACHMENTS bucket), metadata + key here.
 CREATE TABLE IF NOT EXISTS attachments (

@@ -1,6 +1,30 @@
+/** Message accepted by the Cloudflare Email Sending binding (send_email). */
+interface SendEmailMessage {
+  to: string | string[];
+  from: string | { email: string; name?: string };
+  replyTo?: string | { email: string; name?: string };
+  cc?: string | string[];
+  bcc?: string | string[];
+  subject: string;
+  html?: string;
+  text?: string;
+  headers?: Record<string, string>;
+}
+
+/** The send_email binding surface we rely on. */
+interface EmailSendBinding {
+  send(message: SendEmailMessage): Promise<{ messageId?: string } | undefined>;
+}
+
 interface Env {
-  /** D1 database for inbound message storage. */
+  /** D1 database for inbound message storage and the sent-copy store (#27). */
   DB: D1Database;
+  /**
+   * Cloudflare Email Sending binding (send_email -> EMAIL). The default outbound
+   * transport for the mailbox send/reply API (#23/#26). Optional so the inbound
+   * store/ingest path still typechecks where sending is not configured.
+   */
+  EMAIL?: EmailSendBinding;
   /** Vectorize index for semantic search over message bodies. */
   VECTORIZE: VectorizeIndex;
   /** R2 bucket holding inbound attachment bytes (keys referenced in D1.attachments). */
@@ -32,4 +56,22 @@ interface Env {
    * Example: "conrad@skyphusion.org,alerts@skyphusion.org"
    */
   VECTORIZE_FOR: string;
+
+  // --- Mailbox send/reply API (M2: #23/#26) ---
+  /**
+   * Mailbox API token for the client-facing send/reply + read endpoints
+   * (Authorization: Bearer ...). NOT the transport token. wrangler secret put
+   * POSTERN_API_TOKEN. RELAY_TOKEN is read as a one-release rename fallback.
+   */
+  POSTERN_API_TOKEN?: string;
+  /** @deprecated Back-compat fallback for POSTERN_API_TOKEN; remove next release. */
+  RELAY_TOKEN?: string;
+  /** Default From when a send omits it. Must be on ALLOWED_FROM_DOMAIN. */
+  DEFAULT_FROM?: string;
+  /** Optional display name paired with DEFAULT_FROM. */
+  DEFAULT_FROM_NAME?: string;
+  /** Only From addresses on this domain are permitted for outbound. */
+  ALLOWED_FROM_DOMAIN?: string;
+  /** Outbound transport selector: unset/"cf" = Cloudflare Email (default), "relay" = #28. */
+  OUTBOUND_TRANSPORT?: string;
 }

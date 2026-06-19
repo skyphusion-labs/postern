@@ -1,9 +1,12 @@
 // The inbound transport seam (issue #22). ingest() is a pure function of a
-// normalized ParsedInbound: it owns dedup, body cleaning, the trust verdict,
-// the D1 insert, R2 attachments, and opt-in Vectorize. It does NOT know about
-// ForwardableEmailMessage, postal-mime, or forwarding -- those belong to a
-// transport driver (the CF email() handler, or an out-of-Worker POST /ingest).
-// See docs/CONTRACT.md section 2.
+// normalized ParsedInbound: it owns the inbound-specific concerns (dedup key,
+// body cleaning, the trust verdict, the Vectorize opt-in) and hands the
+// normalized record to the store (store.ts), which is the only code that touches
+// D1/R2/Vectorize. ingest() does NOT know about ForwardableEmailMessage,
+// postal-mime, or forwarding -- those belong to a transport driver (the CF
+// email() handler, or an out-of-Worker POST /ingest). See CONTRACT.md section 2.
+
+import * as store from "./store";
 
 /**
  * Normalized inbound message. Every inbound transport (CF Email Routing today,
@@ -30,15 +33,16 @@ export interface ParsedInbound {
 export interface IngestResult {
   messageId: string;
   stored: boolean;
+  threadId: string;
 }
 
 /**
  * Store one inbound message. Pure of transport: callers normalize whatever they
- * received into ParsedInbound first. Returns the normalized messageId and
- * whether a new row was written (false on a dedup hit).
- *
- * Attachments and Vectorize are best-effort and run via ctx.waitUntil so the
- * caller can return promptly; pass the ExecutionContext through.
+ * received into ParsedInbound first. ingest() owns the inbound-specific concerns
+ * (body cleaning, the trust verdict, messageId normalization, the Vectorize
+ * opt-in) and then hands the normalized record to the store, which is the only
+ * code that touches D1/R2/Vectorize. Returns the normalized messageId, whether a
+ * new row was written (false on a dedup hit), and the resolved thread id.
  */
 export async function ingest(
   env: Env,
@@ -64,106 +68,36 @@ export async function ingest(
   // longer (32 bytes = 64 hex chars exactly).
   const rawMessageId = (parsed.messageId ?? "").replace(/[<>]/g, "") || crypto.randomUUID();
   const messageId = rawMessageId.length > 64 ? await sha256hex(rawMessageId) : rawMessageId;
-  const receivedAt = new Date().toISOString();
-  const date = parsed.date ? new Date(parsed.date).toISOString() : receivedAt;
+  const date = parsed.date ? new Date(parsed.date).toISOString() : new Date().toISOString();
 
-  // D1 insert -- INSERT OR IGNORE handles duplicates cleanly. The messages_fts
-  // FTS5 index is kept in sync by triggers (see schema.sql), so no extra work here.
-  const result = await env.DB.prepare(
-    `INSERT OR IGNORE INTO messages
-       (message_id, from_addr, to_addr, subject, date, in_reply_to,
-        body_text, spf, dkim, dmarc, trusted, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      messageId,
-      fromAddr,
-      parsed.to,
-      parsed.subject ?? "",
-      date,
-      parsed.inReplyTo ?? null,
-      bodyText,
-      spf,
-      dkim,
-      dmarc,
-      trusted ? 1 : 0,
-      receivedAt,
-    )
-    .run();
-
-  if (result.meta.changes === 0) return { messageId, stored: false }; // duplicate
-
-  // Attachments -> R2 (bytes) + D1 (metadata + key). Best-effort, non-blocking.
-  const attachments = parsed.attachments ?? [];
-  if (attachments.length > 0) {
-    ctx.waitUntil(
-      (async () => {
-        for (let i = 0; i < attachments.length; i++) {
-          const att = attachments[i];
-          try {
-            const bytes = att.content;
-            if (!bytes || bytes.byteLength === 0) continue;
-            const safeName = (att.filename || `attachment-${i}`)
-              .replace(/[^A-Za-z0-9._-]/g, "_")
-              .slice(0, 100);
-            const key = `att/${messageId}/${i}-${safeName}`;
-            await env.ATTACHMENTS.put(key, bytes, {
-              httpMetadata: { contentType: att.mimeType || "application/octet-stream" },
-            });
-            await env.DB.prepare(
-              `INSERT INTO attachments (message_id, filename, mime, size, r2_key, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-            )
-              .bind(messageId, att.filename ?? null, att.mimeType ?? null, bytes.byteLength, key, receivedAt)
-              .run();
-          } catch (e) {
-            console.error("attachment store failed", i, e);
-          }
-        }
-      })(),
-    );
-  }
-
-  // Vectorize: chunk the body and embed each window so long mail keeps full
-  // recall (a single 8k embedding lost the tail). Non-blocking, best-effort.
   // Only index mail for addresses that opted in to crew RAG (VECTORIZE_FOR).
   const vectorizeFor = (env.VECTORIZE_FOR ?? "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
-  const allowedForVectorize = vectorizeFor.length === 0 || vectorizeFor.includes(toAddr);
+  const vectorize = vectorizeFor.length === 0 || vectorizeFor.includes(toAddr);
 
-  if (bodyText.length > 0 && allowedForVectorize) {
-    ctx.waitUntil(
-      (async () => {
-        try {
-          const chunks = chunkText(bodyText, 1200, 150).slice(0, 24); // bound cost on huge mail
-          // 56-hex base keeps chunk ids (`<base>.<i>`) within Vectorize's 64-char id limit.
-          const base = (await sha256hex(messageId)).slice(0, 56);
-          const embed = (await env.AI.run("@cf/baai/bge-base-en-v1.5", {
-            text: chunks,
-          })) as { data: number[][] };
-          const vectors = embed.data.map((values, i) => ({
-            id: `${base}.${i}`,
-            values,
-            metadata: {
-              message_id: messageId,
-              chunk: i,
-              from: fromAddr,
-              to: toAddr,
-              date,
-              subject: parsed.subject ?? "",
-            },
-          }));
-          if (vectors.length) await env.VECTORIZE.upsert(vectors);
-        } catch (e) {
-          console.error("vectorize upsert failed", e);
-        }
-      })(),
-    );
-  }
+  const result = await store.put(
+    env,
+    {
+      messageId,
+      direction: "inbound",
+      from: fromAddr,
+      to: parsed.to,
+      subject: parsed.subject ?? "",
+      date,
+      inReplyTo: parsed.inReplyTo ?? null,
+      references: parsed.references,
+      bodyText,
+      auth: { spf, dkim, dmarc },
+      trusted,
+      attachments: parsed.attachments,
+      vectorize,
+    },
+    ctx,
+  );
 
-  return { messageId, stored: true };
+  return { messageId: result.messageId, stored: result.stored, threadId: result.threadId };
 }
 
 // --- Helpers ---

@@ -1,5 +1,11 @@
 import PostalMime from "postal-mime";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { ingest, type ParsedInbound } from "./ingest";
+import { handleApi } from "./api";
+import { send, reply, type SendRequest, type ReplyRequest, type SendResult } from "./mailbox";
+import * as store from "./store";
+import type { StoredMessage } from "./store";
+import { toArrayBuffer, extractSpfResult, extractDkimResult, extractDmarcResult } from "./headers";
 
 // The in-Worker inbound transport driver (issue #21): the one surviving email()
 // handler. It forwards, parses the MIME via postal-mime, extracts the CF auth
@@ -73,40 +79,39 @@ export default {
 
     await ingest(env, normalized, ctx);
   },
+
+  // The mailbox HTTP API: send/reply (#26) + read (get/thread) + health. Lives
+  // in the same isolate as the store and the send_email binding so a sent copy
+  // is written without a cross-worker hop (CONTRACT section 6).
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return handleApi(request, env, ctx);
+  },
 };
 
-// --- Helpers (CF transport: header extraction + content coercion) ---
-// Exported so the unit suite (smoke.test.ts) can exercise the transport-side
-// helpers directly without a live Email Routing event. The storage-side pure
-// helpers (cleanBody, htmlToText, chunkText, sha256hex, isTrusted) now live in
-// ingest.ts and are exported from there.
-
-export function toArrayBuffer(content: unknown): ArrayBuffer | null {
-  if (content instanceof ArrayBuffer) return content;
-  // Copy into a fresh ArrayBuffer so the type is unambiguously ArrayBuffer
-  // (Uint8Array.buffer / TextEncoder().buffer are typed as ArrayBufferLike).
-  let view: Uint8Array | null = null;
-  if (content instanceof Uint8Array) view = content;
-  else if (typeof content === "string") view = new TextEncoder().encode(content);
-  if (!view) return null;
-  const out = new ArrayBuffer(view.byteLength);
-  new Uint8Array(out).set(view);
-  return out;
+/**
+ * RPC surface for same-account Workers (e.g. skyphusion-llm-public) bound via a
+ * service binding -- the structured mailbox channel without a network hop or a
+ * shared secret (CONTRACT sections 4-5). Mirrors the HTTP write + read ops.
+ *
+ *   // consumer wrangler.jsonc
+ *   "services": [
+ *     { "binding": "MAILBOX", "service": "skyphusion-email-inbound", "entrypoint": "MailboxService" }
+ *   ]
+ */
+export class MailboxService extends WorkerEntrypoint<Env> {
+  send(req: SendRequest): Promise<SendResult> {
+    return send(this.env, req, this.ctx);
+  }
+  reply(req: ReplyRequest): Promise<SendResult> {
+    return reply(this.env, req, this.ctx);
+  }
+  get(messageId: string): Promise<StoredMessage | null> {
+    return store.get(this.env, messageId);
+  }
+  thread(threadId: string): Promise<StoredMessage[]> {
+    return store.thread(this.env, threadId);
+  }
 }
 
-// --- Auth verdict helpers (parse the CF/MTA headers into a verdict) ---
-
-export function extractSpfResult(header: string): string {
-  const m = header.match(/^(pass|fail|softfail|neutral|none|temperror|permerror)/i);
-  return m ? m[1].toLowerCase() : "none";
-}
-
-export function extractDkimResult(authResults: string): string {
-  const m = authResults.match(/dkim=(pass|fail|neutral|none|policy|temperror|permerror)/i);
-  return m ? m[1].toLowerCase() : "none";
-}
-
-export function extractDmarcResult(authResults: string): string {
-  const m = authResults.match(/dmarc=(pass|fail|none|bestguesspass|temperror|permerror)/i);
-  return m ? m[1].toLowerCase() : "none";
-}
+// Re-export the CF-transport helpers for any existing importer of this module.
+export { toArrayBuffer, extractSpfResult, extractDkimResult, extractDmarcResult } from "./headers";

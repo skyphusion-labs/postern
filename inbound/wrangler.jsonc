@@ -39,6 +39,14 @@
     }
   },
 
+  // Cloudflare Email Sending binding (M2: #23). The default outbound transport
+  // for the mailbox send/reply API. Same binding the standalone send worker
+  // uses; here it lives alongside the store so a sent copy is written in the
+  // same isolate (CONTRACT section 6).
+  "send_email": [
+    { "name": "EMAIL" }
+  ],
+
   "vars": {
     // Comma-separated list of trusted sender domains or full addresses.
     // Senders must also pass SPF or DKIM to get trusted=1.
@@ -55,8 +63,19 @@
 
     // Addresses whose mail is embedded + indexed in Vectorize for crew RAG.
     // Crew members opt in by adding their own address here.
-    "VECTORIZE_FOR": "conrad@skyphusion.org,alerts@skyphusion.org,strummer@skyphusion.org,rollins@skyphusion.org,mackaye@skyphusion.org"
+    "VECTORIZE_FOR": "conrad@skyphusion.org,alerts@skyphusion.org,strummer@skyphusion.org,rollins@skyphusion.org,mackaye@skyphusion.org",
+
+    // Outbound send/reply (M2). DEFAULT_FROM must be on ALLOWED_FROM_DOMAIN.
+    // OUTBOUND_TRANSPORT unset/"cf" = Cloudflare Email Sending (default).
+    "DEFAULT_FROM": "noreply@skyphusion.org",
+    "DEFAULT_FROM_NAME": "Skyphusion",
+    "ALLOWED_FROM_DOMAIN": "skyphusion.org",
+    "OUTBOUND_TRANSPORT": "cf"
   }
+
+  // POSTERN_API_TOKEN is a secret, not a var (gates the send/reply + read API):
+  //   npx wrangler secret put POSTERN_API_TOKEN
+  // (RELAY_TOKEN is still read as a fallback for one release through the rename.)
 
   // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):
   //   Route ALL addresses (including catch-all) to Worker skyphusion-email-inbound.

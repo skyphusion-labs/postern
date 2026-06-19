@@ -53,6 +53,15 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
 2. Else if any id in `references` matches an existing row, inherit that `thread_id`.
 3. Else start a new thread: `thread_id = this.message_id`.
 
+**The references asymmetry (resolved).** Inbound carries threading as a typed
+`ParsedInbound.references: string[]` (the parser already split the `References` header); outbound
+carries it inside `OutboundMessage.headers` as the wire `In-Reply-To` / `References` strings
+(that is what the provider must transmit). The store's input (`StoreInput`) takes the **typed**
+`inReplyTo` + `references[]` form for both directions: `ingest()` passes the parsed list straight
+through, and `mailbox` parses its own outbound header strings back into the typed list before
+`store.put()`. So thread resolution always reads one typed shape; the header-string form exists
+only on the wire, never in the resolver. Ids are compared with `<>` stripped on both sides.
+
 `core/store.ts` is the **only** code that touches D1, R2, or Vectorize. Its surface:
 
 ```ts
@@ -147,6 +156,11 @@ trust verdict, D1 insert, R2 attachments, opt-in Vectorize), but as a pure funct
   CF Email Routing (#29). `content` arrives base64-encoded over JSON; the driver decodes to
   `ArrayBuffer` before the call.
 
+When `ParsedInbound.auth` is **absent or partial**, the missing verdicts default to `none`, which
+is the allowlist-only trust path: a sender is trusted iff it is on `TRUSTED_SENDER_DOMAINS` (since
+`spf=none && dkim=none` is treated as "CF stripped the headers, lean on the MX allowlist"). An
+SMTP transport that omits `auth` therefore gets allowlist-only trust, never an implicit pass.
+
 **Forwarding** (`FORWARD_TO` / `FORWARD_FOR`) stays, but only in the in-Worker driver: it
 needs the live `message.forward()` on the `ForwardableEmailMessage`, which an out-of-Worker
 transport does not have. The forward happens before `message.raw` is consumed by the parser
@@ -177,14 +191,33 @@ interface Transport {
 }
 ```
 
+`providerMessageId` is **best-effort and provider-dependent**: populated only when the provider
+returns an id (CF Email Sending does; an SMTP relay may not). Callers must not treat its absence
+as failure, and must thread/store on the core-generated `messageId`, never on `providerMessageId`.
+
 - **`CfEmailTransport` (default).** Wraps `env.EMAIL.send()`, byte-for-byte the current
   behavior. Selected when `OUTBOUND_TRANSPORT` is unset or `cf`.
 - **`RelayTransport` and others.** POST the `OutboundMessage` to an SMTP bridge or another
   provider. The "not locked into CF" escape hatch (#28). Selected by `OUTBOUND_TRANSPORT=relay`.
 
-`mailbox.send()` becomes: `validate (existing) -> resolveFrom (existing) -> generate
-Message-ID -> dispatch() -> store.put(direction: "outbound")`. The sent copy lands in the same
-store, so threads are complete (#27).
+**The `/dispatch` wire shape** (pinned against the M3 relay, `relay/http.go`). A relay-style
+transport POSTs the `OutboundMessage` as JSON to `POST /dispatch`, gated by
+`POSTERN_TRANSPORT_TOKEN` (`Authorization: Bearer ...`, constant-time):
+
+- Request body: the `OutboundMessage` JSON above, field-for-field (the relay decodes with
+  unknown-field rejection, so the producer sends exactly these keys). `bcc` is envelope-only: it
+  rides in `OutboundMessage.bcc`, never in `headers`.
+- `200`: `{ "ok": true, "messageId": "<core id>", "providerMessageId": "<or empty>" }`.
+- `400`: `{ "ok": false, "error": "..." }` for a malformed body (bad JSON / no recipients / empty
+  message). `401`: missing or wrong transport token. `413`: body over the size cap. `502`:
+  `{ "ok": false, "error": "dispatch failed: ..." }` when the upstream SMTP send fails (core may
+  retry with backoff).
+
+`mailbox.send()` is: `validate -> resolveFrom -> generate Message-ID -> dispatch() ->
+store.put(direction: "outbound")`. The sent copy lands in the same store, so threads are complete
+(#27). `mailbox.reply({messageId})` pulls the referenced stored message, routes to its sender,
+prefixes `Re:` (collapsing an existing prefix), and rebuilds `In-Reply-To` / `References` from
+**stored state, not caller input**, so a reply cannot be pointed at an arbitrary thread.
 
 ---
 
@@ -201,8 +234,8 @@ none touches D1 directly (#25, #26).
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 |
 | GET | `/api/search?q=&mode=fts\|semantic\|hybrid` | search (semantic/hybrid land in M4) | M1 / M4 |
-| POST | `/api/send` | send (body = today's `EmailRequest`) | M2 |
-| POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 |
+| POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
+| POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
 
 `POST /send` (today's bare endpoint) stays as a back-compat alias of `/api/send`. All responses
 keep the current `{ ok, ... }` + `E_*` code shape from `INTEGRATION.md`, so existing callers
@@ -262,6 +295,16 @@ Order that stays green at each step:
 5. **#24** the smoke gate.
 
 M3 (relay), M4 (AI Search), M5 (postern-imap) attach to these finished seams.
+
+**Where M2 actually landed (status).** Rather than do the full `worker/` + `inbound/` collapse
+in one move, M2 built the outbound loop *into the `inbound/` worker* -- the isolate that already
+owns the store (D1/R2/Vectorize/AI). `inbound/` now also holds the `send_email` (EMAIL) binding,
+the transport seam (`transport/index.ts` + `transport/cf.ts`), `mailbox.ts` (send/reply),
+`store.ts` (the sole D1/R2/Vectorize owner), and `api.ts` (the HTTP routes) plus a
+`MailboxService` RPC entrypoint. So `inbound/` is the de-facto `core` from the store side; the
+standalone `worker/` (send-only, `EmailService`) stays for back-compat this round and folds in
+later. The send + store now share one isolate (no cross-worker hop), which is the property
+section 6 required; the directory rename to `core/` is cosmetic and deferred.
 
 ---
 
