@@ -20,8 +20,19 @@ name: deploy
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
 #   CLOUDFLARE_API_TOKEN   -- CF API token, Workers Scripts:Edit on the account
-#                             (plus D1 + Vectorize edit for the inbound store).
+#                             (plus D1 + Vectorize + R2 edit for the inbound store).
 #   CLOUDFLARE_ACCOUNT_ID  -- the Cloudflare account ID.
+#
+# Optional operator override:
+#   POSTERN_INBOUND_WRANGLER -- the full real inbound wrangler config (JSON) for
+#                             YOUR instance: real D1 database_id, bindings, and
+#                             vars. The committed inbound/wrangler.jsonc is a
+#                             public template with placeholder ids, so CI uses
+#                             this secret (kept out of the repo, masked in logs)
+#                             when present, and falls back to the template when
+#                             absent. Worker runtime secrets (e.g.
+#                             POSTERN_API_TOKEN) are set once via `wrangler secret
+#                             put` and persist across deploys -- not set here.
 
 on:
   push:
@@ -68,6 +79,22 @@ jobs:
         working-directory: worker
         run: npx wrangler deploy
 
-      - name: Deploy inbound (postern)
+      # The committed inbound/wrangler.jsonc is the PUBLIC template (placeholder
+      # ids, postern-named, vectorize/send commented out). An operator points CI
+      # at their own instance via the POSTERN_INBOUND_WRANGLER secret (the full
+      # real config), which we write to a runner-local file and deploy with -c.
+      # Absent the secret, the committed template ships as-is.
+      - name: Deploy inbound
         working-directory: inbound
-        run: npx wrangler deploy
+        env:
+          POSTERN_INBOUND_WRANGLER: ${{ secrets.POSTERN_INBOUND_WRANGLER }}
+        run: |
+          if [ -n "$POSTERN_INBOUND_WRANGLER" ]; then
+            printf "%s" "$POSTERN_INBOUND_WRANGLER" > wrangler.ci.json
+            echo "Deploying inbound with operator config (POSTERN_INBOUND_WRANGLER)"
+            npx wrangler deploy -c wrangler.ci.json
+            rm -f wrangler.ci.json
+          else
+            echo "No operator config secret set; deploying committed template"
+            npx wrangler deploy
+          fi
