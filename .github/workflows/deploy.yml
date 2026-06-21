@@ -33,6 +33,12 @@ name: deploy
 #                             absent. Worker runtime secrets (e.g.
 #                             POSTERN_API_TOKEN) are set once via `wrangler secret
 #                             put` and persist across deploys -- not set here.
+#
+# D1 migrations: the inbound deploy runs `wrangler d1 migrations apply` before
+# `wrangler deploy`, so a schema change ships with its code instead of drifting.
+# wrangler tracks applied migrations in a d1_migrations table and only runs new
+# ones, so this is idempotent. (Baselining an EXISTING pre-wrangler DB requires
+# seeding d1_migrations once with the already-applied migration names.)
 
 on:
   push:
@@ -82,19 +88,24 @@ jobs:
       # The committed inbound/wrangler.jsonc is the PUBLIC template (placeholder
       # ids, postern-named, vectorize/send commented out). An operator points CI
       # at their own instance via the POSTERN_INBOUND_WRANGLER secret (the full
-      # real config), which we write to a runner-local file and deploy with -c.
-      # Absent the secret, the committed template ships as-is.
-      - name: Deploy inbound
+      # real config); absent it, the committed template ships. We apply D1
+      # migrations before deploying so schema and code ship together (idempotent;
+      # the DB binding name `DB` resolves the database in either config).
+      - name: Deploy inbound (migrate + deploy)
         working-directory: inbound
         env:
           POSTERN_INBOUND_WRANGLER: ${{ secrets.POSTERN_INBOUND_WRANGLER }}
         run: |
           if [ -n "$POSTERN_INBOUND_WRANGLER" ]; then
             printf "%s" "$POSTERN_INBOUND_WRANGLER" > wrangler.ci.json
-            echo "Deploying inbound with operator config (POSTERN_INBOUND_WRANGLER)"
-            npx wrangler deploy -c wrangler.ci.json
-            rm -f wrangler.ci.json
+            CFG=wrangler.ci.json
+            echo "Using operator config (POSTERN_INBOUND_WRANGLER)"
           else
-            echo "No operator config secret set; deploying committed template"
-            npx wrangler deploy
+            CFG=wrangler.jsonc
+            echo "No operator config secret set; using committed template"
           fi
+          echo "Applying D1 migrations (only un-applied ones run)"
+          npx wrangler d1 migrations apply DB --remote -c "$CFG"
+          echo "Deploying inbound worker"
+          npx wrangler deploy -c "$CFG"
+          rm -f wrangler.ci.json
