@@ -1,17 +1,27 @@
-name: Deploy (main only)
+name: deploy
 
-# Mirrors the Jenkinsfile Deploy stage: deploy both workers to production on
-# push to main. CI suite (worker/inbound/relay/imap) gates PRs via ci.yml;
-# this workflow handles the main deploy. Jenkins job (skyphusion-email) has
-# never built -- this becomes the active deploy path on merge.
+# Deploy step ported from the decommissioned Jenkins pipeline (the old
+# `skyphusion-email` job): on a green push to main, deploy the two Cloudflare
+# Workers to production via `wrangler deploy`.
 #
-# Workers deployed:
-#   worker/   -> skyphusion-email          (outbound sending)
-#   inbound/  -> skyphusion-email-inbound  (CF Email Routing ingestion)
+# PRs are gated by ci.yml (worker/inbound/relay/imap checks). This workflow owns
+# the main deploy, and re-runs the worker + inbound typecheck/test inline so the
+# deploy is gated behind green on the exact code being shipped (faithful to the
+# Jenkins "deploy only on green main"). Branch/PR pushes never deploy.
 #
-# Required secrets (skyphusion-labs/skyphusion-email repo settings):
-#   CLOUDFLARE_API_TOKEN   -- CF API token with Workers + D1 + Vectorize edit perms
-#   CLOUDFLARE_ACCOUNT_ID  -- Cloudflare account ID
+# Workers deployed (names per the post-rename wrangler.jsonc in each dir):
+#   worker/   -> postern-send   (outbound sending; was skyphusion-email)
+#   inbound/  -> postern        (CF Email Routing ingestion + store/read API;
+#                                was skyphusion-email-inbound)
+#
+# Runner: GitHub-hosted ubuntu-latest. This is a PUBLIC repo, so deploy is gated
+# to push-to-main (never a fork PR) and runs on the fork-safe hosted runner
+# (matches ci.yml and the GitHub-hosted policy for public repos).
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   CLOUDFLARE_API_TOKEN   -- CF API token, Workers Scripts:Edit on the account
+#                             (plus D1 + Vectorize edit for the inbound store).
+#   CLOUDFLARE_ACCOUNT_ID  -- the Cloudflare account ID.
 
 on:
   push:
@@ -21,37 +31,43 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-skyphusion-email-main
+  group: deploy-postern-main
   cancel-in-progress: false
 
 jobs:
   deploy:
     name: Deploy workers to Cloudflare
-    runs-on: [self-hosted, fleet]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
 
-      - name: Deploy worker (skyphusion-email)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Gate: deploy only if worker + inbound are green on this exact commit.
+      - name: Worker typecheck + test
         working-directory: worker
         run: |
           npm ci
-          npx wrangler deploy
+          npm run typecheck
+          npm test
 
-      - name: Deploy inbound (skyphusion-email-inbound)
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Inbound typecheck + test
         working-directory: inbound
         run: |
           npm ci
-          npx wrangler deploy
+          npm run typecheck
+          npm test
+
+      - name: Deploy worker (postern-send)
+        working-directory: worker
+        run: npx wrangler deploy
+
+      - name: Deploy inbound (postern)
+        working-directory: inbound
+        run: npx wrangler deploy
