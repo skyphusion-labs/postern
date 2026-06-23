@@ -15,7 +15,7 @@ that also lives, generically, in the sibling `cf-email-relay` repo. Two componen
     `EmailService extends WorkerEntrypoint<Env>`.
   - **Public HTTPS**: `POST /send`, gated by a `RELAY_TOKEN` Bearer secret.
 - `relay/` -- a Go SMTP daemon (`go-smtp` + `enmime`) that runs on **dischord** for services
-  that can only speak SMTP (cron, scripts, backups, Jenkins failure mail). It accepts MIME on
+  that can only speak SMTP (cron, scripts, backups, CI failure mail). It accepts MIME on
   `127.0.0.1:2525`, parses it, and POSTs it to the worker over HTTPS.
 - `inbound/` -- a separate Cloudflare Worker that ingests inbound mail via Email Routing: it
   forwards to `FORWARD_TO`, then parses the MIME and stores it in D1 (`messages`/`attachments`,
@@ -99,20 +99,18 @@ the original into `Reply-To`, so CI/cron mail does not get rejected.
   `smtp.go` (`MaxRecipients`). Keep them in sync.
 - **No queue.** Synchronous sends; on worker failure the relay returns SMTP 451 (transient) so
   the MTA can retry, but nothing is durably buffered.
-- The relay is also what Jenkins uses to email build failures (to `conrad@rockenhaus.net` via
-  `127.0.0.1:2525`), so breaking the relay can silence CI alerts.
+- The relay is also usable by any service that needs to send mail (cron / scripts / backups) via
+  `127.0.0.1:2525`, so breaking the relay can silence those alerts.
 
 ## CI / deploy
-Jenkins multibranch pipeline (`Jenkinsfile`, host **dischord**), all stages in Docker:
-- Worker typecheck (`node:22`): `cd worker && npm ci && npm run typecheck` -- all branches.
-- Inbound typecheck (`node:22`): `cd inbound && npm ci && npm run typecheck` -- all branches.
-- Relay vet + build (`golang:1.23`): `cd relay && go vet ./... && go build` -- all branches.
-- Deploy (`node:22`): `npx wrangler deploy` for **both** `worker/` (skyphusion-email) and
-  `inbound/` (skyphusion-email-inbound) -- **main only** (needs the `CLOUDFLARE_API_TOKEN`
-  Jenkins credential).
-
-There is also a GitHub Actions `ci` workflow (typecheck for worker + inbound, `go vet` + build
-for relay) and a `code-coverage-ts` workflow (vitest + `go test` coverage).
+**GitHub Actions** (Jenkins is retired). `.github/workflows/`:
+- `ci` -- typecheck for `worker/` + `inbound/`, `go vet` + build for `relay/` (all branches).
+- `code-coverage-ts` -- vitest + `go test` coverage.
+- `deploy.yml` -- on push to **main**, deploys BOTH workers: `worker/` -> `postern-send`,
+  `inbound/` -> the `postern` template (Conrad's LIVE inbound worker stays named
+  `skyphusion-email-inbound`). The inbound step writes the `POSTERN_INBOUND_WRANGLER` repo secret
+  (full real config) to a runner file + deploys with `-c`, and runs `wrangler d1 migrations apply`
+  before deploy. Public repo -> GitHub-hosted `ubuntu-latest` runner.
 
 **Both Workers auto-deploy on green `main`.** The relay must be rebuilt and reinstalled on
 dischord by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
