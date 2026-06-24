@@ -68,59 +68,112 @@ through the configured upstream SMTP server (`smtp_transport.go`):
 
 Leave `POSTERN_RELAY_HTTP_LISTEN` unset to run inbound-only.
 
-## Submission: 587/465 + AUTH -> `POST /api/send` (#68)
+## Submission: authenticated SMTP for clients -> `POST /api/send` (#68)
 
 The third seam: authenticated SMTP **submission** so a normal IMAP client
-(Thunderbird / Apple Mail / mobile) can send AS `@skyphusion.org`. Workers cannot
-listen on 587/465, so it lives here. Enable it with at least one of
-`POSTERN_SUBMISSION_STARTTLS_LISTEN` (`:587`, STARTTLS) /
-`POSTERN_SUBMISSION_TLS_LISTEN` (`:465`, implicit TLS).
+(Thunderbird / Apple Mail / mobile) can send AS your own domain. Workers cannot
+listen on submission ports, so it lives here. It is fully domain-agnostic and
+self-hostable from a fresh clone.
 
 ```
- IMAP client ──587 STARTTLS / 465 TLS──► relay submission daemon
+ IMAP client ──TLS (STARTTLS or implicit)──► relay submission daemon
    │ AUTH PLAIN/LOGIN (only after TLS)            │
-   │                          POST /api/smtp-auth (transport token)
+   │                                   AuthProvider backend (native | ldap | system)
    │                                              ▼
-   │                       worker: smtp_credentials (PBKDF2) ─► {ok, from}
+   │                                  resolve the bound identity (your address)
    │ MAIL/RCPT/DATA (MIME)                        │
    ▼ enforce From == bound identity               ▼
  relay ──POST /api/send (mailbox API token)──► worker: DKIM-sign + send + store ─► MX
 ```
 
-- **AUTH only over TLS.** The go-smtp server runs with a `TLSConfig` and
-  `AllowInsecureAuth=false`, so AUTH is advertised/accepted only after STARTTLS
-  (587) or on the implicit-TLS connection (465); a cleartext `AUTH` is answered
-  `523`. PLAIN + LOGIN are offered (LOGIN for older clients).
-- **Postern-native auth, not LDAP.** Each login is validated via
-  `POST /api/smtp-auth` (the **transport** token), which checks the worker's
-  `smtp_credentials` table (secret stored as a PBKDF2 hash) and returns the bound
-  `from`. The relay stays dependency-free; `go-sasl` is go-smtp's own AUTH API
-  surface (already in `go.sum`).
-- **From-enforcement.** The message `From` must equal the bound identity
-  (case-insensitive); a missing or mismatched `From` is rejected `550`.
-- **Bridge to the send seam.** The parsed MIME is mapped to a `SendRequest` and
-  POSTed to `/api/send` (the **mailbox API** token, carried as
-  `POSTERN_SEND_TOKEN`), which DKIM-signs and stores the sent copy. `to`/`cc` come
-  from the headers intersected with the envelope; `bcc` is the envelope remainder
-  (kept envelope-only); `In-Reply-To` / `References` ride along for threading.
-- **v1 limits (honest, not silent):** a message with **attachments** is rejected
-  `554` (the field-based `/api/send` carries none), and a **Bcc-only** message is
-  rejected `550` (the worker requires a `To`). Both are documented follow-ups.
+### Listeners (arbitrary, configurable)
 
-Unlike the loopback-only intake listener, the submission listeners are
-AUTH-required, so binding them publicly (`:587` / `:465`) is correct. They need a
-real TLS cert (`POSTERN_SUBMISSION_TLS_CERT` / `_KEY`) and, under the hardened
-systemd unit, `CAP_NET_BIND_SERVICE` to bind the privileged ports (already set).
+Set `SUBMISSION_LISTENERS` to a comma-separated list of `<addr>:<mode>` entries,
+where mode is `starttls` or `implicit` and a bare port means all interfaces. This
+is a LIST, not a fixed 587/465: ISPs/providers often block 25/587, so an operator
+can add alternate ports (2525, 8025, anything) to route around the block.
 
-Provision a user credential (operator action, mailbox API token):
+```
+SUBMISSION_LISTENERS=587:starttls,465:implicit            # canonical
+SUBMISSION_LISTENERS=587:starttls,465:implicit,2525:starttls   # plus an alternate
+SUBMISSION_LISTENERS=0.0.0.0:587:starttls,127.0.0.1:8025:implicit
+```
+
+AUTH is offered ONLY over TLS: the go-smtp server runs with a `TLSConfig` and
+`AllowInsecureAuth=false`, so AUTH is advertised/accepted only after STARTTLS or
+on an implicit-TLS connection; a cleartext `AUTH` is answered `523`. PLAIN + LOGIN
+are offered (LOGIN for older clients).
+
+### TLS cert (operator-provisioned, hot-reloaded)
+
+`SUBMISSION_TLS_CERT` / `SUBMISSION_TLS_KEY` are PEM paths. The daemon
+**hot-reloads** the cert when the file changes on disk, so a renewal takes effect
+without a restart. How you OBTAIN and renew the cert is your choice; a few recipes:
+
+- **certbot (HTTP-01)**: `certbot certonly --standalone -d smtp.your-domain`, point
+  the paths at `/etc/letsencrypt/live/smtp.your-domain/{fullchain,privkey}.pem`.
+- **certbot / acme.sh (DNS-01)**: useful when 80/443 are not reachable; issue via
+  your DNS provider's API, same file paths.
+- **commercial cert**: drop the PEM files at the configured paths.
+- **self-signed** (testing only): `openssl req -x509 -newkey rsa:2048 -nodes
+  -keyout key.pem -out cert.pem -days 365 -subj /CN=localhost`.
+
+The files must be readable by the relay's user (the hardened systemd unit runs
+`DynamicUser`, so world-read the PEMs or grant an ACL).
+
+### Auth backend (`AUTH_BACKEND`: native | ldap | system)
+
+A pluggable `AuthProvider` verifies the login and returns the bound identity; the
+same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
+`native`).
+
+- **native** (default, zero extra deps): validate at the worker `POST /api/smtp-auth`
+  (the **transport** token), which checks the D1 `smtp_credentials` table (secret
+  stored as a PBKDF2 hash). This is the fresh-clone quickstart; no LDAP/PAM needed.
+  Set `POSTERN_SMTP_AUTH_URL` + `POSTERN_TRANSPORT_TOKEN`.
+- **ldap**: simple-bind (`LDAP_BIND_DN_TEMPLATE`) or search+bind (`LDAP_BIND_DN` +
+  `LDAP_SEARCH_BASE` + `LDAP_SEARCH_FILTER`) over TLS (`ldaps://` or
+  `LDAP_STARTTLS=true`). Bound identity = the `LDAP_MAIL_ATTR` attribute (default
+  `mail`). Pure-Go (`go-ldap`), no cgo.
+- **system**: local Unix accounts via PAM. Bound identity = `<user>@AUTH_SYSTEM_DOMAIN`.
+  PAM needs cgo, so this backend is **build-tagged**: the default binary is
+  cgo-free and rejects `AUTH_BACKEND=system` with a clear "rebuild with -tags pam"
+  error. Build it with `go build -tags pam` (needs libpam headers) and add a PAM
+  service file (default `/etc/pam.d/postern`).
+
+### Bridge to the send seam + From-enforcement
+
+The message `From` MUST equal the bound identity (case-insensitive); a missing or
+mismatched `From` is rejected `550`. The parsed MIME is mapped to a `SendRequest`
+and POSTed to `/api/send` (the **mailbox API** token, carried as
+`POSTERN_SEND_TOKEN`), which DKIM-signs and stores the sent copy. `to`/`cc` come
+from the headers intersected with the envelope; `bcc` is the envelope remainder
+(kept envelope-only); `In-Reply-To` / `References` ride along for threading.
+
+### v1 limits (honest, not silent)
+
+- A message with **attachments** (or inline parts) is rejected `554` with an
+  actionable message: the field-based `/api/send` carries none, and a silent drop
+  would lose data. Tracked in skyphusion-labs/postern#70 (thread attachments
+  end-to-end); the send-as-domain use case is mostly text/confirmation mail, so
+  this still delivers the core value.
+- A **Bcc-only** message is rejected `550` (the worker requires a `To`; the daemon
+  does not rewrite the visible header). A normal client always sets a `To`.
+
+### Provision a credential (native backend)
+
+Operator action, gated by the mailbox API token:
 
 ```bash
 curl -sS -X POST https://postern.<account>.workers.dev/api/admin/smtp-credentials \
   -H "Authorization: Bearer $POSTERN_API_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice@skyphusion.org"}'
+  -d '{"username":"alice@your-domain"}'
 # -> { "ok": true, "username": "...", "from": "...", "secret": "<give this to the user once>" }
 ```
+
+The submission listeners need `CAP_NET_BIND_SERVICE` to bind privileged ports
+under the hardened `DynamicUser` unit (already set in `systemd/`).
 
 ## Build, test
 
@@ -163,7 +216,12 @@ relay/
   transport.go        #23  Transport interface + OutboundMessage + selector
   smtp_transport.go   #23  SMTPTransport: render RFC 5322 + BYO upstream SMTP send
   http.go             outbound /dispatch bridge (token-gated, constant-time)
-  submission.go       #68  587/465 AUTH-over-TLS submission -> /api/send bridge
-  submit_client.go    #68  HTTPS client for /api/smtp-auth + /api/send
+  submission.go       #68  AUTH-over-TLS submission session -> /api/send bridge
+  submit_client.go    #68  HTTPS client for /api/smtp-auth + /api/send (native)
+  auth.go             #68  AuthProvider interface + backend selector
+  auth_ldap.go        #68  ldap backend (go-ldap simple/search bind over TLS)
+  auth_system.go      #68  system backend stub (default build; rejects without -tags pam)
+  auth_system_pam.go  #68  system backend (PAM; build-tagged `pam`, cgo)
+  cert.go             #68  TLS cert loader with hot-reload on renewal
   systemd/            hardened service unit
 ```
