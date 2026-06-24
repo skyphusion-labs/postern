@@ -45,6 +45,12 @@ type Config struct {
 	OutboundFrom string     // POSTERN_OUTBOUND_FROM, fallback envelope From for dispatch
 
 	HTTPTimeout time.Duration // HTTP_TIMEOUT_SECONDS, default 30 (outbound POSTs to core)
+
+	// Submission seam (#68): authenticated SMTP submission for IMAP clients.
+	// Unlike the inbound intake listener (loopback only), these listeners are
+	// AUTH-required, so binding them publicly is correct. AUTH is offered ONLY
+	// over TLS (go-smtp AllowInsecureAuth=false + TLSConfig), so a cert is required.
+	Submission SubmissionCfg
 }
 
 // SMTPOutCfg describes the bring-your-own upstream SMTP server the relay relays
@@ -56,6 +62,25 @@ type SMTPOutCfg struct {
 	Password string        // SMTP_OUT_PASSWORD
 	StartTLS bool          // SMTP_OUT_STARTTLS, default true
 	Timeout  time.Duration // SMTP_OUT_TIMEOUT_SECONDS, default 30
+}
+
+// SubmissionCfg describes the authenticated SMTP submission listeners (#68).
+// The daemon validates each client login against the worker /api/smtp-auth
+// endpoint and bridges authenticated messages to the worker /api/send seam.
+type SubmissionCfg struct {
+	STARTTLSListen string // POSTERN_SUBMISSION_STARTTLS_LISTEN, e.g. :587 (STARTTLS upgrade)
+	TLSListen      string // POSTERN_SUBMISSION_TLS_LISTEN, e.g. :465 (implicit TLS)
+	TLSCert        string // POSTERN_SUBMISSION_TLS_CERT, PEM certificate path
+	TLSKey         string // POSTERN_SUBMISSION_TLS_KEY, PEM private key path
+	FromDomain     string // POSTERN_SUBMISSION_FROM_DOMAIN, the bound-identity domain (default skyphusion.org)
+	AuthURL        string // POSTERN_SMTP_AUTH_URL, worker POST /api/smtp-auth (transport-token gated)
+	SendURL        string // POSTERN_SEND_URL, worker POST /api/send
+	SendToken      string // POSTERN_SEND_TOKEN, the mailbox API token for /api/send
+}
+
+// enabled reports whether at least one submission listener is configured.
+func (s SubmissionCfg) enabled() bool {
+	return s.STARTTLSListen != "" || s.TLSListen != ""
 }
 
 func loadConfig() (Config, error) {
@@ -78,6 +103,16 @@ func loadConfig() (Config, error) {
 			Password: os.Getenv("SMTP_OUT_PASSWORD"),
 			StartTLS: envBool("SMTP_OUT_STARTTLS", true),
 			Timeout:  time.Duration(envInt("SMTP_OUT_TIMEOUT_SECONDS", 30)) * time.Second,
+		},
+		Submission: SubmissionCfg{
+			STARTTLSListen: os.Getenv("POSTERN_SUBMISSION_STARTTLS_LISTEN"),
+			TLSListen:      os.Getenv("POSTERN_SUBMISSION_TLS_LISTEN"),
+			TLSCert:        os.Getenv("POSTERN_SUBMISSION_TLS_CERT"),
+			TLSKey:         os.Getenv("POSTERN_SUBMISSION_TLS_KEY"),
+			FromDomain:     env("POSTERN_SUBMISSION_FROM_DOMAIN", "skyphusion.org"),
+			AuthURL:        os.Getenv("POSTERN_SMTP_AUTH_URL"),
+			SendURL:        os.Getenv("POSTERN_SEND_URL"),
+			SendToken:      os.Getenv("POSTERN_SEND_TOKEN"),
 		},
 	}
 
@@ -103,6 +138,20 @@ func loadConfig() (Config, error) {
 		}
 		if c.SMTPOut.Host == "" {
 			return c, fmt.Errorf("SMTP_OUT_HOST is required when the /dispatch bridge is enabled")
+		}
+	}
+
+	// Submission listeners are opt-in. When enabled they require TLS (AUTH is
+	// never offered in cleartext), the per-user auth check, and the send bridge.
+	if c.Submission.enabled() {
+		if c.Submission.TLSCert == "" || c.Submission.TLSKey == "" {
+			return c, fmt.Errorf("POSTERN_SUBMISSION_TLS_CERT and POSTERN_SUBMISSION_TLS_KEY are required when a submission listener is set (AUTH is offered only over TLS)")
+		}
+		if c.Submission.AuthURL == "" || c.TransportToken == "" {
+			return c, fmt.Errorf("POSTERN_SMTP_AUTH_URL and POSTERN_TRANSPORT_TOKEN are required for submission (the per-user /api/smtp-auth check)")
+		}
+		if c.Submission.SendURL == "" || c.Submission.SendToken == "" {
+			return c, fmt.Errorf("POSTERN_SEND_URL and POSTERN_SEND_TOKEN are required for submission (the bridge to the worker /api/send seam)")
 		}
 	}
 

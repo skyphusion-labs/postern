@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -154,8 +155,9 @@ func run(cfg Config) error {
 	}
 
 	// The function blocks until any listener exits. Size the channel for the SMTP
-	// listeners plus the optional outbound /dispatch bridge.
-	errc := make(chan error, len(addrs)+1)
+	// intake listeners, the optional outbound /dispatch bridge, and the two
+	// optional submission listeners (587 STARTTLS + 465 implicit TLS).
+	errc := make(chan error, len(addrs)+3)
 
 	// Optional outbound bridge (CONTRACT section 3): core POSTs OutboundMessages
 	// here and the relay sends them via bring-your-own SMTP.
@@ -165,6 +167,15 @@ func run(cfg Config) error {
 			return fmt.Errorf("outbound transport: %w", err)
 		}
 		go func() { errc <- startDispatchServer(cfg, transport) }()
+	}
+
+	// Optional submission seam (CONTRACT section 9): authenticated SMTP submission
+	// for IMAP clients on 587 (STARTTLS) and 465 (implicit TLS). AUTH is offered
+	// only over TLS, so a cert is loaded and AllowInsecureAuth stays false.
+	if cfg.Submission.enabled() {
+		if err := startSubmission(cfg, errc); err != nil {
+			return fmt.Errorf("submission: %w", err)
+		}
 	}
 
 	// One go-smtp server per address (e.g. loopback for host services plus a
@@ -192,4 +203,43 @@ func splitListen(s string) []string {
 		}
 	}
 	return out
+}
+
+// startSubmission loads the TLS cert and launches the configured submission
+// listeners (587 STARTTLS and/or 465 implicit TLS) as goroutines feeding errc.
+func startSubmission(cfg Config, errc chan error) error {
+	cert, err := tls.LoadX509KeyPair(cfg.Submission.TLSCert, cfg.Submission.TLSKey)
+	if err != nil {
+		return fmt.Errorf("load TLS keypair: %w", err)
+	}
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	be := &submissionBackend{cfg: cfg, client: NewSubmitClient(cfg)}
+
+	if cfg.Submission.STARTTLSListen != "" {
+		srv := newSubmissionServer(be, tlsCfg, cfg)
+		srv.Addr = cfg.Submission.STARTTLSListen
+		log.Printf("submission (STARTTLS) listening on %s", srv.Addr)
+		go func(s *smtp.Server) { errc <- s.ListenAndServe() }(srv)
+	}
+	if cfg.Submission.TLSListen != "" {
+		srv := newSubmissionServer(be, tlsCfg, cfg)
+		srv.Addr = cfg.Submission.TLSListen
+		log.Printf("submission (implicit TLS) listening on %s", srv.Addr)
+		go func(s *smtp.Server) { errc <- s.ListenAndServeTLS() }(srv)
+	}
+	return nil
+}
+
+// newSubmissionServer builds a go-smtp server for the submission backend. Setting
+// TLSConfig with AllowInsecureAuth=false is what makes go-smtp offer/accept AUTH
+// ONLY over TLS: on 587 the client must STARTTLS first, on 465 the whole
+// connection is TLS; a cleartext AUTH is answered 523 (TLS required).
+func newSubmissionServer(be smtp.Backend, tlsCfg *tls.Config, cfg Config) *smtp.Server {
+	srv := smtp.NewServer(be)
+	srv.Domain = cfg.Submission.FromDomain
+	srv.TLSConfig = tlsCfg
+	srv.AllowInsecureAuth = false
+	srv.MaxMessageBytes = cfg.MaxSize
+	srv.MaxRecipients = MaxRecipients
+	return srv
 }
