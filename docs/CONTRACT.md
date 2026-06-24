@@ -255,6 +255,9 @@ none touches D1 directly (#25, #26).
 | GET | `/api/search?q=&mode=fts\|semantic\|hybrid` | search (fts + semantic + hybrid) | M1 / M4 (done) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
+| POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
+| POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
+| DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
 
 `POST /send` (today's bare endpoint) stays as a back-compat alias of `/api/send`. All responses
 keep the current `{ ok, ... }` + `E_*` code shape from `INTEGRATION.md`, so existing callers
@@ -360,7 +363,24 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
   `GET /api/messages/{messageId}/attachments/{i}`. A short-lived signed R2 URL for large files
   is a post-v1 enhancement, not built now.
 - **Runtime deps (DECIDED):** `postal-mime` is accepted in `core` (the store/ingest path needs
-  it). The Go relay stays dependency-free (`go-smtp` + `enmime` only, no new deps).
+  it). The Go relay's core transport + the default (native) submission auth are stdlib-only
+  (`go-smtp` + `enmime`, plus `go-sasl` which IS go-smtp's own server AUTH API surface). The
+  optional `ldap` auth backend adds pure-Go `go-ldap` (no cgo); the optional `system` (PAM)
+  backend is a cgo, build-tagged (`-tags pam`) extra (`msteinert/pam`) excluded from the default
+  static binary. The lean-default spirit holds: a fresh clone with `AUTH_BACKEND=native` pulls no
+  auth dependency beyond the go-smtp family.
+- **Submission auth is PLUGGABLE (DECIDED, #68):** the daemon has an `AuthProvider` interface
+  (`Authenticate(username, secret) -> identity`) selected by `AUTH_BACKEND`, with three backends.
+  **native** (DEFAULT, zero extra deps): validate at the worker `POST /api/smtp-auth` (transport
+  token) against the `smtp_credentials` D1 table (PBKDF2 hash, never plaintext); the fresh-clone
+  quickstart uses this and needs no LDAP/PAM. **ldap**: simple-bind or search+bind over TLS via
+  pure-Go `go-ldap`; bound identity = the mail attribute. **system**: local Unix accounts via PAM,
+  a cgo build-tagged (`-tags pam`) extra excluded from the default static binary; bound identity =
+  `<user>@<configured-domain>`. From-enforcement is identical for every backend.
+- **Submission attachments (DECIDED, #68):** the field-based `/api/send` carries no attachments,
+  so the v1 submission daemon **rejects** a message with attachments (`554`) rather than silently
+  dropping them, with an actionable reply. Threading attachments end to end (`SendRequest.attachments`)
+  is the post-v1 follow-up tracked in #70.
 - **AI Search: hand-rolled Vectorize query, not managed AutoRAG (DECIDED, #31).** Ingest already
   populates a Vectorize index (one vector per body chunk, `@cf/baai/bge-base-en-v1.5`, metadata
   carries `message_id`). M4 semantic/hybrid query THAT index directly (embed query -> Vectorize
@@ -373,3 +393,121 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
 
 Lane split: Strummer = transports / #23 + relay; Rollins = store + API + send / #25 / #26 /
 #27; Joan = the API client surface (#32). Mackaye owns this contract end to end.
+
+---
+
+## 9. Submission transport seam: authenticated SMTP for clients (#68)
+
+The third transport seam, paired with M5's IMAP read proxy so postern is a real human mailbox:
+a standard IMAP client (Thunderbird / Apple Mail / mobile) sends AS the operator's own domain
+through an authenticated **SMTP submission** endpoint that bridges to the existing `/api/send` seam.
+This is the generic send-as-your-own-domain feature, not skyphusion-specific: nothing below hardcodes
+a domain (the bound identity comes from the auth backend), so postern is self-hostable from a fresh
+clone with only the operator's own domain configured. Workers cannot listen on submission ports, so
+this lives in the Go **relay** (`relay/submission.go`), alongside the inbound `ingest` and outbound
+`dispatch` bridges; it reuses the proven send seam rather than a new send path.
+
+```
+ IMAP client ──TLS (STARTTLS or implicit)──▶ relay submission daemon
+   │  AUTH PLAIN/LOGIN (only after TLS)                 │
+   │                              AuthProvider backend (native | ldap | system)
+   │                                                    ▼
+   │                                   resolve the bound identity (the user's address)
+   │  MAIL/RCPT/DATA (MIME)                             │
+   ▼  enforce From == bound identity                    ▼
+ relay ──POST /api/send (mailbox API token)──▶ worker: DKIM-sign + send + store sent copy ─▶ MX
+```
+
+### Listeners (arbitrary, configurable)
+
+`SUBMISSION_LISTENERS` is a comma-separated list of `<addr>:<mode>` entries (mode = `starttls` or
+`implicit`; a bare port means `:<port>`). It is a LIST, not a fixed 587/465: ISPs/providers commonly
+block 25/587, so an operator can bind alternate ports (e.g. `2525`, `8025`) to route around the
+block. Every listener shares the same AUTH + From-enforcement + `/api/send` bridge; AUTH is offered
+only after TLS on all of them. The TLS cert is read from `SUBMISSION_TLS_CERT` / `_KEY` and
+**hot-reloaded** when the file changes (a renewal needs no daemon restart); how the operator obtains
+and renews the cert (certbot, acme.sh, DNS-01, commercial, self-signed for testing) is THEIR choice,
+never a daemon dependency.
+
+### Auth (pluggable: native | ldap | system)
+
+The daemon offers SMTP AUTH (PLAIN + LOGIN) **only after TLS** (go-smtp `AllowInsecureAuth=false` +
+`TLSConfig`; a cleartext `AUTH` is answered `523`). An `AuthProvider` interface verifies the login
+and returns the bound identity; the backend is chosen by `AUTH_BACKEND` (default `native`). All three
+share the same From-enforcement.
+
+- **native** (default, zero extra deps): validate `{username, secret}` at the worker via:
+
+```
+POST /api/smtp-auth          Authorization: Bearer <POSTERN_TRANSPORT_TOKEN>
+  { "username": "...", "secret": "..." }
+  200 { "ok": true,  "from": "user@your-domain" }      // good credential
+  200 { "ok": false }                                   // bad credential -> daemon answers 535
+  401                                                    // wrong transport token (relay misconfig)
+  400 { "ok": false, "error": "E_FIELD_MISSING" }      // missing username/secret
+```
+
+The endpoint is gated by the **transport token**, never the mailbox API token (section 5): the relay
+is an infra seam, not an API client. `smtp_credentials` (migration `0004`) stores the secret only as
+a `pbkdf2$<iterations>$<salt>$<hash>` derivation (Web Crypto PBKDF2-HMAC-SHA256); an unknown user is
+verified against a dummy hash so timing does not reveal whether the username exists. Operators mint /
+rotate / revoke credentials via the API-token-gated `POST` / `DELETE /api/admin/smtp-credentials`
+(the generated secret is returned once and never logged).
+
+  The endpoint is gated by the **transport token**, never the mailbox API token (section 5): the
+  relay is an infra seam, not an API client. `smtp_credentials` (migration `0004`) stores the secret
+  only as a `pbkdf2$<iterations>$<salt>$<hash>` derivation (Web Crypto PBKDF2-HMAC-SHA256); an
+  unknown user is verified against a dummy hash so timing does not reveal whether the username
+  exists. Operators mint / rotate / revoke credentials via the API-token-gated `POST` /
+  `DELETE /api/admin/smtp-credentials` (the secret is returned once and never logged).
+- **ldap**: LDAP simple-bind (`LDAP_BIND_DN_TEMPLATE`) or search+bind (`LDAP_BIND_DN` +
+  `LDAP_SEARCH_BASE` + `LDAP_SEARCH_FILTER`) over TLS (`ldaps://` or `LDAP_STARTTLS`). The bound
+  identity is the `LDAP_MAIL_ATTR` attribute (default `mail`). Pure-Go `go-ldap`, no cgo. An empty
+  password is rejected before the wire (an empty bind can be an anonymous-bind bypass).
+- **system**: local Unix accounts via PAM. The bound identity is `<user>@AUTH_SYSTEM_DOMAIN`. PAM
+  needs cgo, so this backend is **build-tagged**: the default static binary excludes it and rejects
+  `AUTH_BACKEND=system` with a "rebuild with -tags pam" error. Build `go build -tags pam` (libpam
+  headers) and add a PAM service file (default `/etc/pam.d/postern`).
+
+### From-enforcement (the core safety property)
+
+On authenticated `DATA` the message header `From` MUST equal the bound identity returned by
+`/api/smtp-auth` (case-insensitive). A missing or mismatched `From` is a spoof attempt and is
+rejected `550`. SPF/DKIM/DMARC alignment stays owned by `/api/send`; submission never bypasses it.
+Only the SENDER is authenticated per user; the mailbox/store stays the shared per-domain D1.
+
+### Bridge to `/api/send`
+
+The parsed MIME is mapped to a `SendRequest` and POSTed to `/api/send` (gated by the **mailbox API
+token**, carried by the relay as `POSTERN_SEND_TOKEN`), so it gets the same DKIM-signing + sent-copy
+store as an API send. Recipient reconstruction keeps Bcc private through the field-based API:
+
+- `to` / `cc` are the `To` / `Cc` header addresses **intersected with the envelope** (a header
+  address not in `RCPT TO` is not a real recipient and is not delivered);
+- `bcc` = envelope `RCPT TO` minus those (kept envelope-only, never headered);
+- `In-Reply-To` / `References` ride in `headers` so a client reply threads on the wire.
+
+The relay maps `/api/send` status to SMTP replies: `2xx` -> `250`; `400`/`403` -> `550` (permanent);
+`401` (relay's send token wrong) and `5xx` / network -> `451` (transient, MTA may retry); `413` ->
+`552`.
+
+### v1 limitations (locked, honest, not silent)
+
+- **Attachments are rejected** (`554`, with an actionable message pointing at the tracking issue):
+  the field-based `/api/send` carries none, so the daemon refuses a message with attachments / inline
+  parts rather than dropping them (inline images count). Tracked in #70.
+- **Bcc-only submission is rejected** (`550`): the worker requires at least one `To`; the daemon
+  does not silently rewrite the visible header. A normal client always sets a `To`.
+
+Both are documented follow-ups, not silent degrades.
+
+### Config (relay)
+
+`SUBMISSION_LISTENERS` (the `<addr>:<mode>` list) enables the daemon; `SUBMISSION_TLS_CERT` / `_KEY`
+(required, AUTH is TLS-only, hot-reloaded), `SUBMISSION_HOSTNAME` (cosmetic greeting, default
+`localhost`), `POSTERN_SEND_URL` + `POSTERN_SEND_TOKEN` (the send bridge, the mailbox API token), and
+`AUTH_BACKEND` (`native` | `ldap` | `system`) with its backend-specific vars: native needs
+`POSTERN_SMTP_AUTH_URL` + `POSTERN_TRANSPORT_TOKEN`; ldap needs `LDAP_URL` (+ template or search
+vars); system needs `AUTH_SYSTEM_DOMAIN` and a `-tags pam` build. Unlike the loopback-only intake
+listener, these listeners are AUTH-required, so binding them publicly is correct. See
+`relay/skyphusion-email-relay.env.example` for every variable.

@@ -7,6 +7,14 @@
 import * as store from "./store";
 import { send, reply, MailboxError, type SendRequest, type ReplyRequest } from "./mailbox";
 import { serveWebmail } from "./webmail";
+import {
+  authenticate,
+  upsert as upsertCredential,
+  remove as removeCredential,
+  hashSecret,
+  generateSecret,
+  normalizeUsername,
+} from "./smtpcreds";
 
 // Failure codes that represent a transient upstream condition (the transport /
 // provider) rather than a bad request; mapped to 502 so callers can retry.
@@ -32,6 +40,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     return serveWebmail();
   }
 
+  // SMTP submission auth check (#68). Gated by the TRANSPORT token, NOT the
+  // mailbox API token: the submission relay is an infra seam, not an API client
+  // (CONTRACT section 5/9). Handled before the API-token gate below so the relay
+  // never needs the mailbox API token to validate a login.
+  if (request.method === "POST" && path === "/api/smtp-auth") {
+    return handleSmtpAuth(request, env);
+  }
+
   // Everything under /api (and the back-compat /send alias) requires the token.
   const isApi = path === "/send" || path.startsWith("/api/");
   if (!isApi) return json({ ok: false, error: "not_found" }, 404);
@@ -53,6 +69,24 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const body = await readJson<ReplyRequest>(request);
       const result = await reply(env, body, ctx);
       return json({ ok: true, ...result });
+    }
+
+    // --- admin: provision / rotate an SMTP submission credential (#68) ---
+    // Operator action, gated by the mailbox API token (this block is past the
+    // API-token check). Mints or rotates a per-user submission credential and
+    // returns the secret ONCE; only the PBKDF2 hash is stored.
+    if (request.method === "POST" && path === "/api/admin/smtp-credentials") {
+      return await handleCredentialUpsert(request, env);
+    }
+
+    // --- admin: revoke an SMTP submission credential ---
+    const credMatch =
+      request.method === "DELETE" ? /^\/api\/admin\/smtp-credentials\/(.+)$/.exec(path) : null;
+    if (credMatch) {
+      const username = decodeURIComponent(credMatch[1]);
+      const deleted = await removeCredential(env, username);
+      if (!deleted) return json({ ok: false, error: "E_NOT_FOUND", message: "no such credential" }, 404);
+      return json({ ok: true, deleted: normalizeUsername(username) });
     }
 
     // --- read: list / filter ---
@@ -144,6 +178,79 @@ function parseListQuery(url: URL): import("./store").ListQuery {
     limit: parseLimit(url),
     cursor: p.get("cursor") ?? undefined,
   };
+}
+
+// Email shape check (linear, no ReDoS) mirroring mailbox.ts, used to validate a
+// provisioned bound From identity.
+const EMAIL_RE = /^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$/;
+
+// POST /api/smtp-auth: the submission relay validates a client login here. Gated
+// by the transport token. Returns { ok:true, from } on success (the bound From
+// identity the daemon then enforces), { ok:false } on a bad credential.
+async function handleSmtpAuth(request: Request, env: Env): Promise<Response> {
+  if (!transportAuthorized(request, env)) {
+    return json({ ok: false, error: "unauthorized" }, 401);
+  }
+  let body: { username?: unknown; secret?: unknown };
+  try {
+    body = (await request.json()) as { username?: unknown; secret?: unknown };
+  } catch {
+    return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
+  }
+  const username = typeof body.username === "string" ? body.username : "";
+  const secret = typeof body.secret === "string" ? body.secret : "";
+  if (!username || !secret) {
+    return json({ ok: false, error: "E_FIELD_MISSING", message: "username and secret are required" }, 400);
+  }
+  const from = await authenticate(env, username, secret);
+  if (!from) {
+    // Valid transport token but a bad credential: 200 ok:false, so the relay maps
+    // it to an SMTP 535 (auth failed) and not to its own config error (401).
+    return json({ ok: false, error: "E_AUTH_FAILED" });
+  }
+  return json({ ok: true, from });
+}
+
+// POST /api/admin/smtp-credentials: create or rotate a credential. The secret is
+// returned once in the response (so the operator can hand it to the user) and is
+// otherwise only stored as a PBKDF2 hash, never logged.
+async function handleCredentialUpsert(request: Request, env: Env): Promise<Response> {
+  let body: { username?: unknown; from?: unknown; secret?: unknown };
+  try {
+    body = (await request.json()) as { username?: unknown; from?: unknown; secret?: unknown };
+  } catch {
+    return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
+  }
+  const username = normalizeUsername(typeof body.username === "string" ? body.username : "");
+  if (!username) return json({ ok: false, error: "E_FIELD_MISSING", message: "username is required" }, 400);
+
+  const fromAddr = (typeof body.from === "string" && body.from.trim() ? body.from.trim() : username).toLowerCase();
+  const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  if (!EMAIL_RE.test(fromAddr) || fromAddr.split("@")[1] !== allowedDomain) {
+    return json(
+      { ok: false, error: "E_SENDER_NOT_ALLOWED", message: `from must be a valid address on @${allowedDomain}` },
+      400,
+    );
+  }
+
+  let secret = typeof body.secret === "string" ? body.secret : "";
+  if (secret && secret.length < 12) {
+    return json({ ok: false, error: "E_VALIDATION_ERROR", message: "secret must be at least 12 characters" }, 400);
+  }
+  if (!secret) secret = generateSecret();
+
+  const hash = await hashSecret(secret);
+  await upsertCredential(env, username, fromAddr, hash, new Date().toISOString());
+  return json({ ok: true, username, from: fromAddr, secret });
+}
+
+// Constant-time Bearer compare against the TRANSPORT token (POSTERN_TRANSPORT_TOKEN),
+// the infra-seam credential, distinct from the mailbox API token.
+function transportAuthorized(request: Request, env: Env): boolean {
+  const token = env.POSTERN_TRANSPORT_TOKEN || "";
+  const auth = request.headers.get("authorization") ?? "";
+  const got = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  return token.length > 0 && timingSafeEqual(got, token);
 }
 
 function authorized(request: Request, env: Env): boolean {

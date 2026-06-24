@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -153,9 +154,19 @@ func run(cfg Config) error {
 		return fmt.Errorf("no listen address configured (SMTP_LISTEN)")
 	}
 
-	// The function blocks until any listener exits. Size the channel for the SMTP
-	// listeners plus the optional outbound /dispatch bridge.
-	errc := make(chan error, len(addrs)+1)
+	// Parse submission listeners up front so the error channel is sized exactly.
+	var subListeners []submissionListener
+	if cfg.Submission.enabled() {
+		var err error
+		subListeners, err = parseSubmissionListeners(cfg.Submission.Listeners)
+		if err != nil {
+			return fmt.Errorf("submission: %w", err)
+		}
+	}
+
+	// The function blocks until any listener exits. Size the channel for the intake
+	// listeners, the optional outbound /dispatch bridge, and every submission listener.
+	errc := make(chan error, len(addrs)+1+len(subListeners))
 
 	// Optional outbound bridge (CONTRACT section 3): core POSTs OutboundMessages
 	// here and the relay sends them via bring-your-own SMTP.
@@ -165,6 +176,16 @@ func run(cfg Config) error {
 			return fmt.Errorf("outbound transport: %w", err)
 		}
 		go func() { errc <- startDispatchServer(cfg, transport) }()
+	}
+
+	// Optional submission seam (CONTRACT section 9): authenticated SMTP submission
+	// for IMAP clients on an arbitrary, operator-configured set of (port, tls-mode)
+	// listeners. AUTH is offered only over TLS, so the cert is loaded (and
+	// hot-reloaded on renewal) and AllowInsecureAuth stays false on every listener.
+	if len(subListeners) > 0 {
+		if err := startSubmission(cfg, subListeners, errc); err != nil {
+			return fmt.Errorf("submission: %w", err)
+		}
 	}
 
 	// One go-smtp server per address (e.g. loopback for host services plus a
@@ -192,4 +213,58 @@ func splitListen(s string) []string {
 		}
 	}
 	return out
+}
+
+// startSubmission builds the shared cert reloader, the send bridge, and the
+// selected auth backend, then launches one go-smtp server per configured listener
+// (STARTTLS or implicit TLS) as goroutines feeding errc.
+func startSubmission(cfg Config, listeners []submissionListener, errc chan error) error {
+	reloader, err := newCertReloader(cfg.Submission.TLSCert, cfg.Submission.TLSKey)
+	if err != nil {
+		return err
+	}
+	tlsCfg := &tls.Config{GetCertificate: reloader.GetCertificate, MinVersion: tls.VersionTLS12}
+
+	sc := NewSubmitClient(cfg)
+	auth, err := selectAuthProvider(cfg, sc)
+	if err != nil {
+		return err
+	}
+	be := &submissionBackend{cfg: cfg, auth: auth, sender: sc}
+	log.Printf("submission auth backend = %s", submissionBackendName(cfg))
+
+	for _, l := range listeners {
+		srv := newSubmissionServer(be, tlsCfg, cfg)
+		srv.Addr = l.Addr
+		if l.Implicit {
+			log.Printf("submission (implicit TLS) listening on %s", l.Addr)
+			go func(s *smtp.Server) { errc <- s.ListenAndServeTLS() }(srv)
+		} else {
+			log.Printf("submission (STARTTLS) listening on %s", l.Addr)
+			go func(s *smtp.Server) { errc <- s.ListenAndServe() }(srv)
+		}
+	}
+	return nil
+}
+
+func submissionBackendName(cfg Config) string {
+	if cfg.Submission.Backend == "" {
+		return "native"
+	}
+	return cfg.Submission.Backend
+}
+
+// newSubmissionServer builds a go-smtp server for the submission backend. Setting
+// TLSConfig with AllowInsecureAuth=false is what makes go-smtp offer/accept AUTH
+// ONLY over TLS: on a STARTTLS listener the client must upgrade first, on an
+// implicit-TLS listener the whole connection is TLS; a cleartext AUTH is answered
+// 523 (TLS required). GetCertificate picks up a renewed cert without a restart.
+func newSubmissionServer(be smtp.Backend, tlsCfg *tls.Config, cfg Config) *smtp.Server {
+	srv := smtp.NewServer(be)
+	srv.Domain = cfg.Submission.Hostname
+	srv.TLSConfig = tlsCfg
+	srv.AllowInsecureAuth = false
+	srv.MaxMessageBytes = cfg.MaxSize
+	srv.MaxRecipients = MaxRecipients
+	return srv
 }
