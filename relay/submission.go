@@ -13,11 +13,12 @@ import (
 	"github.com/jhillyerd/enmime"
 )
 
-// submitter is the worker-facing surface the submission session needs: validate
-// a login and bridge a message to /api/send. *SubmitClient is the production
-// implementation; tests substitute a stub (mirrors the Transport seam in http.go).
-type submitter interface {
-	Authenticate(username, secret string) (string, error)
+// sender is the worker /api/send bridge the session needs once a message is
+// authenticated + From-enforced. *SubmitClient is the production implementation;
+// tests substitute a stub (mirrors the Transport seam in http.go). Login
+// verification is the separate AuthProvider seam (auth.go), so the auth backend
+// (native/ldap/system) is independent of the send path.
+type sender interface {
 	Send(p SendPayload) error
 }
 
@@ -27,11 +28,12 @@ type submitter interface {
 // bridged to the worker /api/send seam, never posted to /ingest.
 type submissionBackend struct {
 	cfg    Config
-	client submitter
+	auth   AuthProvider
+	sender sender
 }
 
 func (b *submissionBackend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
-	return &submissionSession{cfg: b.cfg, client: b.client}, nil
+	return &submissionSession{cfg: b.cfg, auth: b.auth, sender: b.sender}, nil
 }
 
 // submissionSession holds per-connection auth + envelope state. authed flips true
@@ -39,7 +41,8 @@ func (b *submissionBackend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
 // identity the message From must match).
 type submissionSession struct {
 	cfg       Config
-	client    submitter
+	auth      AuthProvider
+	sender    sender
 	authed    bool
 	boundFrom string
 	rcpts     []string
@@ -74,7 +77,7 @@ func (s *submissionSession) Auth(mech string) (sasl.Server, error) {
 // the generic auth failure so the client never learns whether the username
 // exists or whether the relay itself is misconfigured.
 func (s *submissionSession) authenticate(username, password string) error {
-	from, err := s.client.Authenticate(username, password)
+	identity, err := s.auth.Authenticate(username, password)
 	if err != nil {
 		if err != errAuthFailed {
 			log.Printf("submission auth infra error user=%q: %v", username, err)
@@ -82,7 +85,7 @@ func (s *submissionSession) authenticate(username, password string) error {
 		return smtp.ErrAuthFailed
 	}
 	s.authed = true
-	s.boundFrom = from
+	s.boundFrom = identity
 	return nil
 }
 
@@ -145,7 +148,7 @@ func (s *submissionSession) Data(r io.Reader) error {
 		return &smtp.SMTPError{
 			Code:         554,
 			EnhancedCode: smtp.EnhancedCode{5, 6, 1},
-			Message:      "attachments are not supported by this submission endpoint yet",
+			Message:      "attachments are not yet supported by this submission endpoint; send text/HTML only (tracking: github.com/skyphusion-labs/postern/issues/70)",
 		}
 	}
 
@@ -154,7 +157,7 @@ func (s *submissionSession) Data(r io.Reader) error {
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: err.Error()}
 	}
 
-	if err := s.client.Send(payload); err != nil {
+	if err := s.sender.Send(payload); err != nil {
 		return mapSendError(payload, err)
 	}
 	log.Printf("submitted from=%s to=%v cc=%v bcc=%d subject=%q", payload.From, payload.To, payload.CC, len(payload.BCC), payload.Subject)

@@ -3,16 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 )
-
-// errAuthFailed is returned by the SubmitClient when the worker accepts the
-// transport token but rejects the user's credential (worker 200 {ok:false}). The
-// submission session maps it to SMTP 535.
-var errAuthFailed = errors.New("smtp-auth rejected the credential")
 
 // sendError carries the worker /api/send HTTP status so the submission session
 // can map it to the right SMTP reply code (permanent reject vs transient retry).

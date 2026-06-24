@@ -9,7 +9,8 @@ import (
 )
 
 // stubSubmitter records calls and returns canned results, mirroring the
-// stubTransport pattern in http_test.go.
+// stubTransport pattern in http_test.go. It satisfies BOTH AuthProvider
+// (Authenticate) and sender (Send) so one stub drives a whole session.
 type stubSubmitter struct {
 	authFrom string
 	authErr  error
@@ -31,10 +32,11 @@ func (s *stubSubmitter) Send(p SendPayload) error {
 	return nil
 }
 
-func newAuthedSession(boundFrom string, rcpts []string, sub submitter) *submissionSession {
+func newAuthedSession(boundFrom string, rcpts []string, sub *stubSubmitter) *submissionSession {
 	return &submissionSession{
 		cfg:       Config{MaxSize: 1 << 20},
-		client:    sub,
+		auth:      sub,
+		sender:    sub,
 		authed:    true,
 		boundFrom: boundFrom,
 		rcpts:     rcpts,
@@ -52,7 +54,8 @@ func smtpCode(err error) int {
 
 func TestSubmission_AuthGating(t *testing.T) {
 	// An unauthenticated session must reject MAIL, RCPT, and DATA.
-	s := &submissionSession{cfg: Config{MaxSize: 1 << 20}, client: &stubSubmitter{}}
+	stub := &stubSubmitter{}
+	s := &submissionSession{cfg: Config{MaxSize: 1 << 20}, auth: stub, sender: stub}
 	if err := s.Mail("a@skyphusion.org", nil); err == nil {
 		t.Error("Mail without auth: want error, got nil")
 	}
@@ -67,7 +70,7 @@ func TestSubmission_AuthGating(t *testing.T) {
 func TestSubmission_Authenticate(t *testing.T) {
 	t.Run("good credential binds the identity", func(t *testing.T) {
 		sub := &stubSubmitter{authFrom: "alice@skyphusion.org"}
-		s := &submissionSession{client: sub}
+		s := &submissionSession{auth: sub}
 		if err := s.authenticate("alice@skyphusion.org", "pw"); err != nil {
 			t.Fatalf("authenticate: %v", err)
 		}
@@ -78,7 +81,7 @@ func TestSubmission_Authenticate(t *testing.T) {
 
 	t.Run("bad credential fails closed", func(t *testing.T) {
 		sub := &stubSubmitter{authErr: errAuthFailed}
-		s := &submissionSession{client: sub}
+		s := &submissionSession{auth: sub}
 		if err := s.authenticate("x@skyphusion.org", "bad"); err != smtp.ErrAuthFailed {
 			t.Errorf("err = %v, want smtp.ErrAuthFailed", err)
 		}
@@ -89,7 +92,7 @@ func TestSubmission_Authenticate(t *testing.T) {
 
 	t.Run("infra error is collapsed to auth failed", func(t *testing.T) {
 		sub := &stubSubmitter{authErr: &sendError{status: 500, msg: "boom"}}
-		s := &submissionSession{client: sub}
+		s := &submissionSession{auth: sub}
 		if err := s.authenticate("x@skyphusion.org", "pw"); err != smtp.ErrAuthFailed {
 			t.Errorf("err = %v, want smtp.ErrAuthFailed (infra detail not leaked)", err)
 		}
