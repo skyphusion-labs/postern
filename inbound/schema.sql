@@ -55,3 +55,15 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
   INSERT INTO messages_fts(messages_fts, rowid, subject, body_text) VALUES ('delete', old.id, old.subject, old.body_text);
   INSERT INTO messages_fts(rowid, subject, body_text) VALUES (new.id, new.subject, new.body_text);
 END;
+
+-- SMTP submission credentials (#68): per-user logins for the 587/465 submission
+-- relay, validated via POST /api/smtp-auth. Secret stored as a PBKDF2 hash only
+-- (inbound/src/smtpcreds.ts). Independent of the message store above.
+CREATE TABLE IF NOT EXISTS smtp_credentials (
+  username    TEXT PRIMARY KEY,
+  from_addr   TEXT NOT NULL,
+  secret_hash TEXT NOT NULL,
+  disabled    INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT,
+  updated_at  TEXT
+);
