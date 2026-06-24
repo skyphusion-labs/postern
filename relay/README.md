@@ -68,6 +68,60 @@ through the configured upstream SMTP server (`smtp_transport.go`):
 
 Leave `POSTERN_RELAY_HTTP_LISTEN` unset to run inbound-only.
 
+## Submission: 587/465 + AUTH -> `POST /api/send` (#68)
+
+The third seam: authenticated SMTP **submission** so a normal IMAP client
+(Thunderbird / Apple Mail / mobile) can send AS `@skyphusion.org`. Workers cannot
+listen on 587/465, so it lives here. Enable it with at least one of
+`POSTERN_SUBMISSION_STARTTLS_LISTEN` (`:587`, STARTTLS) /
+`POSTERN_SUBMISSION_TLS_LISTEN` (`:465`, implicit TLS).
+
+```
+ IMAP client ──587 STARTTLS / 465 TLS──► relay submission daemon
+   │ AUTH PLAIN/LOGIN (only after TLS)            │
+   │                          POST /api/smtp-auth (transport token)
+   │                                              ▼
+   │                       worker: smtp_credentials (PBKDF2) ─► {ok, from}
+   │ MAIL/RCPT/DATA (MIME)                        │
+   ▼ enforce From == bound identity               ▼
+ relay ──POST /api/send (mailbox API token)──► worker: DKIM-sign + send + store ─► MX
+```
+
+- **AUTH only over TLS.** The go-smtp server runs with a `TLSConfig` and
+  `AllowInsecureAuth=false`, so AUTH is advertised/accepted only after STARTTLS
+  (587) or on the implicit-TLS connection (465); a cleartext `AUTH` is answered
+  `523`. PLAIN + LOGIN are offered (LOGIN for older clients).
+- **Postern-native auth, not LDAP.** Each login is validated via
+  `POST /api/smtp-auth` (the **transport** token), which checks the worker's
+  `smtp_credentials` table (secret stored as a PBKDF2 hash) and returns the bound
+  `from`. The relay stays dependency-free; `go-sasl` is go-smtp's own AUTH API
+  surface (already in `go.sum`).
+- **From-enforcement.** The message `From` must equal the bound identity
+  (case-insensitive); a missing or mismatched `From` is rejected `550`.
+- **Bridge to the send seam.** The parsed MIME is mapped to a `SendRequest` and
+  POSTed to `/api/send` (the **mailbox API** token, carried as
+  `POSTERN_SEND_TOKEN`), which DKIM-signs and stores the sent copy. `to`/`cc` come
+  from the headers intersected with the envelope; `bcc` is the envelope remainder
+  (kept envelope-only); `In-Reply-To` / `References` ride along for threading.
+- **v1 limits (honest, not silent):** a message with **attachments** is rejected
+  `554` (the field-based `/api/send` carries none), and a **Bcc-only** message is
+  rejected `550` (the worker requires a `To`). Both are documented follow-ups.
+
+Unlike the loopback-only intake listener, the submission listeners are
+AUTH-required, so binding them publicly (`:587` / `:465`) is correct. They need a
+real TLS cert (`POSTERN_SUBMISSION_TLS_CERT` / `_KEY`) and, under the hardened
+systemd unit, `CAP_NET_BIND_SERVICE` to bind the privileged ports (already set).
+
+Provision a user credential (operator action, mailbox API token):
+
+```bash
+curl -sS -X POST https://postern.<account>.workers.dev/api/admin/smtp-credentials \
+  -H "Authorization: Bearer $POSTERN_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice@skyphusion.org"}'
+# -> { "ok": true, "username": "...", "from": "...", "secret": "<give this to the user once>" }
+```
+
 ## Build, test
 
 Go >= 1.22 (built/tested on 1.26). Dependency-free: `go mod tidy` adds nothing.
@@ -109,5 +163,7 @@ relay/
   transport.go        #23  Transport interface + OutboundMessage + selector
   smtp_transport.go   #23  SMTPTransport: render RFC 5322 + BYO upstream SMTP send
   http.go             outbound /dispatch bridge (token-gated, constant-time)
+  submission.go       #68  587/465 AUTH-over-TLS submission -> /api/send bridge
+  submit_client.go    #68  HTTPS client for /api/smtp-auth + /api/send
   systemd/            hardened service unit
 ```
