@@ -1,0 +1,41 @@
+[Unit]
+Description=Postern IMAP read proxy (Twisted IMAP4 over the Postern mailbox API)
+Documentation=https://github.com/skyphusion-labs/postern/blob/main/imap/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/postern-imap.env
+# The venv is created at install time (see imap/DEPLOY.md); the module is
+# posternimap, run with -m so no console_script entry point is required.
+WorkingDirectory=/opt/postern-imap
+ExecStart=/opt/postern-imap/.venv/bin/python -m posternimap
+Restart=on-failure
+RestartSec=5
+
+# The proxy owns no persistent state: IMAP in, HTTPS out to the Postern API.
+# It reads its venv + code (read-only) and binds a TCP listener. Lock it down,
+# mirroring the relay unit.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Binds a TCP IMAP listener and makes outbound HTTPS to the Postern worker.
+RestrictAddressFamilies=AF_INET AF_INET6
+# ProtectSystem=strict makes the whole tree read-only; the proxy needs no
+# writable paths. If you enable IMAPS, the cert/key under /etc/postern-imap are
+# read-only reads, which is allowed.
+
+[Install]
+WantedBy=multi-user.target
