@@ -159,3 +159,10 @@ injectable transport, so no network is touched.
   parts over IMAP is a follow-up.
 - **No server-pushed updates** (no `IDLE` payload / `\Recent` tracking): re-SELECT
   to see new mail.
+
+## Production deploy (dischord)
+
+For the self-hosted install on dischord (hardened systemd unit, loopback-only v1,
+EnvironmentFile, smoke, and the gated path to public IMAPS), see
+[`DEPLOY.md`](DEPLOY.md). The unit ships at
+[`systemd/postern-imap.service`](systemd/postern-imap.service).
