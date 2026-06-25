@@ -36,7 +36,9 @@ mail client / agent ──IMAP (loopback/VLAN)──► postern-imap (systemd, d
 relay or any other dischord service (CoreDNS, Authentik LDAP, Gatus, ntfy, Swarm).
 
 ## Prerequisites (verified on dischord)
-- Python 3.12 with `venv` and `pip` (present: 3.12.3).
+- Python 3.12 (present: 3.12.3). On Debian/Ubuntu, `python3 -m venv` needs the
+  `python3.12-venv` package (it carries `ensurepip`); install it first
+  (`sudo apt-get install -y python3.12-venv`) or venv creation fails.
 - The Postern read API origin (`POSTERN_API_URL`). See "Read-API endpoint" below.
 
 ## Read-API endpoint (POSTERN_API_URL)
@@ -48,6 +50,14 @@ current value before install (the repo template `https://postern.example` is a
 placeholder). A custom domain (e.g. `postern.skyphusion.org`) is preferred over a
 `*.workers.dev` URL so the endpoint is stable IaC; if the custom domain is not yet
 provisioned, the deployed worker origin is the interim value.
+
+**As deployed (v1 stopgap):**
+`POSTERN_API_URL=https://skyphusion-email-inbound.skyphusion.workers.dev` (the
+live inbound/store worker; `/health` 200, `/api/*` token-gated 401/403). The
+`postern.skyphusion.org` custom domain is intentionally HELD: standing it up means
+redeploying the live inbound worker (a downtime gate on live email), so it waits
+for a supervised window. Swap `POSTERN_API_URL` to the custom domain when it lands;
+nothing else changes.
 
 ## 1. Install the code (venv at /opt/postern-imap)
 
