@@ -118,3 +118,10 @@ The reference instance sends from `skyphusion.org` (and `.net`), both onboarded
 to Email Sending, and deploys the worker to Cloudflare via CI on every green
 build of `main`. No secrets live in the tree: `POSTERN_API_TOKEN` is a Worker
 secret, untouched by deploy.
+
+## License
+
+[AGPL-3.0-only](LICENSE). Postern is software you self-host; if you run it as a network service for
+others, you must offer them the complete corresponding source under the same license. See
+[NOTICE](NOTICE) for the short version and [PRIVACY.md](PRIVACY.md) for what self-hosting means for
+data (short version: Skyphusion Labs operates nothing, so we hold none of your mail).
