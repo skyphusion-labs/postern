@@ -2,8 +2,7 @@
 
 > **STATUS: DRAFT for review. Not legal advice. Not yet in force.**
 > Written by Ernst (Conrad's legal-affairs helper, not a lawyer) and grounded in what the software
-> actually does. Conrad signs off before it goes live. Items that need a licensed attorney are
-> flagged at the end.
+> actually does. Conrad signs off before it goes live.
 
 **Last updated:** DRAFT (unpublished)
 
@@ -74,10 +73,17 @@ cannot act on data held in an instance it does not run.
 
 ---
 
-## Open items that need a licensed attorney before launch
+## Scope: software, not a service
 
-1. Whether a self-hosted mail server distributed (not operated) by Skyphusion Labs triggers any
-   controller/processor characterization for the project itself in any jurisdiction (expected: no,
-   because we operate nothing, but confirm).
-2. Operator-facing guidance on data-protection / lawful-access duties is intentionally left to each
-   operator; confirm we are not implying we assume any of those duties.
+Skyphusion Labs writes and distributes Postern as software. It does not operate Postern for anyone,
+and it will not host mail for anyone; Skyphusion Labs is not an email hosting company. Because
+Skyphusion Labs runs no Postern instance, it has no access to any mail or user data, and no
+data-controller or data-processor role attaches to the project for a service it does not run.
+
+Running a Postern instance in compliance with the law is the operator's responsibility. Each
+operator operates the software in accordance with the laws and regulations of their own jurisdiction
+(for example data-protection, retention, and lawful-access duties). This policy describes how the
+software behaves; it does not assume any of those duties for Skyphusion Labs.
+
+This document is not legal advice. If you run a mail server, consult a lawyer about the obligations
+that apply to you.
