@@ -28,7 +28,9 @@ skyphusion-labs/postern#74 (the deploy drift this fixes).
 - [ ] crew-secrets holds the deploy secrets (presence-check `${VAR:+SET}` only):
       `POSTERN_API_TOKEN` (store-read), `POSTERN_SEND_TOKEN`, `POSTERN_TRANSPORT_TOKEN`.
 - [ ] Cloudflare API token available for DNS + Workers (minter tier, on demand).
-- [ ] Decide the **exposure topology** (Phase 3 decision A vs B) BEFORE starting.
+- [ ] Exposure topology is DECIDED: **Option B, lagwagon-front** (Phase 2). The
+      only open window decisions left are the TLS model (B1 end-to-end vs B2
+      edge-terminate) and native-IMAPS vs stunnel for 993 (Phase 3b).
 - [ ] A non-fleet host (the laptop) ready for external smoke checks.
 
 ---
@@ -127,108 +129,176 @@ Confirm no consumer still points at `skyphusion-email-inbound` or `skyphusion-em
 
 ---
 
-## Phase 2 -- decide the exposure topology (do this BEFORE Phase 3)
+## Phase 2 -- exposure topology: Option B, lagwagon-front (CHOSEN)
 
-The mail doors live on **dischord**, a fleet box whose public interface is closed
-(ufw scoped to the VLAN + bastion). Exposing 587/993 is the first public-facing
-service on a fleet box. Two options; pick one for the window:
+Conrad's decision: **Option B.** Public 587/993 terminate/forward at **lagwagon**
+(the cloud edge / NAT gateway), forwarded over the private mesh to dischord's doors.
+**No fleet box ever binds a public port** -- dischord stays dark, reachable only over
+the private estate. That isolation is the entire point of B.
 
-- **Option A (direct):** open 587/993 on dischord's public interface; grey-cloud
-  DNS A records point at dischord's public IP. Simplest; what the DEPLOY docs assume.
-- **Option B (fronted):** terminate 587/993 on **lagwagon** (already the public
-  edge) and proxy to dischord over the VLAN, keeping fleet boxes off the public
-  internet. More aviation-grade isolation, more moving parts (a TCP proxy on
-  lagwagon; do NOT touch its ip_forward/MASQ). **Flag for Conrad's call.**
+```
+mail client (internet)
+      |  587 / 993 (TLS)
+      v
+  lagwagon   (PUBLIC edge; userspace TCP forwarder, strictly additive)
+      |  private mesh hop (lagwagon -> dischord VLAN IP 10.1.1.2)
+      v
+  dischord   doors: postern-submission (587/1587) + postern-imap (993/1143)
+      |  HTTPS(443) to the worker /api/*  (unchanged)
+      v
+  postern.skyphusion.org
+```
 
-The rest of Phase 3 is written for Option A; for Option B the same steps apply but
-the listener + cert + ufw live on lagwagon and the A record points at lagwagon.
+### lagwagon guardrails (READ FIRST -- lagwagon is the SPOF for ALL off-fleet access)
 
-NB: Hetzner blocks OUTBOUND 25/465/587 on the fleet, but these are INBOUND
-submission/IMAP listeners (clients connect IN), which is unaffected. The send
-hand-off to the worker is HTTPS(443), which is open.
+- lagwagon's `ip_forward` + the POSTROUTING **MASQ** rule + the SSH/bastion path ARE
+  the entire laptop->fleet lifeline. **NEVER touch them.** The mail edge is a
+  **userspace TCP forwarder** (accept on the public port, open a NEW connection to
+  dischord) -- it needs NO kernel forwarding, NO DNAT, NO change to the MASQ/NAT
+  rules. If a step would edit `net.ipv4.ip_forward` or a POSTROUTING/DNAT rule, STOP:
+  you are doing it wrong.
+- Strictly **additive**: a new userspace listener + a new ufw allow on the public
+  iface + (optionally) a new fail2ban jail. Nothing existing is modified.
+- lagwagon is **most-careful, vKVM-open, dead-LAST**. Bring the dischord side up and
+  verify it over the mesh BEFORE adding any public surface on lagwagon. Keep the
+  Hetzner vKVM console open the whole time.
+
+### Option A (dischord-direct) -- NOT chosen, recorded for completeness
+
+Binding 587/993 on dischord's public interface (grey-cloud A record -> dischord
+public IP) is simpler but puts the first public port on a fleet box. Conrad chose B
+to keep fleet boxes dark. If B is ever abandoned, A is the fallback: cert + listener
++ ufw + DNS all on dischord, same per-step shape (cert -> listener -> ufw -> DNS ->
+external smoke), the doors binding 0.0.0.0 instead of the VLAN IP.
+
+NB: Hetzner blocks OUTBOUND 25/465/587 on the fleet, but these are INBOUND listeners
+(clients connect IN to lagwagon), which is unaffected. The send hand-off to the
+worker is HTTPS(443), which is open.
 
 ---
 
-## Phase 3 -- expose the mail doors (per door: cert -> listener -> ufw -> DNS -> smoke)
+## Phase 3 -- stand up the lagwagon-front mail edge (B)
 
-Do the SMTP door fully (3a) and verify before starting the IMAP door (3b). For each
-door the order is: provision the cert (no exposure), wire the listener (no
-exposure), open the firewall (scoped), then add DNS last so the name only resolves
-once the port actually serves.
+Order: bring up dischord's doors on the PRIVATE interface, verify lagwagon reaches
+them over the mesh, design the fail2ban scoping, THEN add public surface on lagwagon
+(dead-last), THEN DNS.
 
-### 3a. SMTP submission (587 / optional 465)
+### 3a. dischord doors bind the PRIVATE mesh interface (no public exposure)
 
-1. **TLS cert (no exposure yet).** DNS-01 against the CF DNS API issues a cert for
-   `smtp.skyphusion.org` without opening a port or needing an A record:
-   ```bash
-   certbot certonly --dns-cloudflare \
-     --dns-cloudflare-credentials /root/.cf-dns.ini -d smtp.skyphusion.org
-   ```
-   Point `SUBMISSION_TLS_CERT`/`SUBMISSION_TLS_KEY` at
-   `/etc/letsencrypt/live/smtp.skyphusion.org/{fullchain,privkey}.pem` (world-read
-   the PEMs or ACL them for the DynamicUser). Set up auto-renew (daemon hot-reloads).
-   - **Smoke:** `openssl x509 -in fullchain.pem -noout -subject -dates` shows the
-     right name + validity. No exposure changed.
+The doors must be reachable from lagwagon over the private estate, NOT from the
+internet. Bind them to dischord's VLAN IP (10.1.1.2), never 0.0.0.0:
 
-2. **Listener (no exposure yet).** `/etc/postern-submission.env` ->
-   `SUBMISSION_LISTENERS=587:starttls,465:implicit`, `systemctl restart
-   postern-submission`.
-   - **Smoke:** `ss -tlnp | grep -E ':587|:465'` shows the binds. Local STARTTLS+AUTH
-     still works. ufw still blocks external (next step opens it).
-   - **Rollback:** revert to `SUBMISSION_LISTENERS=127.0.0.1:1587:starttls`, restart.
+- postern-submission: `SUBMISSION_LISTENERS=10.1.1.2:587:starttls` (or keep the
+  loopback 1587 and have the forwarder target 1587 -- either works).
+- postern-imap: `POSTERN_IMAP_HOST=10.1.1.2`, `POSTERN_IMAP_PORT=993` (or keep 1143).
+- dischord ufw: allow these ports **FROM the lagwagon mesh source ONLY** (the private
+  range), NOT from any. **No public change on dischord.**
 
-3. **Firewall (scoped).** Open 587 (and 465 if used) in ufw. A public submission
-   service is `from any`; if the audience is restricted, scope the source tighter.
-   ```bash
-   ufw allow proto tcp to any port 587 comment 'postern submission'
-   # ufw allow proto tcp to any port 465 comment 'postern implicit-tls submission'
-   ```
-   - **Smoke:** from the laptop, `nc -vz <dischord-public-ip> 587` connects.
-   - **Rollback:** `ufw delete allow ... 587` (and 465). Re-verify external is blocked.
+- **Smoke:** from lagwagon, `nc -vz 10.1.1.2 587` and `:993` connect; from a public
+  host they do NOT.
+- **Rollback:** revert the doors to loopback (127.0.0.1:1587/1143), drop the dischord
+  ufw allow.
 
-4. **Public DNS (last).** Add a grey-cloud A record `smtp.skyphusion.org` ->
-   dischord public IP (IaC: CF DNS API, not the dashboard). CF does not proxy SMTP
-   except via Spectrum, so it MUST be grey-cloud (DNS-only).
-   - **Smoke (the real artifact):** from the laptop,
-     ```bash
-     swaks --server smtp.skyphusion.org:587 --tls --auth PLAIN \
-       --auth-user conrad --auth-password '<directory pw>' \
-       --from conrad@skyphusion.org --to <external> --header 'Subject: go-live 587' --body hi
-     ```
-     A clean `STARTTLS -> AUTH -> 250` from OUTSIDE the fleet is the go-live proof.
-     A non-`mail-users` account / bad password / `From != identity` must be rejected.
-   - **Rollback:** remove the A record; the port stays open but unresolvable, then
-     close ufw if fully aborting.
+### 3b. TLS model -- Conrad's call at the window (write both)
 
-### 3b. IMAP (993 IMAPS)
+Both models keep the public listener on lagwagon and the door on dischord; they
+differ in WHERE TLS terminates, and therefore WHAT lagwagon can see.
 
-Same sequence for the read door. Two ways to serve TLS (pick one):
+**B1. End-to-end passthrough (lagwagon = dumb TCP pipe).** lagwagon forwards raw TCP
+587/993 to dischord; **dischord holds the cert and terminates TLS**. lagwagon sees
+only ciphertext. Preserves 587 STARTTLS and native IMAPS unchanged. Forwarder =
+HAProxy (TCP mode) or `socat`. Cert (`smtp.`/`imap.skyphusion.org`) provisioned on
+dischord via DNS-01 (a TXT record; no port/exposure needed).
+  - Pro: TLS end-to-end; the edge cannot read mail. Con: the cert lives on a fleet
+    box; lagwagon has no auth visibility (drives the fail2ban design, 3d).
 
-- **Native IMAPS:** set `POSTERN_IMAP_TLS_CERT`/`POSTERN_IMAP_TLS_KEY` (cert for
-  `imap.skyphusion.org`), set `POSTERN_IMAP_HOST=0.0.0.0` `POSTERN_IMAP_PORT=993`,
-  restart `postern-imap`.
-- **stunnel front:** keep the proxy loopback 1143, front it with stunnel on 993
-  using the cert. (Useful if you want the proxy itself to stay loopback-only.)
+**B2. Edge-terminate (lagwagon terminates TLS).** lagwagon terminates **implicit
+TLS** (465 for SMTP, 993 for IMAP) with **the cert on lagwagon** (stunnel or HAProxy)
+and forwards PLAINTEXT over the trusted mesh to the dischord door.
+  - Pro: cert + renewal at the edge; no fleet box holds it. Con: plaintext mail on
+    the mesh hop (trusted private estate, but not end-to-end); STARTTLS 587 does not
+    edge-terminate cleanly, so this model uses implicit-TLS ports (465/993).
 
-1. **Cert:** DNS-01 for `imap.skyphusion.org` (as 3a.1).
-2. **Listener:** native 993 or stunnel; restart.
-   - **Smoke:** `ss -tlnp | grep :993`; local `openssl s_client -connect 127.0.0.1:993`
-     presents the cert; an IMAPS login + SELECT INBOX works.
-3. **Firewall:** `ufw allow proto tcp to any port 993 comment 'postern imaps'`.
-   - **Smoke:** laptop `nc -vz <dischord-public-ip> 993` connects.
-4. **DNS (last):** grey-cloud A `imap.skyphusion.org` -> dischord public IP.
-   - **Smoke (artifact):** from the laptop, a real mail client (Thunderbird:
-     IMAPS imap.skyphusion.org:993 + SMTP smtp.skyphusion.org:587, one Authentik
-     login for both) fetches INBOX and sends a message.
-   - **Rollback:** remove A record; close ufw 993; revert listener to loopback.
+Sub-decision (wherever TLS terminates): **native IMAPS vs stunnel for 993** -- either
+the door serves IMAPS natively with the cert, or stunnel fronts the loopback proxy.
+Write both; Conrad picks.
+
+Recommendation (noted, NOT baked): **B1 end-to-end + native door TLS** keeps mail
+unreadable by the edge and preserves 587 STARTTLS; **B2** simplifies cert ops at the
+cost of plaintext on the mesh. Conrad's call at the window.
+
+### 3c. lagwagon edge forwarder (userspace, additive; NEVER ip_forward/MASQ)
+
+Install the chosen userspace forwarder on lagwagon (HAProxy TCP mode or `socat` for
+B1; stunnel for B2), listening on the PUBLIC interface (`:587`/`:993` for B1,
+`:465`/`:993` for B2), target = dischord `10.1.1.2:<door>`. Run it as a hardened
+systemd unit (DynamicUser where the tool allows; mirror the door units). It is a
+userspace process: it does NOT and MUST NOT touch `ip_forward`, DNAT, or the
+POSTROUTING MASQ rule.
+
+- **Smoke:** with the forwarder up but the public ufw still CLOSED, from lagwagon
+  itself `nc -vz 127.0.0.1 587`/`:993` reaches the forwarder -> dischord door (a
+  local test on lagwagon; the public iface is still firewalled).
+- **Rollback:** `systemctl disable --now` the forwarder; remove its unit. Nothing
+  else changes.
+
+### 3d. fail2ban (lagwagon-ONLY) -- scope it so it can NEVER cause a fleet lockout
+
+fail2ban runs ONLY on lagwagon (a fleet-box jail would ban the masq source 10.1.0.3
+= total lockout) and today jails SSH. Public 587/993 adds brute-force surface.
+Design the mail protection ISOLATED from the SSH jail and unable to ban the
+internal/masq source:
+
+- **ignoreip MUST include** `127.0.0.1/8 10.1.0.3 10.1.0.0/16 10.1.1.0/24` (+ the
+  mesh range). This guarantees no jail (SSH or mail) ever bans the masq source or a
+  fleet box. Add it to the mail jail AND confirm it on the existing SSH jail.
+- A **separate** `postern-mail` jail: own filter, own `port = 587,993`, own
+  `f2b-postern-mail` chain. NEVER edit the SSH jail. The action is fail2ban's
+  standard multiport iptables action scoped to the mail ports on the PUBLIC interface
+  only; it inserts into its own chain, NOT POSTROUTING, so MASQ/forward are untouched.
+- **Auth-failure signal lives on dischord** (the door logs 535/LOGIN failures after
+  TLS terminates), but the jail must run on lagwagon. Two tiers:
+  - **Baseline (pure lagwagon-local):** a connection-RATE jail on the public mail
+    ports (port-flood filter) -- catches floods without reading encrypted auth.
+  - **Recommended enhancement:** forward dischord's postern door auth-fail log lines
+    to lagwagon over syslog; the lagwagon `postern-mail` jail matches THOSE and bans
+    the real public client IP at the edge. Keeps fail2ban lagwagon-only AND gets
+    auth-based banning. (Caveat: the forwarded log must carry the real client IP; if
+    the forwarder masks it to the lagwagon source, fall back to the rate tier so a
+    ban can never land on 10.1.0.3 -- which ignoreip blocks regardless.)
+- **Smoke:** trip the filter from a throwaway public IP -> it bans on the public
+  iface; confirm `fail2ban-client status postern-mail` shows the ban, confirm
+  10.1.0.3 and a fleet box are STILL reachable (ignoreip working), confirm the SSH
+  jail is untouched and the laptop->fleet path still works.
+- **Rollback:** `fail2ban-client stop` the postern-mail jail; remove its jail.d
+  file. The SSH jail + ignoreip stay.
+
+### 3e. Public DNS + lagwagon ufw (DEAD-LAST)
+
+Only after 3a-3d verify over the mesh:
+
+- **ufw on lagwagon:** open 587/993 (or 465/993 for B2) on the PUBLIC interface,
+  scoped as tightly as the audience allows. lagwagon is most-careful; vKVM open.
+  ```bash
+  ufw allow proto tcp to any port 587 comment 'postern submission (edge)'
+  ufw allow proto tcp to any port 993 comment 'postern imaps (edge)'
+  ```
+- **DNS (last):** grey-cloud A records `smtp.skyphusion.org` + `imap.skyphusion.org`
+  -> **lagwagon's PUBLIC IP** (NOT dischord). CF does not proxy SMTP/IMAP except via
+  Spectrum, so these are grey-cloud (DNS-only). IaC via the CF DNS API, not the dash.
+- **Smoke (the go-live artifact):** from the laptop (off-fleet), a real mail client
+  (Thunderbird: IMAPS `imap.skyphusion.org:993` + submission `smtp.skyphusion.org:587`,
+  ONE Authentik login for BOTH doors) fetches INBOX and sends a message. A
+  non-`mail-users` account / bad password / `From != identity` is rejected at the
+  dischord door.
+- **Rollback:** remove the A records; close lagwagon public ufw 587/993. The
+  forwarder + dischord doors can stay (private) or be torn down per 3c/3a.
 
 ### Auth backend at go-live
 
-The doors deploy in **PAM mode** (`AUTH_BACKEND=system` / IMAP `pam` mode,
-`AUTH_SYSTEM_PAM_SERVICE=postern`): the unified Authentik login over the existing
+Unchanged: the doors run **PAM mode** (`AUTH_BACKEND=system` / IMAP `pam` mode,
+`AUTH_SYSTEM_PAM_SERVICE=postern`) -- the unified Authentik login over the existing
 nslcd chain, **no IdP change**. Phase 4 (direct-LDAP) is NOT required for go-live.
-
----
 
 ## Phase 4 -- OPTIONAL: off-fleet direct-LDAP (only if PAM is ever insufficient)
 
@@ -277,15 +347,20 @@ supervised, with a rollback ready.
 
 ## Master rollback order (if the window must be aborted)
 
-Reverse of go-live, doors first then email routing (so live email is restored last
-and most carefully):
+Reverse of go-live: the EDGE (lagwagon) comes down first, then the dischord doors,
+then live-email routing LAST (so live email is restored most carefully):
 
-1. Remove DNS A records (`smtp.`/`imap.`), close ufw 587/993, revert listeners to
-   loopback. (Doors back to private.)
-2. If Phase 4 was touched: remove 636 + the scoped account.
-3. Repoint the doors' `POSTERN_API_URL`/`POSTERN_SEND_URL` back if needed.
-4. Email routing + relay: only if Phase 1 itself is being reverted, repoint routing
-   rules + `EMAIL_WORKER_URL` back to the old workers (still present until 1.6).
+1. **lagwagon edge first:** remove the DNS A records (`smtp.`/`imap.`), close the
+   lagwagon public ufw 587/993, `systemctl disable --now` the forwarder, stop the
+   `postern-mail` fail2ban jail. lagwagon is now back to its pre-go-live state --
+   ip_forward / MASQ / SSH jail / ignoreip all untouched throughout.
+2. **dischord doors:** revert the doors to loopback (127.0.0.1:1587/1143), drop the
+   dischord mesh-scoped ufw allow. (Doors back to private.)
+3. If Phase 4 was touched: remove 636 + the scoped `cn=postern-mail-ro` account.
+4. If the doors' origin was moved: repoint `POSTERN_API_URL` / `POSTERN_SEND_URL`
+   back.
+5. **Live email LAST:** only if Phase 1 itself is being reverted, repoint the Email
+   Routing rules + `EMAIL_WORKER_URL` back to the old workers (still present until 1.6).
 
 Live inbound email is the most sensitive surface; its switch (1.3) is a single
 reversible routing change and the old worker stays deployed until a soak passes.
