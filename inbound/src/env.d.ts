@@ -98,6 +98,17 @@ interface Env {
    * to keep the single-token (`both`) posture.
    */
   POSTERN_API_TOKEN_SEND?: string;
+  /**
+   * Optional per-identity SEND registry (#28). A JSON object mapping the sha256 HEX
+   * of a send token -> its bound sender identity { from, displayName? }. MANY tokens,
+   * each the SAME send scope but a DISTINCT, authoritative From, so crew + released
+   * users send as THEMSELVES via their own token instead of one shared key. Stores
+   * token HASHES, never raw tokens, so this secret never holds a plaintext send
+   * credential. The worker hashes the presented Bearer and looks it up; a hit forces
+   * the From to the bound identity on /api/send + /api/reply. Additive: leave unset to
+   * keep the static both/read/send posture. wrangler secret put POSTERN_SEND_IDENTITIES.
+   */
+  POSTERN_SEND_IDENTITIES?: string;
   /** Default From when a send omits it. Must be on ALLOWED_FROM_DOMAIN. */
   DEFAULT_FROM?: string;
   /** Optional display name paired with DEFAULT_FROM. */
