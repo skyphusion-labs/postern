@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/mail"
 	"os"
 	"strings"
@@ -159,6 +160,50 @@ func inboundIntakeAddrs(cfg Config) []string {
 	return splitListen(cfg.Listen)
 }
 
+// intakeAddrIsLoopback reports whether a resolved intake bind address binds ONLY a
+// loopback interface. It fails closed: anything it cannot positively confirm as
+// loopback (a wildcard bind like ":2525", 0.0.0.0, ::, or a non-localhost hostname
+// it cannot resolve to a literal) is treated as NON-loopback. A SplitHostPort error
+// is surfaced so a malformed address is rejected rather than silently allowed.
+func intakeAddrIsLoopback(addr string) (bool, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false, fmt.Errorf("intake listen address %q is not a valid host:port: %w", addr, err)
+	}
+	if host == "" {
+		// e.g. ":2525" -- a wildcard bind on every interface, NOT loopback.
+		return false, nil
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true, nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// A non-localhost hostname we cannot positively confirm as loopback.
+		return false, nil
+	}
+	return ip.IsLoopback(), nil
+}
+
+// checkIntakeLoopback enforces audit finding F4: the inbound intake listener is
+// unauthenticated by design (no AUTH, AllowInsecureAuth=true), so it is safe ONLY
+// on loopback. We make "intake is loopback-only" an ENFORCED invariant, not just a
+// default: if any resolved intake bind address is non-loopback the relay refuses to
+// start (fail closed). An operator who genuinely needs a non-loopback intake must
+// front it with something that authenticates.
+func checkIntakeLoopback(addrs []string) error {
+	for _, addr := range addrs {
+		ok, err := intakeAddrIsLoopback(addr)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("inbound intake listener must bind loopback only; got %q (the intake door is unauthenticated by design, so a public bind is an open injection/store-poisoning door; front it with an authenticated proxy if you truly need a non-loopback intake)", addr)
+		}
+	}
+	return nil
+}
+
 func run(cfg Config) error {
 	be := &Backend{cfg: cfg, client: NewClient(cfg)}
 
@@ -176,6 +221,12 @@ func run(cfg Config) error {
 			"(POSTERN_INGEST_URL or EMAIL_WORKER_URL) is configured; inbound intake is DISABLED. "+
 			"Set an inbound destination to enable intake, or unset SMTP_LISTEN to silence this.",
 			os.Getenv("SMTP_LISTEN"))
+	}
+
+	// F4: the intake door is unauthenticated by design, so enforce loopback-only at
+	// the binding decision. Refuse to start on any non-loopback intake bind.
+	if err := checkIntakeLoopback(addrs); err != nil {
+		return err
 	}
 
 	// Parse submission listeners up front so the error channel is sized exactly.
@@ -219,9 +270,9 @@ func run(cfg Config) error {
 		}
 	}
 
-	// One go-smtp server per address (e.g. loopback for host services plus a
-	// docker-bridge IP for a containerized caller like Uptime Kuma). They share
-	// the stateless Backend.
+	// One go-smtp server per address. Every address is loopback-only by the F4
+	// invariant enforced above (the intake door is unauthenticated), so multiple
+	// binds are just multiple loopback aliases. They share the stateless Backend.
 	for _, addr := range addrs {
 		srv := smtp.NewServer(be)
 		srv.Addr = addr

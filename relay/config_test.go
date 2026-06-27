@@ -200,3 +200,67 @@ func TestRun_NothingToDo(t *testing.T) {
 		t.Fatalf("run() err = %v, want a nothing-to-do error", err)
 	}
 }
+
+// TestIntakeAddrIsLoopback covers the F4 loopback classifier directly: only
+// addresses that bind a loopback interface (or the conventional localhost name) are
+// loopback; wildcard binds, 0.0.0.0, public IPs, and unresolvable hostnames are not.
+func TestIntakeAddrIsLoopback(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:2525", true},
+		{"127.0.0.5:2525", true}, // all of 127.0.0.0/8 is loopback
+		{"[::1]:2525", true},
+		{"localhost:2525", true},
+		{"LocalHost:2525", true}, // case-insensitive
+		{":2525", false},         // wildcard bind, every interface
+		{"0.0.0.0:2525", false},
+		{"[::]:2525", false},
+		{"10.1.1.2:2525", false}, // a real interface
+		{"smtp.example.com:2525", false},
+	}
+	for _, tc := range cases {
+		got, err := intakeAddrIsLoopback(tc.addr)
+		if err != nil {
+			t.Errorf("intakeAddrIsLoopback(%q): unexpected error %v", tc.addr, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("intakeAddrIsLoopback(%q) = %v, want %v", tc.addr, got, tc.want)
+		}
+	}
+}
+
+// TestCheckIntakeLoopback_RejectsNonLoopback asserts the enforced invariant: a
+// non-loopback intake bind is refused with a clear error; a malformed address is
+// also refused.
+func TestCheckIntakeLoopback_RejectsNonLoopback(t *testing.T) {
+	if err := checkIntakeLoopback([]string{"127.0.0.1:2525", "[::1]:2525"}); err != nil {
+		t.Fatalf("loopback-only set rejected: %v", err)
+	}
+	err := checkIntakeLoopback([]string{"127.0.0.1:2525", "0.0.0.0:2525"})
+	if err == nil || !strings.Contains(err.Error(), "loopback only") {
+		t.Fatalf("err = %v, want a loopback-only rejection for a public bind", err)
+	}
+	if err := checkIntakeLoopback([]string{"not-a-host-port"}); err == nil {
+		t.Fatal("want an error for a malformed intake address")
+	}
+}
+
+// TestRun_RejectsNonLoopbackIntake drives the real binding path: an inbound-active
+// config whose SMTP_LISTEN binds a public interface must make run() refuse to start.
+func TestRun_RejectsNonLoopbackIntake(t *testing.T) {
+	clearRelayEnv(t)
+	t.Setenv("POSTERN_INGEST_URL", "https://core.example/ingest")
+	t.Setenv("POSTERN_TRANSPORT_TOKEN", "tok")
+	t.Setenv("SMTP_LISTEN", "0.0.0.0:2525")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	err = run(cfg)
+	if err == nil || !strings.Contains(err.Error(), "loopback only") {
+		t.Fatalf("run() err = %v, want a loopback-only rejection", err)
+	}
+}
