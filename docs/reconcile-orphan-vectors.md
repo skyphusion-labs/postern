@@ -20,6 +20,44 @@ current messages. Two candidate roots:
 - **(b) pre-#116 id scheme**: vectors written under an earlier id scheme that the
   unified `embedAndUpsert` id does not overwrite.
 
+## 1a. Measured results (live audit, 2026-06-27)
+
+Run read-only against the live `skyphusion-mail` D1 + `skyphusion-mail-vec` index via
+`wrangler dev --remote` (the deployed worker stayed frozen; zero Workers-AI spend; the
+index vectorCount was 3125 before and after, confirming nothing was mutated).
+
+| metric | value |
+| --- | --- |
+| messages in D1 | 1864 |
+| gated (indexable, `VECTORIZE_FOR=""`) | 1864 |
+| expected vectors (current scheme) | 2103 |
+| live vectors (`describe`) | 3125 |
+| expected present (`getByIds` verify) | 2103 |
+| expected MISSING (under-coverage) | **0** |
+| **ORPHAN COUNT** | **1022** |
+| cause determination | **(b)** pre-#116 id scheme |
+| sample | 120 probes, 314 distinct orphans: causeB **314**, causeA **0**, unknown **0** |
+
+Findings:
+
+- **Orphan count is 1022** (3125 - 2103), matching the issue's ~1,023 estimate.
+- **Coverage is complete:** all 2103 current-scheme vectors are present; zero
+  under-coverage. The backfill did its job.
+- **Cause is (b), decisively:** every one of the 314 distinct sampled orphans ties back
+  to a STILL-LIVE message; **zero** deleted-message (a) orphans in the sample. This
+  matches the grounded prediction (no delete path exists, so nothing produces (a)).
+- **Two pre-#116 schemes** were identified in the orphan population, both carrying only
+  `{date, from, subject}` metadata (no `message_id` / `chunk` / `direction`):
+  1. **raw-message-id-as-vector-id** -- the vector id IS the message_id (e.g.
+     `...review/4530171109@github.com`). All sampled instances are live messages.
+  2. **bare 64-hex, no chunk suffix** -- a full-length hash id (vs the current 56-char
+     prefix + `.chunk`). Not reproducible from any tested hash of the live message_id,
+     but every sampled instance matches a live message by `(date, subject)`.
+
+The orphans are overwhelmingly GitHub-notification mail re-indexed as the id scheme
+evolved across the #116 epic; the old-scheme vectors were never overwritten because
+their ids differ from the unified `base.chunk`.
+
 ## 2. The id scheme (the contract the audit mirrors)
 
 `embedAndUpsert` (`inbound/src/store.ts`) is the SINGLE vector-construction path for
@@ -74,17 +112,24 @@ lists the viable durable options for getting a complete, deletable target.
    each gated, non-empty message compute its `base.0..base.(n-1)` ids. Yields
    `expectedVectors` and the set of still-live `message_id`s.
 2. **Read live count.** `describe()` -> `liveVectorCount`.
-3. **Verify presence.** `getByIds` over the expected ids (batched 100/call) ->
-   `presentExpected` + `missingExpected`. Missing expected ids are **under-coverage** (a
-   distinct bug from orphans) and are surfaced separately.
+3. **Verify presence.** `getByIds` over the expected ids (batched at the live cap of
+   **20 ids/call** -- `VECTOR_GET_ERROR 40007` above that -- and bounded-parallel so a
+   full-size index finishes inside the request wall-clock) -> `presentExpected` +
+   `missingExpected`. Missing expected ids are **under-coverage** (a distinct bug from
+   orphans) and are surfaced separately.
 4. **Headline.** `orphanCount = liveVectorCount - (verified ? presentExpected : expectedVectors)`.
 5. **Cause sampling.** Take up to `sampleSize` live vectors, pull their VALUES via
-   `getByIds` (no new embeddings -> **zero Workers-AI spend**), and `query` each with a
-   high topK. Every returned id not in the expected set is an orphan; classify it:
-   - `metadata.message_id` **present in D1**  -> **cause (b)** (live message, stale id).
-   - `metadata.message_id` **absent from D1**  -> **cause (a)** (deleted-message orphan).
-   - no usable `message_id`                   -> `unknown`.
-   `causeDetermination` is `a` / `b` / `mixed` / `indeterminate` from the sample.
+   `getByIds` (no new embeddings -> **zero Workers-AI spend**), and `query` each with
+   `topK=20` (Vectorize caps topK at 20 when `returnMetadata="all"`). Every returned id
+   not in the expected set is an orphan; classify it by EVERY linkage it exposes, since
+   the old schemes carry neither the unified id nor a `message_id` field:
+   - `metadata.message_id` in D1, OR the vector id itself is a live message_id, OR the
+     `(date, subject)` metadata matches a live message -> **cause (b)** (still-live).
+   - a `message_id` or `(date, subject)` that is NOT in D1 -> **cause (a)** (deleted).
+   - no usable linkage at all -> `unknown`.
+   `causeDetermination` is `a` / `b` / `mixed` / `indeterminate` from the sample. (The
+   first live run returned `indeterminate` because the old vectors lack `message_id`;
+   the multi-signal classifier above fixed that -> `b`.)
 
 The whole pass uses D1 + Vectorize `describe`/`getByIds`/`query` only. **It never calls
 `deleteByIds`.** Nothing is mutated; the conformance test pins index-unchanged.
@@ -119,11 +164,16 @@ There is **no message-delete path anywhere in Postern today**:
 So messages are not being removed through any live application path, which means the
 orphan population is **static, not regrowing**, and cause (a) -- if present -- comes from
 a one-time historical event (e.g. a manual D1 prune / re-seed during the #116 epic), not
-an ongoing leak. With `message_id` stable, the standing hypothesis is that the bulk are
-**cause (b)** pre-#116-scheme vectors for still-live messages. The reconcile **sample**
-settles the actual a-vs-b split empirically; run it before deciding the prune target.
+an ongoing leak. With `message_id` stable, the standing hypothesis was that the bulk are **cause (b)**
+pre-#116-scheme vectors for still-live messages. **The live audit confirmed it: 314/314
+sampled orphans are cause (b), zero cause (a)** (section 1a).
 
 ## 6. Proposed prune plan (NOT implemented; Conrad-supervised, gated)
+
+The live audit (section 1a) confirms the orphans are cause (b): stale-id vectors for
+messages that are STILL in D1. A **full rebuild from D1 (option 1)** is therefore the
+clean fix -- it re-keys every live message under the unified `base.chunk` scheme and
+carries none of the old-scheme ids across, so the orphan class disappears in one pass.
 
 Because the orphan SET is not cleanly enumerable, "list the orphans then delete them" is
 **not** safely complete. Options, in recommended order:

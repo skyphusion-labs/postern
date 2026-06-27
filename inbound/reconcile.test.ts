@@ -172,4 +172,66 @@ describe("reconcile orphan-vector audit (#134)", () => {
     expect(r.liveVectorCount).toBe(2); // ingest applied the same gate
     expect(r.orphanCount).toBe(0);
   });
+
+  it("classifies a RAW-message-id-as-vector-id orphan (no message_id metadata) as cause (b)", async () => {
+    // The earliest #134 scheme keyed the vector by the raw message_id and stored NO
+    // message_id metadata. Linkage is the vector id itself matching a live message.
+    const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    await seed(env, ctx, settle, { id: "alive@x", direction: "inbound", to: "conrad@skyphusion.org", text: "deploy release invoice", date: "2026-09-01T00:00:00.000Z" });
+    const liveVec = (vectors as { values: number[] }[])[0];
+    await env.VECTORIZE.upsert([
+      { id: "alive@x", values: liveVec.values, metadata: { date: "2026-09-01T00:00:00.000Z", subject: "subject", from: "sender@example.com" } },
+    ]);
+    const r = await store.reconcile(env, { includeOrphanIds: true });
+    expect(r.orphanCount).toBe(1);
+    expect(r.sample.causeB).toBe(1);
+    expect(r.sample.causeA).toBe(0);
+    expect(r.sample.unknown).toBe(0);
+    expect(r.causeDetermination).toBe("b");
+  });
+
+  it("classifies an early-metadata-scheme orphan ((date,subject) only) as cause (b)", async () => {
+    // A later-but-still-pre-#116 scheme hashed the id but stored only {date,subject,from}.
+    // Linkage is the (date,subject) pair matching a live message.
+    const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    await seed(env, ctx, settle, { id: "present@x", direction: "inbound", to: "conrad@skyphusion.org", text: "render gpu video", date: "2026-09-02T00:00:00.000Z" });
+    const liveVec = (vectors as { values: number[] }[])[0];
+    await env.VECTORIZE.upsert([
+      { id: "deadbeefcafef00d", values: liveVec.values, metadata: { date: "2026-09-02T00:00:00.000Z", subject: "subject", from: "sender@example.com" } },
+    ]);
+    const r = await store.reconcile(env, {});
+    expect(r.orphanCount).toBe(1);
+    expect(r.sample.causeB).toBe(1);
+    expect(r.causeDetermination).toBe("b");
+  });
+
+  it("classifies an orphan with NO live linkage as cause (a) (deleted)", async () => {
+    const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    await seed(env, ctx, settle, { id: "anchor2@x", direction: "inbound", to: "conrad@skyphusion.org", text: "deploy release invoice", date: "2026-09-03T00:00:00.000Z" });
+    const liveVec = (vectors as { values: number[] }[])[0];
+    // Metadata points at a (date,subject) that is NOT any live message -> deleted.
+    await env.VECTORIZE.upsert([
+      { id: "facade00deadc0de", values: liveVec.values, metadata: { date: "2001-01-01T00:00:00.000Z", subject: "long gone", from: "sender@example.com" } },
+    ]);
+    const r = await store.reconcile(env, {});
+    expect(r.orphanCount).toBe(1);
+    expect(r.sample.causeA).toBe(1);
+    expect(r.sample.causeB).toBe(0);
+    expect(r.causeDetermination).toBe("a");
+  });
+
+  it("batches the getByIds presence check under the live 20-id cap (>20 expected ids)", async () => {
+    // The live Vectorize getByIds rejects >20 ids/call; the fake enforces that. Seeding
+    // 25 messages proves store.getByIdsBatched chunks at the cap (else this throws).
+    const { env, ctx, settle } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    for (let i = 0; i < 25; i++) {
+      const dd = String(i + 1).padStart(2, "0");
+      await seed(env, ctx, settle, { id: `b${i}@x`, direction: "inbound", to: "conrad@skyphusion.org", text: "deploy release invoice", date: `2026-10-${dd}T00:00:00.000Z` });
+    }
+    const r = await store.reconcile(env, {});
+    expect(r.expectedVectors).toBe(25);
+    expect(r.presentExpected).toBe(25); // all confirmed via batched getByIds, no cap breach
+    expect(r.missingExpected).toBe(0);
+    expect(r.orphanCount).toBe(0);
+  });
 });
