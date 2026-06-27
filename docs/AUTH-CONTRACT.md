@@ -202,6 +202,7 @@ verbatim; do not rename per component.
 | `LDAP_SEARCH_BASE` | both | **`ou=users,dc=ldap,dc=goauthentik,dc=io`**. |
 | `LDAP_SEARCH_FILTER` | both | **`(&(mail=%s)(memberOf=cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io))`** (single `%s`). |
 | `LDAP_MAIL_ATTR` | both | **`mail`**. |
+| `LDAP_TIMEOUT` | both | integer **seconds**, default **`10`**; bounds the directory connect AND every bind/search. `0` disables (no timeout). Symmetric across both doors: Go relay sets the `net.Dialer` timeout + conn read deadline (`relay/auth_ldap.go`); Python proxy sets `connect_timeout` + `receive_timeout` (`imap/posternimap/auth.py`). |
 
 Crew-secrets storage labels are per-function and may differ from the env knob; the
 deploy maps label -> knob in the 0600 EnvironmentFile. The only such mapping today:
@@ -209,9 +210,12 @@ crew-secrets `POSTERN_LDAP_BIND_PASSWORD` (labelled, direct-LDAP only) is writte
 `LDAP_BIND_PASSWORD=` in the file. `POSTERN_API_TOKEN`, `POSTERN_SEND_TOKEN`, and
 `POSTERN_TRANSPORT_TOKEN` are stored and consumed under the same name.
 
-Timeouts: the Python proxy has `POSTERN_API_TIMEOUT` (store API). The Go relay has
-no LDAP-bind timeout knob (go-ldap dial default); if an `LDAP_TIMEOUT` is added it
-must land on both sides to stay symmetric.
+Timeouts: the Python proxy has `POSTERN_API_TIMEOUT` (store API). `LDAP_TIMEOUT`
+(integer seconds, default `10`, `0` disables) bounds the directory auth path and is
+implemented on BOTH doors, keeping connect/bind/search bounded symmetrically: Go
+relay (`relay/config.go` + `relay/auth_ldap.go`) and Python proxy
+(`imap/posternimap/config.py` + `imap/posternimap/auth.py`). The Python side rejects
+a negative value (`LDAP_TIMEOUT must be >= 0`).
 
 ## 6. TLS-to-directory (only for direct-LDAP on the fleet) -- GATED
 
