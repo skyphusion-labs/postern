@@ -68,6 +68,24 @@ class PosternIMAPFactory(protocol.Factory):
         return proto
 
 
+def _build_tls_context_factory(cert_path: str, key_path: str):
+    """An IMAPS context factory with a TLS 1.2 floor (#106).
+
+    Twisted's stock DefaultOpenSSLContextFactory negotiates down to TLS 1.0/1.1,
+    which are deprecated and must not be offered. We build it on TLS_METHOD and
+    raise the minimum protocol version to TLS 1.2, mirroring the SMTP relay's
+    tls.VersionTLS12 floor so both doors share one posture. TLS deps are imported
+    lazily here so a non-TLS (loopback) deployment never needs pyOpenSSL.
+    """
+    from twisted.internet import ssl
+    from OpenSSL import SSL
+
+    factory = ssl.DefaultOpenSSLContextFactory(key_path, cert_path, sslmethod=SSL.TLS_METHOD)
+    # getContext() returns the cached context served to every connection.
+    factory.getContext().set_min_proto_version(SSL.TLS1_2_VERSION)
+    return factory
+
+
 def build_factory(cfg: Config) -> PosternIMAPFactory:
     return PosternIMAPFactory(cfg)
 
@@ -81,7 +99,7 @@ def run(cfg: Config) -> None:
     if cfg.tls_cert and cfg.tls_key:
         from twisted.internet import ssl
 
-        ctx = ssl.DefaultOpenSSLContextFactory(cfg.tls_key, cfg.tls_cert)
+        ctx = _build_tls_context_factory(cfg.tls_cert, cfg.tls_key)
         reactor.listenSSL(cfg.listen_port, factory, ctx, interface=cfg.listen_host)
         scheme = "imaps"
     else:

@@ -75,8 +75,10 @@ stays dependency-light. No token or password is ever logged.
 
 Run the proxy **behind TLS or on loopback** (the password is a real credential):
 set `POSTERN_IMAP_TLS_CERT`/`POSTERN_IMAP_TLS_KEY`, or front a loopback listener
-with stunnel. By default it binds `127.0.0.1:1143`. Exposing **993 (IMAPS)** is
-gated -- see [`DEPLOY.md`](DEPLOY.md).
+with stunnel. When TLS is enabled the listener enforces a **TLS 1.2 minimum** (the
+deprecated TLS 1.0/1.1 are never offered, mirroring the SMTP relay; #106). By
+default it binds `127.0.0.1:1143`. Exposing **993 (IMAPS)** is gated -- see
+[`DEPLOY.md`](DEPLOY.md).
 
 ## Configuration
 
@@ -102,7 +104,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `AUTH_SYSTEM_DOMAIN` | no | -- | optional display suffix for `system` logins |
 | `POSTERN_IMAP_HOST` | no | `127.0.0.1` | listen interface |
 | `POSTERN_IMAP_PORT` | no | `1143` | listen port |
-| `POSTERN_IMAP_TLS_CERT` | no | -- | PEM cert path (set with key for IMAPS) |
+| `POSTERN_IMAP_TLS_CERT` | no | -- | PEM cert path (set with key for IMAPS; listener enforces TLS 1.2+) |
 | `POSTERN_IMAP_TLS_KEY` | no | -- | PEM key path |
 | `POSTERN_API_TIMEOUT` | no | `15` | per-request timeout to the API, seconds |
 | `POSTERN_IMAP_WINDOW` | no | `500` | cap INBOX/Sent to the most-recent N at SELECT (0 = unlimited; All is always unbounded) |
