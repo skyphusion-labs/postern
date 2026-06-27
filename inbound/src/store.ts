@@ -33,6 +33,17 @@ export interface AttachmentMeta {
 
 /** List view: a message without its body or attachment bytes; carries a count. */
 export interface StoredMessageSummary {
+  /**
+   * Monotonic insertion key (#103): the store's AUTOINCREMENT rowid, assigned
+   * strictly ascending at ARRIVAL and never reused. This is the durable IMAP UID
+   * the proxy maps each message to (RFC 3501): order the mailbox by this value
+   * (arrival order) and surface it as the message UID under a constant
+   * UIDVALIDITY. Unlike the `date` field, it does not move when a backdated
+   * message arrives -- that message simply gets the next-highest uid and appears
+   * last, so a client's cached uid -> message mapping never points at the wrong
+   * body. Always present and > 0.
+   */
+  uid: number;
   messageId: string;
   direction: "inbound" | "outbound";
   threadId: string;
@@ -379,6 +390,7 @@ interface SummaryRow {
 
 function rowToSummary(row: SummaryRow): StoredMessageSummary {
   return {
+    uid: row.id,
     messageId: row.message_id,
     direction: row.direction === "outbound" ? "outbound" : "inbound",
     threadId: row.thread_id ?? row.message_id,
