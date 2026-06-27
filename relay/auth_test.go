@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -39,12 +38,11 @@ func TestSelectAuthProvider(t *testing.T) {
 		}
 	})
 
-	t.Run("system without the pam build tag is rejected with an actionable error", func(t *testing.T) {
-		cfg := Config{Submission: SubmissionCfg{Backend: "system", SystemDomain: "example.com"}}
-		_, err := selectAuthProvider(cfg, native)
-		if err == nil || !strings.Contains(err.Error(), "pam") {
-			t.Fatalf("err = %v, want an error mentioning the pam build tag", err)
-		}
+	// The system/PAM backend behaves differently per build tag (stub error in the
+	// default cgo-free build, real provider under -tags pam), so its assertion lives
+	// in a build-tagged helper (auth_system_select_{default,pam}_test.go).
+	t.Run("system backend", func(t *testing.T) {
+		assertSystemBackend(t, native)
 	})
 
 	t.Run("unknown backend is rejected", func(t *testing.T) {
