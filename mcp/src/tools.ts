@@ -1,8 +1,8 @@
 // Tool registry. Each tool declares the scope it needs; registerTools registers
 // only the tools whose scope the configured credentials satisfy. v1 ships READ
-// tools (scope "read"). The send tools (mailbox_send / mailbox_reply, scope
-// "send") drop into SEND_TOOLS in v1.1 and register ONLY when a send-scoped
-// token is present -- no refactor: the scope gate already exists here.
+// tools (scope "read"). v1.1 adds SEND_TOOLS (mailbox_send / mailbox_reply, scope
+// "send"); they register ONLY when a send-scoped token is configured -- the scope
+// gate below already enforces this, no refactor.
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -33,6 +33,9 @@ function fail(err: unknown): TextResult {
 
 const DIRECTION = z.enum(["inbound", "outbound"]);
 const MODE = z.enum(["fts", "semantic", "hybrid"]);
+// A recipient field accepts one address or a list; the worker validates each
+// against its address rule and enforces the recipient cap.
+const ADDRESSES = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
 
 export const READ_TOOLS: ToolDef[] = [
   {
@@ -103,9 +106,80 @@ export const READ_TOOLS: ToolDef[] = [
   },
 ];
 
-// Seam for v1.1: export const SEND_TOOLS: ToolDef[] = [ ...mailbox_send, mailbox_reply (scope "send")... ];
-// index.ts will registerTools(server, sendClient, scopes, SEND_TOOLS); they only
-// register when scopes includes "send" (i.e. a send-scoped token was configured).
+// v1.1 send tools (scope "send"). MUTATING: they actually send mail as the estate,
+// so they register ONLY when a send-scoped token is configured (see index.ts). The
+// worker owns From-enforcement, DKIM, threading, and storing the sent copy; these
+// tools forward a composed message and return the core messageId + threadId.
+export const SEND_TOOLS: ToolDef[] = [
+  {
+    name: "mailbox_send",
+    scope: "send",
+    description:
+      "Send a NEW email from the mailbox. MUTATING: this actually delivers mail to the " +
+      "recipients as the estate, so use it deliberately. Provide 'to', 'subject', and at " +
+      "least one of 'text' or 'html'. The server enforces the allowed From domain, signs " +
+      "(DKIM), threads, and stores the sent copy. Returns the new message id + thread id. " +
+      "To answer an existing message, prefer mailbox_reply (it threads automatically).",
+    inputSchema: {
+      to: ADDRESSES.describe("recipient address, or a list of addresses"),
+      subject: z.string().min(1).describe("the subject line"),
+      text: z.string().optional().describe("plain-text body (provide text and/or html)"),
+      html: z.string().optional().describe("HTML body (provide text and/or html)"),
+      cc: ADDRESSES.optional().describe("cc address, or a list"),
+      bcc: ADDRESSES.optional().describe("bcc address, or a list"),
+      from: z.string().optional().describe("optional From override; must be on the allowed From domain, else the server rejects it"),
+      reply_to: z.string().optional().describe("optional Reply-To address"),
+    },
+    handler: async (client, a) => {
+      if (!a.text && !a.html) {
+        throw new PosternError("provide at least one of 'text' or 'html'");
+      }
+      const result = await client.send({
+        to: a.to,
+        subject: a.subject,
+        text: a.text,
+        html: a.html,
+        cc: a.cc,
+        bcc: a.bcc,
+        from: a.from,
+        replyTo: a.reply_to,
+      });
+      return { sent: true, messageId: result.messageId, threadId: result.threadId, providerMessageId: result.providerMessageId ?? null };
+    },
+  },
+  {
+    name: "mailbox_reply",
+    scope: "send",
+    description:
+      "Reply to an existing stored message by its message id. MUTATING: this actually " +
+      "delivers mail as the estate. Provide 'message_id' and at least one of 'text' or " +
+      "'html'. The server pulls the referenced message and fills to / subject / " +
+      "In-Reply-To / References / thread, so the reply lands in the same conversation. " +
+      "Returns the new message id + thread id (shared with the original).",
+    inputSchema: {
+      message_id: z.string().min(1).describe("the message id being replied to (as returned by search/list/get)"),
+      text: z.string().optional().describe("plain-text body (provide text and/or html)"),
+      html: z.string().optional().describe("HTML body (provide text and/or html)"),
+      cc: ADDRESSES.optional().describe("cc address, or a list"),
+      bcc: ADDRESSES.optional().describe("bcc address, or a list"),
+      from: z.string().optional().describe("optional From override; must be on the allowed From domain, else the server rejects it"),
+    },
+    handler: async (client, a) => {
+      if (!a.text && !a.html) {
+        throw new PosternError("provide at least one of 'text' or 'html'");
+      }
+      const result = await client.reply({
+        messageId: a.message_id,
+        text: a.text,
+        html: a.html,
+        cc: a.cc,
+        bcc: a.bcc,
+        from: a.from,
+      });
+      return { sent: true, messageId: result.messageId, threadId: result.threadId, providerMessageId: result.providerMessageId ?? null };
+    },
+  },
+];
 
 export function registerTools(
   server: McpServer,
