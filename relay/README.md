@@ -134,7 +134,9 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
 - **ldap**: simple-bind (`LDAP_BIND_DN_TEMPLATE`) or search+bind (`LDAP_BIND_DN` +
   `LDAP_SEARCH_BASE` + `LDAP_SEARCH_FILTER`) over TLS (`ldaps://` or
   `LDAP_STARTTLS=true`). Bound identity = the `LDAP_MAIL_ATTR` attribute (default
-  `mail`). Pure-Go (`go-ldap`), no cgo.
+  `mail`). Pure-Go (`go-ldap`), no cgo. `LDAP_TIMEOUT` (seconds, default 10) bounds
+  the directory dial AND each bind/search so a dead or slow directory cannot hang a
+  login; symmetric with the Python IMAP proxy's `ldap` mode (#88).
 - **system**: local Unix accounts via PAM. Bound identity = `<user>@AUTH_SYSTEM_DOMAIN`.
   PAM needs cgo, so this backend is **build-tagged**: the default binary is
   cgo-free and rejects `AUTH_BACKEND=system` with a clear "rebuild with -tags pam"
