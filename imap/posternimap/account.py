@@ -39,19 +39,28 @@ from .mailbox import PosternMailbox
 class _Folder:
     """Static description of one advertised mailbox."""
 
-    __slots__ = ("direction", "special_use", "empty")
+    __slots__ = ("direction", "special_use", "empty", "windowed")
 
-    def __init__(self, direction: Optional[str], special_use: List[str], empty: bool) -> None:
+    def __init__(
+        self,
+        direction: Optional[str],
+        special_use: List[str],
+        empty: bool,
+        windowed: bool = False,
+    ) -> None:
         self.direction = direction
         self.special_use = special_use
         self.empty = empty
+        # windowed folders cap to the most-recent POSTERN_IMAP_WINDOW at SELECT; the
+        # unbounded All folder is the archival escape hatch (#102 Stage 1).
+        self.windowed = windowed
 
 
 # name (as the client sees it) -> folder description. INBOX/Sent/All are real
 # direction views; the rest are RFC 6154 special-use placeholders (empty in v1).
 _MAILBOXES: Dict[str, _Folder] = {
-    "INBOX": _Folder("inbound", [], False),
-    "Sent": _Folder("outbound", ["\\Sent"], False),
+    "INBOX": _Folder("inbound", [], False, windowed=True),
+    "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True),
     "All": _Folder(None, ["\\All"], False),
     "Drafts": _Folder(None, ["\\Drafts"], True),
     "Trash": _Folder(None, ["\\Trash"], True),
@@ -81,6 +90,8 @@ class PosternAccount:
             special_use=folder.special_use,
             empty=folder.empty,
             list_view=list_view,
+            window=self._cfg.imap_window if folder.windowed else 0,
+            poll_seconds=self._cfg.imap_poll_seconds,
         )
 
     # --- IAccount: read ---

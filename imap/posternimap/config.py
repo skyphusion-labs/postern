@@ -103,6 +103,23 @@ class Config:
     # Per-request timeout to the Postern API, seconds.
     api_timeout: float = 15.0
 
+    # --- mailbox windowing + live refresh (#102 Stage 1) ---
+    # POSTERN_IMAP_WINDOW: cap INBOX/Sent to the most-recent N messages at SELECT
+    # time. Load-on-demand for older mail is via the unbounded All folder, or by
+    # raising this value; IMAP cannot grow a folder downward mid-session, so there
+    # is no in-folder scroll-back. 0 means unlimited. 500 is a measurement-informed
+    # starting point, not gospel: it bounds the cold-sync cost a client pays until a
+    # message-size field lands (a client that fetches RFC822.SIZE still hydrates up
+    # to W bodies once; envelope/header scans stay body-free regardless).
+    imap_window: int = 500
+    # POSTERN_IMAP_POLL_SECONDS: while a mailbox is selected, re-poll the store
+    # (summary-only, recent end only) on this interval and push untagged EXISTS so
+    # new mail surfaces mid-session and IDLE is a real capability, not just an
+    # advertised one. The poll uses the same blocking urllib as fetch (one I/O model
+    # per stage); a deferToThread variant is a clean follow-up if measurement shows
+    # reactor stalls under concurrent SELECTs.
+    imap_poll_seconds: int = 30
+
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":
         e = os.environ if env is None else env
@@ -187,6 +204,13 @@ class Config:
         if bool(cert) != bool(key):
             raise ConfigError("set both POSTERN_IMAP_TLS_CERT and POSTERN_IMAP_TLS_KEY, or neither")
 
+        imap_window = _int(e, "POSTERN_IMAP_WINDOW", 500)
+        if imap_window < 0:
+            raise ConfigError("POSTERN_IMAP_WINDOW must be >= 0 (0 means unlimited)")
+        imap_poll_seconds = _int(e, "POSTERN_IMAP_POLL_SECONDS", 30)
+        if imap_poll_seconds < 0:
+            raise ConfigError("POSTERN_IMAP_POLL_SECONDS must be >= 0 (0 disables the poll)")
+
         return cls(
             api_url=api_url,
             listen_host=(e.get("POSTERN_IMAP_HOST") or "127.0.0.1").strip(),
@@ -210,6 +234,8 @@ class Config:
             pam_service=pam_service,
             system_domain=system_domain,
             api_timeout=_float(e, "POSTERN_API_TIMEOUT", 15.0),
+            imap_window=imap_window,
+            imap_poll_seconds=imap_poll_seconds,
         )
 
 

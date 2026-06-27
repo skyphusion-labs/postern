@@ -58,6 +58,9 @@ class FakeTransport:
         self.expected_token = expected_token
         self.page_size = page_size
         self.calls: List[str] = []
+        # count of per-message body fetches (GET /api/messages/{id}); the #102 proof
+        # is that an ENVELOPE/header scan never increments this.
+        self.body_fetches = 0
 
     def __call__(self, req):
         self.calls.append(req.full_url)
@@ -68,6 +71,8 @@ class FakeTransport:
         parsed = urllib.parse.urlparse(req.full_url)
         path = parsed.path
         params = dict(urllib.parse.parse_qsl(parsed.query))
+        if path.startswith("/api/messages/"):
+            self.body_fetches += 1
 
         if path == "/api/messages":
             return self._list(params)

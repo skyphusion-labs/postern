@@ -65,7 +65,12 @@ class ServerE2ETest(twisted_unittest.TestCase):
             make_message("m1", subject="welcome aboard", body="hello"),
         ]
         self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=2)
-        self.cfg = Config(api_url="https://x", auth_mode="token", api_timeout=5.0)
+        # poll disabled: these exercise LOGIN/LIST/SELECT/FETCH, not live refresh,
+        # so no LoopingCall is scheduled to dirty trial's reactor. The poll has
+        # its own deterministic coverage in test_mailbox (via twisted Clock).
+        self.cfg = Config(
+            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+        )
         self.factory, self._restore = _patched_factory(self.cfg, self.transport)
         self.port = reactor.listenTCP(0, self.factory, interface="127.0.0.1")
         self.addr = self.port.getHost()
