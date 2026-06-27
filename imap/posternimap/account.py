@@ -19,8 +19,10 @@ advertised as existing but empty (selectable, zero messages, no API hit).
 
 The mailbox set is fixed: create/rename/delete are rejected. SUBSCRIBE/LSUB are
 satisfied (every advertised folder is implicitly subscribed). APPEND is accepted
-as a no-op by the mailbox layer (see mailbox.addMessage) so a client's post-send
-"copy to Sent" never fails and never double-stores.
+as a no-op SUCCESS on the real views (INBOX/Sent/All) so a client's post-send
+"copy to Sent" never fails and never double-stores, but REJECTED with a tagged NO
+on the placeholder folders (Drafts/Trash/Junk/Archive), which have no backing store:
+failing honestly beats fake-acking and dropping the message (#109).
 """
 
 from __future__ import annotations

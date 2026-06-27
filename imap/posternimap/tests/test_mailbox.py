@@ -97,6 +97,20 @@ class MailboxTest(unittest.TestCase):
         d.addCallback(out.append)
         self.assertEqual(out, [None])  # already fired, no error
 
+    def test_append_to_placeholder_folder_is_rejected(self):
+        # #109: a placeholder folder has no backing store; APPEND must FAIL (tagged
+        # NO at the protocol layer) rather than fake-ack OK and drop the message.
+        from twisted.internet import defer
+        from posternimap.mailbox import AppendRejectedError, PosternMailbox
+
+        mb = PosternMailbox(self.client, empty=True)
+        d = mb.addMessage(b"raw rfc822 bytes", flags=["\\Seen"], date=None)
+        self.assertIsInstance(d, defer.Deferred)
+        errs = []
+        d.addErrback(errs.append)  # consume the failure (no unhandled-error noise)
+        self.assertEqual(len(errs), 1)
+        self.assertTrue(errs[0].check(AppendRejectedError))
+
     def test_message_headers_and_body(self):
         from twisted.mail.imap4 import MessageSet
 

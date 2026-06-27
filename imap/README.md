@@ -189,6 +189,11 @@ injectable transport, so no network is touched.
 ## Known limitations (v1, by design)
 
 - **Read-only.** Sending is the structured API's job.
+- **APPEND is accepted only where it is safe.** INBOX/Sent/All accept a client's
+  APPEND as a no-op (the store is the source of truth; a post-send Sent copy is
+  already persisted). The placeholder folders (Drafts/Trash/Junk/Archive) have no
+  backing store, so they REJECT APPEND with a tagged NO rather than fake-ack and
+  drop the message (#109).
 - **UIDs are an interim ordinal over the date-ordered snapshot**, with a constant
   `UIDVALIDITY`. This preserves a client cache across reconnects in the common
   case, but per RFC 3501 it is NOT a true UID: it shifts (silently, under constant

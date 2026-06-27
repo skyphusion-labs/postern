@@ -159,5 +159,22 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
 
+    @defer.inlineCallbacks
+    def test_append_to_placeholder_folder_is_rejected(self):
+        # #109 end-to-end: APPEND into a placeholder (Drafts) returns a tagged NO
+        # with a clear reason, NOT a fake OK that silently drops the message.
+        import io
+
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            msg = io.BytesIO(b"From: a@example.com\r\nSubject: draft\r\n\r\nbody\r\n")
+            d = proto.append("Drafts", msg, ("\\Seen",))
+            exc = yield self.assertFailure(d, imap4.IMAP4Exception)
+            self.assertIn("does not store", str(exc))
+        finally:
+            yield proto.logout()
+
+
 if __name__ == "__main__":
     unittest.main()
