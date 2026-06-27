@@ -83,6 +83,18 @@
     margin-top: 18px; padding-top: 18px; border: none; border-top: 1px solid var(--line);
     width: 100%; min-height: 220px; background: var(--panel-2);
   }
+  /* #60: remote-content blocked-by-default banner (tracking-pixel privacy) */
+  .remote-banner {
+    margin-top: 18px; padding: 8px 12px; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 6px; font-size: 13px; color: var(--muted);
+  }
+  .remote-banner + .msg-body-frame { margin-top: 0; }
+  .remote-banner .load-remote {
+    font-size: 12px; padding: 3px 10px; cursor: pointer; background: transparent;
+    color: var(--accent); border: 1px solid var(--accent); border-radius: 6px;
+  }
+  .remote-banner .load-remote:hover { background: var(--accent); color: #0b0d10; }
   .attachments { margin-top: 18px; }
   .attachments h3 { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
   .attachments li { font-size: 13px; margin-bottom: 4px; }
@@ -243,31 +255,145 @@
       return '<a href="' + u + '" target="_blank" rel="noopener noreferrer nofollow">' + u + '</a>';
     });
   }
-  function bodyIframe(m) {
-    // Prefer the stored HTML body when present, else the plain-text body. Either
-    // way the content goes into a sandbox="" iframe (no scripts, no same-origin,
-    // no forms), so it cannot execute or reach the token/API. HTML is placed raw
-    // (the sandbox is the isolation boundary, not sanitization); plain text is
-    // escaped + linkified and shown pre-wrap.
+  // --- remote-content blocking (#60): privacy by default -----------------------
+  // HTML bodies can reference remote subresources (img src, srcset, CSS url(),
+  // <link rel=stylesheet>, legacy background=""). Even in the sandbox="" iframe
+  // (which blocks scripts) those still FETCH on open: that is the tracking-pixel
+  // leak (the sender learns the open, the reader's IP, time, and client). So by
+  // default we neutralize remote-loading references and offer a per-message
+  // opt-in ("Load remote images"), exactly like Gmail / Apple Mail / Thunderbird.
+  // Parsing uses DOMParser (text/html is INERT: no scripts run, no resources load)
+  // and we only mutate attributes / text nodes, never assign innerHTML.
+  function isRemoteUrl(u) {
+    if (u == null) return false;
+    return /^(?:https?:)?\/\//i.test(String(u).trim());
+  }
+  function hasRemoteInSrcset(ss) {
+    return !!ss && /(?:^|,)\s*(?:https?:)?\/\//i.test(String(ss));
+  }
+  // A neutral inline placeholder so a blocked image degrades to a tidy box (not a
+  // broken-image icon) and fires NO network request (data: is allowed by the CSP).
+  var BLOCKED_IMG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='90'%3E%3Crect width='100%25' height='100%25' fill='%23f3f3f3' stroke='%23cccccc'/%3E%3Ctext x='60' y='48' font-size='10' fill='%23999999' text-anchor='middle' font-family='sans-serif'%3Eimage blocked%3C/text%3E%3C/svg%3E";
+  function stripRemoteCssUrls(css) {
+    var n = 0;
+    var out = String(css).replace(/url\(\s*(['"]?)\s*(?:https?:)?\/\/[^)'"]*\1\s*\)/ig, function () {
+      n++; return "url('')";
+    });
+    return { css: out, count: n };
+  }
+  function neutralizeRemoteHtml(html) {
+    var blocked = 0, doc = null;
+    try { doc = new DOMParser().parseFromString(String(html), "text/html"); } catch (e) { doc = null; }
+    if (!doc || !doc.body) {
+      // Parser unavailable: FAIL SAFE -- show escaped text so nothing auto-loads.
+      return { html: linkify(escapeHtml(String(html))), blocked: 0 };
+    }
+    var i, list, hit;
+    // Hoist any <style> from <head> into <body> so our body-only embed keeps them.
+    if (doc.head) {
+      var hs = doc.head.querySelectorAll("style");
+      for (i = hs.length - 1; i >= 0; i--) doc.body.insertBefore(hs[i], doc.body.firstChild);
+    }
+    function blockAttr(node, attr, stash) {
+      var v = node.getAttribute(attr);
+      if (isRemoteUrl(v)) { node.setAttribute(stash, v); node.removeAttribute(attr); return true; }
+      return false;
+    }
+    // <img>: remote src -> placeholder; remote srcset -> stripped.
+    list = doc.querySelectorAll("img");
+    for (i = 0; i < list.length; i++) {
+      hit = false;
+      var src = list[i].getAttribute("src");
+      if (isRemoteUrl(src)) {
+        list[i].setAttribute("data-blocked-src", src);
+        list[i].setAttribute("src", BLOCKED_IMG);
+        list[i].setAttribute("data-blocked", "1");
+        hit = true;
+      }
+      var ss = list[i].getAttribute("srcset");
+      if (hasRemoteInSrcset(ss)) { list[i].setAttribute("data-blocked-srcset", ss); list[i].removeAttribute("srcset"); hit = true; }
+      if (hit) blocked++;
+    }
+    // Other remote-loading elements.
+    list = doc.querySelectorAll("source, video, audio, track, iframe, embed, object, input[type=image]");
+    for (i = 0; i < list.length; i++) {
+      hit = false;
+      if (blockAttr(list[i], "src", "data-blocked-src")) hit = true;
+      if (blockAttr(list[i], "poster", "data-blocked-poster")) hit = true;
+      if (blockAttr(list[i], "data", "data-blocked-data")) hit = true;
+      var ss2 = list[i].getAttribute("srcset");
+      if (hasRemoteInSrcset(ss2)) { list[i].setAttribute("data-blocked-srcset", ss2); list[i].removeAttribute("srcset"); hit = true; }
+      if (hit) blocked++;
+    }
+    // Legacy background="" attribute (old HTML email tables).
+    list = doc.querySelectorAll("[background]");
+    for (i = 0; i < list.length; i++) { if (blockAttr(list[i], "background", "data-blocked-background")) blocked++; }
+    // Remote <link> (e.g. rel=stylesheet): drop it; it would fetch on open.
+    list = doc.querySelectorAll("link[href]");
+    for (i = 0; i < list.length; i++) {
+      if (isRemoteUrl(list[i].getAttribute("href")) && list[i].parentNode) { list[i].parentNode.removeChild(list[i]); blocked++; }
+    }
+    // Inline style="" carrying remote url().
+    list = doc.querySelectorAll("[style]");
+    for (i = 0; i < list.length; i++) {
+      var r1 = stripRemoteCssUrls(list[i].getAttribute("style"));
+      if (r1.count) { list[i].setAttribute("style", r1.css); blocked += r1.count; }
+    }
+    // <style> blocks carrying remote url().
+    list = doc.querySelectorAll("style");
+    for (i = 0; i < list.length; i++) {
+      var r2 = stripRemoteCssUrls(list[i].textContent);
+      if (r2.count) { list[i].textContent = r2.css; blocked += r2.count; }
+    }
+    return { html: doc.body.innerHTML, blocked: blocked };
+  }
+
+  // Build the sandboxed body iframe + (when content was blocked) the opt-in banner.
+  // Returns a container node; the iframe stays sandbox="" in every path.
+  function renderBody(m) {
+    var wrap = el("div", { class: "body-wrap" });
     var hasHtml = !!(m && m.bodyHtml);
-    var inner = hasHtml ? String(m.bodyHtml) : linkify(escapeHtml((m && m.bodyText) || ""));
     // HTML email authors its own colors for a LIGHT background (every mail client
     // renders HTML mail on white), so use white + dark text for the HTML case to
     // avoid dark-on-dark unreadable bodies. Plain text keeps the app's dark theme.
-    var bodyCss = "margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;" +
-      "word-wrap:break-word;padding:10px" +
-      (hasHtml
-        ? ";color:#1a1a1a;background:#ffffff"
-        : ";color:#e7e9ee;background:#1c1f26;white-space:pre-wrap");
-    var doc = '<!doctype html><html><head><meta charset="utf-8">' +
-      '<style>body{' + bodyCss + '}a{color:#6ea8fe}img{max-width:100%;height:auto}</style>' +
-      '</head><body>' + inner + '</body></html>';
-    var f = document.createElement("iframe");
-    f.className = "msg-body-frame";
-    f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
-    f.setAttribute("referrerpolicy", "no-referrer");
-    f.setAttribute("srcdoc", doc);
-    return f;
+    function baseStyle(light) {
+      return "<style>html,body{margin:0}body{font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;" +
+        "word-wrap:break-word;padding:10px" +
+        (light ? ";color:#1a1a1a;background:#ffffff" : ";color:#e7e9ee;background:#1c1f26;white-space:pre-wrap") +
+        "}a{color:#6ea8fe}img{max-width:100%;height:auto}</style>";
+    }
+    function frameFor(inner, light) {
+      var doc = '<!doctype html><html><head><meta charset="utf-8">' + baseStyle(light) +
+        '</head><body>' + inner + '</body></html>';
+      var f = document.createElement("iframe");
+      f.className = "msg-body-frame";
+      f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
+      f.setAttribute("referrerpolicy", "no-referrer");
+      f.setAttribute("srcdoc", doc);
+      return f;
+    }
+    function mount(loadRemote) {
+      clear(wrap);
+      if (!hasHtml) { wrap.appendChild(frameFor(linkify(escapeHtml((m && m.bodyText) || "")), false)); return; }
+      var inner, blocked = 0;
+      if (loadRemote) {
+        inner = String(m.bodyHtml);               // per-message opt-in: load everything
+      } else {
+        var res = neutralizeRemoteHtml(m.bodyHtml);
+        inner = res.html; blocked = res.blocked;
+      }
+      if (blocked > 0 && !loadRemote) {
+        var btn = el("button", { class: "load-remote", text: "Load remote images" });
+        btn.addEventListener("click", function () { mount(true); });
+        wrap.appendChild(el("div", { class: "remote-banner" }, [
+          el("span", { text: "Remote content blocked to protect your privacy (" + blocked + " item" + (blocked === 1 ? "" : "s") + "). " }),
+          btn
+        ]));
+      }
+      wrap.appendChild(frameFor(inner, true));
+    }
+    mount(false);
+    return wrap;
   }
 
   // --- formatting (pure, returns strings; rendered via text nodes) -----------
@@ -426,7 +552,7 @@
 
     // Body: rendered inside a sandboxed iframe (sandbox="" = no scripts, no
     // same-origin), so stored content cannot execute or reach the token/API.
-    r.appendChild(bodyIframe(m));
+    r.appendChild(renderBody(m));
 
     if (m.attachments && m.attachments.length) {
       var ul = el("ul");
