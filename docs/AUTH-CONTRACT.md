@@ -157,6 +157,24 @@ username, no service account) is a fallback, but it depends on a bound user bein
 able to read their own `mail` attribute through the outpost (verify during
 bring-up; if the search returns nothing the identity cannot be resolved).
 
+**Per-door difference (verified against the #77 IMAP code).** The `mail`-attribute
+resolution above is the **SMTP relay's** need: the relay uses `mail` as the
+authenticated From and enforces `From == mail`, so it MUST read it (and the
+simple-bind caveat applies to the relay). The **IMAP proxy does NOT read `mail`**:
+simple-bind checks only that the bind succeeds, and search+bind uses only the
+matched entry's DN to rebind the user; the bound identity is the login as a
+display/log label, and the store is read with `POSTERN_API_TOKEN`, not the
+directory identity. So for the IMAP proxy a successful BIND is the whole pass
+criterion -- simple-bind is sufficient and has no own-`mail`-read dependency.
+`LDAP_SEARCH_FILTER`/`LDAP_MAIL_ATTR` still matter to the proxy only for the
+`mail-users` authorization gate, not for identity.
+
+**TLS is mandatory on BOTH doors for direct-LDAP.** The relay and the IMAP proxy
+each refuse a plaintext `ldap://10.1.1.2:389` bind unless `LDAP_STARTTLS=true` (or
+an `ldaps://` URL). A bind carries the password, so it never crosses cleartext.
+That is why direct-LDAP on the fleet is gated on the section 6 work (636 or
+StartTLS on the outpost) for BOTH doors, while PAM (section 3a) needs none of it.
+
 Failover: list both directories where the client supports it
 (`ldaps://dischord.internal:636 ldaps://fugazi.internal:636`); the current Go
 backend dials a single `LDAP_URL`, so fleet HA for direct-LDAP is a follow-up.
