@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/mail"
+	"os"
 	"strings"
 
 	"github.com/emersion/go-smtp"
@@ -147,11 +149,84 @@ func onDomain(addr, domain string) bool {
 	return strings.EqualFold(addr[at+1:], domain)
 }
 
+// inboundIntakeAddrs returns the SMTP intake addresses run() will bind. It is
+// empty unless inbound is active (an inbound destination is configured); this is
+// the seam that lets a submission-only or dispatch-only deploy bind no intake
+// port. Pure and side-effect free, so the binding decision is directly testable.
+func inboundIntakeAddrs(cfg Config) []string {
+	if !cfg.inboundActive() {
+		return nil
+	}
+	return splitListen(cfg.Listen)
+}
+
+// intakeAddrIsLoopback reports whether a resolved intake bind address binds ONLY a
+// loopback interface. It fails closed: anything it cannot positively confirm as
+// loopback (a wildcard bind like ":2525", 0.0.0.0, ::, or a non-localhost hostname
+// it cannot resolve to a literal) is treated as NON-loopback. A SplitHostPort error
+// is surfaced so a malformed address is rejected rather than silently allowed.
+func intakeAddrIsLoopback(addr string) (bool, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false, fmt.Errorf("intake listen address %q is not a valid host:port: %w", addr, err)
+	}
+	if host == "" {
+		// e.g. ":2525" -- a wildcard bind on every interface, NOT loopback.
+		return false, nil
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true, nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// A non-localhost hostname we cannot positively confirm as loopback.
+		return false, nil
+	}
+	return ip.IsLoopback(), nil
+}
+
+// checkIntakeLoopback enforces audit finding F4: the inbound intake listener is
+// unauthenticated by design (no AUTH, AllowInsecureAuth=true), so it is safe ONLY
+// on loopback. We make "intake is loopback-only" an ENFORCED invariant, not just a
+// default: if any resolved intake bind address is non-loopback the relay refuses to
+// start (fail closed). An operator who genuinely needs a non-loopback intake must
+// front it with something that authenticates.
+func checkIntakeLoopback(addrs []string) error {
+	for _, addr := range addrs {
+		ok, err := intakeAddrIsLoopback(addr)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("inbound intake listener must bind loopback only; got %q (the intake door is unauthenticated by design, so a public bind is an open injection/store-poisoning door; front it with an authenticated proxy if you truly need a non-loopback intake)", addr)
+		}
+	}
+	return nil
+}
+
 func run(cfg Config) error {
 	be := &Backend{cfg: cfg, client: NewClient(cfg)}
-	addrs := splitListen(cfg.Listen)
-	if len(addrs) == 0 {
-		return fmt.Errorf("no listen address configured (SMTP_LISTEN)")
+
+	// Intake listeners are bound ONLY when an inbound destination is configured
+	// (see inboundIntakeAddrs). A submission-only or dispatch-only deploy leaves the
+	// inbound vars unset and therefore binds NO intake port (no more vestigial dead
+	// loopback listener).
+	addrs := inboundIntakeAddrs(cfg)
+	if len(addrs) == 0 && os.Getenv("SMTP_LISTEN") != "" {
+		// Footgun: an operator set SMTP_LISTEN intending inbound but configured no
+		// destination, so intake is skipped. Warn loudly rather than fail: a valid
+		// submission-only or dispatch-only deploy may still carry a leftover (or
+		// default-shaped) SMTP_LISTEN, and we must not block those.
+		log.Printf("WARNING: SMTP_LISTEN=%q is set but no inbound destination "+
+			"(POSTERN_INGEST_URL or EMAIL_WORKER_URL) is configured; inbound intake is DISABLED. "+
+			"Set an inbound destination to enable intake, or unset SMTP_LISTEN to silence this.",
+			os.Getenv("SMTP_LISTEN"))
+	}
+
+	// F4: the intake door is unauthenticated by design, so enforce loopback-only at
+	// the binding decision. Refuse to start on any non-loopback intake bind.
+	if err := checkIntakeLoopback(addrs); err != nil {
+		return err
 	}
 
 	// Parse submission listeners up front so the error channel is sized exactly.
@@ -162,6 +237,13 @@ func run(cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("submission: %w", err)
 		}
+	}
+
+	// Nothing-to-do guard. loadConfig already enforces this, but run() is also
+	// driven directly from tests, so guard here too: with no intake, no submission,
+	// and no /dispatch bridge there is nothing to serve.
+	if len(addrs) == 0 && len(subListeners) == 0 && cfg.HTTPListen == "" {
+		return fmt.Errorf("nothing to do: set POSTERN_INGEST_URL (inbound), SUBMISSION_LISTENERS (submission), or POSTERN_RELAY_HTTP_LISTEN (dispatch)")
 	}
 
 	// The function blocks until any listener exits. Size the channel for the intake
@@ -188,9 +270,9 @@ func run(cfg Config) error {
 		}
 	}
 
-	// One go-smtp server per address (e.g. loopback for host services plus a
-	// docker-bridge IP for a containerized caller like Uptime Kuma). They share
-	// the stateless Backend.
+	// One go-smtp server per address. Every address is loopback-only by the F4
+	// invariant enforced above (the intake door is unauthenticated), so multiple
+	// binds are just multiple loopback aliases. They share the stateless Backend.
 	for _, addr := range addrs {
 		srv := smtp.NewServer(be)
 		srv.Addr = addr
