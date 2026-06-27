@@ -17,18 +17,30 @@ type sendError struct {
 
 func (e *sendError) Error() string { return fmt.Sprintf("send failed (%d): %s", e.status, e.msg) }
 
+// SendAttachment is one attachment forwarded to the worker /api/send seam (#70).
+// Content is standard base64 (Go base64.StdEncoding, no line wrapping), matching
+// the worker SendRequest.attachments shape; the worker decodes it for the
+// send_email binding (which builds the MIME itself, so the relay never hand-rolls
+// a multipart message).
+type SendAttachment struct {
+	Filename string `json:"filename,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	Content  string `json:"content"`
+}
+
 // SendPayload mirrors the worker SendRequest JSON (inbound/src/mailbox.ts). The
 // daemon sends from as a plain string (the bound identity); the worker's
 // resolveFrom accepts a string and re-checks the domain.
 type SendPayload struct {
-	From    string            `json:"from"`
-	To      []string          `json:"to"`
-	CC      []string          `json:"cc,omitempty"`
-	BCC     []string          `json:"bcc,omitempty"`
-	Subject string            `json:"subject"`
-	HTML    string            `json:"html,omitempty"`
-	Text    string            `json:"text,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
+	From        string            `json:"from"`
+	To          []string          `json:"to"`
+	CC          []string          `json:"cc,omitempty"`
+	BCC         []string          `json:"bcc,omitempty"`
+	Subject     string            `json:"subject"`
+	HTML        string            `json:"html,omitempty"`
+	Text        string            `json:"text,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Attachments []SendAttachment  `json:"attachments,omitempty"`
 }
 
 // SubmitClient talks to the worker for the submission seam (#68): it validates a

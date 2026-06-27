@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"reflect"
 	"strings"
 	"testing"
@@ -149,7 +150,7 @@ func TestSubmission_FromEnforcement(t *testing.T) {
 	}
 }
 
-func TestSubmission_RejectsAttachments(t *testing.T) {
+func TestSubmission_ForwardsAttachments(t *testing.T) {
 	raw := "From: alice@skyphusion.org\r\n" +
 		"To: d@example.com\r\n" +
 		"Subject: with file\r\n" +
@@ -160,17 +161,60 @@ func TestSubmission_RejectsAttachments(t *testing.T) {
 		"Content-Type: text/plain\r\n\r\nsee attached\r\n" +
 		"--BOUNDARY\r\n" +
 		"Content-Type: application/octet-stream\r\n" +
-		"Content-Disposition: attachment; filename=\"x.bin\"\r\n\r\n" +
-		"AAAA\r\n" +
+		"Content-Disposition: attachment; filename=\"x.bin\"\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" +
+		base64.StdEncoding.EncodeToString([]byte("BINARYBYTES")) + "\r\n" +
 		"--BOUNDARY--\r\n"
 	sub := &stubSubmitter{authFrom: "alice@skyphusion.org"}
 	s := newAuthedSession("alice@skyphusion.org", []string{"d@example.com"}, sub)
+
+	if err := s.Data(strings.NewReader(raw)); err != nil {
+		t.Fatalf("Data with an attachment: %v", err)
+	}
+	if sub.sendCnt != 1 {
+		t.Fatalf("Send called %d times, want 1 (the attachment must be forwarded, not dropped)", sub.sendCnt)
+	}
+	if len(sub.lastSend.Attachments) != 1 {
+		t.Fatalf("payload carried %d attachments, want 1", len(sub.lastSend.Attachments))
+	}
+	att := sub.lastSend.Attachments[0]
+	if att.Filename != "x.bin" {
+		t.Errorf("attachment filename = %q, want x.bin", att.Filename)
+	}
+	if att.MimeType != "application/octet-stream" {
+		t.Errorf("attachment mimeType = %q, want application/octet-stream", att.MimeType)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(att.Content)
+	if err != nil {
+		t.Fatalf("attachment content is not valid base64: %v", err)
+	}
+	if string(decoded) != "BINARYBYTES" {
+		t.Errorf("attachment content = %q, want BINARYBYTES", string(decoded))
+	}
+	// The text body still rides the field-based path alongside the attachment.
+	if !strings.Contains(sub.lastSend.Text, "see attached") {
+		t.Errorf("text body = %q, want it to contain the body text", sub.lastSend.Text)
+	}
+}
+
+func TestSubmission_RejectsOversizeMessage(t *testing.T) {
+	sub := &stubSubmitter{authFrom: "alice@skyphusion.org"}
+	s := &submissionSession{
+		cfg:       Config{MaxSize: 512},
+		auth:      sub,
+		sender:    sub,
+		authed:    true,
+		boundFrom: "alice@skyphusion.org",
+		rcpts:     []string{"d@example.com"},
+	}
+	raw := "From: alice@skyphusion.org\r\nTo: d@example.com\r\nSubject: big\r\n\r\n" + strings.Repeat("A", 1024) + "\r\n"
+
 	err := s.Data(strings.NewReader(raw))
-	if smtpCode(err) != 554 {
-		t.Errorf("attachment Data code = %d (err=%v), want 554", smtpCode(err), err)
+	if smtpCode(err) != 552 {
+		t.Errorf("oversize Data code = %d (err=%v), want 552", smtpCode(err), err)
 	}
 	if sub.sendCnt != 0 {
-		t.Errorf("Send called %d times for a message with attachments, want 0 (no silent drop)", sub.sendCnt)
+		t.Errorf("Send called %d times for an oversize message, want 0", sub.sendCnt)
 	}
 }
 

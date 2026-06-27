@@ -1,3 +1,18 @@
+/**
+ * One attachment accepted by the Cloudflare Email Sending binding. Mirrors the
+ * runtime `EmailAttachment` type (workerd / @cloudflare/workers-types): the
+ * binding builds the MIME itself, so we never hand-roll multipart/mixed. `content`
+ * is raw bytes (an ArrayBufferView), NOT base64 -- the transport base64-DECODES the
+ * JSON wire value before handing it here. `disposition` is "attachment" for v1;
+ * inline-cid fidelity (disposition:"inline" + contentId) is a tracked follow-up.
+ */
+interface SendEmailAttachment {
+  filename: string;
+  type: string; // MIME type, e.g. "application/pdf"
+  disposition: "attachment";
+  content: ArrayBuffer | ArrayBufferView;
+}
+
 /** Message accepted by the Cloudflare Email Sending binding (send_email). */
 interface SendEmailMessage {
   to: string | string[];
@@ -9,6 +24,7 @@ interface SendEmailMessage {
   html?: string;
   text?: string;
   headers?: Record<string, string>;
+  attachments?: SendEmailAttachment[];
 }
 
 /** The send_email binding surface we rely on. */

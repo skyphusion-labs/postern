@@ -8,12 +8,20 @@
 
 import * as store from "./store";
 import { htmlToText, cleanBody } from "./ingest";
-import { selectTransport, type OutboundMessage } from "./transport/index";
+import { selectTransport, type OutboundMessage, type OutboundAttachment } from "./transport/index";
 
 export interface EmailAddress {
   email: string;
   name?: string;
 }
+
+/**
+ * One outbound attachment on a send (#70). `content` is standard base64 (no line
+ * wrapping) over JSON, mirroring the inbound ParsedInbound attachment shape; the
+ * selected transport decodes it to bytes. filename/mimeType are optional and the
+ * transport fills sane defaults. Same shape the relay forwards from a real MUA.
+ */
+export type SendAttachment = OutboundAttachment;
 
 export interface SendRequest {
   to: string | string[];
@@ -25,6 +33,7 @@ export interface SendRequest {
   html?: string;
   text?: string;
   headers?: Record<string, string>;
+  attachments?: SendAttachment[];
 }
 
 export interface ReplyRequest {
@@ -60,6 +69,12 @@ export class MailboxError extends Error {
 // joined by literal dots, so no two adjacent quantifiers share a class.
 const EMAIL_RE = /^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$/;
 const MAX_RECIPIENTS = 50;
+// Attachment limits. CF Email Sending caps a whole message (body + attachments)
+// near 25 MiB and throws E_CONTENT_TOO_LARGE past it; we reject early on the
+// decoded attachment total so a caller gets a clean 413 instead of a provider
+// error, and bound the count so a request cannot carry thousands of tiny parts.
+const MAX_ATTACHMENTS = 20;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 // Defense in depth against header injection: any CR/LF in a single-line field
 // could smuggle extra headers or split the message. Reject outright.
 const CRLF_RE = /[\r\n]/;
@@ -81,6 +96,70 @@ function validateRecipients(label: string, list: string[]): void {
       throw new MailboxError("E_VALIDATION_ERROR", `invalid ${label} address: ${addr}`);
     }
   }
+}
+
+// The number of bytes a base64 string decodes to. atob throws on non-base64
+// input, which we surface as a clean validation error (never a 500). Standard
+// base64 only (no line wrapping), matching the inbound ParsedInbound shape.
+function base64ByteLength(b64: string): number {
+  return atob(b64).length;
+}
+
+/**
+ * Validate + normalize the attachments array (#70). Returns undefined when there
+ * are none (so the no-attachment send path is byte-for-byte unchanged). Enforces
+ * count, per-field CRLF safety, valid base64, and the decoded-size cap.
+ */
+function validateAttachments(input: unknown): OutboundAttachment[] | undefined {
+  if (input === undefined) return undefined;
+  if (!Array.isArray(input)) {
+    throw new MailboxError("E_VALIDATION_ERROR", "attachments must be an array");
+  }
+  if (input.length === 0) return undefined;
+  if (input.length > MAX_ATTACHMENTS) {
+    throw new MailboxError("E_VALIDATION_ERROR", `too many attachments (max ${MAX_ATTACHMENTS})`);
+  }
+
+  let totalBytes = 0;
+  const out: OutboundAttachment[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const raw = input[i];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new MailboxError("E_VALIDATION_ERROR", `attachment ${i} must be an object`);
+    }
+    const a = raw as Record<string, unknown>;
+    if (typeof a.content !== "string" || a.content === "") {
+      throw new MailboxError("E_FIELD_MISSING", `attachment ${i} content (base64) is required`);
+    }
+    let byteLen: number;
+    try {
+      byteLen = base64ByteLength(a.content);
+    } catch {
+      throw new MailboxError("E_VALIDATION_ERROR", `attachment ${i} content is not valid base64`);
+    }
+    totalBytes += byteLen;
+    if (totalBytes > MAX_ATTACHMENT_BYTES) {
+      throw new MailboxError("E_PAYLOAD_TOO_LARGE", `attachments exceed ${MAX_ATTACHMENT_BYTES} bytes`, 413);
+    }
+
+    const att: OutboundAttachment = { content: a.content };
+    if (a.filename !== undefined) {
+      if (typeof a.filename !== "string") {
+        throw new MailboxError("E_VALIDATION_ERROR", `attachment ${i} filename must be a string`);
+      }
+      rejectCRLF(`attachment ${i} filename`, a.filename);
+      att.filename = a.filename;
+    }
+    if (a.mimeType !== undefined) {
+      if (typeof a.mimeType !== "string") {
+        throw new MailboxError("E_VALIDATION_ERROR", `attachment ${i} mimeType must be a string`);
+      }
+      rejectCRLF(`attachment ${i} mimeType`, a.mimeType);
+      att.mimeType = a.mimeType;
+    }
+    out.push(att);
+  }
+  return out;
 }
 
 function resolveFrom(env: Env, from: SendRequest["from"]): EmailAddress {
@@ -160,6 +239,7 @@ export async function send(env: Env, req: SendRequest, ctx: ExecutionContext): P
   }
 
   const from = resolveFrom(env, req.from);
+  const attachments = validateAttachments(req.attachments);
 
   let replyTo: EmailAddress | undefined;
   if (req.replyTo !== undefined) {
@@ -183,6 +263,7 @@ export async function send(env: Env, req: SendRequest, ctx: ExecutionContext): P
     html: req.html,
     text: req.text,
     headers,
+    attachments,
     inReplyTo: headers["In-Reply-To"] ?? null,
     references: parseReferences(headers["References"]),
   });
@@ -258,6 +339,7 @@ interface DispatchInput {
   html?: string;
   text?: string;
   headers: Record<string, string>;
+  attachments?: OutboundAttachment[];
   inReplyTo: string | null;
   references: string[];
   forcedThreadId?: string;
@@ -276,6 +358,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
   if (d.replyTo) outbound.replyTo = d.replyTo;
   if (d.html) outbound.html = d.html;
   if (d.text) outbound.text = d.text;
+  if (d.attachments && d.attachments.length) outbound.attachments = d.attachments;
   // Stamp our generated Message-ID so the provider, the recipient, and our store
   // all agree on the id we thread by.
   const headers: Record<string, string> = { ...d.headers, "Message-ID": `<${messageId}>` };

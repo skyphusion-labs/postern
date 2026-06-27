@@ -152,11 +152,13 @@ from the headers intersected with the envelope; `bcc` is the envelope remainder
 
 ### v1 limits (honest, not silent)
 
-- A message with **attachments** (or inline parts) is rejected `554` with an
-  actionable message: the field-based `/api/send` carries none, and a silent drop
-  would lose data. Tracked in skyphusion-labs/postern#70 (thread attachments
-  end-to-end); the send-as-domain use case is mostly text/confirmation mail, so
-  this still delivers the core value.
+- A message with **attachments** (or inline parts) is supported (#70): the daemon
+  maps the parsed MIME parts to `SendRequest.attachments` (base64 over JSON) and
+  forwards them to `/api/send`, which hands them to the Cloudflare Email Sending
+  binding (the binding builds the MIME, so the relay never hand-rolls one). Limits:
+  20 parts and 25 MiB decoded total, else `552`. Every part is delivered with
+  disposition `attachment` for v1 (rendering inline parts inline by cid is a tracked
+  refinement, never a silent drop).
 - A **Bcc-only** message is rejected `550` (the worker requires a `To`; the daemon
   does not rewrite the visible header). A normal client always sets a `To`.
 

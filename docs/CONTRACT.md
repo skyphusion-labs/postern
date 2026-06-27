@@ -377,10 +377,16 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
   pure-Go `go-ldap`; bound identity = the mail attribute. **system**: local Unix accounts via PAM,
   a cgo build-tagged (`-tags pam`) extra excluded from the default static binary; bound identity =
   `<user>@<configured-domain>`. From-enforcement is identical for every backend.
-- **Submission attachments (DECIDED, #68):** the field-based `/api/send` carries no attachments,
-  so the v1 submission daemon **rejects** a message with attachments (`554`) rather than silently
-  dropping them, with an actionable reply. Threading attachments end to end (`SendRequest.attachments`)
-  is the post-v1 follow-up tracked in #70.
+- **Submission attachments (DECIDED, #68 + #70, DONE):** `/api/send` carries attachments as
+  `SendRequest.attachments?: { filename?; mimeType?; content }[]`, where `content` is standard base64
+  over JSON (the same shape as inbound `ParsedInbound.attachments`). The submission daemon maps the
+  parsed MIME parts (attachments, inline, and other non-body parts) to that shape and forwards them; the
+  worker hands them to the Cloudflare Email Sending binding, which builds the multipart MIME itself, so
+  there is no hand-rolled RFC 5322 and no added runtime dependency. `CfEmailTransport` base64-DECODES
+  `content` to bytes for the binding. Limits: at most 20 parts and 25 MiB decoded total (the CF message
+  cap), else `E_PAYLOAD_TOO_LARGE` (413, mapped to SMTP `552`). For v1 every part is delivered with
+  disposition `attachment`; rendering inline parts inline (cid) is a tracked refinement, never a silent
+  drop (the bytes are always preserved).
 - **AI Search: hand-rolled Vectorize query, not managed AutoRAG (DECIDED, #31).** Ingest already
   populates a Vectorize index (one vector per body chunk, `@cf/baai/bge-base-en-v1.5`, metadata
   carries `message_id`). M4 semantic/hybrid query THAT index directly (embed query -> Vectorize
@@ -493,9 +499,12 @@ The relay maps `/api/send` status to SMTP replies: `2xx` -> `250`; `400`/`403` -
 
 ### v1 limitations (locked, honest, not silent)
 
-- **Attachments are rejected** (`554`, with an actionable message pointing at the tracking issue):
-  the field-based `/api/send` carries none, so the daemon refuses a message with attachments / inline
-  parts rather than dropping them (inline images count). Tracked in #70.
+- **Attachments are supported** (#70): a real MUA (Thunderbird / Apple Mail) can send with attachments.
+  The daemon maps the parsed MIME parts to `SendRequest.attachments` (base64 over JSON) and forwards them
+  to `/api/send`, which hands them to the Cloudflare Email Sending binding. Limits: 20 parts and 25 MiB
+  decoded total (the CF message cap); over that is rejected (`552`). The remaining v1 limitation is
+  *fidelity*: every part is delivered with disposition `attachment`, so an inline image arrives as an
+  attachment rather than rendered inline (cid). The bytes are always preserved, never a silent drop.
 - **Bcc-only submission is rejected** (`550`): the worker requires at least one `To`; the daemon
   does not silently rewrite the visible header. A normal client always sets a `To`.
 

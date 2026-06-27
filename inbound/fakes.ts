@@ -54,6 +54,14 @@ interface SentMessage {
   bcc?: string | string[];
   replyTo?: unknown;
   headers?: Record<string, string>;
+  // #70: attachments the binding receives (content already decoded to bytes by
+  // the transport). disposition is "attachment" for v1.
+  attachments?: {
+    filename: string;
+    type: string;
+    disposition: string;
+    content: ArrayBuffer | ArrayBufferView;
+  }[];
 }
 
 export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): FakeEnvResult {
