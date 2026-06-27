@@ -7,12 +7,18 @@ import (
 	"io"
 	"log"
 	"net/mail"
+	"os"
 	"strings"
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/jhillyerd/enmime"
 )
+
+// submissionDebug, set by SUBMISSION_DEBUG, turns on per-session diagnostic logging
+// (connection, auth username + OUTCOME, and auth-required rejections). It NEVER logs
+// the password or the raw AUTH line. Off by default; a deploy-time troubleshooting aid.
+var submissionDebug = os.Getenv("SUBMISSION_DEBUG") != ""
 
 // sender is the worker /api/send bridge the session needs once a message is
 // authenticated + From-enforced. *SubmitClient is the production implementation;
@@ -33,7 +39,10 @@ type submissionBackend struct {
 	sender sender
 }
 
-func (b *submissionBackend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
+func (b *submissionBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	if submissionDebug {
+		log.Printf("submission session opened from %v", c.Conn().RemoteAddr())
+	}
 	return &submissionSession{cfg: b.cfg, auth: b.auth, sender: b.sender}, nil
 }
 
@@ -82,16 +91,24 @@ func (s *submissionSession) authenticate(username, password string) error {
 	if err != nil {
 		if err != errAuthFailed {
 			log.Printf("submission auth infra error user=%q: %v", username, err)
+		} else if submissionDebug {
+			log.Printf("submission auth REJECTED user=%q (backend returned auth-failed)", username)
 		}
 		return smtp.ErrAuthFailed
 	}
 	s.authed = true
 	s.boundFrom = identity
+	if submissionDebug {
+		log.Printf("submission auth OK user=%q -> identity=%q", username, identity)
+	}
 	return nil
 }
 
 func (s *submissionSession) Mail(_ string, _ *smtp.MailOptions) error {
 	if !s.authed {
+		if submissionDebug {
+			log.Printf("submission MAIL rejected: session not authenticated")
+		}
 		return smtp.ErrAuthRequired
 	}
 	return nil
