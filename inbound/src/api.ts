@@ -96,6 +96,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return await handleCredentialUpsert(request, env);
     }
 
+    // --- admin: backfill / re-embed the mailbox into Vectorize (#116 ws4) ---
+    // Operator action (both-scoped). Processes ONE keyset page per call and returns
+    // a cursor; a thin runner loops until done. Idempotent (deterministic vector
+    // ids overwrite), so safe to resume/repeat; dryRun counts the cost first.
+    if (request.method === "POST" && path === "/api/admin/reindex") {
+      return await handleReindex(request, env);
+    }
+
     // --- admin: revoke an SMTP submission credential ---
     const credMatch =
       request.method === "DELETE" ? /^\/api\/admin\/smtp-credentials\/(.+)$/.exec(path) : null;
@@ -261,6 +269,27 @@ async function handleCredentialUpsert(request: Request, env: Env): Promise<Respo
   return json({ ok: true, username, from: fromAddr, secret });
 }
 
+// POST /api/admin/reindex: backfill the Vectorize index over the existing mailbox
+// (#116 ws4). Processes one keyset page per call (await the embeds so the page
+// finishes inside request limits) and returns a cursor; the runner loops until
+// done:true. Body: { cursor?, limit?, dryRun? }. Idempotent (deterministic vector
+// ids overwrite); dryRun totals the chunk count WITHOUT embedding.
+async function handleReindex(request: Request, env: Env): Promise<Response> {
+  let body: { cursor?: unknown; limit?: unknown; dryRun?: unknown } = {};
+  if (request.headers.get("content-length") && request.headers.get("content-length") !== "0") {
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
+    }
+  }
+  const cursor = typeof body.cursor === "string" ? body.cursor : undefined;
+  const limit = typeof body.limit === "number" ? body.limit : undefined;
+  const dryRun = body.dryRun === true;
+  const result = await store.reindexPage(env, { cursor, limit, dryRun });
+  return json({ ok: true, ...result });
+}
+
 // Constant-time Bearer compare against the TRANSPORT token (POSTERN_TRANSPORT_TOKEN),
 // the infra-seam credential, distinct from the mailbox API token.
 function transportAuthorized(request: Request, env: Env): boolean {
@@ -289,6 +318,10 @@ function requiredScope(method: string, path: string): RouteScope | null {
   if (method === "POST" && path === "/api/reply") return "send";
   if (method === "POST" && path === "/api/admin/smtp-credentials") return "admin";
   if (method === "DELETE" && /^\/api\/admin\/smtp-credentials\/(.+)$/.test(path)) return "admin";
+  // Reindex/backfill is the most privileged: a new /api/admin/* path is NOT
+  // covered automatically (unknown paths fall through to null), so it is mapped
+  // here explicitly as `admin` -- a read or send token must never reach it (#85).
+  if (method === "POST" && path === "/api/admin/reindex") return "admin";
   if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
   if (method === "GET" && path === "/api/search") return "read";
   // Single message and the /attachments/{i} sub-route both live under here.

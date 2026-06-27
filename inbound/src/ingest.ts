@@ -76,12 +76,10 @@ export async function ingest(
   const messageId = rawMessageId.length > 64 ? await sha256hex(rawMessageId) : rawMessageId;
   const date = parsed.date ? new Date(parsed.date).toISOString() : new Date().toISOString();
 
-  // Only index mail for addresses that opted in to crew RAG (VECTORIZE_FOR).
-  const vectorizeFor = (env.VECTORIZE_FOR ?? "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  const vectorize = vectorizeFor.length === 0 || vectorizeFor.includes(toAddr);
+  // Only index mail for addresses that opted in to crew RAG (VECTORIZE_FOR). The
+  // SAME gate the #116 ws4 backfill applies (store.shouldVectorize), so live and
+  // backfilled coverage match.
+  const vectorize = store.shouldVectorize(store.vectorizeAllowlist(env), "inbound", [toAddr]);
 
   const result = await store.put(
     env,

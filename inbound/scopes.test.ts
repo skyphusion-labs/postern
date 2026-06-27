@@ -69,6 +69,11 @@ describe("per-function token scopes (#85)", () => {
       expect((await handleApi(req("POST", "/api/admin/smtp-credentials", { token: "read-token", body: ADMIN_BODY }), env, ctx)).status).toBe(403);
       expect((await handleApi(req("DELETE", "/api/admin/smtp-credentials/alice%40skyphusion.org", { token: "read-token" }), env, ctx)).status).toBe(403);
     });
+
+    it("cannot trigger the reindex backfill (-> 403, #116 ws4)", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("POST", "/api/admin/reindex", { token: "read-token", body: {} }), env, ctx)).status).toBe(403);
+    });
   });
 
   describe("send-scoped token", () => {
@@ -92,6 +97,11 @@ describe("per-function token scopes (#85)", () => {
       const { env, ctx } = scopedEnv();
       expect((await handleApi(req("POST", "/api/admin/smtp-credentials", { token: "send-token", body: ADMIN_BODY }), env, ctx)).status).toBe(403);
     });
+
+    it("cannot trigger the reindex backfill (-> 403, #116 ws4)", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("POST", "/api/admin/reindex", { token: "send-token", body: {} }), env, ctx)).status).toBe(403);
+    });
   });
 
   describe("both-scoped token (back-compat / egalitarian default)", () => {
@@ -107,6 +117,13 @@ describe("per-function token scopes (#85)", () => {
       const adminRes = await handleApi(req("POST", "/api/admin/smtp-credentials", { token: "both-token", body: ADMIN_BODY }), env, ctx);
       expect(adminRes.status).toBe(200);
       expect((await adminRes.json()) as { ok: boolean }).toMatchObject({ ok: true });
+    });
+
+    it("reaches the reindex backfill route (#116 ws4)", async () => {
+      const { env, ctx } = scopedEnv();
+      const res = await handleApi(req("POST", "/api/admin/reindex", { token: "both-token", body: { dryRun: true } }), env, ctx);
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
     });
   });
 
