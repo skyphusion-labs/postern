@@ -9,6 +9,11 @@ Read first: `docs/AUTH-CONTRACT.md` (the auth bindings), `imap/DEPLOY.md`,
 `relay/SUBMISSION-DEPLOY.md` (the two doors, already deployed loopback-only), and
 skyphusion-labs/postern#74 (the deploy drift this fixes).
 
+**Phase 0 (below) is the PREREQUISITE hardened-set mesh deploy** -- it ships the
+current box binaries, the per-function tokens, and the 0005 store rebuild over
+loopback/VLAN, with NO public exposure. It runs and is signed off BEFORE the public
+edge (Phases 1-4).
+
 ## Operating rules for the window (aviation discipline)
 
 - **CARDINAL FLEET INGRESS INVARIANT (period, no exceptions).** ALL external
@@ -39,6 +44,218 @@ skyphusion-labs/postern#74 (the deploy drift this fixes).
       The only open window decisions are the TLS termination point (end-to-end vs
       edge) and native-IMAPS vs stunnel for 993 (Phase 3b).
 - [ ] A non-fleet host (the laptop) ready for external smoke checks.
+
+---
+
+## Phase 0 -- Hardened-set mesh deploy (PREREQUISITE; mesh-internal, NO public exposure)
+
+Status: **runbook only, GATED.** This phase ships the hardened box services + the
+0005 store rebuild + the per-function tokens to dischord, all over loopback/VLAN.
+It precedes the public edge (Phases 1-4) and touches NO public surface: no DNS, no
+lagwagon, no ufw, no fleet-ingress change. It is the "get the doors current and
+least-privilege, offline" pass so the exposure flip later is purely a networking
+step.
+
+**Gates (all must hold before starting):**
+- [ ] Conrad's supervised window open (this restarts live services + rebuilds the
+      live store).
+- [ ] #106 (TLS 1.2+ floor on the Python IMAPS 993 listener) MERGED. It changes the
+      proxy's TLS posture, so it must be in the binary we deploy here. (Open as of
+      writing -- HARD prerequisite for step 0.4.)
+- [ ] #105 (587 AUTH + 993 LOGIN brute-force throttle) merged (code is in; this phase
+      configures its knobs).
+- [ ] #118 (migration 0005) reviewed and ready, NOT yet merged (it merges at the END
+      of step 0.5, after the offline apply).
+- [ ] Known-good root/console session held on dischord (LDAP-backed SSH; do not risk
+      lockout mid-restart). Hetzner vKVM reachable.
+- [ ] A fresh backup target for the D1 store (step 0.5 takes the authoritative one).
+
+**Build provenance:** every box binary is built from the SAME merged `main` commit
+(record the SHA in the window log). Relay (`relay/`) and IMAP proxy (`imap/`) carry:
+`LDAP_TIMEOUT` (#88, default 10s, both doors), attachments (relay #89/#92), the #105
+throttle, and the #106 TLS floor (proxy). Verify locally first: `cd relay && go build
+./... && go vet ./... && go test ./...`; `cd imap && python -m mypy && python -m
+twisted.trial posternimap.tests`.
+
+### 0.1 Pre-flight snapshot (record current live state; change nothing)
+
+Capture the before-state so every later step has a known-good baseline + rollback ref.
+
+```bash
+# On dischord (read-only):
+systemctl status skyphusion-email-relay postern-submission postern-imap --no-pager
+ss -ltnp | grep -E ':2525|:2587|:1587|:1143|:587|:993'   # current binds
+# Record each EnvironmentFile's current values (root, 0600):
+for f in /etc/skyphusion-email-relay.env /etc/postern-submission.env /etc/postern-imap.env; do
+  echo "== $f =="; sudo grep -vE '^\s*#|^\s*$' "$f"
+done
+```
+
+- **Smoke:** all three units `active (running)`; binds match the recorded baseline
+  (relay intake `127.0.0.1:2525` + the stale `172.17.0.1:2525` to be removed in 0.2;
+  submission `10.1.1.2:587` + loopback intake `127.0.0.1:2587`; imap proxy `:1143`).
+- **Rollback:** none (read-only).
+
+### 0.2 SMTP_LISTEN loopback cleanup -- REQUIRED, and it gates the relay restart
+
+The live relay still binds `172.17.0.1:2525` (docker0 bridge) alongside loopback. The
+new relay binary ENFORCES loopback-only intake (#93 / #104 audit F4): it REFUSES to
+start if any intake bind is non-loopback. So this one-line edit is NOT optional and
+MUST land BEFORE the new binary restarts, or the relay fails to boot.
+
+Verified safe (no caller): the `172.17.0.1:2525` bind has had zero client sessions
+across the full relay journal retention; the only intake traffic is a loopback health
+probe. (See the #116 mesh verify.)
+
+```bash
+# /etc/skyphusion-email-relay.env: drop the docker-bridge bind, keep loopback only.
+#   SMTP_LISTEN=172.17.0.1:2525,127.0.0.1:2525   ->   SMTP_LISTEN=127.0.0.1:2525
+sudo sed -i 's#^SMTP_LISTEN=.*#SMTP_LISTEN=127.0.0.1:2525#' /etc/skyphusion-email-relay.env
+sudo grep '^SMTP_LISTEN=' /etc/skyphusion-email-relay.env   # confirm == 127.0.0.1:2525
+```
+
+- **Smoke:** the value reads exactly `127.0.0.1:2525`.
+- **Rollback:** restore the prior `SMTP_LISTEN=172.17.0.1:2525,127.0.0.1:2525` line.
+- **NB:** do not restart the relay yet on the OLD binary -- the old binary is fine with
+  loopback-only too, but the restart belongs to 0.3 so binary + config flip together.
+
+### 0.3 Deploy the box binaries + restart (one service at a time, verify between)
+
+Install the freshly built binaries, then restart each unit and verify before the next.
+Each unit keeps its existing EnvironmentFile (tokens are narrowed later in 0.4; running
+on the existing `both` token in between is a SAFE intermediate state).
+
+```bash
+# Install (mirror the existing install path; built from the recorded main SHA):
+sudo install -m0755 relay/dist/skyphusion-email-relay /usr/local/bin/skyphusion-email-relay
+sudo install -m0755 relay/dist/postern-submission     /usr/local/bin/postern-submission   # -tags pam build
+sudo /opt/postern-imap/.venv/bin/pip install --upgrade '/opt/postern-imap[pam]'            # proxy + pam extra
+
+# Restart in dependency-safe order, verifying each:
+sudo systemctl restart skyphusion-email-relay && systemctl status skyphusion-email-relay --no-pager
+sudo systemctl restart postern-submission     && systemctl status postern-submission --no-pager
+sudo systemctl restart postern-imap           && systemctl status postern-imap --no-pager
+```
+
+- **Smoke (per unit):**
+  - relay: `active`, startup log shows intake on `127.0.0.1:2525` ONLY (no
+    `172.17.0.1`, no `WARNING: SMTP_LISTEN ... intake DISABLED`); loopback
+    `swaks --server 127.0.0.1:2525 --to test@skyphusion.org --body t` is accepted.
+  - postern-submission: `active`; loopback 587 STARTTLS+AUTH still logs in
+    (SUBMISSION-DEPLOY.md step 6); a bad password / `From != identity` is rejected;
+    the #105 throttle trips after N rapid bad AUTHs.
+  - postern-imap: `active`; loopback `1143` (or 993) IMAP login + SELECT INBOX
+    (imap/DEPLOY.md step 4); LDAP/PAM bind respects `LDAP_TIMEOUT`; #106 TLS floor:
+    `openssl s_client -connect <door> -tls1_1` is REFUSED, `-tls1_2` succeeds.
+- **Rollback:** reinstall the prior binary from `/usr/local/bin/*.prev` (keep a copy
+  before `install`), restore the EnvironmentFile, `systemctl restart`. One unit at a
+  time, so a failure is isolated to that door.
+
+### 0.4 Provision the #85 per-function scoped tokens (mint -> worker -> crew-secrets -> EnvironmentFiles)
+
+The worker classifies a presented bearer by which secret VALUE it matches:
+`POSTERN_API_TOKEN_READ` = read door only, `POSTERN_API_TOKEN_SEND` = send door only,
+`POSTERN_API_TOKEN` = `both` (read+send+credential-admin). Goal: the proxy + MCP hold
+the READ value (physically cannot send), the 587 submission holds the SEND value.
+
+Crew mints the token VALUES (opaque random bearers; no Conrad ask). Do NOT write a
+plaintext value into any tracked file; store in crew-secrets age-encrypted, labelled
+by function, via PR (not direct push).
+
+```bash
+# 1. Mint two opaque values (e.g. `openssl rand -hex 32` each): READVAL, SENDVAL.
+# 2. Set them worker-side (skyphusion-email-inbound):
+cd inbound
+printf '%s' "$READVAL" | npx wrangler secret put POSTERN_API_TOKEN_READ -c <real-config>
+printf '%s' "$SENDVAL" | npx wrangler secret put POSTERN_API_TOKEN_SEND -c <real-config>
+# 3. Store in crew-secrets (age, PR): POSTERN_API_TOKEN_READ + POSTERN_API_TOKEN_SEND.
+# 4. Wire the consumer EnvironmentFiles (the proxy presents whatever VALUE it holds;
+#    the worker classifies it -- so the proxy's var name stays POSTERN_API_TOKEN):
+#    /etc/postern-imap.env        -> POSTERN_API_TOKEN=<READVAL>     (read door)
+#    /etc/postern-submission.env  -> POSTERN_SEND_TOKEN=<SENDVAL>    (send door)
+#    MCP server env               -> POSTERN_API_TOKEN=<READVAL>     (read-only)
+sudo systemctl restart postern-imap postern-submission   # pick up narrowed tokens
+```
+
+- **Smoke (scope enforcement is the point):**
+  - proxy with READ value: IMAP fetch still works; a direct `POST /api/send` with that
+    same value returns **403** (scope), not 200. Same check for the MCP read token.
+  - 587 with SEND value: a submission send succeeds; a `GET /api/messages` with the
+    SEND value returns **403**.
+  - an unknown value -> **401**.
+- **DECISION TO FLAG (Conrad):** who keeps the `both` `POSTERN_API_TOKEN` after the
+  split? The credential-admin routes (`/api/admin/smtp-credentials`) need a `both`
+  token, so it cannot be retired outright -- but it should live ONLY in a restricted
+  admin/ops location, NEVER in the box units (which now hold read/send only). Recommend:
+  keep `POSTERN_API_TOKEN` set worker-side, hold its value in crew-secrets minter-tier
+  only, out of every EnvironmentFile.
+- **Rollback:** restore each EnvironmentFile to `POSTERN_API_TOKEN` / `POSTERN_SEND_TOKEN`
+  = the prior `both` value; `systemctl restart`. The worker secrets can stay (additive).
+
+### 0.5 Migration 0005 (messages.id AUTOINCREMENT) -- OFFLINE apply on the live store
+
+A core-table rebuild on the live D1 (`skyphusion-mail`). #118 is held `DO NOT MERGE`
+precisely because `deploy.yml` would otherwise auto-apply it online with no backup.
+Apply order is fixed (the migration header is authoritative):
+
+```text
+back up  ->  quiesce writers  ->  apply 0005 offline  ->  verify  ->  seed d1_migrations  ->  merge #118
+```
+
+```bash
+# 1. BACK UP first (authoritative copy of skyphusion-mail before any write):
+npx wrangler d1 export skyphusion-mail --remote --output skyphusion-mail.pre0005.sql -c <real-config>
+# 2. QUIESCE writers (see decision below) so the rebuild has NO concurrent INSERT.
+# 3. APPLY offline (this single migration only, not the whole apply path):
+npx wrangler d1 execute skyphusion-mail --remote --file inbound/migrations/0005_messages_id_autoincrement.sql -c <real-config>
+# 4. VERIFY (all three must pass):
+#    - row count + id set preserved 1:1 vs the backup (no id changed);
+#    - messages_fts integrity intact (external-content keyed on messages.id, NOT rebuilt):
+#        SELECT * FROM messages_fts WHERE messages_fts MATCH 'the' LIMIT 1;  -- returns
+#        INSERT INTO messages_fts(messages_fts) VALUES('integrity-check');   -- no error
+#    - AUTOINCREMENT high-water seeded: SELECT seq FROM sqlite_sequence WHERE name='messages';
+#      (>= current MAX(id)); a fresh insert gets MAX(id)+1, never a reused id.
+# 5. SEED the migration ledger so the next deploy no-ops (same baseline pattern as 0001-0003):
+npx wrangler d1 execute skyphusion-mail --remote -c <real-config> \
+  --command "INSERT INTO d1_migrations (name, applied_at) VALUES ('0005_messages_id_autoincrement.sql', CURRENT_TIMESTAMP);"
+# 6. UN-quiesce writers. THEN merge #118 (so the next CI deploy sees 0005 already applied).
+```
+
+- **Smoke:** `wrangler d1 migrations list skyphusion-mail --remote` shows 0005 applied;
+  a new inbound message lands with `id = prior_max+1`; IMAP UID = that id, stable under
+  a constant `UIDVALIDITY`; existing messages still searchable (FTS).
+- **DECISION TO FLAG (Conrad): how to quiesce inbound writers for the apply window.**
+  The store is fed by CF Email Routing -> the worker (writes can arrive anytime). The
+  rebuild needs NO concurrent writer. Options: (a) temporarily disable the catch-all /
+  point Email Routing at a hold rule for the (short) apply window -- inbound mail queues
+  at the sending MX and redelivers after; (b) a brief maintenance window accepting that
+  any mail arriving mid-rebuild is the only risk. Recommend (a): clean, no lost mail,
+  fully reversible. Strummer wires the routing pause/restore; Conrad approves the window.
+- **Rollback:** if any verify fails, RESTORE from `skyphusion-mail.pre0005.sql` (the
+  step-1 backup), do NOT seed d1_migrations, do NOT merge #118. The store returns to its
+  pre-rebuild state; the held PR stays held.
+
+### 0.6 Enable Joan's Stage-1 measurement (IMAP proxy)
+
+With the proxy on the read-scoped token and 0005 applied (stable UIDs), turn on Joan's
+Stage-1 measurement instrumentation per her proxy measurement doc. This is additive
+(measurement only; no behaviour change to the read path).
+
+- **Smoke:** Stage-1 metrics populate for a loopback IMAP session (fetch/SELECT) with
+  no errors in the proxy log; UID stability holds across reconnect.
+- **Rollback:** disable the Stage-1 flag; the proxy reverts to plain read-proxy.
+- **FLAG:** Stage-1's exact enable switch + metric sink are Joan's lane -- confirm the
+  toggle name + destination with Joan before the window; this step is the hook, not the
+  spec.
+
+### Phase 0 exit criteria (all green before Phase 1)
+
+- [ ] Three doors `active`, on the recorded main SHA, loopback/VLAN only (no public bind).
+- [ ] Relay intake loopback-only (`172.17.0.1` gone); F4 guard satisfied.
+- [ ] Proxy + MCP on the READ token, 587 on the SEND token; cross-scope calls 403.
+- [ ] 0005 applied + verified (ids 1:1, FTS intact, high-water seeded); #118 merged.
+- [ ] `LDAP_TIMEOUT`, #105 throttle, #106 TLS floor all live and smoke-verified.
+- [ ] Joan's Stage-1 measuring. Known-good dischord session still open.
 
 ---
 
