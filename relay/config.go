@@ -99,6 +99,21 @@ type SubmissionCfg struct {
 	// system backend (local Unix accounts via PAM; cgo, build-tagged `pam`).
 	SystemDomain  string // AUTH_SYSTEM_DOMAIN, bound identity = <user>@<this domain>
 	SystemService string // AUTH_SYSTEM_PAM_SERVICE, PAM service name (default postern)
+
+	// Online brute-force throttle on the AUTH door (#105).
+	Throttle ThrottleCfg
+}
+
+// ThrottleCfg configures the per-account online brute-force throttle (#105). The
+// knob names are a cross-door CONTRACT shared 1:1 with the Python IMAP checker's
+// LOGIN throttle, so an operator sets one set of values for both doors.
+type ThrottleCfg struct {
+	Enabled      bool          // AUTH_THROTTLE_ENABLED (default true)
+	MaxFailures  int           // AUTH_THROTTLE_MAX_FAILURES, per-account consecutive failures before lockout (default 5)
+	Lockout      time.Duration // AUTH_THROTTLE_LOCKOUT_SECONDS, base per-account lockout, doubles per failure past the threshold (default 60)
+	MaxLockout   time.Duration // AUTH_THROTTLE_MAX_LOCKOUT_SECONDS, cap on the per-account backoff (default 900)
+	GlobalMax    int           // AUTH_THROTTLE_GLOBAL_MAX_FAILURES, aggregate failures within the window before a global cooldown, 0 = off (default 100)
+	GlobalWindow time.Duration // AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS, the aggregate window + cooldown (default 60)
 }
 
 // LDAPCfg configures the ldap auth backend. TLS is mandatory (ldaps:// or
@@ -216,6 +231,14 @@ func loadConfig() (Config, error) {
 			},
 			SystemDomain:  os.Getenv("AUTH_SYSTEM_DOMAIN"),
 			SystemService: env("AUTH_SYSTEM_PAM_SERVICE", "postern"),
+			Throttle: ThrottleCfg{
+				Enabled:      envBool("AUTH_THROTTLE_ENABLED", true),
+				MaxFailures:  envInt("AUTH_THROTTLE_MAX_FAILURES", 5),
+				Lockout:      time.Duration(envInt("AUTH_THROTTLE_LOCKOUT_SECONDS", 60)) * time.Second,
+				MaxLockout:   time.Duration(envInt("AUTH_THROTTLE_MAX_LOCKOUT_SECONDS", 900)) * time.Second,
+				GlobalMax:    envInt("AUTH_THROTTLE_GLOBAL_MAX_FAILURES", 100),
+				GlobalWindow: time.Duration(envInt("AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS", 60)) * time.Second,
+			},
 		},
 	}
 

@@ -312,8 +312,12 @@ func startSubmission(cfg Config, listeners []submissionListener, errc chan error
 	if err != nil {
 		return err
 	}
-	be := &submissionBackend{cfg: cfg, auth: auth, sender: sc}
+	throttle := newAuthThrottle(cfg.Submission.Throttle, nil)
+	be := &submissionBackend{cfg: cfg, auth: auth, sender: sc, throttle: throttle}
 	log.Printf("submission auth backend = %s", submissionBackendName(cfg))
+	if cfg.Submission.Throttle.Enabled {
+		log.Printf("submission auth throttle: per-account lockout after %d failures (#105)", cfg.Submission.Throttle.MaxFailures)
+	}
 
 	for _, l := range listeners {
 		srv := newSubmissionServer(be, tlsCfg, cfg)
