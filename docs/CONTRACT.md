@@ -123,7 +123,7 @@ stable under concurrent inserts; `cursor: null` means no more rows. Read endpoin
 into a phrase expression before it reaches FTS5 `MATCH` (word tokens, each quoted, OR-joined),
 so caller input cannot inject FTS operators or break the query; an all-punctuation query matches
 nothing. All filter values are bound params. `search` modes: `fts` (M1, date-ordered + cursor-paged), `semantic` and `hybrid` (M4, over the
-Vectorize index ingest already populates). `semantic` embeds the query with the same model
+Vectorize index the store populates for BOTH inbound and outbound mail, #116 ws2). `semantic` embeds the query with the same model
 (`@cf/baai/bge-base-en-v1.5`) and queries Vectorize, collapsing chunk-hits to unique messages
 (best chunk score wins) and hydrating from D1; `hybrid` blends the fts and semantic result sets
 by `message_id` on a normalized score. semantic/hybrid are SCORE-ranked, so they return a single
@@ -386,15 +386,19 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
   `content` to bytes for the binding. Limits: at most 20 parts and 25 MiB decoded total (the CF message
   cap), else `E_PAYLOAD_TOO_LARGE` (413, mapped to SMTP `552`). For v1 every part is delivered with
   disposition `attachment`; rendering inline parts inline (cid) is a tracked refinement, never a silent
-  drop (the bytes are always preserved). The default CF transport remains the primary attachment path;
-  the relay `/dispatch` OUTBOUND bridge (`OUTBOUND_TRANSPORT=relay`) now ALSO carries attachments (#92):
-  `OutboundMessage.attachments` (base64 over JSON) is decoded and built into a `multipart/mixed` message
-  for the BYO upstream SMTP send (the relay constructs MIME itself, unlike the CF binding). The total
-  request is still bounded by the relay's body cap (`413` over the limit); filenames + media types are
-  sanitized so attachment metadata cannot inject a header.
-- **AI Search: hand-rolled Vectorize query, not managed AutoRAG (DECIDED, #31).** Ingest already
+  drop (the bytes are always preserved). The default CF transport is the supported attachment path for
+  v1: the relay `/dispatch` OUTBOUND bridge (`OUTBOUND_TRANSPORT=relay`) does NOT yet carry attachments
+  and rejects a send-with-attachment loud (`400`, never a silent drop), tracked in #92.
+- **AI Search: hand-rolled Vectorize query, not managed AutoRAG (DECIDED, #31).** The store
   populates a Vectorize index (one vector per body chunk, `@cf/baai/bge-base-en-v1.5`, metadata
-  carries `message_id`). M4 semantic/hybrid query THAT index directly (embed query -> Vectorize
+  carries `message_id`, `chunk`, `direction`, `from`, `to`, `date`, `subject`). The index covers
+  mail in BOTH directions (#116 ws2): inbound received mail AND the outbound sends / replies the
+  mailbox stores back, so a status / decision query finds the answer WE wrote, not just the
+  question. `direction` ("inbound" | "outbound") in the metadata lets a query attribute or filter
+  "what we said" vs "what was asked". Indexing default is index-ALL: outbound is always our own mail
+  and is indexed unconditionally; inbound indexing is index-all by default, optionally NARROWED by
+  the `VECTORIZE_FOR` allowlist (opt-in privacy gate for shared-domain crew mail). M4 semantic/hybrid
+  query THAT index directly (embed query -> Vectorize
   query -> collapse chunks to messages -> hydrate from D1) rather than standing up managed CF AI
   Search / AutoRAG. Rationale: AutoRAG would re-index from a separate data source, duplicating
   storage + embeddings and adding a managed dependency, against the no-rent/no-lock-in thesis. The

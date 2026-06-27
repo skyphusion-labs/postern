@@ -382,7 +382,12 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       bodyText: deriveBodyText(d.html, d.text),
       auth: { spf: "none", dkim: "none", dmarc: "none" },
       trusted: true, // we sent it
-      vectorize: false, // outbound is not RAG-indexed by default
+      // Index outbound mail + replies into the semantic store (#116 ws2): our own
+      // sends carry status / decisions / answers, so a query like "what's the
+      // status of the RunPod API fix?" must be able to find the reply WE wrote.
+      // Outbound is always our own mail = always crew-relevant, so index it
+      // unconditionally (no VECTORIZE_FOR allowlist gate, unlike inbound).
+      vectorize: true,
     },
     ctx,
   );
