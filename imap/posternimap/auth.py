@@ -244,11 +244,17 @@ class LDAPBinder:
         cfg = self._cfg
         use_ssl = cfg.ldap_url.lower().startswith("ldaps://")  # type: ignore[union-attr]
         try:
-            server = ldap3.Server(cfg.ldap_url, use_ssl=use_ssl, get_info=ldap3.NONE)
+            # LDAP_TIMEOUT bounds connect (here) AND every bind/search (receive_timeout
+            # on each Connection below), mirroring the Go relay's DialWithDialer +
+            # SetTimeout. 0 -> None == no timeout (matches Go's zero-duration default).
+            timeout = cfg.ldap_timeout or None
+            server = ldap3.Server(
+                cfg.ldap_url, use_ssl=use_ssl, get_info=ldap3.NONE, connect_timeout=timeout
+            )
             if cfg.ldap_bind_dn_template:
-                return self._simple_bind(ldap3, server, escape_rdn, username, password)
+                return self._simple_bind(ldap3, server, escape_rdn, username, password, timeout)
             return self._search_bind(
-                ldap3, server, escape_filter_chars, username, password
+                ldap3, server, escape_filter_chars, username, password, timeout
             )
         except LDAPException as exc:
             raise AuthBackendError(f"ldap error: {exc}") from exc
@@ -262,18 +268,23 @@ class LDAPBinder:
                 raise AuthBackendError("ldap starttls failed")
 
     def _simple_bind(
-        self, ldap3: Any, server: Any, escape_rdn: Any, username: str, password: str
+        self, ldap3: Any, server: Any, escape_rdn: Any, username: str, password: str,
+        timeout: Any = None,
     ) -> bool:
         dn = self._cfg.ldap_bind_dn_template % escape_rdn(username)
-        conn = ldap3.Connection(server, user=dn, password=password)
+        conn = ldap3.Connection(server, user=dn, password=password, receive_timeout=timeout)
         self._open(ldap3, conn)
         return bool(conn.bind())
 
     def _search_bind(
-        self, ldap3: Any, server: Any, escape_filter_chars: Any, username: str, password: str
+        self, ldap3: Any, server: Any, escape_filter_chars: Any, username: str, password: str,
+        timeout: Any = None,
     ) -> bool:
         cfg = self._cfg
-        svc = ldap3.Connection(server, user=cfg.ldap_bind_dn, password=cfg.ldap_bind_password)
+        svc = ldap3.Connection(
+            server, user=cfg.ldap_bind_dn, password=cfg.ldap_bind_password,
+            receive_timeout=timeout,
+        )
         self._open(ldap3, svc)
         if not svc.bind():
             raise AuthBackendError("ldap service-account bind failed")
@@ -285,7 +296,7 @@ class LDAPBinder:
             return False
         user_dn = entries[0].entry_dn
         # Bind the user's own password to verify it.
-        user_conn = ldap3.Connection(server, user=user_dn, password=password)
+        user_conn = ldap3.Connection(server, user=user_dn, password=password, receive_timeout=timeout)
         self._open(ldap3, user_conn)
         return bool(user_conn.bind())
 

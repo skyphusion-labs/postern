@@ -48,6 +48,20 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_IMAP_TLS_CERT": "/c.pem"})
 
+    def test_ldap_timeout_default_and_custom(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x"})
+        self.assertEqual(cfg.ldap_timeout, 10)  # shared default, matches the Go relay
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x", "LDAP_TIMEOUT": "25"})
+        self.assertEqual(cfg.ldap_timeout, 25)
+
+    def test_ldap_timeout_negative_rejected(self):
+        with self.assertRaises(ConfigError):
+            Config.from_env({"POSTERN_API_URL": "https://x", "LDAP_TIMEOUT": "-1"})
+
+    def test_ldap_timeout_must_be_int(self):
+        with self.assertRaises(ConfigError):
+            Config.from_env({"POSTERN_API_URL": "https://x", "LDAP_TIMEOUT": "soon"})
+
     def test_port_must_be_int(self):
         with self.assertRaises(ConfigError):
             Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_IMAP_PORT": "abc"})

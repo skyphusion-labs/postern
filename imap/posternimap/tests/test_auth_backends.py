@@ -69,15 +69,17 @@ def _install_fake_ldap3(directory, search_result=None, record=None):
     ldap3 = types.ModuleType("ldap3")
     ldap3.NONE = "NONE"
 
-    def _server(url, use_ssl=False, get_info=None):
+    def _server(url, use_ssl=False, get_info=None, connect_timeout=None):
         if record is not None:
             record["use_ssl"] = use_ssl
             record["url"] = url
+            record["connect_timeout"] = connect_timeout
         return ("server", url)
 
-    def _connection(server, user=None, password=None):
+    def _connection(server, user=None, password=None, receive_timeout=None):
         if record is not None:
             record.setdefault("binds", []).append((user, password))
+            record.setdefault("receive_timeouts", []).append(receive_timeout)
         return _FakeConnection(server, user=user, password=password,
                                directory=directory, search_result=search_result)
 
@@ -277,3 +279,67 @@ class PAMAuthTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LDAPTimeoutTest(unittest.TestCase):
+    """LDAP_TIMEOUT must bound BOTH connect and every bind/search (mirrors the Go
+    relay's DialWithDialer + SetTimeout), so a dead/slow directory cannot hang a
+    login. Shared cross-language knob name, default 10s, 0 disables."""
+
+    def _cfg(self, **over):
+        return _cfg(
+            ldap_url="ldaps://dir.example:636",
+            ldap_bind_dn_template="uid=%s,ou=people,dc=ex,dc=com",
+            **over,
+        )
+
+    def test_default_timeout_applied_to_connect_and_bind(self):
+        record = {}
+        td = _install_fake_ldap3(
+            directory={("uid=joan,ou=people,dc=ex,dc=com", "right"): True}, record=record
+        )
+        try:
+            self.assertTrue(LDAPBinder(self._cfg())("joan", "right"))
+            self.assertEqual(record["connect_timeout"], 10)  # Server connect timeout
+            self.assertTrue(record["receive_timeouts"])  # at least one bind
+            self.assertTrue(all(rt == 10 for rt in record["receive_timeouts"]))
+        finally:
+            td()
+
+    def test_search_bind_applies_timeout_to_every_connection(self):
+        record = {}
+        td = _install_fake_ldap3(
+            directory={
+                ("cn=svc,dc=ex,dc=com", "svcpw"): True,
+                ("uid=joan,ou=people,dc=ex,dc=com", "right"): True,
+            },
+            search_result=[_FakeEntry("uid=joan,ou=people,dc=ex,dc=com")],
+            record=record,
+        )
+        try:
+            cfg = _cfg(
+                ldap_url="ldaps://dir.example:636",
+                ldap_bind_dn="cn=svc,dc=ex,dc=com",
+                ldap_bind_password="svcpw",
+                ldap_search_base="ou=people,dc=ex,dc=com",
+                ldap_search_filter="(uid=%s)",
+            )
+            self.assertTrue(LDAPBinder(cfg)("joan", "right"))
+            # service-account bind + user bind both carry the timeout.
+            self.assertEqual(record["connect_timeout"], 10)
+            self.assertEqual(len(record["receive_timeouts"]), 2)
+            self.assertTrue(all(rt == 10 for rt in record["receive_timeouts"]))
+        finally:
+            td()
+
+    def test_zero_timeout_disables(self):
+        record = {}
+        td = _install_fake_ldap3(
+            directory={("uid=joan,ou=people,dc=ex,dc=com", "right"): True}, record=record
+        )
+        try:
+            self.assertTrue(LDAPBinder(self._cfg(ldap_timeout=0))("joan", "right"))
+            self.assertIsNone(record["connect_timeout"])  # 0 -> None == no timeout
+            self.assertTrue(all(rt is None for rt in record["receive_timeouts"]))
+        finally:
+            td()
