@@ -82,6 +82,22 @@ interface Env {
   POSTERN_API_TOKEN?: string;
   /** @deprecated Back-compat fallback for POSTERN_API_TOKEN; remove next release. */
   RELAY_TOKEN?: string;
+  /**
+   * Optional per-function READ-scoped mailbox token (#85). When set, a caller
+   * presenting it reaches ONLY the read door (GET /api/messages|search|threads
+   * and attachment bytes); it cannot send or touch admin routes. Independent of
+   * POSTERN_API_TOKEN and separately rotatable. wrangler secret put
+   * POSTERN_API_TOKEN_READ. Leave unset to keep the single-token (`both`) posture.
+   */
+  POSTERN_API_TOKEN_READ?: string;
+  /**
+   * Optional per-function SEND-scoped mailbox token (#85). When set, a caller
+   * presenting it reaches ONLY the write door (POST /api/send|reply); it cannot
+   * read the store or touch admin routes. Independent of POSTERN_API_TOKEN and
+   * separately rotatable. wrangler secret put POSTERN_API_TOKEN_SEND. Leave unset
+   * to keep the single-token (`both`) posture.
+   */
+  POSTERN_API_TOKEN_SEND?: string;
   /** Default From when a send omits it. Must be on ALLOWED_FROM_DOMAIN. */
   DEFAULT_FROM?: string;
   /** Optional display name paired with DEFAULT_FROM. */
