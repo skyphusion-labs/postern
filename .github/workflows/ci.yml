@@ -126,3 +126,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install pip-audit==2.10.1
           pip-audit --skip-editable
+
+  mcp:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
