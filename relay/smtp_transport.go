@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
@@ -192,37 +194,204 @@ func renderMIME(msg OutboundMessage, mailFrom string) ([]byte, error) {
 		writeHeader(&b, sanitizeHeader(k), sanitizeHeader(msg.Headers[k]))
 	}
 
+	// Body: text/plain, text/html, or multipart/alternative (both). With
+	// attachments (#92) that body becomes the first part of a multipart/mixed and
+	// the attachment parts follow it.
+	if len(msg.Attachments) > 0 {
+		if err := writeMixed(&b, msg); err != nil {
+			return nil, err
+		}
+		return b.Bytes(), nil
+	}
+	if err := writeBodyEntity(&b, msg); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+// writeBodyEntity writes the message body as a self-contained MIME entity (its own
+// Content-Type [+ Content-Transfer-Encoding] header lines, a blank line, then the
+// encoded body) to w. Written straight after the top-level headers it IS the
+// message body; written into a multipart/mixed part it is the body part. Byte for
+// byte identical to the previous inline body for the no-attachment case.
+func writeBodyEntity(w io.Writer, msg OutboundMessage) error {
 	switch {
 	case msg.HTML != "" && msg.Text != "":
-		mw := multipart.NewWriter(&b)
-		writeHeader(&b, "Content-Type", "multipart/alternative; boundary="+mw.Boundary())
-		b.WriteString("\r\n")
+		mw := multipart.NewWriter(w)
+		if _, err := io.WriteString(w, "Content-Type: multipart/alternative; boundary="+mw.Boundary()+"\r\n\r\n"); err != nil {
+			return err
+		}
 		if err := writeQPPart(mw, "text/plain; charset=utf-8", msg.Text); err != nil {
-			return nil, err
+			return err
 		}
 		if err := writeQPPart(mw, "text/html; charset=utf-8", msg.HTML); err != nil {
-			return nil, err
+			return err
 		}
-		if err := mw.Close(); err != nil {
-			return nil, err
-		}
+		return mw.Close()
 	case msg.HTML != "":
-		writeHeader(&b, "Content-Type", "text/html; charset=utf-8")
-		writeHeader(&b, "Content-Transfer-Encoding", "quotedprintable")
-		b.WriteString("\r\n")
-		if err := writeQP(&b, msg.HTML); err != nil {
-			return nil, err
+		if _, err := io.WriteString(w, "Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quotedprintable\r\n\r\n"); err != nil {
+			return err
 		}
+		return writeQP(w, msg.HTML)
 	default:
-		writeHeader(&b, "Content-Type", "text/plain; charset=utf-8")
-		writeHeader(&b, "Content-Transfer-Encoding", "quotedprintable")
-		b.WriteString("\r\n")
-		if err := writeQP(&b, msg.Text); err != nil {
-			return nil, err
+		if _, err := io.WriteString(w, "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quotedprintable\r\n\r\n"); err != nil {
+			return err
 		}
+		return writeQP(w, msg.Text)
+	}
+}
+
+// writeMixed wraps the body + attachments in a multipart/mixed entity (#92). The
+// boundary is written manually (consistent with the file's manual-header style) so
+// the body entity, which may itself be a nested multipart/alternative, can be
+// embedded verbatim as the first part without the CreatePart header-ownership clash.
+func writeMixed(b *bytes.Buffer, msg OutboundMessage) error {
+	boundary := newBoundary()
+	writeHeader(b, "Content-Type", "multipart/mixed; boundary="+boundary)
+	b.WriteString("\r\n")
+
+	// Part 1: the body entity (text / html / alternative).
+	b.WriteString("--" + boundary + "\r\n")
+	if err := writeBodyEntity(b, msg); err != nil {
+		return err
+	}
+	b.WriteString("\r\n")
+
+	// Parts 2..N: one per attachment.
+	for i, att := range msg.Attachments {
+		b.WriteString("--" + boundary + "\r\n")
+		if err := writeAttachmentPart(b, att, i); err != nil {
+			return err
+		}
+		b.WriteString("\r\n")
 	}
 
-	return b.Bytes(), nil
+	b.WriteString("--" + boundary + "--\r\n")
+	return nil
+}
+
+// writeAttachmentPart writes one attachment as a MIME entity: a validated
+// Content-Type + Content-Disposition, base64 Content-Transfer-Encoding, and the
+// re-wrapped base64 body. The wire content is base64; it is DECODED here (which
+// validates it) then re-encoded in 76-char lines so no single line can exceed the
+// SMTP line-length limit. The filename is sanitized to a quote/CRLF-free token and
+// the media type to RFC-2045 token chars, so neither can inject a header or break
+// the parameter quoting.
+func writeAttachmentPart(w io.Writer, att OutboundAttachment, index int) error {
+	data, err := decodeBase64(att.Content)
+	if err != nil {
+		return fmt.Errorf("attachment %d: invalid base64 content: %w", index, err)
+	}
+
+	name := safeAttachmentName(att.Filename, index)
+	ctype := safeMediaType(att.MimeType)
+
+	if _, err := io.WriteString(w, "Content-Type: "+ctype+"; name=\""+name+"\"\r\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "Content-Disposition: attachment; filename=\""+name+"\"\r\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, "Content-Transfer-Encoding: base64\r\n\r\n"); err != nil {
+		return err
+	}
+	return writeBase64Wrapped(w, data)
+}
+
+// newBoundary returns a fresh RFC-2046 boundary token (30 hex chars from
+// multipart.Writer, used here only as a generator).
+func newBoundary() string {
+	return multipart.NewWriter(io.Discard).Boundary()
+}
+
+// decodeBase64 strips ASCII whitespace (some clients wrap base64) then decodes with
+// standard padded base64, the encoding the worker / btoa produces.
+func decodeBase64(s string) ([]byte, error) {
+	clean := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\r', '\n':
+			return -1
+		}
+		return r
+	}, s)
+	return base64.StdEncoding.DecodeString(clean)
+}
+
+// writeBase64Wrapped writes data as standard base64 in 76-char lines (RFC 2045).
+func writeBase64Wrapped(w io.Writer, data []byte) error {
+	const lineLen = 76
+	enc := base64.StdEncoding.EncodeToString(data)
+	for len(enc) > 0 {
+		n := lineLen
+		if n > len(enc) {
+			n = len(enc)
+		}
+		if _, err := io.WriteString(w, enc[:n]+"\r\n"); err != nil {
+			return err
+		}
+		enc = enc[n:]
+	}
+	return nil
+}
+
+// safeAttachmentName reduces a filename to a quote/CRLF/control-free token
+// ([A-Za-z0-9._-], others -> _), capped at 100 chars, defaulting to
+// "attachment-<index>" when empty. Mirrors the read-API download sanitization so a
+// filename can never inject a header or break the name="..." parameter quoting.
+func safeAttachmentName(name string, index int) string {
+	mapped := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			return r
+		case r == '.' || r == '_' || r == '-':
+			return r
+		default:
+			return '_'
+		}
+	}, name)
+	if len(mapped) > 100 {
+		mapped = mapped[:100]
+	}
+	if mapped == "" {
+		return fmt.Sprintf("attachment-%d", index)
+	}
+	return mapped
+}
+
+// safeMediaType returns the attachment's media type if it is a well-formed type
+// of RFC-2045 token characters, else application/octet-stream. Rejecting anything
+// else keeps a stray quote / semicolon / CR-LF out of the Content-Type header.
+func safeMediaType(mt string) string {
+	const fallback = "application/octet-stream"
+	mt = strings.TrimSpace(mt)
+	if mt == "" {
+		return fallback
+	}
+	parsed, _, err := mime.ParseMediaType(mt)
+	if err != nil || !isTokenMediaType(parsed) {
+		return fallback
+	}
+	return parsed
+}
+
+// isTokenMediaType reports whether s is "type/subtype" of RFC-2045 token chars.
+func isTokenMediaType(s string) bool {
+	slash := strings.IndexByte(s, '/')
+	if slash <= 0 || slash == len(s)-1 {
+		return false
+	}
+	for _, r := range s {
+		if r == '/' {
+			continue
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$&-^_.+", r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func writeQPPart(mw *multipart.Writer, contentType, body string) error {
@@ -240,8 +409,8 @@ func writeQPPart(mw *multipart.Writer, contentType, body string) error {
 	return qp.Close()
 }
 
-func writeQP(b *bytes.Buffer, body string) error {
-	qp := quotedprintable.NewWriter(b)
+func writeQP(w io.Writer, body string) error {
+	qp := quotedprintable.NewWriter(w)
 	if _, err := qp.Write([]byte(body)); err != nil {
 		return err
 	}
