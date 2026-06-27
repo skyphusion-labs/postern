@@ -96,6 +96,55 @@ it live at login; the file holds no secret, so 0600 is belt-and-suspenders.
 `fixed` mode (proxy holds the token, clients use a normal password) DOES put the
 token in this file -- if you use it, keep 0600 and treat the file as a secret.
 
+## 2a. Auth backends and the secret posture (#77)
+
+A normal mail client uses ONE credential for BOTH doors (IMAP receive + SMTP
+send). The SMTP `relay/` already authenticates that credential three ways
+(`native`/`ldap`/`system`); the proxy mirrors those backends so the SAME login
+opens the read door. Pick the backend with `POSTERN_IMAP_AUTH_MODE`.
+
+**The posture shift (state it plainly).** In `token` mode the proxy holds NO
+secret: the user's own API token rides in on every login. In `native`/`ldap`/
+`system` the proxy authenticates the USER and then reads the store with a
+**per-function SERVICE token it holds** -- so the proxy goes from holding nothing
+to holding a long-lived secret. That is a real change in blast radius; treat the
+EnvironmentFile as a secret and scope the token to exactly this function.
+
+The auth-the-user step and the read-the-store step are deliberately separate (see
+`auth.py`): a bad login is rejected BEFORE the service token is ever used, and the
+service token never authenticates a client.
+
+| mode | secret(s) the proxy holds | function of each | where stored |
+|---|---|---|---|
+| `token` | none | -- | -- (each session carries the user's own token) |
+| `fixed` | `POSTERN_API_TOKEN` | the login token AND the read token | EnvironmentFile, 0600 |
+| `native` | `POSTERN_API_TOKEN` (service) + `POSTERN_TRANSPORT_TOKEN` | read the store / call `POST /api/smtp-auth` to verify the user | EnvironmentFile, 0600 |
+| `ldap` | `POSTERN_API_TOKEN` (service) + (search+bind only) `LDAP_BIND_PASSWORD` | read the store / bind the LDAP service account | EnvironmentFile, 0600 |
+| `system` | `POSTERN_API_TOKEN` (service) | read the store | EnvironmentFile, 0600 |
+
+**Per-function tokens, labeled, age-encrypted.** The service `POSTERN_API_TOKEN`
+and the `POSTERN_TRANSPORT_TOKEN` are issued specifically for THIS proxy (own
+token per consumer, house rule), labeled by function (e.g.
+`postern-imap-proxy-service-token`, `postern-transport`), and at deploy they are
+materialized from the age-encrypted secret store into `/etc/postern-imap.env`
+(0600) by the deploy step -- **never committed in plaintext to git**. The
+`native` transport token is the SAME transport-seam credential the relay uses for
+`POST /api/smtp-auth`; reuse the relay's value so one credential gates that seam.
+Rotation: rotate the service token at the worker, re-encrypt, redeploy the
+EnvironmentFile, restart the unit; no client is affected (clients authenticate
+with their own user credential, not the service token).
+
+**Optional dependencies.** `ldap` needs `ldap3`, `system` needs `python-pam`
+(both pure-Python, no C build step, imported lazily). Install the extra alongside
+the package on the box:
+
+```bash
+sudo /opt/postern-imap/.venv/bin/pip install '/opt/postern-imap[ldap]'   # ldap mode
+sudo /opt/postern-imap/.venv/bin/pip install '/opt/postern-imap[pam]'    # system mode
+```
+
+`native` and `token`/`fixed` need nothing beyond the base install.
+
 ## 3. Install and enable the unit
 
 ```bash
@@ -172,10 +221,26 @@ LDAP bind details (base, user DN shape, the `mail-users` authorization gate, the
 search filter) are in `docs/AUTH-CONTRACT.md` and are identical to what the 587
 submission server consumes, by design (one contract, both doors).
 
-## Public IMAPS (later phase, gated)
+## Public IMAPS (later phase, HARD GATE on Conrad)
 
-Exposing IMAP to the internet is out of scope for v1 and is a downtime/exposure
-gate (flag before doing it):
+Exposing IMAP to the internet is out of scope for v1 and is a **hard gate: do not
+provision a public cert or open 993 without Conrad's direct word.** It is both a
+downtime/exposure change on a live box and the point where the proxy's held
+service token (section 2a) becomes reachable from outside loopback.
+
+993 IMAPS uses the existing `POSTERN_IMAP_TLS_CERT` / `POSTERN_IMAP_TLS_KEY` knobs
+(set both -> the listener serves implicit TLS). For local verification you may
+generate a **self-signed cert and test on loopback ONLY**:
+
+```bash
+# loopback test only -- NOT a public cert, NOT exposed
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout /tmp/imaps-test.key -out /tmp/imaps-test.crt -subj "/CN=localhost"
+# point POSTERN_IMAP_TLS_CERT/KEY at these, restart, then imaplib.IMAP4_SSL on 127.0.0.1
+```
+
+Provisioning a real cert and opening the port is the gated path below (flag before
+doing it):
 1. DNS: add an A record for the mail host (e.g. `imap.skyphusion.org`) in
    Cloudflare DNS (IaC, not the dashboard). Cloudflare does not proxy IMAP except
    via Spectrum (paid), so this is a grey-cloud record to the box.
