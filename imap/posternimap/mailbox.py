@@ -72,6 +72,14 @@ class ReadOnlyError(imap4.MailboxException):
     """Raised for any write operation; the proxy is a read-only view in v1."""
 
 
+class AppendRejectedError(imap4.MailboxException):
+    """APPEND into a folder that has no backing store (placeholder folders, #109).
+
+    A MailboxException so the server maps it to a tagged NO (see server.py): the
+    client learns the save did not persist instead of the message being silently
+    dropped with a fake OK (RFC 3501 / audit F11)."""
+
+
 @implementer(imap4.IMailbox)
 class PosternMailbox:
     """A read-only IMAP view of the Postern mailbox, scoped by an optional filter.
@@ -309,16 +317,27 @@ class PosternMailbox:
         raise ReadOnlyError("postern-imap is read-only; flags are not stored")
 
     def addMessage(self, message, flags=(), date=None):
-        # APPEND is accepted as a NO-OP success and never fails the client. A mail
-        # client (Thunderbird) APPENDs its own copy of a sent message into Sent
-        # after submission; the Postern submission path already records the outbound
-        # message in the store, so persisting the APPEND would double-store. We
-        # acknowledge it (returning a Deferred, as Twisted's do_APPEND expects) so
-        # the post-send copy succeeds and the sent mail still appears (via the store
-        # on the next SELECT), exactly once. Drafts/Trash/Junk are placeholders with
-        # no v1 backing store, so an APPEND there is accepted but not persisted.
+        # do_APPEND calls this WITHOUT maybeDeferred, so we must return a Deferred
+        # (never raise synchronously, which Twisted would report as a server BAD).
         from twisted.internet import defer
 
+        if self._empty:
+            # Placeholder folders (Drafts/Trash/Junk/Archive) have no backing store
+            # in v1; the pre-#109 behaviour fake-acked the APPEND with OK and then
+            # DROPPED the message -> silent data loss (RFC 3501 / audit F11). Reject
+            # with a failed Deferred so the server returns a tagged NO and a client
+            # doing server-side drafts learns the save did not persist.
+            return defer.fail(
+                AppendRejectedError(
+                    "this folder does not store messages; APPEND is not supported"
+                )
+            )
+        # Real views (INBOX/Sent/All): accept as a NO-OP success. A mail client
+        # (Thunderbird) APPENDs its own copy of a sent message into Sent after
+        # submission; the Postern submission path already recorded that outbound
+        # message, so persisting the APPEND would double-store. Acknowledging it lets
+        # the post-send copy succeed while the sent mail still appears exactly once
+        # (via the store on the next SELECT).
         return defer.succeed(None)
 
     def expunge(self):

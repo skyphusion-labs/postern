@@ -23,9 +23,33 @@ import sys
 from twisted.internet import protocol
 from twisted.mail import imap4
 from twisted.python import log
+from twisted.python.compat import networkString
 
 from .auth import build_portal
 from .config import Config
+
+
+class PosternIMAP4Server(imap4.IMAP4Server):
+    """IMAP4Server that returns a tagged NO (not BAD) for a refused APPEND.
+
+    RFC 3501: a well-formed APPEND the server declines is a tagged NO. Twisted's
+    do_APPEND maps every addMessage failure to BAD via the (name-mangled) __ebAppend
+    handler, so we override it: a deliberate reject we raise as a MailboxException
+    (e.g. AppendRejectedError on a placeholder folder, #109) becomes NO with the
+    reason text; any other (unexpected) failure keeps the BAD + log behaviour. This
+    is a deliberate, documented conformance shim; if a future Twisted renames the
+    handler the override simply stops applying and the response degrades to BAD (the
+    APPEND still fails -- no silent data loss either way).
+    """
+
+    def _IMAP4Server__ebAppend(self, failure, tag):  # overrides IMAP4Server.__ebAppend
+        if failure.check(imap4.MailboxException):
+            self.sendNegativeResponse(
+                tag, b"APPEND failed: " + networkString(str(failure.value))
+            )
+            return
+        self.sendBadResponse(tag, b"APPEND failed: " + networkString(str(failure.value)))
+        log.err(failure)
 
 
 class PosternIMAPFactory(protocol.Factory):
@@ -36,7 +60,7 @@ class PosternIMAPFactory(protocol.Factory):
         self._portal = build_portal(cfg)
 
     def buildProtocol(self, addr):
-        proto = imap4.IMAP4Server()
+        proto = PosternIMAP4Server()
         # IMAP4Server.authenticateLogin defers LOGIN to this portal, which
         # resolves credentials to a PosternAccount (auth.build_portal / #32).
         proto.portal = self._portal
