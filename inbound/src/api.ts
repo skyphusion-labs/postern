@@ -125,11 +125,15 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const q = (url.searchParams.get("q") ?? "").trim();
       if (!q) return json({ ok: false, error: "E_FIELD_MISSING", message: "q is required" }, 400);
       const modeParam = url.searchParams.get("mode") ?? undefined;
+      // #128: an optional direction filter, mirroring /api/messages. An invalid
+      // value is ignored (treated as unset), not an error.
+      const dir = url.searchParams.get("direction");
       const page = await store.search(env, {
         q,
         mode: modeParam as "fts" | "semantic" | "hybrid" | undefined,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
+        direction: dir === "inbound" || dir === "outbound" ? dir : undefined,
       });
       return json({ ok: true, ...page });
     }

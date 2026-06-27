@@ -182,3 +182,66 @@ describe("search API mode passthrough (#31)", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("search direction filter (#128)", () => {
+  // Seed an inbound question and an outbound reply, both mentioning "deploy", so a
+  // direction filter is the only thing that separates them.
+  async function seedPair(env: Env, ctx: ExecutionContext, settle: () => Promise<unknown[]>) {
+    await ingest(
+      env,
+      { messageId: "inq@example.com", from: "ext@example.com", to: "conrad@skyphusion.org", subject: "deploy question", text: "deploy release green status", date: "2026-06-01T00:00:00.000Z" },
+      ctx,
+    );
+    await settle();
+    await handleApi(
+      new Request("https://postern.example/api/send", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ to: "ext@example.com", subject: "re: deploy", text: "deploy release green status done" }),
+      }),
+      env,
+      ctx,
+    );
+    await settle();
+  }
+
+  it("fts: direction restricts to that direction only", async () => {
+    const { env, ctx, settle } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    await seedPair(env, ctx, settle);
+
+    const out = await store.search(env, { q: "deploy", mode: "fts", direction: "outbound" });
+    expect(out.items.length).toBeGreaterThan(0);
+    expect(out.items.every((h) => h.message.direction === "outbound")).toBe(true);
+
+    const inb = await store.search(env, { q: "deploy", mode: "fts", direction: "inbound" });
+    expect(inb.items.length).toBeGreaterThan(0);
+    expect(inb.items.every((h) => h.message.direction === "inbound")).toBe(true);
+
+    // No filter: both directions present.
+    const both = await store.search(env, { q: "deploy", mode: "fts" });
+    const dirs = new Set(both.items.map((h) => h.message.direction));
+    expect(dirs.has("inbound") && dirs.has("outbound")).toBe(true);
+  });
+
+  it("semantic: direction filter restricts the ranked hits", async () => {
+    const { env, ctx, settle } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    await seedPair(env, ctx, settle);
+    const out = await store.search(env, { q: "deploy release", mode: "semantic", direction: "outbound" });
+    expect(out.items.length).toBeGreaterThan(0);
+    expect(out.items.every((h) => h.message.direction === "outbound")).toBe(true);
+  });
+
+  it("GET /api/search reads the direction param", async () => {
+    const { env, ctx, settle } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    await seedPair(env, ctx, settle);
+    const res = await handleApi(
+      new Request("https://postern.example/api/search?q=deploy&mode=fts&direction=inbound", { headers: { authorization: "Bearer test-token" } }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: { message: { direction: string } }[] };
+    expect(body.items.length).toBeGreaterThan(0);
+    expect(body.items.every((h) => h.message.direction === "inbound")).toBe(true);
+  });
+});

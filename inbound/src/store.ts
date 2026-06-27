@@ -72,6 +72,9 @@ export interface SearchQuery {
   mode?: "fts" | "semantic" | "hybrid"; // semantic/hybrid land in M4
   limit?: number;
   cursor?: string;
+  /** Restrict to one direction (#128): "what we said" (outbound) vs "what was
+   *  asked" (inbound). Applied in every mode. */
+  direction?: "inbound" | "outbound";
 }
 
 /** One page of results. cursor=null means there are no more. */
@@ -626,6 +629,11 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const binds: unknown[] = [ftsExpr];
   const where: string[] = ["m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"];
 
+  if (q.direction === "inbound" || q.direction === "outbound") {
+    where.push("m.direction = ?");
+    binds.push(q.direction);
+  }
+
   const cur = decodeCursor(q.cursor);
   if (cur) {
     where.push("(m.date < ? OR (m.date = ? AND m.id < ?))");
@@ -676,7 +684,7 @@ async function nearestMessageIds(
 ): Promise<{ messageId: string; score: number }[]> {
   if (!env.VECTORIZE) return [];
   // Over-fetch chunks so collapsing to messages still yields ~limit of them.
-  const topK = Math.min(50, Math.max(limit * 3, limit));
+  const topK = Math.min(100, Math.max(limit * 3, limit));
   const res = (await env.VECTORIZE.query(queryVec, {
     topK,
     returnMetadata: "all",
@@ -718,12 +726,20 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   const queryVec = await embedQuery(env, text);
   if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
 
-  const ranked = await nearestMessageIds(env, queryVec, limit);
+  const direction = q.direction === "inbound" || q.direction === "outbound" ? q.direction : undefined;
+  // When filtering by direction (#128), over-fetch candidates so the post-hydration
+  // filter still yields ~limit. The filter uses the hydrated row's direction (from
+  // D1, always present), so it is exact and needs no Vectorize metadata index.
+  const pool = direction ? limit * 4 : limit;
+  const ranked = await nearestMessageIds(env, queryVec, pool);
   const summaries = await summariesByIds(env, ranked.map((r) => r.messageId));
   const items: SearchHit[] = [];
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
-    if (message) items.push({ message, score: r.score });
+    if (!message) continue;
+    if (direction && message.direction !== direction) continue;
+    items.push({ message, score: r.score });
+    if (items.length >= limit) break;
   }
   // Score-ranked: single page, no date cursor.
   return { items, cursor: null };
@@ -733,8 +749,8 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const limit = clampLimit(q.limit);
   // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
   const [ftsPage, semPage] = await Promise.all([
-    ftsSearch(env, { q: q.q, mode: "fts", limit }),
-    semanticSearch(env, { q: q.q, mode: "semantic", limit }),
+    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction }),
+    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();

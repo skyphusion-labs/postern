@@ -134,7 +134,7 @@ interface ListQuery {
   limit?: number;                     // default 50, max 200
   cursor?: string;                    // opaque; encodes (date, id) of the last row
 }
-interface SearchQuery { q: string; mode?: "fts" | "semantic" | "hybrid"; limit?: number; cursor?: string }
+interface SearchQuery { q: string; mode?: "fts" | "semantic" | "hybrid"; limit?: number; cursor?: string; direction?: "inbound" | "outbound" }
 interface Page<T> { items: T[]; cursor: string | null }   // cursor=null means no more
 interface SearchHit { message: StoredMessageSummary; score?: number; snippet?: string }
 ```
@@ -152,7 +152,10 @@ by `message_id` on a normalized score. semantic/hybrid are SCORE-ranked, so they
 ranked page (`cursor` always null) of up to `limit` hits -- a date keyset cursor does not apply;
 paging a re-ranked semantic set is a post-v1 nicety. If the AI/Vectorize bindings are not
 configured, semantic/hybrid degrade to empty rather than erroring (ingest skips indexing too). An
-unknown mode returns `E_VALIDATION_ERROR`.
+unknown mode returns `E_VALIDATION_ERROR`. The optional `direction` filter (#128, `inbound`|`outbound`,
+mirroring `/api/messages`) applies in EVERY mode -- "what we said" vs "what was asked": `fts` adds a
+`direction` predicate to the query, and `semantic`/`hybrid` filter the hydrated hits by the stored
+direction (no Vectorize metadata index required). An invalid value is ignored (treated as unset).
 
 ---
 
