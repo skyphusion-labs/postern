@@ -86,9 +86,28 @@ class FakeTransport:
             return self._search(params)
         return 404, json.dumps({"ok": False, "error": "not_found"}).encode()
 
+    def _uid_of(self, m: Dict[str, Any]) -> int:
+        """The store's insertion key (rowid) for this message.
+
+        Mirrors the real worker, which surfaces messages.id (an AUTOINCREMENT rowid
+        assigned at arrival) as StoredMessageSummary.uid. The seed list is
+        newest-first (as the API returns), so arrival order is its REVERSE: the
+        newest message (index 0) gets the highest uid. Deriving uid from the
+        arrival ordinal (len - index) keeps existing uids stable when a test inserts
+        a new arrival at the front, exactly like an append-only rowid. An explicit
+        per-message `uid` override wins (so a test can pin a specific value).
+        """
+        if "uid" in m:
+            return int(m["uid"])
+        for i, mm in enumerate(self.messages):
+            if mm is m:
+                return len(self.messages) - i
+        return 0
+
     def _summary_of(self, m: Dict[str, Any]) -> Dict[str, Any]:
         s = {k: v for k, v in m.items() if k not in ("bodyText", "attachments")}
         s["attachmentCount"] = len(m.get("attachments", []))
+        s["uid"] = self._uid_of(m)
         return s
 
     def _list(self, params):

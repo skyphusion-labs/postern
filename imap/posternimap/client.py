@@ -38,6 +38,12 @@ class PosternAuthError(PosternError):
 class MessageSummary:
     """A list-view row (no body), mirroring the API StoredMessageSummary."""
 
+    # Monotonic insertion key (#103): the store's AUTOINCREMENT rowid (messages.id),
+    # assigned strictly ascending at ARRIVAL and never reused. The mailbox orders by
+    # it and surfaces it as the durable IMAP UID (RFC 3501). Contract-guaranteed
+    # present and > 0 on every summary (StoredMessageSummary.uid), so we read it
+    # strictly: a missing value is a backend contract violation, not a soft case.
+    uid: int
     message_id: str
     direction: str
     thread_id: str
@@ -53,6 +59,7 @@ class MessageSummary:
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "MessageSummary":
         return cls(
+            uid=int(d["uid"]),
             message_id=d["messageId"],
             direction=d.get("direction", "inbound"),
             thread_id=d.get("threadId", d["messageId"]),
