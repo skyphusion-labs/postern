@@ -62,6 +62,30 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             Config.from_env({"POSTERN_API_URL": "https://x", "LDAP_TIMEOUT": "soon"})
 
+    def test_throttle_defaults(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x"})
+        self.assertTrue(cfg.throttle_enabled)
+        self.assertEqual(cfg.throttle_max_failures, 5)
+        self.assertEqual(cfg.throttle_lockout_seconds, 60)
+        self.assertEqual(cfg.throttle_max_lockout_seconds, 900)
+        self.assertEqual(cfg.throttle_global_max_failures, 100)
+        self.assertEqual(cfg.throttle_global_window_seconds, 60)
+
+    def test_throttle_custom_and_disable(self):
+        cfg = Config.from_env({
+            "POSTERN_API_URL": "https://x",
+            "AUTH_THROTTLE_ENABLED": "false",
+            "AUTH_THROTTLE_MAX_FAILURES": "3",
+            "AUTH_THROTTLE_LOCKOUT_SECONDS": "30",
+        })
+        self.assertFalse(cfg.throttle_enabled)
+        self.assertEqual(cfg.throttle_max_failures, 3)
+        self.assertEqual(cfg.throttle_lockout_seconds, 30)
+
+    def test_throttle_negative_rejected(self):
+        with self.assertRaises(ConfigError):
+            Config.from_env({"POSTERN_API_URL": "https://x", "AUTH_THROTTLE_MAX_FAILURES": "-1"})
+
     def test_port_must_be_int(self):
         with self.assertRaises(ConfigError):
             Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_IMAP_PORT": "abc"})

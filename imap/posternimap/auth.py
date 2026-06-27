@@ -355,12 +355,16 @@ def build_portal(
     cfg: Config,
     verify: Optional[TokenVerifier] = None,
     authenticate: Optional[Authenticator] = None,
+    throttle=None,
 ):
     """Build a twisted.cred Portal whose login() yields an IMAP IAccount.
 
     The checker turns IUsernamePassword into an Identity via resolve_token; the
     realm turns the Identity into a PosternAccount (the IMAP IAccount). Returns a
     twisted.cred.portal.Portal.
+
+    `throttle` is the brute-force throttle (#105); None builds one from cfg. It is
+    per-portal (== per-process), matching the relay's per-process model.
     """
     from twisted.cred import checkers, credentials, error, portal
     from twisted.internet import defer
@@ -369,12 +373,16 @@ def build_portal(
     from zope.interface import implementer
 
     from .account import PosternAccount
+    from .throttle import build_throttle, throttle_key
 
     if cfg.auth_mode in SERVICE_TOKEN_MODES:
         if authenticate is None:
             authenticate = build_authenticator(cfg)
     elif verify is None:
         verify = TokenVerifier(cfg)
+
+    if throttle is None:
+        throttle = build_throttle(cfg)
 
     @implementer(checkers.ICredentialsChecker)
     class _Checker:
@@ -383,17 +391,28 @@ def build_portal(
         def requestAvatarId(self, creds):
             username = creds.username.decode() if isinstance(creds.username, bytes) else creds.username
             password = creds.password.decode() if isinstance(creds.password, bytes) else creds.password
+            account = throttle_key(username)
+            # Locked out (per-account or global cooldown): return the SAME generic
+            # failure as a wrong password and do NOT touch the backend (invariant 2:
+            # a throttled response is byte-identical to a normal auth failure).
+            if not throttle.allow(account):
+                return defer.fail(error.UnauthorizedLogin("bad credentials"))
             try:
                 identity = resolve_token(cfg, username, password, verify=verify, authenticate=authenticate)
             except AuthError:
+                # A genuine bad credential: this counts toward the lockout.
+                throttle.fail(account)
                 return defer.fail(error.UnauthorizedLogin("bad credentials"))
             except AuthBackendError as exc:
                 # A real backend fault (misconfig / unreachable): log it so the
                 # operator sees it, but still fail the login as plain bad creds so
-                # we never leak whether a username exists.
+                # we never leak whether a username exists. Invariant 1: this is an
+                # infra error, so it must NOT count toward the lockout (no fail()).
                 log.err(exc, "postern-imap auth backend fault")
                 return defer.fail(error.UnauthorizedLogin("bad credentials"))
-            # The avatar id carries the resolved identity to the realm.
+            # Correct credential: clear any accumulated failure state, then carry
+            # the resolved identity to the realm.
+            throttle.success(account)
             return defer.succeed(identity)
 
     @implementer(portal.IRealm)

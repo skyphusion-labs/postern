@@ -125,6 +125,17 @@ class Config:
     # reactor stalls under concurrent SELECTs.
     imap_poll_seconds: int = 30
 
+    # --- auth brute-force throttle (#105) ---
+    # RATIFIED cross-door contract: identical AUTH_THROTTLE_* knobs on the SMTP
+    # relay (587) and this IMAP door (993), integer seconds. Account-keyed +
+    # a global spread-spray backstop. See throttle.py / docs/AUTH-CONTRACT.md.
+    throttle_enabled: bool = True
+    throttle_max_failures: int = 5  # per-account consecutive failures before lockout
+    throttle_lockout_seconds: int = 60  # base lockout; doubles per failure past threshold
+    throttle_max_lockout_seconds: int = 900  # backoff cap
+    throttle_global_max_failures: int = 100  # aggregate failures/window before global cooldown (0 = off)
+    throttle_global_window_seconds: int = 60  # aggregate window + cooldown
+
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":
         e = os.environ if env is None else env
@@ -219,6 +230,24 @@ class Config:
         if imap_poll_seconds < 0:
             raise ConfigError("POSTERN_IMAP_POLL_SECONDS must be >= 0 (0 disables the poll)")
 
+        # Auth throttle (#105). Door-agnostic AUTH_THROTTLE_* names, integer seconds,
+        # shared verbatim with the relay so one vocabulary configures both doors.
+        throttle_enabled = _bool(e, "AUTH_THROTTLE_ENABLED", True)
+        throttle_max_failures = _int(e, "AUTH_THROTTLE_MAX_FAILURES", 5)
+        throttle_lockout_seconds = _int(e, "AUTH_THROTTLE_LOCKOUT_SECONDS", 60)
+        throttle_max_lockout_seconds = _int(e, "AUTH_THROTTLE_MAX_LOCKOUT_SECONDS", 900)
+        throttle_global_max_failures = _int(e, "AUTH_THROTTLE_GLOBAL_MAX_FAILURES", 100)
+        throttle_global_window_seconds = _int(e, "AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS", 60)
+        for _name, _val in (
+            ("AUTH_THROTTLE_MAX_FAILURES", throttle_max_failures),
+            ("AUTH_THROTTLE_LOCKOUT_SECONDS", throttle_lockout_seconds),
+            ("AUTH_THROTTLE_MAX_LOCKOUT_SECONDS", throttle_max_lockout_seconds),
+            ("AUTH_THROTTLE_GLOBAL_MAX_FAILURES", throttle_global_max_failures),
+            ("AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS", throttle_global_window_seconds),
+        ):
+            if _val < 0:
+                raise ConfigError(f"{_name} must be >= 0")
+
         return cls(
             api_url=api_url,
             listen_host=(e.get("POSTERN_IMAP_HOST") or "127.0.0.1").strip(),
@@ -245,6 +274,12 @@ class Config:
             api_timeout=_float(e, "POSTERN_API_TIMEOUT", 15.0),
             imap_window=imap_window,
             imap_poll_seconds=imap_poll_seconds,
+            throttle_enabled=throttle_enabled,
+            throttle_max_failures=throttle_max_failures,
+            throttle_lockout_seconds=throttle_lockout_seconds,
+            throttle_max_lockout_seconds=throttle_max_lockout_seconds,
+            throttle_global_max_failures=throttle_global_max_failures,
+            throttle_global_window_seconds=throttle_global_window_seconds,
         )
 
 
