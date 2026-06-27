@@ -93,6 +93,66 @@ describe("unknown search mode still rejects", () => {
   });
 });
 
+describe("outbound vectorization (#116 ws2)", () => {
+  type Vec = { metadata?: { message_id?: string; direction?: string } };
+
+  function sendReq(body: unknown): Request {
+    return new Request("https://postern.example/api/send", {
+      method: "POST",
+      headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("indexes an outbound send and finds it by semantic search, tagged direction=outbound", async () => {
+    const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    const res = await handleApi(
+      sendReq({ to: "alice@example.com", subject: "status update", text: "deploy release build green gpu render" }),
+      env,
+      ctx,
+    );
+    await settle();
+    const { messageId } = (await res.json()) as { messageId: string };
+
+    // It was indexed (outbound used to be vectorize:false).
+    const mine = (vectors as Vec[]).filter((v) => v.metadata?.message_id === messageId);
+    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.every((v) => v.metadata?.direction === "outbound")).toBe(true);
+
+    // And it is recoverable by semantic search -- the point of the change.
+    const sr = await store.search(env, { q: "release deploy", mode: "semantic" });
+    expect(sr.items.map((h) => h.message.messageId)).toContain(messageId);
+  });
+
+  it("indexes outbound unconditionally -- even with a VECTORIZE_FOR allowlist set (outbound is not gated)", async () => {
+    // The allowlist narrows INBOUND only; outbound is always our own mail.
+    const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "someone-else@skyphusion.org" });
+    const res = await handleApi(
+      sendReq({ to: "bob@example.com", subject: "reply", text: "invoice payment money billing" }),
+      env,
+      ctx,
+    );
+    await settle();
+    const { messageId } = (await res.json()) as { messageId: string };
+    const mine = (vectors as Vec[]).filter((v) => v.metadata?.message_id === messageId);
+    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.every((v) => v.metadata?.direction === "outbound")).toBe(true);
+  });
+
+  it("tags inbound mail direction=inbound in the vector metadata", async () => {
+    const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    await ingest(
+      env,
+      { messageId: "in@example.com", from: "x@example.com", to: "conrad@skyphusion.org", subject: "q", text: "invoice payment money", date: "2026-01-01T00:00:00.000Z" },
+      ctx,
+    );
+    await settle();
+    const mine = (vectors as Vec[]).filter((v) => v.metadata?.message_id === "in@example.com");
+    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.every((v) => v.metadata?.direction === "inbound")).toBe(true);
+  });
+});
+
 describe("search API mode passthrough (#31)", () => {
   function req(path: string): Request {
     return new Request(`https://postern.example${path}`, { headers: { authorization: "Bearer test-token" } });

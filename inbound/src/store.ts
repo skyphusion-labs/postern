@@ -249,6 +249,10 @@ async function indexVectors(env: Env, input: StoreInput): Promise<void> {
       metadata: {
         message_id: input.messageId,
         chunk: i,
+        // direction (#116 ws2) lets a query attribute / filter "what WE said"
+        // (outbound) vs "what was asked" (inbound) -- e.g. a status question wants
+        // the outbound reply. inbound | outbound, threaded from StoreInput.
+        direction: input.direction,
         from: input.from,
         to: input.to.toLowerCase(),
         date: input.date,
