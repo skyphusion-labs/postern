@@ -8,6 +8,19 @@ import type { EmailAddress } from "../mailbox";
 import { CfEmailTransport } from "./cf";
 import { RelayTransport } from "./relay";
 
+/**
+ * One attachment on an outbound message (#70). `content` is standard base64 (no
+ * line wrapping), kept as a string so an OutboundMessage stays JSON-serializable
+ * for the relay /dispatch transport; the transport that puts bytes on the wire
+ * (CfEmailTransport) decodes it. filename/mimeType are optional; the transport
+ * fills sane defaults when a MUA omits them.
+ */
+export interface OutboundAttachment {
+  filename?: string;
+  mimeType?: string;
+  content: string; // base64
+}
+
 /** Normalized, post-validation message ready to hand to a Transport. */
 export interface OutboundMessage {
   messageId: string; // core-generated, so we can thread + store the sent copy
@@ -20,6 +33,7 @@ export interface OutboundMessage {
   html?: string;
   text?: string;
   headers?: Record<string, string>; // carries In-Reply-To / References on replies
+  attachments?: OutboundAttachment[]; // #70: present only when the send carries files
 }
 
 /** providerMessageId is best-effort: present only if the provider returns one. */

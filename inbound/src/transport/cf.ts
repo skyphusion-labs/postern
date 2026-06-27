@@ -6,6 +6,16 @@
 
 import type { Transport, OutboundMessage, DispatchResult } from "./index";
 
+// Decode standard base64 (the JSON wire form of an attachment) to raw bytes for
+// the binding, which accepts an ArrayBufferView and builds the MIME itself. atob
+// throws on non-base64 input; attachments are validated before they reach here.
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
 export class CfEmailTransport implements Transport {
   constructor(private readonly env: Env) {}
 
@@ -25,6 +35,19 @@ export class CfEmailTransport implements Transport {
       message.replyTo = msg.replyTo.name
         ? { email: msg.replyTo.email, name: msg.replyTo.name }
         : msg.replyTo.email;
+    }
+    // Attachments (#70): the binding takes them as a field and builds the MIME
+    // (multipart/mixed) itself, so we never hand-roll a raw RFC 5322 message. The
+    // wire/JSON value is base64; decode to bytes here. All parts are sent as
+    // disposition "attachment" for v1 (inline-cid fidelity is a tracked
+    // follow-up). When there are none, the field-based path is unchanged.
+    if (msg.attachments && msg.attachments.length) {
+      message.attachments = msg.attachments.map((a, i) => ({
+        filename: a.filename && a.filename.trim() ? a.filename : `attachment-${i + 1}`,
+        type: a.mimeType && a.mimeType.trim() ? a.mimeType : "application/octet-stream",
+        disposition: "attachment" as const,
+        content: base64ToBytes(a.content),
+      }));
     }
     // Cloudflare Email Sending generates its own Message-ID and REJECTS a custom
     // one (only whitelisted + X-* headers are accepted). The mailbox stamps a

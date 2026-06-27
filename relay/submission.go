@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -104,9 +105,8 @@ func (s *submissionSession) Rcpt(to string, _ *smtp.RcptOptions) error {
 	return nil
 }
 
-// Data enforces auth + From, rejects attachments (the send seam has no attachment
-// support yet; rejecting is honest where dropping would lose data), reconstructs
-// to/cc/bcc, and bridges to the worker /api/send seam.
+// Data enforces auth + From, reconstructs to/cc/bcc, carries attachments through
+// (#70), and bridges to the worker /api/send seam.
 func (s *submissionSession) Data(r io.Reader) error {
 	if !s.authed {
 		return smtp.ErrAuthRequired
@@ -142,16 +142,6 @@ func (s *submissionSession) Data(r io.Reader) error {
 		}
 	}
 
-	// v1 limitation: the worker send seam (/api/send -> SendRequest) is field-based
-	// and carries no attachments. Reject loudly rather than silently drop them.
-	if len(env.Attachments) > 0 || len(env.Inlines) > 0 || len(env.OtherParts) > 0 {
-		return &smtp.SMTPError{
-			Code:         554,
-			EnhancedCode: smtp.EnhancedCode{5, 6, 1},
-			Message:      "attachments are not yet supported by this submission endpoint; send text/HTML only (tracking: github.com/skyphusion-labs/postern/issues/70)",
-		}
-	}
-
 	payload, err := s.buildSendPayload(env)
 	if err != nil {
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: err.Error()}
@@ -160,7 +150,7 @@ func (s *submissionSession) Data(r io.Reader) error {
 	if err := s.sender.Send(payload); err != nil {
 		return mapSendError(payload, err)
 	}
-	log.Printf("submitted from=%s to=%v cc=%v bcc=%d subject=%q", payload.From, payload.To, payload.CC, len(payload.BCC), payload.Subject)
+	log.Printf("submitted from=%s to=%v cc=%v bcc=%d attachments=%d subject=%q", payload.From, payload.To, payload.CC, len(payload.BCC), len(payload.Attachments), payload.Subject)
 	return nil
 }
 
@@ -201,13 +191,14 @@ func (s *submissionSession) buildSendPayload(env *enmime.Envelope) (SendPayload,
 	}
 
 	p := SendPayload{
-		From:    s.boundFrom,
-		To:      to,
-		CC:      cc,
-		BCC:     bcc,
-		Subject: env.GetHeader("Subject"),
-		HTML:    env.HTML,
-		Text:    env.Text,
+		From:        s.boundFrom,
+		To:          to,
+		CC:          cc,
+		BCC:         bcc,
+		Subject:     env.GetHeader("Subject"),
+		HTML:        env.HTML,
+		Text:        env.Text,
+		Attachments: collectAttachments(env),
 	}
 
 	// Carry reply threading so a reply sent from the client threads on the wire.
@@ -224,6 +215,37 @@ func (s *submissionSession) buildSendPayload(env *enmime.Envelope) (SendPayload,
 		p.Headers = headers
 	}
 	return p, nil
+}
+
+// collectAttachments maps the parsed MIME's non-body parts (#70) to the worker
+// SendRequest.attachments shape. Attachments, inline parts (e.g. an Apple Mail
+// inline image), AND other parts (multipart/related extras) are all carried -- the
+// same set the daemon used to reject loudly -- so a real MUA's message survives
+// intact with nothing silently dropped. The worker hands them to the send_email
+// binding, which builds the MIME. Content is base64 (the JSON wire form). Carrying
+// inline parts as attachments preserves their bytes; rendering them inline (cid)
+// rather than as attachments is a tracked follow-up, not a silent drop.
+func collectAttachments(env *enmime.Envelope) []SendAttachment {
+	parts := make([]*enmime.Part, 0, len(env.Attachments)+len(env.Inlines)+len(env.OtherParts))
+	parts = append(parts, env.Attachments...)
+	parts = append(parts, env.Inlines...)
+	parts = append(parts, env.OtherParts...)
+
+	out := make([]SendAttachment, 0, len(parts))
+	for _, part := range parts {
+		if len(part.Content) == 0 {
+			continue // structural part with no bytes; nothing to carry
+		}
+		out = append(out, SendAttachment{
+			Filename: part.FileName,
+			MimeType: part.ContentType,
+			Content:  base64.StdEncoding.EncodeToString(part.Content),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // classifyHeaderRecipients returns the header addresses that are present in the
