@@ -386,7 +386,9 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
   `content` to bytes for the binding. Limits: at most 20 parts and 25 MiB decoded total (the CF message
   cap), else `E_PAYLOAD_TOO_LARGE` (413, mapped to SMTP `552`). For v1 every part is delivered with
   disposition `attachment`; rendering inline parts inline (cid) is a tracked refinement, never a silent
-  drop (the bytes are always preserved).
+  drop (the bytes are always preserved). The default CF transport is the supported attachment path for
+  v1: the relay `/dispatch` OUTBOUND bridge (`OUTBOUND_TRANSPORT=relay`) does NOT yet carry attachments
+  and rejects a send-with-attachment loud (`400`, never a silent drop), tracked in #92.
 - **AI Search: hand-rolled Vectorize query, not managed AutoRAG (DECIDED, #31).** Ingest already
   populates a Vectorize index (one vector per body chunk, `@cf/baai/bge-base-en-v1.5`, metadata
   carries `message_id`). M4 semantic/hybrid query THAT index directly (embed query -> Vectorize
