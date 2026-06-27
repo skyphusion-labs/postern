@@ -68,7 +68,7 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(status["UIDNEXT"], 4)
         self.assertEqual(status["RECENT"], 0)
 
-    def test_read_only_rejects_writes(self):
+    def test_read_only_rejects_destructive_writes(self):
         from posternimap.mailbox import ReadOnlyError
 
         mb = self._mailbox()
@@ -76,7 +76,19 @@ class MailboxTest(unittest.TestCase):
         with self.assertRaises(ReadOnlyError):
             mb.expunge()
         with self.assertRaises(ReadOnlyError):
-            mb.addMessage(b"raw")
+            mb.store(None, ["\\Seen"], 1, False)
+
+    def test_append_is_noop_success(self):
+        # APPEND must NOT fail (a client copies its sent mail into Sent); it is a
+        # no-op that returns a fired Deferred, so the post-send copy succeeds.
+        from twisted.internet import defer
+
+        mb = self._mailbox(direction="outbound")
+        d = mb.addMessage(b"raw rfc822 bytes", flags=["\\Seen"], date=None)
+        self.assertIsInstance(d, defer.Deferred)
+        out = []
+        d.addCallback(out.append)
+        self.assertEqual(out, [None])  # already fired, no error
 
     def test_message_headers_and_body(self):
         from twisted.mail.imap4 import MessageSet
@@ -104,15 +116,82 @@ class MailboxTest(unittest.TestCase):
 class AccountTest(unittest.TestCase):
     def setUp(self):
         from posternimap.config import Config
+        from posternimap.client import PosternClient
 
         self.cfg = Config(api_url="https://x", auth_mode="token", api_timeout=5.0)
+        # Back the account's client with a fake transport so no network is touched
+        # and we can assert placeholder folders make zero API calls.
+        self.transport = FakeTransport(
+            [make_message("m1"), make_message("m2", direction="outbound")],
+            expected_token="tok",
+            page_size=2,
+        )
+        self._orig_client = None
 
-    def test_lists_three_fixed_mailboxes(self):
+        def _fake_client(acct_self):
+            return PosternClient(acct_self._cfg.api_url, acct_self._token, transport=self.transport)
+
+        from posternimap import account as account_mod
+
+        self._orig_client = account_mod.PosternAccount._client
+        account_mod.PosternAccount._client = _fake_client
+
+    def tearDown(self):
+        from posternimap import account as account_mod
+
+        if self._orig_client is not None:
+            account_mod.PosternAccount._client = self._orig_client
+
+    def test_lists_special_use_folder_set(self):
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
         names = {name for name, _ in acct.listMailboxes("", "*")}
-        self.assertEqual(names, {"INBOX", "Sent", "All"})
+        self.assertEqual(names, {"INBOX", "Sent", "All", "Drafts", "Trash", "Junk", "Archive"})
+
+    def test_list_advertises_rfc6154_special_use_attributes(self):
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        flags = {name: set(box.getFlags()) for name, box in acct.listMailboxes("", "*")}
+        # Each LIST entry carries its special-use attribute so a client auto-maps.
+        self.assertIn("\\Sent", flags["Sent"])
+        self.assertIn("\\Drafts", flags["Drafts"])
+        self.assertIn("\\Trash", flags["Trash"])
+        self.assertIn("\\Junk", flags["Junk"])
+        self.assertIn("\\Archive", flags["Archive"])
+        self.assertIn("\\All", flags["All"])
+        # INBOX has no special-use attr, just the structural one.
+        self.assertNotIn("\\Sent", flags["INBOX"])
+        for name in flags:
+            self.assertIn("\\HasNoChildren", flags[name])
+
+    def test_selected_mailbox_reports_message_flags_not_special_use(self):
+        # The SELECT instance must report message flags, NOT the LIST attributes.
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        sent = acct.select("Sent")
+        self.assertEqual(set(sent.getFlags()), {"\\Seen"})
+
+    def test_placeholder_folders_are_empty_without_api_calls(self):
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        for name in ("Drafts", "Trash", "Junk", "Archive"):
+            box = acct.select(name)
+            self.assertEqual(box.getMessageCount(), 0, name)
+        # An empty placeholder must not have touched the Postern API at all.
+        self.assertEqual(self.transport.calls, [])
+
+    def test_subscribe_unsubscribe_are_noops(self):
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        self.assertIsNone(acct.subscribe("Sent"))
+        self.assertIsNone(acct.unsubscribe("Sent"))
+        for name in ("INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive", "All"):
+            self.assertTrue(acct.isSubscribed(name))
 
     def test_select_inbox_case_insensitive(self):
         from posternimap.account import PosternAccount
@@ -125,7 +204,7 @@ class AccountTest(unittest.TestCase):
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
-        self.assertIsNone(acct.select("Drafts"))
+        self.assertIsNone(acct.select("Nonexistent"))
 
     def test_create_rejected(self):
         from posternimap.account import PosternAccount, ReadOnlyAccountError

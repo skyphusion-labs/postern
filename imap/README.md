@@ -17,15 +17,24 @@ in #12.
 
 ## What it does (v1)
 
-- **Read-only.** `LOGIN`, `LIST`, `SELECT`/`EXAMINE`, `FETCH`, `SEARCH`, `LOGOUT`.
-  You read mail here; you **send** through the structured API (`POST /api/send` /
-  `/api/reply`) or a future webmail, not by IMAP `APPEND`. Every write op
-  (`STORE`/`EXPUNGE`/`APPEND`/mailbox create/delete) is refused cleanly rather
-  than silently dropping data.
-- **Three mailboxes over the one store**, all direction-filtered views:
+- **Read-only store.** `LOGIN`, `LIST`/`LSUB`, `SELECT`/`EXAMINE`, `STATUS`,
+  `FETCH`, `SEARCH`, `LOGOUT`. You read mail here; you **send** through the
+  structured API (`POST /api/send` / `/api/reply`) or the submission server, not by
+  IMAP. Destructive write ops (`STORE`/`EXPUNGE`/mailbox create/rename/delete) are
+  refused cleanly rather than silently dropping data.
+- **`APPEND` is accepted as a no-op.** A mail client copies its own sent message
+  into `Sent` after submission; the Postern submission path already records the
+  outbound message in the store, so the proxy acknowledges the `APPEND` (it never
+  fails the client) and does NOT double-store. The sent mail appears once, via the
+  store, on the next `SELECT`. `SUBSCRIBE`/`UNSUBSCRIBE` are likewise accepted.
+- **Mailboxes with RFC 6154 special-use attributes**, so a real client
+  (Thunderbird) auto-maps its folders and never tries to CREATE them. `INBOX`,
+  `Sent`, and `All` are direction-filtered views over the one store; the rest are
+  present-but-empty placeholders (no backing state in v1, no API hit):
   - `INBOX` -> inbound mail
-  - `Sent` -> outbound mail (the stored sent copies)
-  - `All` -> both directions
+  - `Sent` (`\Sent`) -> outbound mail (the stored sent copies)
+  - `All` (`\All`) -> both directions
+  - `Drafts` (`\Drafts`), `Trash` (`\Trash`), `Junk` (`\Junk`), `Archive` (`\Archive`) -> empty placeholders
 - **Zero new state.** The proxy owns no database; it reads the live API per
   session with the caller's own token.
 
@@ -155,7 +164,7 @@ without Twisted:
 | `auth.py` | core no / portal yes | `resolve_token` (#32/#77) + the native/ldap/pam backends + the Twisted cred portal |
 | `message.py` | yes | `IMessage`/`IMessagePart` over a rendered message |
 | `mailbox.py` | yes | read-only `IMailbox` (snapshot, fetch, status) |
-| `account.py` | yes | `IAccount` exposing INBOX / Sent / All |
+| `account.py` | yes | `IAccount`: the special-use mailbox set (INBOX/Sent/All + empty Drafts/Trash/Junk/Archive), APPEND no-op |
 | `server.py` | yes | the `IMAP4Server` factory + reactor wiring |
 | `__main__.py` | -- | `python -m posternimap` entrypoint |
 
