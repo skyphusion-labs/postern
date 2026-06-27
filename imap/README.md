@@ -105,6 +105,12 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_TLS_CERT` | no | -- | PEM cert path (set with key for IMAPS) |
 | `POSTERN_IMAP_TLS_KEY` | no | -- | PEM key path |
 | `POSTERN_API_TIMEOUT` | no | `15` | per-request timeout to the API, seconds |
+| `AUTH_THROTTLE_ENABLED` | no | `true` | master switch for the auth brute-force throttle (#105) |
+| `AUTH_THROTTLE_MAX_FAILURES` | no | `5` | per-account consecutive failures before lockout |
+| `AUTH_THROTTLE_LOCKOUT_SECONDS` | no | `60` | base lockout; doubles per failure past the threshold |
+| `AUTH_THROTTLE_MAX_LOCKOUT_SECONDS` | no | `900` | per-account backoff cap |
+| `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` | no | `100` | aggregate failures/window before a global cooldown (0 = off) |
+| `AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS` | no | `60` | aggregate window + global cooldown |
 | `POSTERN_IMAP_WINDOW` | no | `500` | cap INBOX/Sent to the most-recent N at SELECT (0 = unlimited; All is always unbounded) |
 | `POSTERN_IMAP_POLL_SECONDS` | no | `30` | live-refresh interval while selected: re-poll the store and push EXISTS for new mail (0 = disable) |
 
