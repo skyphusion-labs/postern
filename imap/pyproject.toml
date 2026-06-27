@@ -12,7 +12,11 @@ license = { text = "MIT" }
 authors = [{ name = "skyphusion" }]
 # Runtime dep is Twisted (the IMAP4 server) only; the client + renderer + auth
 # core are pure stdlib, so the testable surface needs nothing extra.
-dependencies = ["Twisted>=22.10"]
+# PINNED (audit #107): the old floor (>=22.10) let an install resolve a Twisted
+# carrying known advisories. We pin to a single audited version so CI and a fresh
+# operator install resolve identically; the pip-audit gate in CI flags this pin the
+# moment a new advisory lands, which is the signal to bump it (controlled, visible).
+dependencies = ["Twisted==26.4.0"]
 
 [project.optional-dependencies]
 # Tests use stdlib unittest only; mypy is the type gate (mirrors the worker's
@@ -29,7 +33,8 @@ ldap = ["ldap3>=2.9"]
 pam = ["python-pam>=2.0", "six"]  # python-pam 2.0.2 imports six but does not declare it
 # Native IMAPS (POSTERN_IMAP_TLS_CERT/KEY) goes through Twisted's TLS stack, which
 # needs pyOpenSSL + service-identity. Install .[tls] (or .[pam,tls]) when serving 993.
-tls = ["Twisted[tls]>=22.10"]
+# Pinned in lockstep with the base Twisted pin above.
+tls = ["Twisted[tls]==26.4.0"]
 
 [project.scripts]
 postern-imap = "posternimap.__main__:main"
