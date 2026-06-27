@@ -15,6 +15,12 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+# Identify the proxy to the Postern API. The default urllib User-Agent
+# ("Python-urllib/x.y") is a known-bot signature that Cloudflare blocks with HTTP
+# 403 "error code: 1010" (browser-signature ban) in front of the worker, which would
+# break every store read (SELECT/LIST) even with a valid token. Send a real UA.
+USER_AGENT = "postern-imap (+https://github.com/skyphusion-labs/postern)"
+
 
 class PosternError(Exception):
     """A non-2xx response or transport failure from the Postern API."""
@@ -216,6 +222,7 @@ class PosternClient:
         req = urllib.request.Request(url, method="GET")
         req.add_header("Authorization", f"Bearer {self._token}")
         req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", USER_AGENT)
         status, raw = self._transport(req)
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
