@@ -150,6 +150,24 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
   error. Build it with `go build -tags pam` (needs libpam headers) and add a PAM
   service file (default `/etc/pam.d/postern`).
 
+### Online brute-force throttle (`AUTH_THROTTLE_*`, #105)
+
+PBKDF2 + dummy-hash timing equalization defeat OFFLINE cracking and user
+enumeration, but ONLINE password guessing needs an application backstop. The
+submission AUTH door applies a **per-account** failure counter with lockout +
+exponential backoff (default: lock after 5 consecutive failures, 60s base
+doubling to a 900s cap), plus a **global** aggregate ceiling that cools down ALL
+auth for one window once tripped (default 100 failures / 60s). It is keyed on the
+**account, not the source IP**: behind the lagwagon bastion every public
+connection presents one IP, so per-IP throttling (and fail2ban) is blind here. A
+throttled attempt returns the **same generic auth failure** as a wrong password,
+and a locked account is rejected **without** touching the backend, so the throttle
+never reveals whether an account exists and a guess against a locked account costs
+the attacker nothing. Infra errors (backend down) do NOT count, so an outage
+cannot lock users out. On by default; tune or disable via `AUTH_THROTTLE_*` (see
+`postern-submission.env.example`). The knob names are shared 1:1 with the Python
+IMAP checker's LOGIN throttle (the 993 door); state is in-memory + per-process.
+
 ### Bridge to the send seam + From-enforcement
 
 The message `From` MUST equal the bound identity (case-insensitive); a missing or

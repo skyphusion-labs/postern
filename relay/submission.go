@@ -34,16 +34,17 @@ type sender interface {
 // intake Backend in smtp.go: every message here is AUTH-gated, From-enforced, and
 // bridged to the worker /api/send seam, never posted to /ingest.
 type submissionBackend struct {
-	cfg    Config
-	auth   AuthProvider
-	sender sender
+	cfg      Config
+	auth     AuthProvider
+	sender   sender
+	throttle *authThrottle // shared across all sessions; per-account brute-force throttle (#105)
 }
 
 func (b *submissionBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	if submissionDebug {
 		log.Printf("submission session opened from %v", c.Conn().RemoteAddr())
 	}
-	return &submissionSession{cfg: b.cfg, auth: b.auth, sender: b.sender}, nil
+	return &submissionSession{cfg: b.cfg, auth: b.auth, sender: b.sender, throttle: b.throttle}, nil
 }
 
 // submissionSession holds per-connection auth + envelope state. authed flips true
@@ -53,6 +54,7 @@ type submissionSession struct {
 	cfg       Config
 	auth      AuthProvider
 	sender    sender
+	throttle  *authThrottle
 	authed    bool
 	boundFrom string
 	rcpts     []string
@@ -87,15 +89,34 @@ func (s *submissionSession) Auth(mech string) (sasl.Server, error) {
 // the generic auth failure so the client never learns whether the username
 // exists or whether the relay itself is misconfigured.
 func (s *submissionSession) authenticate(username, password string) error {
-	identity, err := s.auth.Authenticate(username, password)
-	if err != nil {
-		if err != errAuthFailed {
-			log.Printf("submission auth infra error user=%q: %v", username, err)
-		} else if submissionDebug {
-			log.Printf("submission auth REJECTED user=%q (backend returned auth-failed)", username)
+	// #105: per-account online brute-force throttle. Keyed on the account, not the
+	// source IP (behind the bastion every connection is one IP). A throttled
+	// attempt returns the SAME generic auth failure as a wrong password, so it
+	// never reveals whether the account exists -- and we do NOT touch the backend,
+	// so a guess against a locked account costs the attacker nothing useful.
+	account := throttleKey(username)
+	if !s.throttle.allow(account) {
+		if submissionDebug {
+			log.Printf("submission auth THROTTLED user=%q (too many recent failures)", username)
 		}
 		return smtp.ErrAuthFailed
 	}
+
+	identity, err := s.auth.Authenticate(username, password)
+	if err != nil {
+		if err != errAuthFailed {
+			// Infra error (backend down): NOT a password guess, so it must not
+			// count toward the throttle, else an outage locks every user out.
+			log.Printf("submission auth infra error user=%q: %v", username, err)
+		} else {
+			s.throttle.fail(account)
+			if submissionDebug {
+				log.Printf("submission auth REJECTED user=%q (backend returned auth-failed)", username)
+			}
+		}
+		return smtp.ErrAuthFailed
+	}
+	s.throttle.success(account)
 	s.authed = true
 	s.boundFrom = identity
 	if submissionDebug {
