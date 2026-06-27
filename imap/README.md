@@ -188,12 +188,14 @@ injectable transport, so no network is touched.
 ## Known limitations (v1, by design)
 
 - **Read-only.** Sending is the structured API's job.
-- **UIDs are the message's global arrival ordinal** (its position in the full
-  oldest-first store), with a constant `UIDVALIDITY`. Because the store is
-  append-only, a message keeps its ordinal, so UIDs are stable within a `SELECT`
-  AND across reconnects (a client cache survives). The honest caveat: this holds
-  only while the store is append-only; a durable, store-assigned UID that also
-  survives deletion/reordering is tracked in #103.
+- **UIDs are an interim ordinal over the date-ordered snapshot**, with a constant
+  `UIDVALIDITY`. This preserves a client cache across reconnects in the common
+  case, but per RFC 3501 it is NOT a true UID: it shifts (silently, under constant
+  `UIDVALIDITY`) on a deletion OR a backdated arrival (a new message with an old
+  `Date` inserts mid-order). The conformant fix is an arrival-order monotonic
+  insertion key as the UID, exposed by #103 and consumed in a follow-up; if a shift
+  is ever observed before then we bump `UIDVALIDITY` rather than let UIDs move
+  silently.
 - **Attachments are referenced, not inlined.** A FETCH body notes the attachments;
   their bytes live behind `GET /api/messages/{id}/attachments/{i}`. Inlining MIME
   parts over IMAP is a follow-up.

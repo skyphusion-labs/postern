@@ -27,15 +27,25 @@ Read-only is deliberate for v1 (#12): humans read here and *send* through the
 structured API, not by IMAP APPEND. Write paths raise so a client gets a clean
 "read-only" rather than silent data loss.
 
-UID model (v1 limitation, documented): UID == the message's GLOBAL arrival ordinal
-(its 1-based position in the full oldest-first store), and UIDVALIDITY is constant.
-Because the store is append-only, a message keeps its ordinal across reconnects, so
-UIDs are stable session-to-session and a client's cache survives -- which a
-window-relative UID would NOT be (it would shift as the window moves, forcing a
-UIDVALIDITY bump and full re-sync every session). The honest caveat: this holds
-only while the store is append-only; deletion/reordering would shift ordinals. A
-truly durable, store-assigned UID (stable under deletion, identical across proxy
-processes) is filed as #103; until it lands this ordinal is the correct interim.
+UID model (v1 INTERIM, documented; conformant fix tracked in #103): UID == the
+message's position in the snapshot, which is ordered by `date` (the store returns
+date DESC). A window-relative UID would shift as the window moves, so we use the
+GLOBAL ordinal instead and keep UIDVALIDITY constant, which preserves a client's
+cache across reconnects in the common case.
+
+RFC 3501 boundary (state it plainly, do not paper over it): an ordinal keyed on
+`date` is NOT a true UID. It shifts -- silently, under a constant UIDVALIDITY --
+in TWO cases, and a silent shift is OUR spec violation:
+  1. Deletion: removing an older message renumbers everything above it.
+  2. Backdated arrival: a newly-arrived message carrying an OLD Date header inserts
+     mid-order (the snapshot is date-ordered), shifting every higher UID. Real mail
+     does not arrive in Date order, so this is not rare.
+The conformant fix is arrival-order with a monotonic insertion key as the UID
+(RFC 3501's model): #103 exposes that key in StoredMessageSummary; a follow-up to
+THIS PR will order the mailbox by it and use it as the UID. Until then, if either
+trigger above is ever observed we must consume #103's key OR bump UIDVALIDITY (so a
+conformant client re-syncs) -- never let UIDs shift silently. #103 is Rollins's;
+Stage 1 only documents this boundary, it does not build the consumption.
 """
 
 from __future__ import annotations
