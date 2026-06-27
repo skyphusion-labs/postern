@@ -11,6 +11,12 @@ skyphusion-labs/postern#74 (the deploy drift this fixes).
 
 ## Operating rules for the window (aviation discipline)
 
+- **CARDINAL FLEET INGRESS INVARIANT (period, no exceptions).** ALL external
+  ingress to the fleet arrives via EITHER a cloudflared tunnel OR the bastion
+  (lagwagon). **No fleet box ever takes a direct connection from the outside
+  world or binds a public port.** Raw-TCP services (the 587/993 mail doors) use
+  the bastion (Phase 2); HTTP surfaces (e.g. webmail) use a cloudflared tunnel.
+  This governs every externally-reachable service, not just Postern.
 - **One variable at a time. Verify after each step before the next.**
 - **Keep a known-good root/console session open on dischord** for the duration (the
   fleet SSH path is LDAP-backed; do not risk locking yourself out mid-change).
@@ -28,9 +34,10 @@ skyphusion-labs/postern#74 (the deploy drift this fixes).
 - [ ] crew-secrets holds the deploy secrets (presence-check `${VAR:+SET}` only):
       `POSTERN_API_TOKEN` (store-read), `POSTERN_SEND_TOKEN`, `POSTERN_TRANSPORT_TOKEN`.
 - [ ] Cloudflare API token available for DNS + Workers (minter tier, on demand).
-- [ ] Exposure topology is DECIDED: **Option B, lagwagon-front** (Phase 2). The
-      only open window decisions left are the TLS model (B1 end-to-end vs B2
-      edge-terminate) and native-IMAPS vs stunnel for 993 (Phase 3b).
+- [ ] Topology is FIXED by the fleet ingress invariant (Phase 2): external mail
+      ingress comes via the bastion (lagwagon); no fleet box binds a public port.
+      The only open window decisions are the TLS termination point (end-to-end vs
+      edge) and native-IMAPS vs stunnel for 993 (Phase 3b).
 - [ ] A non-fleet host (the laptop) ready for external smoke checks.
 
 ---
@@ -129,18 +136,19 @@ Confirm no consumer still points at `skyphusion-email-inbound` or `skyphusion-em
 
 ---
 
-## Phase 2 -- exposure topology: Option B, lagwagon-front (CHOSEN)
+## Phase 2 -- the mail edge: bastion-front (per the fleet ingress invariant)
 
-Conrad's decision: **Option B.** Public 587/993 terminate/forward at **lagwagon**
-(the cloud edge / NAT gateway), forwarded over the private mesh to dischord's doors.
-**No fleet box ever binds a public port** -- dischord stays dark, reachable only over
-the private estate. That isolation is the entire point of B.
+Per the cardinal invariant above, external mail ingress comes in via the bastion.
+Public 587/993 terminate/forward at **lagwagon**, forwarded over the private mesh to
+dischord's doors. **No fleet box ever binds a public port** -- dischord stays dark,
+reachable only over the private estate. This is not a choice between alternatives;
+binding 587/993 (or any public port) directly on a fleet box is FORBIDDEN.
 
 ```
 mail client (internet)
       |  587 / 993 (TLS)
       v
-  lagwagon   (PUBLIC edge; userspace TCP forwarder, strictly additive)
+  lagwagon   (bastion edge; userspace TCP forwarder, strictly additive)
       |  private mesh hop (lagwagon -> dischord VLAN IP 10.1.1.2)
       v
   dischord   doors: postern-submission (587/1587) + postern-imap (993/1143)
@@ -148,6 +156,12 @@ mail client (internet)
       v
   postern.skyphusion.org
 ```
+
+HTTP surfaces are different: if the **webmail** (or any other HTTP UI) is ever
+exposed, the sanctioned pattern is a **cloudflared tunnel** to it, never a fleet-box
+public port and never the raw-TCP bastion forwarder. That is out of scope for this
+mail go-live; noted here so the invariant is not violated when webmail exposure
+comes up.
 
 ### lagwagon guardrails (READ FIRST -- lagwagon is the SPOF for ALL off-fleet access)
 
@@ -163,21 +177,13 @@ mail client (internet)
   verify it over the mesh BEFORE adding any public surface on lagwagon. Keep the
   Hetzner vKVM console open the whole time.
 
-### Option A (dischord-direct) -- NOT chosen, recorded for completeness
-
-Binding 587/993 on dischord's public interface (grey-cloud A record -> dischord
-public IP) is simpler but puts the first public port on a fleet box. Conrad chose B
-to keep fleet boxes dark. If B is ever abandoned, A is the fallback: cert + listener
-+ ufw + DNS all on dischord, same per-step shape (cert -> listener -> ufw -> DNS ->
-external smoke), the doors binding 0.0.0.0 instead of the VLAN IP.
-
 NB: Hetzner blocks OUTBOUND 25/465/587 on the fleet, but these are INBOUND listeners
 (clients connect IN to lagwagon), which is unaffected. The send hand-off to the
 worker is HTTPS(443), which is open.
 
 ---
 
-## Phase 3 -- stand up the lagwagon-front mail edge (B)
+## Phase 3 -- stand up the bastion-front mail edge
 
 Order: bring up dischord's doors on the PRIVATE interface, verify lagwagon reaches
 them over the mesh, design the fail2ban scoping, THEN add public surface on lagwagon
@@ -204,7 +210,7 @@ internet. Bind them to dischord's VLAN IP (10.1.1.2), never 0.0.0.0:
 Both models keep the public listener on lagwagon and the door on dischord; they
 differ in WHERE TLS terminates, and therefore WHAT lagwagon can see.
 
-**B1. End-to-end passthrough (lagwagon = dumb TCP pipe).** lagwagon forwards raw TCP
+**TLS-E2E. End-to-end passthrough (lagwagon = dumb TCP pipe).** lagwagon forwards raw TCP
 587/993 to dischord; **dischord holds the cert and terminates TLS**. lagwagon sees
 only ciphertext. Preserves 587 STARTTLS and native IMAPS unchanged. Forwarder =
 HAProxy (TCP mode) or `socat`. Cert (`smtp.`/`imap.skyphusion.org`) provisioned on
@@ -212,7 +218,7 @@ dischord via DNS-01 (a TXT record; no port/exposure needed).
   - Pro: TLS end-to-end; the edge cannot read mail. Con: the cert lives on a fleet
     box; lagwagon has no auth visibility (drives the fail2ban design, 3d).
 
-**B2. Edge-terminate (lagwagon terminates TLS).** lagwagon terminates **implicit
+**TLS-EDGE. Edge-terminate (lagwagon terminates TLS).** lagwagon terminates **implicit
 TLS** (465 for SMTP, 993 for IMAP) with **the cert on lagwagon** (stunnel or HAProxy)
 and forwards PLAINTEXT over the trusted mesh to the dischord door.
   - Pro: cert + renewal at the edge; no fleet box holds it. Con: plaintext mail on
@@ -223,15 +229,15 @@ Sub-decision (wherever TLS terminates): **native IMAPS vs stunnel for 993** -- e
 the door serves IMAPS natively with the cert, or stunnel fronts the loopback proxy.
 Write both; Conrad picks.
 
-Recommendation (noted, NOT baked): **B1 end-to-end + native door TLS** keeps mail
-unreadable by the edge and preserves 587 STARTTLS; **B2** simplifies cert ops at the
+Recommendation (noted, NOT baked): **TLS-E2E end-to-end + native door TLS** keeps mail
+unreadable by the edge and preserves 587 STARTTLS; **TLS-EDGE** simplifies cert ops at the
 cost of plaintext on the mesh. Conrad's call at the window.
 
 ### 3c. lagwagon edge forwarder (userspace, additive; NEVER ip_forward/MASQ)
 
 Install the chosen userspace forwarder on lagwagon (HAProxy TCP mode or `socat` for
-B1; stunnel for B2), listening on the PUBLIC interface (`:587`/`:993` for B1,
-`:465`/`:993` for B2), target = dischord `10.1.1.2:<door>`. Run it as a hardened
+TLS-E2E; stunnel for TLS-EDGE), listening on the PUBLIC interface (`:587`/`:993` for TLS-E2E,
+`:465`/`:993` for TLS-EDGE), target = dischord `10.1.1.2:<door>`. Run it as a hardened
 systemd unit (DynamicUser where the tool allows; mirror the door units). It is a
 userspace process: it does NOT and MUST NOT touch `ip_forward`, DNAT, or the
 POSTROUTING MASQ rule.
@@ -277,7 +283,7 @@ internal/masq source:
 
 Only after 3a-3d verify over the mesh:
 
-- **ufw on lagwagon:** open 587/993 (or 465/993 for B2) on the PUBLIC interface,
+- **ufw on lagwagon:** open 587/993 (or 465/993 for TLS-EDGE) on the PUBLIC interface,
   scoped as tightly as the audience allows. lagwagon is most-careful; vKVM open.
   ```bash
   ufw allow proto tcp to any port 587 comment 'postern submission (edge)'
