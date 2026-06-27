@@ -1,0 +1,32 @@
+{
+  "name": "postern-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for Postern: read tools over the mailbox API so an agent can search, read, and thread mail.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "postern-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.4",
+    "vitest": "^4.1.9"
+  }
+}
