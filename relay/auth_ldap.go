@@ -3,7 +3,9 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"strings"
+	"time"
 
 	"github.com/go-ldap/ldap/v3"
 )
@@ -27,11 +29,23 @@ type ldapConn interface {
 	Close() error
 }
 
-// ldapDial is the production dialer (overridable in tests).
-var ldapDial = func(url string) (ldapConn, error) {
-	c, err := ldap.DialURL(url)
+// ldapDial is the production dialer (overridable in tests). timeout (LDAP_TIMEOUT)
+// bounds BOTH the TCP connect (net.Dialer) AND every later operation on the conn
+// (SetTimeout: bind/search read deadline), so a dead or slow directory can neither
+// hang the connect nor hang a bind/search mid-login. A non-positive timeout leaves
+// go-ldap's defaults in place (no timeout); the config default is 10s.
+var ldapDial = func(url string, timeout time.Duration) (ldapConn, error) {
+	var opts []ldap.DialOpt
+	if timeout > 0 {
+		opts = append(opts, ldap.DialWithDialer(&net.Dialer{Timeout: timeout}))
+	}
+	c, err := ldap.DialURL(url, opts...)
 	if err != nil {
 		return nil, err
+	}
+	if timeout > 0 {
+		// Read deadline for the binds + search that follow (set before any bind).
+		c.SetTimeout(timeout)
 	}
 	return c, nil
 }
@@ -50,7 +64,12 @@ func newLDAPAuth(cfg LDAPCfg) (*ldapAuth, error) {
 	if cfg.MailAttr == "" {
 		cfg.MailAttr = "mail"
 	}
-	return &ldapAuth{cfg: cfg, dial: ldapDial}, nil
+	// Bind the production dialer with the configured timeout. The struct's dial
+	// seam stays a func(url) so tests inject a fake directory unchanged; the real
+	// wiring carries LDAP_TIMEOUT through to the net.Dialer + conn read deadline.
+	return &ldapAuth{cfg: cfg, dial: func(url string) (ldapConn, error) {
+		return ldapDial(url, cfg.Timeout)
+	}}, nil
 }
 
 func (a *ldapAuth) Authenticate(username, secret string) (string, error) {

@@ -112,6 +112,11 @@ type LDAPCfg struct {
 	SearchBase     string // LDAP_SEARCH_BASE, e.g. "ou=people,dc=example,dc=com"
 	SearchFilter   string // LDAP_SEARCH_FILTER, e.g. "(uid=%s)"
 	MailAttr       string // LDAP_MAIL_ATTR, the attribute holding the bound identity (default mail)
+	// Timeout (LDAP_TIMEOUT, integer seconds, default 10) bounds the directory
+	// dial AND each bind/search, so a dead or slow directory cannot hang a login.
+	// Symmetric with the Python IMAP proxy's ldap mode (#88). 0 disables it (not
+	// recommended). Distinct from POSTERN_API_TIMEOUT (the store-API timeout).
+	Timeout time.Duration
 }
 
 // enabled reports whether any submission listener is configured.
@@ -207,6 +212,7 @@ func loadConfig() (Config, error) {
 				SearchBase:     os.Getenv("LDAP_SEARCH_BASE"),
 				SearchFilter:   os.Getenv("LDAP_SEARCH_FILTER"),
 				MailAttr:       env("LDAP_MAIL_ATTR", "mail"),
+				Timeout:        time.Duration(envInt("LDAP_TIMEOUT", 10)) * time.Second,
 			},
 			SystemDomain:  os.Getenv("AUTH_SYSTEM_DOMAIN"),
 			SystemService: env("AUTH_SYSTEM_PAM_SERVICE", "postern"),
