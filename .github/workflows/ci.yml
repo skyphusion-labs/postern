@@ -63,6 +63,14 @@ jobs:
       # the race detector. Without this, those tests never execute in CI and the
       # regression guard for the go/email-injection fix would be decorative.
       - run: go test -race ./...
+      # Vulnerability gate (audit #107): scan the relay module + its dependency
+      # graph against the Go vulnerability database before public exposure. The tool
+      # version is pinned for reproducible CI; its advisory DB is fetched fresh at
+      # run time, so the gate stays current without a tool bump.
+      - name: govulncheck (dependency vulnerability gate)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
 
   imap:
     runs-on: ubuntu-latest
@@ -76,10 +84,22 @@ jobs:
           python-version: "3.12"
       # Twisted is the only runtime dep; mypy is the type gate (mirrors the
       # Node typecheck convention). The pure layers test without Twisted, but
-      # the e2e server test needs it, so install the package + dev extras.
-      - run: pip install -e '.[dev]'
+      # the e2e server test needs it, so install the package + dev extras. We also
+      # install the [tls] extra (pyOpenSSL / service-identity, the 993 IMAPS TLS
+      # stack, audit #107) so it resolves in CI and is covered by the scan below.
+      - run: pip install -e '.[dev,tls]'
       - run: python -m mypy
       - run: python -m twisted.trial posternimap.tests
+      # Vulnerability gate (audit #107): audit the installed environment, which now
+      # includes Twisted[tls] and its transitive TLS deps. Upgrade pip first so the
+      # gate scans our SHIPPED deps, not stale advisories in the runner's bundled
+      # pip toolchain; --skip-editable skips the local posternimap package (no PyPI
+      # version). pip-audit is pinned for reproducibility.
+      - name: pip-audit (dependency vulnerability gate)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit==2.10.1
+          pip-audit --skip-editable
 
   clients-python:
     runs-on: ubuntu-latest
@@ -97,3 +117,12 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: python -m mypy
       - run: python -m unittest discover
+      # Vulnerability gate (audit #107): the client is pure stdlib, so this audits
+      # the dev toolchain; kept for parity so every shippable Python surface has the
+      # same pre-exposure scan. Upgrade pip first (avoid stale-toolchain noise);
+      # --skip-editable skips the local postern-client package. pip-audit pinned.
+      - name: pip-audit (dependency vulnerability gate)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit==2.10.1
+          pip-audit --skip-editable
