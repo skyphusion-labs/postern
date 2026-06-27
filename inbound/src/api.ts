@@ -376,9 +376,11 @@ async function resolveToken(request: Request, env: Env): Promise<TokenResolution
   if (matched !== null) return { scope: matched };
 
   // No static match: consult the per-identity send registry. A hit is a known
-  // per-member token -> send scope with an authoritative bound From; a miss falls
-  // through to null (the caller maps that to 401, unknown token).
-  const identity = await resolveRegistryIdentity(got, env.POSTERN_SEND_IDENTITIES);
+  // per-member token -> send scope with an authoritative bound From; a miss (incl. an
+  // entry whose From is off ALLOWED_FROM_DOMAIN, denied at resolve time) falls through
+  // to null (the caller maps that to 401, unknown token).
+  const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  const identity = await resolveRegistryIdentity(got, env.POSTERN_SEND_IDENTITIES, allowedDomain);
   if (identity) return { scope: "send", identity };
   return null;
 }

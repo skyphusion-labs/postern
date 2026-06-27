@@ -61,8 +61,17 @@ export async function sha256Hex(input: string): Promise<string> {
  * tokens keep working regardless. Each entry is validated -- the key must be a
  * 64-char lowercase sha256 hex and `from` a well-formed address; a bad entry is
  * skipped, not fatal.
+ *
+ * When `allowedDomain` is given, the domain policy stays AUTHORITATIVE over the
+ * registry: the per-identity From is authoritative over the CALLER, but a registry
+ * entry can never widen the sender domain. An entry whose From is outside the allowed
+ * domain is DENIED at resolve time (skipped here) and logged, so a fat-fingered or
+ * tampered entry cannot make the worker send as an arbitrary external domain.
  */
-export function parseRegistry(raw: string | undefined): Map<string, BoundIdentity> {
+export function parseRegistry(
+  raw: string | undefined,
+  allowedDomain?: string,
+): Map<string, BoundIdentity> {
   const map = new Map<string, BoundIdentity>();
   if (!raw || raw.trim() === "") return map;
 
@@ -74,12 +83,22 @@ export function parseRegistry(raw: string | undefined): Map<string, BoundIdentit
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return map;
 
+  const domain = allowedDomain ? allowedDomain.toLowerCase() : undefined;
   for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
     if (!/^[0-9a-f]{64}$/.test(key)) continue; // not a sha256 hex key
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const v = value as Record<string, unknown>;
     const from = typeof v.from === "string" ? v.from.trim().toLowerCase() : "";
     if (!EMAIL_RE.test(from)) continue; // entry with no/invalid From: skip (deny)
+    // Domain policy authoritative over the registry: an off-domain entry is denied at
+    // the gate (and logged), defense in depth with resolveFrom. The From is config
+    // data, not a secret, so it is safe to log; the token/hash is never logged.
+    if (domain && from.split("@")[1] !== domain) {
+      console.warn(
+        `POSTERN_SEND_IDENTITIES: ignoring entry with from="${from}" outside ALLOWED_FROM_DOMAIN="${domain}"`,
+      );
+      continue;
+    }
     const identity: BoundIdentity = { from };
     if (typeof v.displayName === "string" && v.displayName.trim() !== "") {
       identity.displayName = v.displayName.trim();
@@ -93,14 +112,16 @@ export function parseRegistry(raw: string | undefined): Map<string, BoundIdentit
  * Resolve a presented Bearer against the send-identity registry: the bound identity
  * for a known registry token, or null if the token is not registered. The caller
  * resolves the static scope tokens FIRST and consults this only when none matched,
- * so a registry hit always means scope `send` with an authoritative From.
+ * so a registry hit always means scope `send` with an authoritative From. An entry
+ * whose From is outside `allowedDomain` is treated as not present (denied -> 401).
  */
 export async function resolveRegistryIdentity(
   token: string,
   raw: string | undefined,
+  allowedDomain?: string,
 ): Promise<BoundIdentity | null> {
   if (!token) return null;
-  const map = parseRegistry(raw);
+  const map = parseRegistry(raw, allowedDomain);
   if (map.size === 0) return null;
   const hash = await sha256Hex(token);
   return map.get(hash) ?? null;
