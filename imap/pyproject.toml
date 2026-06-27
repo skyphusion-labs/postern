@@ -27,6 +27,9 @@ dev = ["mypy>=1.8"]
 # Both are imported LAZILY (auth.py), so importing the package never pulls them.
 ldap = ["ldap3>=2.9"]
 pam = ["python-pam>=2.0", "six"]  # python-pam 2.0.2 imports six but does not declare it
+# Native IMAPS (POSTERN_IMAP_TLS_CERT/KEY) goes through Twisted's TLS stack, which
+# needs pyOpenSSL + service-identity. Install .[tls] (or .[pam,tls]) when serving 993.
+tls = ["Twisted[tls]>=22.10"]
 
 [project.scripts]
 postern-imap = "posternimap.__main__:main"
