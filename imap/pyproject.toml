@@ -26,7 +26,7 @@ dev = ["mypy>=1.8"]
 #   python-pam: ctypes binding to libpam (no C build step) for the system backend.
 # Both are imported LAZILY (auth.py), so importing the package never pulls them.
 ldap = ["ldap3>=2.9"]
-pam = ["python-pam>=2.0"]
+pam = ["python-pam>=2.0", "six"]  # python-pam 2.0.2 imports six but does not declare it
 
 [project.scripts]
 postern-imap = "posternimap.__main__:main"

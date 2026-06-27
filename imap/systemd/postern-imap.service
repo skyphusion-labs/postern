@@ -32,7 +32,10 @@ MemoryDenyWriteExecute=yes
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 # Binds a TCP IMAP listener and makes outbound HTTPS to the Postern worker.
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX is REQUIRED in system/pam mode: PAM auth (pam_ldap) talks to the nslcd
+# socket over AF_UNIX, and the PAM stack logs over /dev/log. AF_INET* are the IMAP
+# listener + outbound HTTPS to the worker.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # ProtectSystem=strict makes the whole tree read-only; the proxy needs no
 # writable paths. If you enable IMAPS, the cert/key under /etc/postern-imap are
 # read-only reads, which is allowed.
