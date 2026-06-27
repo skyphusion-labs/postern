@@ -2,6 +2,12 @@ module github.com/skyphusion/skyphusion-email/relay
 
 go 1.25.0
 
+// Build toolchain pinned to a PATCHED release (audit #107): govulncheck flags
+// standard-library CVEs against the toolchain version, so CI (setup-go reads this
+// directive) must build with a patched Go. 1.25.11 carries every current 1.25-line
+// stdlib security backport; bump when the dep-scan gate flags a newer stdlib CVE.
+toolchain go1.25.11
+
 require (
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21
 	github.com/emersion/go-smtp v0.21.3
