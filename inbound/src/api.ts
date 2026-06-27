@@ -23,6 +23,7 @@ import {
   generateSecret,
   normalizeUsername,
 } from "./smtpcreds";
+import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 
 // Failure codes that represent a transient upstream condition (the transport /
 // provider) rather than a bad request; mapped to 502 so callers can retry.
@@ -64,12 +65,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   // per route/method (#85). An absent or unknown token is 401; a known token used
   // outside its scope is 403. With only POSTERN_API_TOKEN set it resolves to `both`
   // and every route is permitted, exactly as before this change.
-  const scope = resolveScope(request, env);
-  if (scope === null) {
+  const resolution = await resolveToken(request, env);
+  if (resolution === null) {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
   const need = requiredScope(request.method, path);
-  if (need !== null && !scopeSatisfies(scope, need)) {
+  if (need !== null && !scopeSatisfies(resolution.scope, need)) {
     return json({ ok: false, error: "forbidden", message: `requires ${need} scope` }, 403);
   }
 
@@ -77,14 +78,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // --- write: send ---
     if (request.method === "POST" && (path === "/api/send" || path === "/send")) {
       const body = await readJson<SendRequest>(request);
-      const result = await send(env, body, ctx);
+      const result = await send(env, body, ctx, resolution.identity);
       return json({ ok: true, ...result });
     }
 
     // --- write: reply ---
     if (request.method === "POST" && path === "/api/reply") {
       const body = await readJson<ReplyRequest>(request);
-      const result = await reply(env, body, ctx);
+      const result = await reply(env, body, ctx, resolution.identity);
       return json({ ok: true, ...result });
     }
 
@@ -299,12 +300,12 @@ function transportAuthorized(request: Request, env: Env): boolean {
   return token.length > 0 && timingSafeEqual(got, token);
 }
 
-// --- Per-function token scopes (#85) ---
+// --- Per-function token scopes (#85) + per-identity send registry (#28) ---
 
-// The scope a presented mailbox token carries. `both` is the egalitarian default
+// `Scope` (read / send / both) is defined in ./sendidentity (the canonical home for
+// the token-resolution types) and imported above. `both` is the egalitarian default
 // (one key sends and receives, the back-compat path); `read` and `send` are the
-// optional per-function hardening that bounds a leaked token's blast radius.
-type Scope = "read" | "send" | "both";
+// per-function hardening that bounds a leaked token's blast radius.
 
 // The scope a route/method demands. `admin` (credential provisioning) is strictly
 // more privileged than send and is satisfied ONLY by a `both` token.
@@ -340,15 +341,23 @@ function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   return false; // admin: only `both`
 }
 
-// Resolve the Authorization bearer to the scope of the configured token it matches,
-// or null if it matches none. The token is read from the Authorization header only,
-// never the URL/query. Every configured token is compared constant-time and the
-// loop does not break on a match, so the check does not leak WHICH token matched
-// via timing; the token LENGTH may leak (tokens are high-entropy), the bytes must
-// not. Precedence is fixed (both, then read, then send): distinct per-function
-// values are expected, so at most one matches, but on an accidental value
-// collision the more-permissive `both` wins to avoid locking out the primary key.
-function resolveScope(request: Request, env: Env): Scope | null {
+// Resolve the Authorization bearer to a scope (and, for a registry token, a bound
+// identity), or null if it matches nothing. The token is read from the Authorization
+// header only, never the URL/query.
+//
+// Two stages, in order:
+//   1. The static, named scope tokens (both / read / send), compared constant-time.
+//      The loop does not break on a match, so the check does not leak WHICH token
+//      matched via timing; the LENGTH may leak (tokens are high-entropy), the bytes
+//      must not. Precedence is fixed (both, then read, then send): distinct values
+//      are expected, so at most one matches, but on an accidental value collision the
+//      more-permissive `both` wins, to avoid locking out the primary key. A static
+//      match carries NO bound identity (back-compat: From falls back to req.from /
+//      DEFAULT_FROM, validated against ALLOWED_FROM_DOMAIN).
+//   2. Only if no static token matched, the per-identity send registry (#28): hash
+//      the presented Bearer and look it up. A hit grants `send` scope with an
+//      AUTHORITATIVE bound From; a miss is an unknown token (the caller returns 401).
+async function resolveToken(request: Request, env: Env): Promise<TokenResolution | null> {
   const auth = request.headers.get("authorization") ?? "";
   const got = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (got.length === 0) return null;
@@ -364,7 +373,14 @@ function resolveScope(request: Request, env: Env): Scope | null {
     const eq = token.length > 0 && timingSafeEqual(got, token);
     if (eq && matched === null) matched = scope;
   }
-  return matched;
+  if (matched !== null) return { scope: matched };
+
+  // No static match: consult the per-identity send registry. A hit is a known
+  // per-member token -> send scope with an authoritative bound From; a miss falls
+  // through to null (the caller maps that to 401, unknown token).
+  const identity = await resolveRegistryIdentity(got, env.POSTERN_SEND_IDENTITIES);
+  if (identity) return { scope: "send", identity };
+  return null;
 }
 
 async function readJson<T>(request: Request): Promise<T> {

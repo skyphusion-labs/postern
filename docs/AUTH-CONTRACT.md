@@ -254,12 +254,24 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 |---|---|---|
 | `POSTERN_API_TOKEN` (or `RELAY_TOKEN`) | `both` | read + send + credential-admin (the egalitarian single-key default) |
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
-| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only |
+| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From) |
+| `POSTERN_SEND_IDENTITIES` (registry, #28) | `send` + bound From | `POST /api/send`/`reply` as the token's OWN identity |
 
 Unknown token -> `401`; known token outside its scope -> `403`. Credential-admin
 (`/api/admin/smtp-credentials`) is reachable ONLY by a `both` token. Provisioning
 the two scoped secrets is OPTIONAL and non-breaking: with only `POSTERN_API_TOKEN`
 set, every consumer keeps using that one `both` value exactly as before.
+
+**Per-identity send registry (#28) -- one scope, many identities.** The scope split
+above bounds a leaked token to a FUNCTION; the registry adds WHO. The optional worker
+secret `POSTERN_SEND_IDENTITIES` is a JSON map of `sha256hex(token) -> { from, displayName? }`:
+many send-scoped tokens, each the SAME `send` scope but a DISTINCT, authoritative From.
+The worker hashes the presented Bearer, looks it up, and on `/api/send` + `/api/reply`
+OVERRIDES the From to the bound identity (a token cannot send as anyone else). It stores
+token HASHES, never raw tokens. Additive and back-compat: the static
+`POSTERN_API_TOKEN_SEND` keeps working as the un-bound send token (From falls back to the
+caller / `DEFAULT_FROM`). Full contract, JSON shape, and the operator registration
+recipe: **`docs/SEND-IDENTITIES.md`**.
 
 **Token custody after the split (RATIFIED, Mackaye 2026-06-27).** Once the scoped
 values are provisioned (#85), the `both` `POSTERN_API_TOKEN` lives worker-side and in

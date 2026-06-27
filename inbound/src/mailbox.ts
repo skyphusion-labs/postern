@@ -9,6 +9,7 @@
 import * as store from "./store";
 import { htmlToText, cleanBody } from "./ingest";
 import { selectTransport, type OutboundMessage, type OutboundAttachment } from "./transport/index";
+import type { BoundIdentity } from "./sendidentity";
 
 export interface EmailAddress {
   email: string;
@@ -162,7 +163,15 @@ function validateAttachments(input: unknown): OutboundAttachment[] | undefined {
   return out;
 }
 
-function resolveFrom(env: Env, from: SendRequest["from"]): EmailAddress {
+function resolveFrom(env: Env, from: SendRequest["from"], bound?: BoundIdentity): EmailAddress {
+  // A per-identity send token binds the From AUTHORITATIVELY (#28): the token's
+  // identity overrides any caller-supplied From, so a token cannot send as anyone
+  // else. The bound address still flows through the SAME validation below (shape,
+  // ALLOWED_FROM_DOMAIN, CRLF), so a misconfigured registry From fails loud, never
+  // silently sends from a bad address.
+  if (bound) {
+    from = bound.displayName ? { email: bound.from, name: bound.displayName } : bound.from;
+  }
   const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
   const fallback = env.DEFAULT_FROM || `noreply@${allowedDomain}`;
 
@@ -213,7 +222,12 @@ function deriveBodyText(html?: string, text?: string): string {
  * store the sent copy (direction: outbound). Returns the stored messageId +
  * thread (a fresh thread unless headers carry In-Reply-To/References).
  */
-export async function send(env: Env, req: SendRequest, ctx: ExecutionContext): Promise<SendResult> {
+export async function send(
+  env: Env,
+  req: SendRequest,
+  ctx: ExecutionContext,
+  identity?: BoundIdentity,
+): Promise<SendResult> {
   if (!req || typeof req !== "object") {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be an object");
   }
@@ -238,7 +252,7 @@ export async function send(env: Env, req: SendRequest, ctx: ExecutionContext): P
     throw new MailboxError("E_TOO_MANY_RECIPIENTS", `combined to/cc/bcc exceeds ${MAX_RECIPIENTS}`);
   }
 
-  const from = resolveFrom(env, req.from);
+  const from = resolveFrom(env, req.from, identity);
   const attachments = validateAttachments(req.attachments);
 
   let replyTo: EmailAddress | undefined;
@@ -275,7 +289,12 @@ export async function send(env: Env, req: SendRequest, ctx: ExecutionContext): P
  * References so the provider and the store both thread it correctly. The sent
  * copy is stored with the same thread_id as the original (#27).
  */
-export async function reply(env: Env, req: ReplyRequest, ctx: ExecutionContext): Promise<SendResult> {
+export async function reply(
+  env: Env,
+  req: ReplyRequest,
+  ctx: ExecutionContext,
+  identity?: BoundIdentity,
+): Promise<SendResult> {
   if (!req || typeof req !== "object" || typeof req.messageId !== "string" || !req.messageId.trim()) {
     throw new MailboxError("E_FIELD_MISSING", "messageId is required");
   }
@@ -299,7 +318,7 @@ export async function reply(env: Env, req: ReplyRequest, ctx: ExecutionContext):
     throw new MailboxError("E_TOO_MANY_RECIPIENTS", `combined to/cc/bcc exceeds ${MAX_RECIPIENTS}`);
   }
 
-  const from = resolveFrom(env, req.from);
+  const from = resolveFrom(env, req.from, identity);
   const subject = original.subject.replace(/^\s*(re:\s*)+/i, "").trim();
   const replySubject = `Re: ${subject}`;
   rejectCRLF("subject", replySubject);
