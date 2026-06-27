@@ -280,6 +280,22 @@ none touches D1 directly (#25, #26).
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
 | DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
+| POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
+
+`POST /api/admin/reindex` is the **backfill** (#116 ws4): it (re)embeds the EXISTING mailbox into
+the semantic index so history predating the live index -- and all historical outbound -- becomes
+queryable. It is `both`-scoped (admin, #85), so a read or send token gets `403`. Body
+`{ cursor?, limit?, dryRun? }`; it processes ONE keyset page per call (same `(date DESC, id DESC)`
+order + opaque cursor as the read API), applies the SAME `VECTORIZE_FOR` gate as live ingest
+(`store.shouldVectorize`: outbound always, inbound per allowlist), and AWAITS the embeds so a page
+finishes inside request limits. It returns
+`{ ok, total?, processed, indexed, vectors, skippedByGate, nextCursor, done, dryRun }` (`total` only
+on the first call). Each message is embedded through the SAME `embedAndUpsert` the live path uses, so
+backfilled vectors are byte-identical to live ones, and the vector id is deterministic
+(`sha256(messageId).slice + chunk`) so a re-run OVERWRITES -- the backfill is **idempotent** and safe
+to resume or repeat. `dryRun: true` does everything except the embed/upsert, summing the chunk count
+so the exact vector total (and cost) is known before the real run. A thin runner (`inbound/reindex.mjs`)
+loops it until `done`.
 
 `POST /send` (today's bare endpoint) stays as a back-compat alias of `/api/send`. All responses
 keep the current `{ ok, ... }` + `E_*` code shape from `INTEGRATION.md`, so existing callers

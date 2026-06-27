@@ -103,6 +103,9 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         return { meta: { changes: 0 } };
       },
       async first<T>() {
+        if (/SELECT COUNT\(\*\) AS n FROM messages/i.test(sql)) {
+          return { n: rows.length } as unknown as T;
+        }
         if (/SELECT thread_id FROM messages WHERE message_id/i.test(sql)) {
           const id = bound[0] as string;
           const row = rows.find((r) => r.message_id === id);
@@ -126,6 +129,34 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/FROM attachments WHERE message_id/i.test(sql)) {
           const id = bound[0] as string;
           return { results: atts.filter((a) => a.message_id === id) as unknown as T[] };
+        }
+        // reindex page (#116 ws4): SELECT ... body_text FROM messages [WHERE keyset]
+        // ORDER BY date DESC, id DESC LIMIT ?. Walks the same keyset the live list
+        // uses, returning the body so the backfill can re-embed without an N+1.
+        if (/body_text\s+FROM messages/i.test(sql) && /ORDER BY date DESC, id DESC/i.test(sql)) {
+          let i = 0;
+          let work = rows.slice();
+          if (/date < \?/i.test(sql)) {
+            const d = String(bound[i++]);
+            const d2 = String(bound[i++]);
+            const cid = Number(bound[i++]);
+            void d2;
+            work = work.filter((r) => r.date < d || (r.date === d && r.id < cid));
+          }
+          const limit = Number(bound[i++]);
+          work.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
+          const limited = work.slice(0, limit);
+          const results = limited.map((r) => ({
+            id: r.id,
+            message_id: r.message_id,
+            direction: r.direction,
+            from_addr: r.from_addr,
+            to_addr: r.to_addr,
+            subject: r.subject,
+            date: r.date,
+            body_text: r.body_text,
+          }));
+          return { results: results as unknown as T[] };
         }
         if (/FROM messages WHERE thread_id = \?/i.test(sql)) {
           const id = bound[0] as string;

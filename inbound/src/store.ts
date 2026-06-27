@@ -234,35 +234,117 @@ async function storeAttachments(
   }
 }
 
+// Chunking parameters: ONE place so the live index path and the backfill (#116
+// ws4) chunk identically, which (with the deterministic vector id) makes a
+// backfilled vector byte-identical to the live one for the same message.
+const CHUNK_SIZE = 1200;
+const CHUNK_OVERLAP = 150;
+const MAX_CHUNKS = 24; // bound embed cost on huge mail
+
+/** The fields embedAndUpsert needs from a message (a subset of StoreInput, also
+ *  reconstructable from a stored row for the backfill). */
+export interface VectorizeFields {
+  messageId: string;
+  bodyText: string;
+  direction: "inbound" | "outbound";
+  from: string;
+  to: string;
+  date: string;
+  subject: string;
+}
+
+/** plannedChunks is how many chunk-vectors a body WOULD produce, without
+ *  embedding -- used by the reindex dry run to total the cost up front. */
+export function plannedChunks(bodyText: string): number {
+  if (bodyText.length === 0) return 0;
+  return chunkText(bodyText, CHUNK_SIZE, CHUNK_OVERLAP).slice(0, MAX_CHUNKS).length;
+}
+
+/**
+ * embedAndUpsert chunks the body, embeds each chunk (bge-base), and upserts the
+ * vectors keyed by a DETERMINISTIC id (sha256(messageId).slice + chunk), so a
+ * re-run OVERWRITES rather than duplicates -- the backfill is idempotent. Returns
+ * the number of vectors written. The SINGLE source of vector construction: both
+ * the live store.put path (via indexVectors) and the #116 ws4 backfill call it, so
+ * their vectors are identical. Unlike indexVectors this THROWS on failure, so a
+ * backfill page fails loud instead of silently skipping a message.
+ */
+export async function embedAndUpsert(env: Env, f: VectorizeFields): Promise<number> {
+  if (!env.AI || !env.VECTORIZE) return 0;
+  if (f.bodyText.length === 0) return 0;
+  const chunks = chunkText(f.bodyText, CHUNK_SIZE, CHUNK_OVERLAP).slice(0, MAX_CHUNKS);
+  if (chunks.length === 0) return 0;
+  const base = (await sha256hex(f.messageId)).slice(0, 56);
+  const embed = (await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks })) as { data: number[][] };
+  const vectors = embed.data.map((values, i) => ({
+    id: `${base}.${i}`,
+    values,
+    metadata: {
+      message_id: f.messageId,
+      chunk: i,
+      // direction (#116 ws2) lets a query attribute / filter "what WE said"
+      // (outbound) vs "what was asked" (inbound) -- e.g. a status question wants
+      // the outbound reply. inbound | outbound.
+      direction: f.direction,
+      from: f.from,
+      to: f.to.toLowerCase(),
+      date: f.date,
+      subject: f.subject,
+    },
+  }));
+  if (vectors.length) await env.VECTORIZE.upsert(vectors);
+  return vectors.length;
+}
+
 async function indexVectors(env: Env, input: StoreInput): Promise<void> {
-  // Skip cleanly when the AI/Vectorize bindings are not configured (a deployment
-  // that does not want semantic recall just omits them); never throw from the
-  // best-effort indexing path.
-  if (!env.AI || !env.VECTORIZE) return;
+  // Best-effort on the live path: never throw out of store.put. The backfill calls
+  // embedAndUpsert directly so it CAN see failures.
   try {
-    const chunks = chunkText(input.bodyText, 1200, 150).slice(0, 24); // bound cost on huge mail
-    const base = (await sha256hex(input.messageId)).slice(0, 56);
-    const embed = (await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks })) as { data: number[][] };
-    const vectors = embed.data.map((values, i) => ({
-      id: `${base}.${i}`,
-      values,
-      metadata: {
-        message_id: input.messageId,
-        chunk: i,
-        // direction (#116 ws2) lets a query attribute / filter "what WE said"
-        // (outbound) vs "what was asked" (inbound) -- e.g. a status question wants
-        // the outbound reply. inbound | outbound, threaded from StoreInput.
-        direction: input.direction,
-        from: input.from,
-        to: input.to.toLowerCase(),
-        date: input.date,
-        subject: input.subject,
-      },
-    }));
-    if (vectors.length) await env.VECTORIZE.upsert(vectors);
+    await embedAndUpsert(env, {
+      messageId: input.messageId,
+      bodyText: input.bodyText,
+      direction: input.direction,
+      from: input.from,
+      to: input.to,
+      date: input.date,
+      subject: input.subject,
+    });
   } catch (e) {
     console.error("vectorize upsert failed", e);
   }
+}
+
+// --- Vectorize gating (single source for the live path AND the backfill, #116) ---
+
+/** Parse VECTORIZE_FOR into a normalized allowlist (empty = index everything). */
+export function vectorizeAllowlist(env: Env): string[] {
+  return (env.VECTORIZE_FOR ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * shouldVectorize is the opt-in RAG gate, identical for live ingest and backfill:
+ * outbound mail is ALWAYS indexed (it is our own); inbound only when the allowlist
+ * is empty (index-all, the current default) or one of the recipients opted in.
+ */
+export function shouldVectorize(allowlist: string[], direction: "inbound" | "outbound", recipients: string[]): boolean {
+  if (direction === "outbound") return true;
+  if (allowlist.length === 0) return true;
+  return recipients.some((r) => allowlist.includes(r));
+}
+
+/** Extract bare lower-cased addresses from a stored to_addr (which may be a
+ *  comma-list and/or carry display names), for the backfill gate. */
+export function parseRecipients(toAddr: string): string[] {
+  return toAddr
+    .split(",")
+    .map((part) => {
+      const angle = part.match(/<([^>]+)>/);
+      return (angle ? angle[1] : part).trim().toLowerCase();
+    })
+    .filter(Boolean);
 }
 
 // --- Reads (CONTRACT section 1 / section 4) ---
@@ -686,4 +768,130 @@ export class SearchModeUnsupported extends Error {
     super(`search mode '${mode}' is not supported yet (fts only until M4)`);
     this.name = "SearchModeUnsupported";
   }
+}
+
+// --- Backfill / re-embed the existing mailbox (#116 ws4) ---
+
+const DEFAULT_REINDEX_LIMIT = 25;
+const MAX_REINDEX_LIMIT = 50;
+
+function clampReindexLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit) || limit < 1) return DEFAULT_REINDEX_LIMIT;
+  return Math.min(Math.floor(limit), MAX_REINDEX_LIMIT);
+}
+
+/** One message's fields needed to (re)embed it, fetched in a single paged query. */
+interface ReindexRow {
+  id: number;
+  message_id: string;
+  direction: string;
+  from_addr: string;
+  to_addr: string;
+  subject: string;
+  date: string;
+  body_text: string;
+}
+
+export interface ReindexResult {
+  /** Total messages in the store; present ONLY on the first call (no cursor) so a
+   *  runner can show progress without an extra round-trip. */
+  total?: number;
+  processed: number; // messages examined this page
+  indexed: number; // messages actually embedded this page (0 on a dry run)
+  vectors: number; // chunk-vectors written this page (or that WOULD be, on a dry run)
+  skippedByGate: number; // inbound messages excluded by the VECTORIZE_FOR allowlist
+  nextCursor: string | null;
+  done: boolean;
+  dryRun: boolean;
+}
+
+/** countMessages totals the store, for the runner's progress denominator. */
+export async function countMessages(env: Env): Promise<number> {
+  const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages").first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/** pageForReindex keyset-pages the messages table by the SAME (date DESC, id DESC)
+ *  order + opaque cursor the read API uses, pulling body_text + the metadata fields
+ *  in one query (no N+1). */
+async function pageForReindex(
+  env: Env,
+  cursor: string | undefined,
+  limit: number,
+): Promise<{ rows: ReindexRow[]; nextCursor: string | null }> {
+  const cur = decodeCursor(cursor);
+  const binds: unknown[] = [];
+  let where = "";
+  if (cur) {
+    where = " WHERE (date < ? OR (date = ? AND id < ?))";
+    binds.push(cur.date, cur.date, cur.id);
+  }
+  const sql =
+    "SELECT id, message_id, direction, from_addr, to_addr, subject, date, body_text" +
+    ` FROM messages${where} ORDER BY date DESC, id DESC LIMIT ?`;
+  binds.push(limit + 1); // fetch one extra to detect a next page
+  const res = await env.DB.prepare(sql).bind(...binds).all<ReindexRow>();
+  const all = res.results ?? [];
+  const hasMore = all.length > limit;
+  const rows = hasMore ? all.slice(0, limit) : all;
+  const last = rows[rows.length - 1];
+  const nextCursor = hasMore && last ? encodeCursor(last.date, last.id) : null;
+  return { rows, nextCursor };
+}
+
+/**
+ * reindexPage processes ONE page of the backfill (#116 ws4): for each message it
+ * applies the SAME VECTORIZE_FOR gate as live ingest, then (unless dryRun) embeds
+ * and upserts via the shared embedAndUpsert, so backfilled vectors are identical
+ * to live ones and re-runs overwrite (idempotent). A dry run does everything except
+ * the embed/upsert, summing the chunk count so the exact cost is known up front. It
+ * returns the next cursor; a thin runner loops until done.
+ */
+export async function reindexPage(
+  env: Env,
+  opts: { cursor?: string; limit?: number; dryRun?: boolean },
+): Promise<ReindexResult> {
+  const dryRun = opts.dryRun === true;
+  const allowlist = vectorizeAllowlist(env);
+  const { rows, nextCursor } = await pageForReindex(env, opts.cursor, clampReindexLimit(opts.limit));
+
+  let indexed = 0;
+  let vectors = 0;
+  let skippedByGate = 0;
+
+  for (const r of rows) {
+    const direction = r.direction === "outbound" ? "outbound" : "inbound";
+    if (!shouldVectorize(allowlist, direction, parseRecipients(r.to_addr))) {
+      skippedByGate++;
+      continue;
+    }
+    const chunks = plannedChunks(r.body_text);
+    if (chunks === 0) continue; // empty body: nothing to embed (not an allowlist skip)
+    if (dryRun) {
+      vectors += chunks;
+      continue;
+    }
+    vectors += await embedAndUpsert(env, {
+      messageId: r.message_id,
+      bodyText: r.body_text,
+      direction,
+      from: r.from_addr,
+      to: r.to_addr,
+      date: r.date,
+      subject: r.subject,
+    });
+    indexed++;
+  }
+
+  const result: ReindexResult = {
+    processed: rows.length,
+    indexed,
+    vectors,
+    skippedByGate,
+    nextCursor,
+    done: nextCursor === null,
+    dryRun,
+  };
+  if (!opts.cursor) result.total = await countMessages(env);
+  return result;
 }
