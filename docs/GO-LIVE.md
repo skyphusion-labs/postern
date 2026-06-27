@@ -292,13 +292,49 @@ Only after 3a-3d verify over the mesh:
 - **DNS (last):** grey-cloud A records `smtp.skyphusion.org` + `imap.skyphusion.org`
   -> **lagwagon's PUBLIC IP** (NOT dischord). CF does not proxy SMTP/IMAP except via
   Spectrum, so these are grey-cloud (DNS-only). IaC via the CF DNS API, not the dash.
+- **Autodiscovery SRV records (RFC 6186), created at THIS step:** let mail clients
+  auto-configure from just `user@skyphusion.org`. SRV records cannot be proxied
+  (CF proxies only A/AAAA/CNAME), so they are DNS-only by nature. **The targets are
+  the bastion mail edge host names (the A records above, -> lagwagon public IP),
+  NEVER a fleet box** -- this is the cardinal ingress invariant applied to
+  autodiscovery. Records (`_service._proto name TTL IN SRV prio weight port target`):
+  ```
+  _submission._tcp.skyphusion.org.  300  IN  SRV  0 1 587  smtp.skyphusion.org.
+  _imaps._tcp.skyphusion.org.        300  IN  SRV  0 1 993  imap.skyphusion.org.
+  _imap._tcp.skyphusion.org.         300  IN  SRV  0 0 0    .
+  ```
+  - **`_submission` (587)** is the STARTTLS submission door (RFC 6186). **NO 465 /
+    `_submissions` record:** Hetzner blocks 465 and submission is 587-only
+    (postern-mail-access-architecture).
+  - **`_imap` vs `_imaps` -- FLAG FOR CONRAD (tied to the still-open 993 TLS
+    decision).** RFC 6186: `_imaps._tcp` = implicit-TLS on 993; `_imap._tcp` =
+    plain/STARTTLS on 143. Our 993 door is implicit-TLS in BOTH 993 options (native
+    IMAPS or stunnel), so the RFC-correct positive record is **`_imaps._tcp ... 993`**
+    regardless of which 993 TLS path is chosen. We do NOT offer plaintext/143, so the
+    `_imap._tcp ... 0 0 0 .` line is the RFC negative ("service not available"),
+    which steers clients off plaintext IMAP. Conrad asked for "_imap"; this implements
+    it RFC-correctly as `_imaps` positive + `_imap` negative. If Conrad instead wants a
+    literal `_imap._tcp` positive, that would mean offering STARTTLS-on-143, which is a
+    separate door we have not built -- confirm before deviating.
+  - (Optional, not created unless Conrad asks: negative `_submissions._tcp ... 0 0 0 .`
+    and `_pop3._tcp`/`_pop3s._tcp ... 0 0 0 .` to advertise "no 465 / no POP".)
+  - Apply as code (CF DNS API, not the dashboard) -- the staged source +
+    apply script is fleet-chezmoi `system/cloudflare/mail-dns/`.
 - **Smoke (the go-live artifact):** from the laptop (off-fleet), a real mail client
   (Thunderbird: IMAPS `imap.skyphusion.org:993` + submission `smtp.skyphusion.org:587`,
   ONE Authentik login for BOTH doors) fetches INBOX and sends a message. A
   non-`mail-users` account / bad password / `From != identity` is rejected at the
   dischord door.
-- **Rollback:** remove the A records; close lagwagon public ufw 587/993. The
-  forwarder + dischord doors can stay (private) or be torn down per 3c/3a.
+- **SRV smoke:** `dig +short SRV _submission._tcp.skyphusion.org` ->
+  `0 1 587 smtp.skyphusion.org.` and `dig +short SRV _imaps._tcp.skyphusion.org` ->
+  `0 1 993 imap.skyphusion.org.`. CRITICAL invariant check: the targets resolve to
+  the BASTION, not a fleet box -- `dig +short smtp.skyphusion.org` and
+  `imap.skyphusion.org` both == lagwagon's public IP. Then confirm a client's
+  autodiscovery (Thunderbird "find config" from just `user@skyphusion.org`) lands on
+  587 submission + 993 IMAPS.
+- **Rollback:** remove the A records AND the SRV records (`_submission._tcp`,
+  `_imaps._tcp`, `_imap._tcp`); close lagwagon public ufw 587/993. The forwarder +
+  dischord doors can stay (private) or be torn down per 3c/3a.
 
 ### Auth backend at go-live
 
