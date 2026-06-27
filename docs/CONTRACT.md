@@ -102,7 +102,29 @@ interface AttachmentMeta {
 ```
 
 `StoredMessageSummary` is `StoredMessage` without `bodyText` and `attachments` (list views
-do not pay for the body); it adds `attachmentCount: number`.
+do not pay for the body); it adds `attachmentCount: number` and `uid: number`.
+
+```ts
+interface StoredMessageSummary {
+  uid: number;                        // messages.id (AUTOINCREMENT rowid) -- see below
+  // ...all StoredMessage fields except bodyText + attachments...
+  attachmentCount: number;
+}
+```
+
+**`uid` -- the monotonic insertion key / IMAP UID (#103, RFC 3501).** `uid` is the
+store's `messages.id`, an `INTEGER PRIMARY KEY AUTOINCREMENT` rowid assigned strictly
+ascending at ARRIVAL and NEVER reused (AUTOINCREMENT keeps a high-water mark, so a new
+row is always greater than any id that has ever existed, even across deletions). It is
+the durable value the IMAP proxy maps each message to: order the mailbox by `uid`
+(arrival order) and surface it as the per-message IMAP UID under a constant
+`UIDVALIDITY`. This is what makes the proxy RFC 3501-conformant. Contrast `date`:
+ordering by `date` is non-conformant because a backdated inbound message (an old
+`Date:` header arriving now) inserts MID-order and shifts the positional UID of every
+later message, corrupting a client's cached UID -> message mapping. Ordered by `uid`, a
+backdated message simply gets the next-highest `uid` and appears last -- correct IMAP
+semantics, no cache corruption. `uid` is also the `id` half of the keyset pagination
+cursor (a `Page` cursor encodes `(date, id)`); it is always present and `> 0`.
 
 ```ts
 interface ListQuery {

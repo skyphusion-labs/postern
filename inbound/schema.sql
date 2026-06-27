@@ -3,7 +3,13 @@
 -- sync by triggers. For an existing DB, apply migrations/ instead of this file.
 
 CREATE TABLE IF NOT EXISTS messages (
-  id          INTEGER PRIMARY KEY,
+  -- AUTOINCREMENT (not a bare INTEGER PRIMARY KEY) so the rowid is assigned
+  -- strictly ascending at insertion AND is NEVER reused (#103): a bare rowid
+  -- reuses the value of the highest deleted row, which would violate the IMAP
+  -- UID never-reuse contract (RFC 3501) under a constant UIDVALIDITY the moment
+  -- a message-deletion path exists (the AFTER DELETE trigger below shows one is
+  -- designed for). The proxy uses this id directly as the per-message IMAP UID.
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
   message_id  TEXT UNIQUE,
   from_addr   TEXT,
   to_addr     TEXT,
