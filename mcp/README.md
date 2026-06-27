@@ -6,9 +6,10 @@ mailbox API (the same token-gated endpoints the IMAP proxy uses), so an agent ca
 the mailbox as a knowledge base and, when explicitly enabled, send mail.
 
 - **Read tools** (always on): search, list, read a message, read a thread.
-- **Send tools** (v1.1, **opt-in, default-OFF**): `mailbox_send` / `mailbox_reply`,
-  registered **only** when a send-scoped token is configured. See
-  [Send tools](#send-tools-v11-opt-in).
+- **Send tools** (v1.1, **opt-in**): `mailbox_send` / `mailbox_reply`, registered
+  **only** when a send-scoped token is configured. With a **per-identity** send token
+  the worker binds the From to that token's own identity. See
+  [Send tools](#send-tools-v11-opt-in) and [Per-identity send](#per-identity-send).
 
 ## Tools
 
@@ -25,17 +26,17 @@ the mailbox as a knowledge base and, when explicitly enabled, send mail.
 
 | Tool | What it does | Wraps |
 |---|---|---|
-| `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from` (must be on the allowed From domain), `reply_to`. | `POST /api/send` |
+| `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`. With a per-identity token the worker stamps `From` to the bound identity; any caller `from` is discarded. | `POST /api/send` |
 | `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`. | `POST /api/reply` |
 
-Send tools are **MUTATING**: they deliver mail as the estate. They register only
-when a send token is present (see below). The server owns From-enforcement, DKIM
-signing, threading, and storing the sent copy; the tools forward a composed message
-and return the core `messageId` + `threadId`.
+Send tools are **MUTATING**: they deliver mail. They register only when a send token
+is present (see below). The server owns From-enforcement, DKIM signing, threading, and
+storing the sent copy; the tools forward a composed message and return the core
+`messageId` + `threadId`.
 
 Each tool returns pretty-printed JSON. Errors come back as an MCP `isError` result
 with a clear message (never a thrown exception) -- including the worker's own reason
-on a 400/403 (e.g. `requires send scope`, `invalid to address: ...`).
+on a 400/401/403 (e.g. `requires send scope`, `invalid to address: ...`).
 
 ## Install / build
 
@@ -85,7 +86,7 @@ Once published to npm it is `npx`-runnable (`"command": "npx", "args": ["-y", "p
 |---|---|---|---|
 | `POSTERN_API_URL` | yes | -- | the Postern mailbox API origin |
 | `POSTERN_API_TOKEN` | yes | -- | a **read-scoped** API token, sent as `Authorization: Bearer` on read tools |
-| `POSTERN_SEND_TOKEN` | no | (unset) | a **send-scoped** API token (#85). When set, the send tools register and use it. **Mutating; opt-in.** |
+| `POSTERN_SEND_TOKEN` | no | (unset) | a **send-scoped** API token. When set, the send tools register and use it. With a **per-identity** token the worker binds the From to that token's identity. **Mutating; opt-in.** |
 | `POSTERN_API_TIMEOUT_MS` | no | `15000` | per-request timeout (ms) |
 
 Every request carries a custom `User-Agent` (`postern-mcp ...`). The API sits behind
@@ -104,26 +105,56 @@ needs and `registerTools` registers only those the configured credentials satisf
   `mailbox_reply`, on their own client using the send token. The read tools keep using
   the read token; the send token is never used on read routes.
 
-This mirrors the server-side per-function token split (#85): the worker resolves
-`POSTERN_API_TOKEN_SEND` to the `send` scope, which returns `200` on `POST /api/send`
-and `/api/reply` but `403` on `/api/search` and `/api/admin/*`. So even if a send
-token leaked, its blast radius is bounded to sending; it cannot read or administer.
+This mirrors the server-side per-function token split (#85): the worker resolves a
+`send`-scoped token to the `send` scope, which returns `200` on `POST /api/send` and
+`/api/reply` but `403` on `/api/search` and `/api/admin/*`. So even if a send token
+leaked, its blast radius is bounded to sending; it cannot read or administer.
 
-### Rollout: default-OFF for the crew (deliberate toggle)
+The boot-level gate is proven by `npm run smoke` and documented end to end in
+[`PROOF-per-identity-send.md`](PROOF-per-identity-send.md).
 
-Sending is a mutating capability (an agent could send mail as the estate), so it is
-shipped **built-but-dormant**. The read MCP is unchanged for everyone. Enabling send
-for an agent is a deliberate, gated step: provision a send-scoped token, install it as
-the worker's `POSTERN_API_TOKEN_SEND` secret, and add `POSTERN_SEND_TOKEN` to that
-agent's MCP server `env`. Until that toggle is flipped, the send tools do not exist
-at runtime. Do not wire the send token into shared/default agent config silently.
+## Per-identity send
+
+A send token can be **bound to a single sender identity**, so an agent sends mail **as
+itself**, never through a shared god-token. This is the backend per-identity send
+registry; the authoritative contract is **[`docs/SEND-IDENTITIES.md`](../docs/SEND-IDENTITIES.md)**.
+
+How it works (the MCP client implements none of it; the worker is authoritative):
+
+- The worker holds one secret `POSTERN_SEND_IDENTITIES` mapping the **sha256 hex of a
+  raw send token** to `{ from, displayName? }` (hashes, never raw tokens).
+- On `POST /api/send` / `/api/reply`, when the presented Bearer resolves to a registry
+  entry, the worker **overrides** the outbound `From` to that bound identity and
+  discards any caller-supplied `from`. A token cannot send as anyone else. The stored
+  outbound row's `from_addr` is that identity (lowercased), threaded and indexed.
+- An unknown token is `401`; a send token on a read/admin route is `403`. A registry
+  `from` off `ALLOWED_FROM_DOMAIN` fails loud, nothing sent. Full table:
+  `docs/SEND-IDENTITIES.md` section 6.
+
+For the agent operator the wiring is unchanged from the section above: put **your own**
+per-identity send token in `POSTERN_SEND_TOKEN` (out of band, never in a tracked file),
+and the worker binds your From for you. You do not set or send a `from`; it is stamped.
+
+### Rollout: opt-in per identity (deliberate toggle)
+
+Sending is a mutating capability, so it ships **off until a send token is present**.
+The read MCP is unchanged for everyone. Enabling send for an agent is a deliberate,
+gated step: register the agent's `sha256hex(token) -> { from }` in the worker's
+`POSTERN_SEND_IDENTITIES` secret (no code change; `docs/SEND-IDENTITIES.md` section 7),
+hand the agent its **raw** token out of band, and set `POSTERN_SEND_TOKEN` in that
+agent's MCP server `env`. Until that toggle is flipped, the send tools do not exist at
+runtime. Do not wire a send token into shared/default agent config silently; each
+agent gets its own identity-bound token.
 
 ## Security
 
 - Tokens are read from the environment only and never logged. Give the server a
-  **read** token (#85) for read-only use; add a **send** token only to enable sending.
+  **read** token for read-only use; add a **send** token only to enable sending.
 - A leaked token is bounded by its scope: a read token cannot send; a send token
-  cannot read or administer (#85).
+  cannot read or administer (#85). A per-identity send token can only send **as its
+  own bound identity** (the worker stamps the From).
+- The registry stores token **hashes**, never raw tokens; reading the secret yields no
+  usable credential (`docs/SEND-IDENTITIES.md` section 5).
 - Do not commit a real token. `.env.example` is a reference only.
 
 ## Develop
@@ -134,10 +165,12 @@ npm run typecheck
 npm run build && npm run smoke   # boots the built server over stdio and asserts the scope gate
 ```
 
-`npm run smoke` proves the default-OFF gate end to end at the process level: a
-read-only env exposes exactly the four read tools, and adding `POSTERN_SEND_TOKEN`
-adds `mailbox_send` + `mailbox_reply`. Live request scope-gating (a read token gets
-`403` on send, a send token `403` on read) is enforced by the worker (#85).
+`npm run smoke` proves the opt-in gate end to end at the process level: a read-only
+env exposes exactly the four read tools, and adding `POSTERN_SEND_TOKEN` adds
+`mailbox_send` + `mailbox_reply`. Live request scope-gating (a read token gets `403` on
+send, a send token `403` on read) and the per-identity From-binding are enforced by the
+worker (#85, #138); the end-to-end proof is in
+[`PROOF-per-identity-send.md`](PROOF-per-identity-send.md).
 
 ## License
 
