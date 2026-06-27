@@ -48,7 +48,7 @@ bound identity:
 | Field | Type | Rule |
 |---|---|---|
 | key | string | lowercase sha256 hex of the raw Bearer token (exactly 64 hex chars) |
-| `from` | string | the AUTHORITATIVE sender address. MUST be a valid address on `ALLOWED_FROM_DOMAIN` (default `skyphusion.org`). |
+| `from` | string | the AUTHORITATIVE sender address. MUST be a valid address on `ALLOWED_FROM_DOMAIN` (default `skyphusion.org`), enforced at resolve time (section 4). |
 | `displayName` | string? | optional. Becomes the From display name (`Name <addr>`). |
 
 (The hashes shown above are illustrative, not real tokens.)
@@ -71,6 +71,14 @@ any caller-supplied `from`. A token cannot send as anyone else. The bound addres
 flows through the SAME validation as any From (shape, `ALLOWED_FROM_DOMAIN`, CRLF
 safety), so a misconfigured registry From fails **loud** (`403 E_SENDER_NOT_ALLOWED`,
 nothing sent), never a silent send from a bad address.
+
+**Domain policy is authoritative over the registry.** When the worker parses the
+registry it ALSO enforces `ALLOWED_FROM_DOMAIN`: an entry whose `from` is outside the
+allowed domain is dropped at resolve time (its token resolves to nothing -> `401`) and
+logged. The per-identity From is authoritative over the CALLER, but a registry entry
+can never WIDEN the sender domain, so a fat-fingered or tampered entry cannot make the
+worker send as an arbitrary external domain. `resolveFrom`'s own domain check stays as
+a second layer behind this.
 
 DKIM signing, threading, the In-Reply-To/References chain, and the outbound sent-copy
 store-back are all unchanged: only the `From` is now authoritatively bound.
@@ -108,7 +116,7 @@ The registry can only DENY, never escalate, and never breaks the static tokens:
 | Registry secret is malformed JSON | The whole registry is empty (its tokens 401); static tokens unaffected |
 | Registry entry key is not 64-char sha256 hex | That entry skipped |
 | Registry entry `from` missing or not a valid address | That entry skipped (its token 401) |
-| Registry entry `from` valid but off `ALLOWED_FROM_DOMAIN` | Token authorizes (send scope) but the send fails loud `403 E_SENDER_NOT_ALLOWED`, nothing sent |
+| Registry entry `from` valid but off `ALLOWED_FROM_DOMAIN` | Entry dropped at resolve time + logged; its token resolves to nothing -> `401`, nothing sent (`resolveFrom`'s `403 E_SENDER_NOT_ALLOWED` is the second layer) |
 
 ## 7. Operator: register a new per-member token
 

@@ -127,15 +127,16 @@ describe("per-identity send registry (#28)", () => {
       expect(sent).toHaveLength(0);
     });
 
-    it("a registry From off ALLOWED_FROM_DOMAIN fails loud (403), nothing sent", async () => {
-      // The token IS in the registry (passes the send-scope gate), but its bound From
-      // is off-domain, so resolveFrom rejects it: an honest, loud failure, never a
-      // silent send from a bad address.
+    it("a registry From off ALLOWED_FROM_DOMAIN is denied at resolve time (401), nothing sent", async () => {
+      // Domain policy stays AUTHORITATIVE over the registry: an off-domain entry is
+      // denied at the gate (it never enters the resolved map, so the token resolves to
+      // nothing -> 401), so a fat-fingered or tampered entry can never make the worker
+      // send as an arbitrary external domain. resolveFrom's own domain check remains as
+      // a second layer behind this.
       const { env, ctx, settle, sent } = await registryEnv([{ token: "bad-secret", from: "evil@example.com" }]);
       const res = await handleApi(req("POST", "/api/send", { token: "bad-secret", body: SEND_BODY }), env, ctx);
       await settle();
-      expect(res.status).toBe(403);
-      expect(((await res.json()) as { error: string }).error).toBe("E_SENDER_NOT_ALLOWED");
+      expect(res.status).toBe(401);
       expect(sent).toHaveLength(0);
     });
 
@@ -193,6 +194,16 @@ describe("registry parsing + hashing (units)", () => {
     const map = parseRegistry(raw);
     expect(map.size).toBe(1);
     expect(map.get(good)).toEqual({ from: "rollins@skyphusion.org", displayName: "Rollins" });
+  });
+
+  it("parseRegistry denies an off-domain From only when an allowed domain is given", async () => {
+    const off = await sha256Hex("offdomain");
+    const raw = JSON.stringify({ [off]: { from: "evil@example.com", displayName: "Spoof" } });
+    // Domain policy authoritative over the registry: off-domain entry is dropped.
+    expect(parseRegistry(raw, "skyphusion.org").size).toBe(0);
+    // Without a domain argument the shape check still passes it (the resolver always
+    // supplies ALLOWED_FROM_DOMAIN, so the worker path is always domain-gated).
+    expect(parseRegistry(raw).size).toBe(1);
   });
 
   it("parseRegistry returns empty on missing or non-object input", () => {
