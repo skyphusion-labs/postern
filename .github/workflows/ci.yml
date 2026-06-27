@@ -80,3 +80,20 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: python -m mypy
       - run: python -m twisted.trial posternimap.tests
+
+  clients-python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/python
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Zero runtime deps (pure stdlib urllib); install the package + dev extras so
+      # mypy (the type gate, mirrors the Node typecheck) is available. Tests are
+      # stdlib unittest, no extra deps. Public repo -> GitHub-hosted, fork-safe.
+      - run: pip install -e '.[dev]'
+      - run: python -m mypy
+      - run: python -m unittest discover
