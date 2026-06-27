@@ -109,10 +109,12 @@ try:
     from twisted.cred.credentials import UsernamePassword
     from twisted.cred import error as cred_error
     from twisted.mail import imap4
+    from twisted.trial import unittest as trial_unittest
 
     HAVE_TWISTED = True
 except ImportError:
     HAVE_TWISTED = False
+    trial_unittest = unittest  # type: ignore
 
 
 def _sync(d):
@@ -123,7 +125,7 @@ def _sync(d):
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
-class ThrottlePortalTest(unittest.TestCase):
+class ThrottlePortalTest(trial_unittest.TestCase):
     def _login(self, portal, user, pw):
         return _sync(portal.login(UsernamePassword(user.encode(), pw.encode()), None, imap4.IAccount))
 
@@ -193,6 +195,9 @@ class ThrottlePortalTest(unittest.TestCase):
             self.assertIn("err", box)
         self.assertEqual(len(calls), 6)
         self.assertNotIn("joan", throttle._accounts)
+        # The checker log.err's each backend fault by design; flush them so
+        # trial does not count the expected logged errors as test failures.
+        self.assertEqual(len(self.flushLoggedErrors(AuthBackendError)), 6)
 
 
 if __name__ == "__main__":
