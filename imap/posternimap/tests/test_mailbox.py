@@ -32,10 +32,17 @@ class MailboxTest(unittest.TestCase):
         self.transport = FakeTransport(self.msgs, expected_token="t", page_size=2)
         self.client = PosternClient("https://x", "t", transport=self.transport)
 
-    def _mailbox(self, direction=None):
+    def _mailbox(self, direction=None, *, window=0, poll_seconds=0, clock=None):
         from posternimap.mailbox import PosternMailbox
 
-        return PosternMailbox(self.client, direction=direction, page_size=2)
+        return PosternMailbox(
+            self.client,
+            direction=direction,
+            page_size=2,
+            window=window,
+            poll_seconds=poll_seconds,
+            clock=clock,
+        )
 
     def test_count_and_ordering_oldest_first(self):
         mb = self._mailbox()
@@ -46,7 +53,7 @@ class MailboxTest(unittest.TestCase):
         got = list(mb.fetch(MessageSet(1, 3), uid=False))
         seqs = [seq for seq, _ in got]
         self.assertEqual(seqs, [1, 2, 3])
-        subjects = [m._msg.subject for _, m in got]
+        subjects = [m._summary.subject for _, m in got]
         self.assertEqual(subjects, ["first", "second", "sent reply"])
 
     def test_uid_equals_seq_in_snapshot(self):
@@ -97,7 +104,7 @@ class MailboxTest(unittest.TestCase):
         got = dict((seq, m) for seq, m in mb.fetch(MessageSet(2, 2), uid=False))
         msg = got[2]
         headers = msg.getHeaders(False, "Subject", "From")
-        self.assertEqual(headers["SUBJECT"], "second")
+        self.assertEqual(headers["subject"], "second")
         self.assertEqual(msg.getBodyFile().read().decode().strip(), "body two")
         self.assertGreater(msg.getSize(), 0)
         self.assertFalse(msg.isMultipart())
@@ -110,6 +117,133 @@ class MailboxTest(unittest.TestCase):
         flags = list(msg.getFlags())
         self.assertIn("\\Seen", flags)
         self.assertIn("Outbound", flags)
+
+
+    # --- #102 Stage 1: lazy ENVELOPE, windowing, live refresh ---
+
+    def test_envelope_scan_does_zero_body_fetches(self):
+        # The headline #102 proof: a full ENVELOPE/FLAGS/INTERNALDATE scan must not
+        # pull a single per-message body. Opening a message then costs exactly one.
+        from twisted.mail.imap4 import MessageSet, getEnvelope
+
+        mb = self._mailbox()
+        msgs = [m for _, m in mb.fetch(MessageSet(1, 3), uid=False)]
+        self.assertEqual(self.transport.body_fetches, 0)  # list pass only so far
+        for m in msgs:
+            getEnvelope(m)        # ENVELOPE -> getHeaders(True), summary-served
+            list(m.getFlags())    # summary-served
+            m.getInternalDate()   # summary-served
+        self.assertEqual(self.transport.body_fetches, 0)
+        # Envelope content is correct despite no body fetch.
+        env_subjects = [getEnvelope(m)[1] for m in msgs]
+        self.assertEqual(env_subjects, ["first", "second", "sent reply"])
+        # Opening one message hydrates exactly once; a second access is memoized.
+        msgs[0].getBodyFile()
+        self.assertEqual(self.transport.body_fetches, 1)
+        msgs[0].getSize()
+        self.assertEqual(self.transport.body_fetches, 1)
+
+    def test_body_field_fetch_from_summary_no_hydrate(self):
+        from twisted.mail.imap4 import MessageSet
+
+        mb = self._mailbox()
+        (_, msg), = list(mb.fetch(MessageSet(2, 2), uid=False))
+        hdrs = msg.getHeaders(False, "Subject", "From")
+        self.assertEqual(hdrs["subject"], "second")
+        self.assertEqual(self.transport.body_fetches, 0)
+
+    def test_window_caps_to_recent_and_uid_is_global_ordinal(self):
+        # 3 messages oldest-first [m1, m2, m3]; window=2 shows the recent two.
+        mb = self._mailbox(window=2)
+        self.assertEqual(mb.getMessageCount(), 2)
+        from twisted.mail.imap4 import MessageSet
+
+        got = list(mb.fetch(MessageSet(1, 2), uid=False))
+        self.assertEqual([m._summary.subject for _, m in got], ["second", "sent reply"])
+        # UID == global arrival ordinal (base = N - window = 1), not window position.
+        self.assertEqual([m.getUID() for _, m in got], [2, 3])
+        self.assertEqual(mb.getUID(1), 2)
+        self.assertEqual(mb.getUID(2), 3)
+        # UIDNEXT is the next global ordinal (total + 1), regardless of the window.
+        self.assertEqual(mb.getUIDNext(), 4)
+        self.assertEqual(mb.requestStatus(["MESSAGES", "UIDNEXT"]),
+                         {"MESSAGES": 2, "UIDNEXT": 4})
+
+    def test_uid_fetch_under_window_resolves_global_uids(self):
+        from twisted.mail.imap4 import MessageSet
+
+        mb = self._mailbox(window=2)
+        # UID FETCH 1:* -> only the two present (global UIDs 2 and 3), keyed by seq.
+        got = list(mb.fetch(MessageSet(1, None), uid=True))
+        self.assertEqual([(seq, m.getUID()) for seq, m in got], [(1, 2), (2, 3)])
+
+    def test_refresh_appends_new_arrivals_and_pushes_exists(self):
+        mb = self._mailbox()
+        mb.getMessageCount()  # force the initial snapshot
+        listener = _FakeListener()
+        mb.addListener(listener)  # poll_seconds=0 -> no LoopingCall, logic only
+        # A new message arrives at the newest end (front of the newest-first list).
+        self.msgs.insert(0, make_message("m4", subject="newest"))
+        mb._poll_tick()
+        self.assertEqual(mb.getMessageCount(), 4)
+        self.assertEqual(listener.events, [(4, None)])
+        # The new arrival keeps appending global ordinals: UID 4, seq 4.
+        from twisted.mail.imap4 import MessageSet
+
+        (seq, msg), = list(mb.fetch(MessageSet(4, 4), uid=False))
+        self.assertEqual((seq, msg.getUID(), msg._summary.subject), (4, 4, "newest"))
+        # No new mail -> no spurious EXISTS on the next tick.
+        mb._poll_tick()
+        self.assertEqual(listener.events, [(4, None)])
+
+    def test_poll_loop_fires_and_stops_via_clock(self):
+        # Deterministic LoopingCall coverage with a virtual clock (no real reactor).
+        from twisted.internet.task import Clock
+
+        clock = Clock()
+        mb = self._mailbox(poll_seconds=5, clock=clock)
+        mb.getMessageCount()
+        listener = _FakeListener()
+        mb.addListener(listener)
+        self.assertIsNotNone(mb._poll)
+        self.msgs.insert(0, make_message("m4", subject="newest"))
+        clock.advance(5)  # one poll interval elapses
+        self.assertEqual(listener.events, [(4, None)])
+        # removeListener stops the loop cleanly (no pending calls leak).
+        mb.removeListener(listener)
+        self.assertIsNone(mb._poll)
+        self.assertEqual(clock.getDelayedCalls(), [])
+
+    def test_poll_self_prunes_dead_listener_and_stops(self):
+        # connectionLost does not always removeListener; the poll must drop a dead
+        # listener (transport gone) and stop itself.
+        mb = self._mailbox(poll_seconds=0)
+        mb.getMessageCount()
+        dead = _FakeListener(connected=False)
+        mb._listeners.append(dead)
+        mb._poll_tick()
+        self.assertEqual(mb._listeners, [])
+        self.assertEqual(dead.events, [])
+
+
+class _FakeListener:
+    """Minimal IMailboxListener double capturing newMessages pushes."""
+
+    def __init__(self, connected=True):
+        self.events = []
+        if connected:
+            self.transport = type("_T", (), {"connected": 1})()
+        else:
+            self.transport = type("_T", (), {"connected": 0})()
+
+    def newMessages(self, exists, recent):
+        self.events.append((exists, recent))
+
+    def flagsChanged(self, newFlags):
+        pass
+
+    def modeChanged(self, writeable):
+        pass
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")

@@ -104,6 +104,8 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_TLS_CERT` | no | -- | PEM cert path (set with key for IMAPS) |
 | `POSTERN_IMAP_TLS_KEY` | no | -- | PEM key path |
 | `POSTERN_API_TIMEOUT` | no | `15` | per-request timeout to the API, seconds |
+| `POSTERN_IMAP_WINDOW` | no | `500` | cap INBOX/Sent to the most-recent N at SELECT (0 = unlimited; All is always unbounded) |
+| `POSTERN_IMAP_POLL_SECONDS` | no | `30` | live-refresh interval while selected: re-poll the store and push EXISTS for new mail (0 = disable) |
 
 ## Run it
 
@@ -186,14 +188,26 @@ injectable transport, so no network is touched.
 ## Known limitations (v1, by design)
 
 - **Read-only.** Sending is the structured API's job.
-- **UIDs are per-snapshot.** They are stable within a `SELECT` (the spec's hard
-  requirement) but a client should resync rather than rely on them across
-  reconnects. A durable `message_id -> int` map is a post-v1 enhancement.
+- **UIDs are the message's global arrival ordinal** (its position in the full
+  oldest-first store), with a constant `UIDVALIDITY`. Because the store is
+  append-only, a message keeps its ordinal, so UIDs are stable within a `SELECT`
+  AND across reconnects (a client cache survives). The honest caveat: this holds
+  only while the store is append-only; a durable, store-assigned UID that also
+  survives deletion/reordering is tracked in #103.
 - **Attachments are referenced, not inlined.** A FETCH body notes the attachments;
   their bytes live behind `GET /api/messages/{id}/attachments/{i}`. Inlining MIME
   parts over IMAP is a follow-up.
-- **No server-pushed updates** (no `IDLE` payload / `\Recent` tracking): re-SELECT
-  to see new mail.
+- **Live refresh / IDLE.** While a mailbox is selected the proxy polls the store
+  (`POSTERN_IMAP_POLL_SECONDS`, summary-only, recent end only) and pushes an
+  untagged `EXISTS` when new mail arrives, so MUAs and `IDLE` see new mail
+  mid-session. `\Recent` is still not tracked (everything reads `\Seen`).
+- **Windowing.** INBOX/Sent show the most-recent `POSTERN_IMAP_WINDOW` messages at
+  `SELECT` (the `All` folder is unbounded for archival access). IMAP cannot grow a
+  folder downward mid-session, so older mail is reached via `All` or a larger
+  window rather than in-folder scroll-back.
+- **ENVELOPE is served from the list response.** A header/ENVELOPE scan never
+  fetches a body; the per-message body GET happens only when a message is opened
+  (or `RFC822.SIZE` is requested), so a large shared mailbox stays snappy.
 
 ## Production deploy (dischord)
 

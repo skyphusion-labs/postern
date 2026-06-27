@@ -13,7 +13,7 @@ from __future__ import annotations
 from email.message import EmailMessage
 from email.utils import format_datetime, parsedate_to_datetime
 
-from .client import Message
+from .client import Message, MessageSummary
 
 
 def _fmt_date(iso: str) -> str:
@@ -65,3 +65,31 @@ def render_rfc822(msg: Message) -> bytes:
         body = body + note
     em.set_content(body)
     return em.as_bytes()
+
+
+def envelope_headers(summary: MessageSummary) -> dict[str, str]:
+    """The IMAP ENVELOPE / scan-relevant headers for a summary, body-free.
+
+    Returns a lowercase-keyed map of the headers an IMAP client needs to render
+    a row (From/To/Subject/Date/Message-ID/In-Reply-To) formatted IDENTICALLY to
+    render_rfc822 above, so a header served from the list summary is byte-for-byte
+    what a hydrated FETCH would return (#102: serve ENVELOPE from the list response,
+    never a per-message body fetch). Only headers the summary actually carries are
+    included; Cc/Bcc/Sender/Reply-To are absent from the store, so the IMAP server
+    correctly renders them NIL whether or not we hydrate. Subject is always present
+    (render_rfc822 always sets it), matching the rendered form for an empty subject.
+    """
+    h: dict[str, str] = {}
+    if summary.from_addr:
+        h["from"] = _hdr(summary.from_addr)
+    if summary.to_addr:
+        h["to"] = _hdr(summary.to_addr)
+    h["subject"] = _hdr(summary.subject or "")
+    date = _fmt_date(summary.date)
+    if date:
+        h["date"] = date
+    if summary.message_id:
+        h["message-id"] = _hdr(f"<{summary.message_id}>")
+    if summary.in_reply_to:
+        h["in-reply-to"] = _hdr(f"<{summary.in_reply_to}>")
+    return h
