@@ -90,6 +90,12 @@ class ServerE2ETest(twisted_unittest.TestCase):
             names = {m[2] for m in mailboxes}
             self.assertIn("INBOX", names)
             self.assertIn("Sent", names)
+            # RFC 6154 special-use: the Sent entry must carry the \\Sent attribute
+            # (m[0] is the LIST flags) so a client auto-maps its Sent folder.
+            flags_by_name = {m[2]: set(m[0]) for m in mailboxes}
+            self.assertIn("\\Sent", flags_by_name["Sent"])
+            self.assertIn("Drafts", names)
+            self.assertIn("\\Drafts", flags_by_name["Drafts"])
 
             # INBOX is inbound-only (m1, m2); m3 is outbound -> in Sent.
             info = yield proto.select(b"INBOX")
@@ -118,6 +124,32 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.login(b"agent", b"tok")
             info = yield proto.select(b"Sent")
             self.assertEqual(info["EXISTS"], 1)
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_placeholder_folder_selectable_and_empty(self):
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"Drafts")
+            self.assertEqual(info["EXISTS"], 0)
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_append_to_sent_succeeds(self):
+        # Thunderbird APPENDs its own copy of a sent message into Sent after
+        # submission; this must succeed (no-op), not error.
+        import io
+
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            msg = io.BytesIO(b"From: a@example.com\r\nSubject: copy\r\n\r\nbody\r\n")
+            # IMAP4Client.append returns a Deferred that fires on a positive tagged
+            # response; assertFailure is NOT expected here -- it must succeed.
+            yield proto.append("Sent", msg, ("\\Seen",))
         finally:
             yield proto.logout()
 

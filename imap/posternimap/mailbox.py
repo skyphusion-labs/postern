@@ -26,6 +26,7 @@ from typing import List, Optional
 
 from zope.interface import implementer
 
+from twisted.internet import defer
 from twisted.mail import imap4
 
 from .client import MessageSummary, PosternClient
@@ -45,7 +46,19 @@ class PosternMailbox:
     """A read-only IMAP view of the Postern mailbox, scoped by an optional filter.
 
     `direction` (None | "inbound" | "outbound") selects which slice the mailbox
-    shows, so INBOX, Sent, and All can be three mailboxes over one store.
+    shows, so INBOX, Sent, and All are direction-filtered views over one store.
+
+    `special_use` are the RFC 6154 attributes for this mailbox (e.g. ["\\Sent"]).
+    Twisted reads getFlags() off the listMailboxes() instance for the LIST mailbox
+    attributes, but off the select() instance for the SELECT message-FLAGS line, so
+    `list_view` disambiguates: a list-view box reports its special-use + structural
+    attributes; a selected box reports the message flags. The two instances never
+    cross, so one getFlags() correctly serves both call sites.
+
+    `empty` marks a present-but-empty placeholder (Drafts/Trash/Junk/Archive):
+    selectable with zero messages and NO API hit, so a client (Thunderbird) maps
+    its special-use folders to ours and never tries to CREATE them. Postern has no
+    such state in v1; these are advertised so a real MUA is satisfied.
     """
 
     def __init__(
@@ -53,10 +66,16 @@ class PosternMailbox:
         client: PosternClient,
         *,
         direction: Optional[str] = None,
+        special_use: Optional[List[str]] = None,
+        list_view: bool = False,
+        empty: bool = False,
         page_size: int = 200,
     ) -> None:
         self._client = client
         self._direction = direction
+        self._special_use = list(special_use or [])
+        self._list_view = list_view
+        self._empty = empty
         self._page_size = page_size
         self._summaries: List[MessageSummary] = []
         self._loaded = False
@@ -65,6 +84,11 @@ class PosternMailbox:
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
+            return
+        if self._empty:
+            # Placeholder folder (e.g. Drafts/Trash): always empty, never hit the API.
+            self._summaries = []
+            self._loaded = True
             return
         items: List[MessageSummary] = []
         cursor: Optional[str] = None
@@ -117,6 +141,12 @@ class PosternMailbox:
         return "/"
 
     def getFlags(self) -> List[str]:
+        # In a LIST (list_view), report the RFC 6154 special-use + structural
+        # attributes so a client auto-maps its folders. In a SELECT, report the
+        # message flags settable in this (read-only) mailbox. Twisted calls this on
+        # distinct instances for the two cases (see the class docstring).
+        if self._list_view:
+            return self._special_use + ["\\HasNoChildren"]
         return ["\\Seen"]
 
     def getDefaultFlags(self) -> List[str]:
@@ -166,7 +196,15 @@ class PosternMailbox:
         raise ReadOnlyError("postern-imap is read-only; flags are not stored")
 
     def addMessage(self, message, flags=(), date=None):
-        raise ReadOnlyError("postern-imap is read-only; send via the Postern API")
+        # APPEND is accepted as a NO-OP success and never fails the client. A mail
+        # client (Thunderbird) APPENDs its own copy of a sent message into Sent
+        # after submission; the Postern submission path already records the outbound
+        # message in the store, so persisting the APPEND would double-store. We
+        # acknowledge it (returning a Deferred, as Twisted's do_APPEND expects) so
+        # the post-send copy succeeds and the sent mail still appears (via the store
+        # on the next SELECT), exactly once. Drafts/Trash/Junk are placeholders with
+        # no v1 backing store, so an APPEND there is accepted but not persisted.
+        return defer.succeed(None)
 
     def expunge(self):
         raise ReadOnlyError("postern-imap is read-only; nothing to expunge")
