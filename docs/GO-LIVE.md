@@ -183,12 +183,13 @@ sudo systemctl restart postern-imap postern-submission   # pick up narrowed toke
   - 587 with SEND value: a submission send succeeds; a `GET /api/messages` with the
     SEND value returns **403**.
   - an unknown value -> **401**.
-- **DECISION TO FLAG (Conrad):** who keeps the `both` `POSTERN_API_TOKEN` after the
-  split? The credential-admin routes (`/api/admin/smtp-credentials`) need a `both`
-  token, so it cannot be retired outright -- but it should live ONLY in a restricted
-  admin/ops location, NEVER in the box units (which now hold read/send only). Recommend:
-  keep `POSTERN_API_TOKEN` set worker-side, hold its value in crew-secrets minter-tier
-  only, out of every EnvironmentFile.
+- **TOKEN CUSTODY -- RATIFIED (Mackaye 2026-06-27):** the `both` `POSTERN_API_TOKEN`
+  stays set worker-side and its value lives in crew-secrets **minter-tier ONLY** -- out
+  of EVERY box EnvironmentFile. Each box holds ONLY its scoped token (read -> imap proxy
+  + the Postern MCP; send -> 587 submission). The `both` token is used ONLY for admin
+  ops (smtp-credential mint, the reindex route) by Mackaye/crew, NEVER projected onto a
+  box. This is the per-function-keys / least-privilege end state -- locked, not a window
+  decision.
 - **Rollback:** restore each EnvironmentFile to `POSTERN_API_TOKEN` / `POSTERN_SEND_TOKEN`
   = the prior `both` value; `systemctl restart`. The worker secrets can stay (additive).
 
@@ -259,54 +260,41 @@ Stage-1 measurement instrumentation per her proxy measurement doc. This is addit
 
 ---
 
-## Phase 1 -- #74: deploy the renamed worker + custom domain (LIVE EMAIL, downtime-aware)
+## Phase 1 -- #74: custom domain LIVE; retire the legacy send worker (cosmetic rename DEFERRED)
 
-This is the foundation: both mail doors point at `https://postern.skyphusion.org`
-for their store-read / send hand-off. Today the inbound/store worker is still
-deployed under the OLD name `skyphusion-email-inbound`, and there is no `postern`
-worker. Repo config: `inbound/wrangler.jsonc` name=`postern`,
-`worker/wrangler.jsonc` name=`postern-send`.
+**Reconciled to live reality (2026-06-27).** The user-facing goal of #74 -- a stable
+`https://postern.skyphusion.org` origin for both doors' store-read / send hand-off --
+is **DONE**. The inbound/store worker is live as `skyphusion-email-inbound` with the
+custom domain `postern.skyphusion.org` attached and serving (verified during #116);
+there is NO `postern`-named worker. Creating one is **not worth doing**: a Cloudflare
+Worker cannot be renamed in place, so "renaming" means recreate-and-migrate (re-attach
+the custom domain, re-point the Email Routing catch-all, re-`wrangler secret put` the
+API tokens, re-bind D1/R2/Vectorize/AI/send_email) on Conrad's LIVE mail store, for a
+PURELY cosmetic gain -- the domain works regardless of the worker's internal name.
 
-Order matters: **create the new target, verify it, THEN repoint the live routing**,
-so inbound email keeps flowing the whole time.
+So 1.1-1.3 are **DONE / moot**, kept only as the historical record + rollback ref. The
+remaining REAL work in this phase is OUTBOUND: repoint the relay off the legacy
+`skyphusion-email` send worker onto `postern-send`, then retire the legacy workers
+(1.4 + 1.6). The repo template `inbound/wrangler.jsonc` still says name=`postern`;
+treat it as the public template's example name (operators set their own) or reconcile
+it to `skyphusion-email-inbound` -- a docs-only follow-up, no live impact.
 
-### 1.1 Deploy the inbound/store worker under the name `postern`
+### 1.1 Inbound/store worker -- DONE (live as `skyphusion-email-inbound`)
 
-```bash
-cd inbound
-npm run typecheck
-npx wrangler d1 migrations apply postern --remote   # apply migrations to the bound D1 first
-npx wrangler deploy                                 # creates the NEW worker `postern`
-```
+Live and serving; custom domain attached. The cosmetic rename to `postern` is DEFERRED
+(not worth a live recreation, see above). No action.
 
-- **Smoke:** `curl -fsS https://postern.<account>.workers.dev/health` returns 200;
-  `/api/*` returns 401/403 without a token. The OLD `skyphusion-email-inbound` is
-  still serving live email at this point (we have NOT repointed routing yet).
-- **Rollback:** the new `postern` worker is additive; delete it
-  (`npx wrangler delete --name postern`) if you abort. Live email untouched.
+### 1.2 Custom domain `postern.skyphusion.org` -- DONE
 
-### 1.2 Attach the custom domain `postern.skyphusion.org`
+Attached to `skyphusion-email-inbound` (orange-cloud, cert provisioned): `/health` 200,
+`/api/*` 401/403 without a token. No action.
 
-Prefer IaC (a `routes` / custom-domain entry in `inbound/wrangler.jsonc`, then
-`wrangler deploy`); the dashboard is the fallback. The custom domain creates the
-orange-cloud hostname bound to the `postern` worker.
+### 1.3 Email Routing -- DONE (already routes to the live worker)
 
-- **Smoke:** `curl -fsS https://postern.skyphusion.org/health` returns 200 (DNS +
-  cert provision by CF can take a minute). `/api/*` 401/403 without a token.
-- **Rollback:** remove the custom-domain binding; the `*.workers.dev` URL still works.
-
-### 1.3 Repoint Email Routing to the `postern` worker
-
-CF Email Routing rules currently route inbound mail to `skyphusion-email-inbound`.
-Repoint ALL routing rules (including catch-all) to the `postern` worker.
-
-- **Smoke (downtime-critical):** send a test email from an external account to a
-  `@skyphusion.org` address; confirm it lands in the store via
-  `curl -H "Authorization: Bearer $POSTERN_API_TOKEN" https://postern.skyphusion.org/api/messages`
-  (most recent message is the test). Send a SECOND test to confirm steady state.
-- **Rollback:** repoint the routing rules back to `skyphusion-email-inbound`
-  (still deployed). This is the single reversible switch for live inbound email;
-  do not delete the old worker until Phase 2 confirms nothing references it.
+The catch-all already delivers `@skyphusion.org` to `skyphusion-email-inbound` (the
+inbound copy in the #116 test arrived this way). No repoint is needed because the
+worker is NOT being renamed. If the cosmetic rename were ever done, THIS would be the
+downtime-critical switch -- deferred with the rename.
 
 ### 1.4 Deploy `postern-send` and repoint the relay's send path
 

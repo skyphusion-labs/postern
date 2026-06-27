@@ -261,6 +261,15 @@ Unknown token -> `401`; known token outside its scope -> `403`. Credential-admin
 the two scoped secrets is OPTIONAL and non-breaking: with only `POSTERN_API_TOKEN`
 set, every consumer keeps using that one `both` value exactly as before.
 
+**Token custody after the split (RATIFIED, Mackaye 2026-06-27).** Once the scoped
+values are provisioned (#85), the `both` `POSTERN_API_TOKEN` lives worker-side and in
+crew-secrets **minter-tier ONLY** -- never in any box EnvironmentFile. Each box holds
+ONLY its scoped value: the IMAP proxy and the Postern MCP hold the `read` value, the
+587 submission server holds the `send` value. The `both` token is reserved for
+credential-admin ops (`/api/admin/smtp-credentials`, the reindex route) run by
+Mackaye/crew, never projected onto a box -- so a leaked box EnvironmentFile is bounded
+to exactly one scope.
+
 **Posture change to bake in (per #75).** The IMAP proxy moves from "holds no
 secret" (token mode: each session carries the user's own token) to "holds a
 per-function service token" (`ldap`/`pam` mode: the proxy authenticates the human
