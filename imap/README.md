@@ -97,6 +97,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | `ldap` (search+bind) | -- | service-account DN + password |
 | `LDAP_SEARCH_BASE` / `LDAP_SEARCH_FILTER` | `ldap` (search+bind) | -- | e.g. `ou=people,dc=ex,dc=com` / `(uid=%s)` |
 | `LDAP_MAIL_ATTR` | no | `mail` | directory attribute carrying the mail address |
+| `LDAP_TIMEOUT` | no | `10` | seconds bounding LDAP connect + bind/search (0 = none); matches the Go relay knob 1:1 |
 | `AUTH_SYSTEM_PAM_SERVICE` | no | `postern` | PAM service name for `system` mode |
 | `AUTH_SYSTEM_DOMAIN` | no | -- | optional display suffix for `system` logins |
 | `POSTERN_IMAP_HOST` | no | `127.0.0.1` | listen interface |

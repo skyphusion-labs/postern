@@ -95,6 +95,11 @@ class Config:
     ldap_search_base: Optional[str] = None  # e.g. ou=people,dc=ex,dc=com
     ldap_search_filter: Optional[str] = None  # e.g. (uid=%s)
     ldap_mail_attr: str = "mail"  # attribute carrying the mail address (informational here)
+    # LDAP_TIMEOUT (integer seconds, default 10): bounds BOTH the directory connect
+    # and the bind/search operations, so a dead or slow directory cannot hang a
+    # login. Shared cross-language contract name: must match the Go relay 1:1
+    # (relay/auth_ldap.go DialWithDialer + SetTimeout). 0 disables (no timeout).
+    ldap_timeout: int = 10
 
     # --- system mode (mirrors relay AUTH_SYSTEM_* env knobs) ---
     pam_service: str = "postern"  # AUTH_SYSTEM_PAM_SERVICE, the PAM service name
@@ -180,6 +185,9 @@ class Config:
         ldap_search_base = (e.get("LDAP_SEARCH_BASE") or "").strip() or None
         ldap_search_filter = (e.get("LDAP_SEARCH_FILTER") or "").strip() or None
         ldap_mail_attr = (e.get("LDAP_MAIL_ATTR") or "mail").strip() or "mail"
+        ldap_timeout = _int(e, "LDAP_TIMEOUT", 10)
+        if ldap_timeout < 0:
+            raise ConfigError("LDAP_TIMEOUT must be >= 0 (0 disables the timeout)")
         if auth_mode == "ldap":
             if not ldap_url:
                 raise ConfigError("ldap auth mode needs LDAP_URL")
@@ -231,6 +239,7 @@ class Config:
             ldap_search_base=ldap_search_base,
             ldap_search_filter=ldap_search_filter,
             ldap_mail_attr=ldap_mail_attr,
+            ldap_timeout=ldap_timeout,
             pam_service=pam_service,
             system_domain=system_domain,
             api_timeout=_float(e, "POSTERN_API_TIMEOUT", 15.0),
