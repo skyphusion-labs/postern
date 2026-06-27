@@ -29,29 +29,45 @@ in #12.
 - **Zero new state.** The proxy owns no database; it reads the live API per
   session with the caller's own token.
 
-## Auth model (#32)
+## Auth model (#32, expanded for #77)
 
-Postern is gated by a single high-entropy Bearer token (`POSTERN_API_TOKEN`);
-scoped / multi-tokens are explicitly post-v1. So an IMAP login has to resolve to a
-Postern API token. Two modes (`POSTERN_IMAP_AUTH_MODE`):
+A normal mail client uses ONE username+password for BOTH doors: IMAP to receive
+and SMTP to send. The SMTP relay (`relay/`) authenticates that credential three
+ways via a pluggable `AuthProvider`; the IMAP proxy mirrors the same backends so
+**one credential opens both doors**. Pick the backend with
+`POSTERN_IMAP_AUTH_MODE`:
 
-| mode | IMAP username | IMAP password | who holds the token |
-|---|---|---|---|
-| `token` (default) | a free label (use the mailbox address) | **the Postern API token** | nobody; each session carries the user's own token |
-| `fixed` | a configured username | a configured password | the proxy (`POSTERN_API_TOKEN` in its env) |
+| mode | IMAP username | IMAP password | what the proxy holds | mirrors relay |
+|---|---|---|---|---|
+| `token` (default) | a free label (use the mailbox address) | **the Postern API token** | nothing | -- |
+| `fixed` | a configured username | a configured password | the API token (`POSTERN_API_TOKEN`) | -- |
+| `native` | the mailbox address | the user's SMTP secret | a per-function service token + the transport token | `AUTH_BACKEND=native` |
+| `ldap` | the directory login | the directory password | a per-function service token + (optional) LDAP service-account creds | `AUTH_BACKEND=ldap` |
+| `system` | a local Unix user | the Unix password | a per-function service token | `AUTH_BACKEND=system` |
 
 - **`token` mode** stores no secret in the proxy and validates the token *live*
-  against the API at login (a bad token fails). It is the BYO-token / no-lock-in
-  default and the honest mapping onto Postern's single-token reality. The downside
-  is that the user pastes a 64-char token as their "password", which some mail
-  clients dislike.
+  against the API at login. BYO-token / no-lock-in default; the user pastes the
+  64-char token as their "password", which some mail clients dislike.
 - **`fixed` mode** is the convenience path for a one-person self-host: put the API
-  token in the proxy env, pick a normal password, and Thunderbird/mutt log in with
-  username + password. Comparisons are constant-time.
+  token in the proxy env, pick a normal password. Comparisons are constant-time.
+- **`native` / `ldap` / `system`** authenticate the **user** (against the worker
+  `POST /api/smtp-auth`, an LDAP bind over TLS, or local PAM), then the proxy reads
+  the store with a **per-function service token** it holds (`POSTERN_API_TOKEN`).
+  These two steps are deliberately separate: authenticate-the-user, then
+  act-on-the-store-with-the-service-token. This is a **posture shift** -- in
+  `token` mode the proxy holds no secret; in these modes it holds a service token.
+  See [`DEPLOY.md`](DEPLOY.md) for exactly what secret is held in each mode, by
+  function, and where it is stored.
 
-The token is never logged. Run the proxy **behind TLS or on loopback** (the
-password is a real credential): set `POSTERN_IMAP_TLS_CERT`/`POSTERN_IMAP_TLS_KEY`,
-or front a loopback listener with stunnel. By default it binds `127.0.0.1:1143`.
+`native` is stdlib-only (urllib). `ldap` needs the pure-Python `ldap3`
+(`pip install -e '.[ldap]'`) and `system` needs `python-pam`
+(`pip install -e '.[pam]'`); both are imported lazily, so the default install
+stays dependency-light. No token or password is ever logged.
+
+Run the proxy **behind TLS or on loopback** (the password is a real credential):
+set `POSTERN_IMAP_TLS_CERT`/`POSTERN_IMAP_TLS_KEY`, or front a loopback listener
+with stunnel. By default it binds `127.0.0.1:1143`. Exposing **993 (IMAPS)** is
+gated -- see [`DEPLOY.md`](DEPLOY.md).
 
 ## Configuration
 
@@ -61,9 +77,19 @@ All config is environment-driven (no flags), so it drops into a systemd
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `POSTERN_API_URL` | yes | -- | Postern mailbox API origin, e.g. `https://postern.example` |
-| `POSTERN_IMAP_AUTH_MODE` | no | `token` | `token` or `fixed` |
-| `POSTERN_API_TOKEN` | in `fixed` | -- | the Postern API token (secret) the proxy presents in `fixed` mode |
+| `POSTERN_IMAP_AUTH_MODE` | no | `token` | `token`, `fixed`, `native`, `ldap`, or `system` (`pam` aliases `system`) |
+| `POSTERN_API_TOKEN` | in `fixed`/`native`/`ldap`/`system` | -- | the token the proxy presents: the login token in `fixed`, the per-function **service** token in `native`/`ldap`/`system` |
 | `POSTERN_IMAP_USERNAME` | in `fixed` | -- | the login username in `fixed` mode |
+| `POSTERN_TRANSPORT_TOKEN` | in `native` | -- | transport-seam bearer for `POST /api/smtp-auth` (mirrors the relay) |
+| `POSTERN_SMTP_AUTH_URL` | no | `${POSTERN_API_URL}/api/smtp-auth` | the `native` auth endpoint |
+| `LDAP_URL` | in `ldap` | -- | `ldaps://host:636` (preferred) or `ldap://host:389` |
+| `LDAP_STARTTLS` | no | `false` | upgrade an `ldap://` connection before binding |
+| `LDAP_BIND_DN_TEMPLATE` | `ldap` (simple bind) | -- | e.g. `uid=%s,ou=people,dc=ex,dc=com` |
+| `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | `ldap` (search+bind) | -- | service-account DN + password |
+| `LDAP_SEARCH_BASE` / `LDAP_SEARCH_FILTER` | `ldap` (search+bind) | -- | e.g. `ou=people,dc=ex,dc=com` / `(uid=%s)` |
+| `LDAP_MAIL_ATTR` | no | `mail` | directory attribute carrying the mail address |
+| `AUTH_SYSTEM_PAM_SERVICE` | no | `postern` | PAM service name for `system` mode |
+| `AUTH_SYSTEM_DOMAIN` | no | -- | optional display suffix for `system` logins |
 | `POSTERN_IMAP_HOST` | no | `127.0.0.1` | listen interface |
 | `POSTERN_IMAP_PORT` | no | `1143` | listen port |
 | `POSTERN_IMAP_TLS_CERT` | no | -- | PEM cert path (set with key for IMAPS) |
@@ -126,7 +152,7 @@ without Twisted:
 | `client.py` | no (urllib) | HTTP client over the Postern read API |
 | `rfc822.py` | no (email) | render a stored Message -> RFC822 bytes |
 | `config.py` | no | env-driven `Config` |
-| `auth.py` | core no / portal yes | `resolve_token` (#32) + the Twisted cred portal |
+| `auth.py` | core no / portal yes | `resolve_token` (#32/#77) + the native/ldap/pam backends + the Twisted cred portal |
 | `message.py` | yes | `IMessage`/`IMessagePart` over a rendered message |
 | `mailbox.py` | yes | read-only `IMailbox` (snapshot, fetch, status) |
 | `account.py` | yes | `IAccount` exposing INBOX / Sent / All |

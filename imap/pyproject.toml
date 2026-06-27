@@ -18,6 +18,15 @@ dependencies = ["Twisted>=22.10"]
 # Tests use stdlib unittest only; mypy is the type gate (mirrors the worker's
 # `tsc --noEmit` CI gate, house convention).
 dev = ["mypy>=1.8"]
+# #77 optional auth backends. token/fixed/native need NOTHING beyond stdlib
+# (native POSTs to /api/smtp-auth with urllib), so the default install stays
+# dependency-light; these extras add a backend only when that mode is used.
+#   ldap3:      pure-Python LDAP client (no libldap/C build step), so it is the
+#               dependency-light choice over python-ldap for the ldap backend.
+#   python-pam: ctypes binding to libpam (no C build step) for the system backend.
+# Both are imported LAZILY (auth.py), so importing the package never pulls them.
+ldap = ["ldap3>=2.9"]
+pam = ["python-pam>=2.0"]
 
 [project.scripts]
 postern-imap = "posternimap.__main__:main"
