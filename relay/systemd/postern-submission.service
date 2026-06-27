@@ -1,0 +1,46 @@
+[Unit]
+Description=Postern SMTP submission server (587, authenticated, LDAP/PAM) -> worker /api/send
+Documentation=https://github.com/skyphusion-labs/postern/blob/main/relay/SUBMISSION-DEPLOY.md
+After=network-online.target nslcd.service
+Wants=network-online.target
+# nslcd.service: PAM auth (AUTH_BACKEND=system) flows pam_ldap -> nslcd -> Authentik.
+# The nslcd socket must exist before a client can authenticate.
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/postern-submission.env
+# The submission build is the relay binary compiled WITH PAM (`go build -tags pam`),
+# installed under a distinct name so it coexists with the cgo-free inbound relay
+# (/usr/local/bin/skyphusion-email-relay). See SUBMISSION-DEPLOY.md.
+ExecStart=/usr/local/bin/postern-submission
+Restart=always
+RestartSec=5
+
+# The submission server holds no persistent state: authenticated SMTP in, HTTPS out
+# to the worker /api/send. Lock it down, mirroring the relay + postern-imap units.
+DynamicUser=yes
+NoNewPrivileges=yes
+# 587 (and 465 if added) are privileged ports; grant only the bind capability. The
+# TLS cert/key must be readable by the DynamicUser (world-read the PEMs or an ACL).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# AF_UNIX is REQUIRED here (unlike the inbound relay unit): PAM auth via pam_ldap
+# talks to the nslcd socket over AF_UNIX, and the PAM stack logs over /dev/log
+# (also AF_UNIX). Drop AF_UNIX and AUTH_BACKEND=system fails every login. AF_INET*
+# are for the 587 listener + the outbound HTTPS POST to the worker.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
