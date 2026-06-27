@@ -101,9 +101,14 @@ Named secrets (by function; full inventory in AUTH-CONTRACT.md section 7):
 - `POSTERN_SEND_TOKEN` -- the worker `/api/send` mailbox API token (the send door).
 - `POSTERN_TRANSPORT_TOKEN` -- the transport token for the mandatory inbound stub.
 
-Both are age-encrypted in crew-secrets; presence-check with `${VAR:+SET}` only. In
-v1 both `POSTERN_SEND_TOKEN` and the IMAP proxy's store-read token resolve to the
-single mailbox API token (per-function split is post-v1; AUTH-CONTRACT.md section 7).
+Both are age-encrypted in crew-secrets; presence-check with `${VAR:+SET}` only.
+`POSTERN_SEND_TOKEN` is the mailbox API token the submission server presents to the
+worker `/api/send`; with worker-side per-function scoping (#85) it should hold the
+`send`-scoped value (worker secret `POSTERN_API_TOKEN_SEND`), so a leak of this
+EnvironmentFile cannot read the store -- only send. This is optional: until the
+operator provisions the scoped worker secrets, `POSTERN_SEND_TOKEN` and the IMAP
+proxy's store-read token both carry the SAME single `both` mailbox token, exactly
+as before (full inventory + scope table in AUTH-CONTRACT.md section 7).
 
 ## 4. Loopback TLS cert (for the smoke test only)
 

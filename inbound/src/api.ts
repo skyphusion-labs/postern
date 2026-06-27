@@ -1,8 +1,16 @@
 // The mailbox HTTP API (docs/CONTRACT.md section 4). The write half (send/reply,
 // #26) and just enough of the read half to make M2 verifiable end to end
 // (get one message, get a thread). The full M1 read surface (list/search/
-// pagination, #24/#25) attaches to the same store next. Token-gated with the
-// mailbox API token (POSTERN_API_TOKEN), constant-time compared.
+// pagination, #24/#25) attaches to the same store next.
+//
+// Token-gated, constant-time compared. The default posture is egalitarian: one
+// mailbox token (POSTERN_API_TOKEN) sends AND receives. Optionally an operator can
+// provision per-function scoped tokens (#85) to bound a leaked credential's blast
+// radius: POSTERN_API_TOKEN_READ reaches only the read door (GET messages/search/
+// threads/attachments), POSTERN_API_TOKEN_SEND only the write door (POST send/
+// reply). The unscoped POSTERN_API_TOKEN stays a `both` token, so with only it set
+// the whole surface behaves exactly as before. Credential-admin routes are the
+// most privileged and are reachable ONLY by a `both` token.
 
 import * as store from "./store";
 import { send, reply, MailboxError, type SendRequest, type ReplyRequest } from "./mailbox";
@@ -48,12 +56,21 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     return handleSmtpAuth(request, env);
   }
 
-  // Everything under /api (and the back-compat /send alias) requires the token.
+  // Everything under /api (and the back-compat /send alias) requires a token.
   const isApi = path === "/send" || path.startsWith("/api/");
   if (!isApi) return json({ ok: false, error: "not_found" }, 404);
 
-  if (!authorized(request, env)) {
+  // Resolve the presented bearer to its scope (read / send / both), then authorize
+  // per route/method (#85). An absent or unknown token is 401; a known token used
+  // outside its scope is 403. With only POSTERN_API_TOKEN set it resolves to `both`
+  // and every route is permitted, exactly as before this change.
+  const scope = resolveScope(request, env);
+  if (scope === null) {
     return json({ ok: false, error: "unauthorized" }, 401);
+  }
+  const need = requiredScope(request.method, path);
+  if (need !== null && !scopeSatisfies(scope, need)) {
+    return json({ ok: false, error: "forbidden", message: `requires ${need} scope` }, 403);
   }
 
   try {
@@ -72,8 +89,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     }
 
     // --- admin: provision / rotate an SMTP submission credential (#68) ---
-    // Operator action, gated by the mailbox API token (this block is past the
-    // API-token check). Mints or rotates a per-user submission credential and
+    // Operator action, gated by a `both`-scoped mailbox token (this block is past
+    // the scope check above). Mints or rotates a per-user submission credential and
     // returns the secret ONCE; only the PBKDF2 hash is stored.
     if (request.method === "POST" && path === "/api/admin/smtp-credentials") {
       return await handleCredentialUpsert(request, env);
@@ -253,11 +270,68 @@ function transportAuthorized(request: Request, env: Env): boolean {
   return token.length > 0 && timingSafeEqual(got, token);
 }
 
-function authorized(request: Request, env: Env): boolean {
-  const apiToken = env.POSTERN_API_TOKEN || env.RELAY_TOKEN || "";
+// --- Per-function token scopes (#85) ---
+
+// The scope a presented mailbox token carries. `both` is the egalitarian default
+// (one key sends and receives, the back-compat path); `read` and `send` are the
+// optional per-function hardening that bounds a leaked token's blast radius.
+type Scope = "read" | "send" | "both";
+
+// The scope a route/method demands. `admin` (credential provisioning) is strictly
+// more privileged than send and is satisfied ONLY by a `both` token.
+type RouteScope = "read" | "send" | "admin";
+
+// Map the method+path to the scope it requires, mirroring the route table in
+// handleApi exactly. Returns null for any path with no API handler, so (once the
+// token itself is valid) it falls through to the same 404 as before.
+function requiredScope(method: string, path: string): RouteScope | null {
+  if (method === "POST" && (path === "/api/send" || path === "/send")) return "send";
+  if (method === "POST" && path === "/api/reply") return "send";
+  if (method === "POST" && path === "/api/admin/smtp-credentials") return "admin";
+  if (method === "DELETE" && /^\/api\/admin\/smtp-credentials\/(.+)$/.test(path)) return "admin";
+  if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
+  if (method === "GET" && path === "/api/search") return "read";
+  // Single message and the /attachments/{i} sub-route both live under here.
+  if (method === "GET" && path.startsWith("/api/messages/")) return "read";
+  if (method === "GET" && path.startsWith("/api/threads/")) return "read";
+  return null;
+}
+
+// A `both` token satisfies every route; a scoped token satisfies only its own
+// kind. `admin` is satisfied solely by `both`: read/send tokens cannot reach the
+// credential-provisioning routes.
+function scopeSatisfies(have: Scope, need: RouteScope): boolean {
+  if (have === "both") return true;
+  if (need === "read") return have === "read";
+  if (need === "send") return have === "send";
+  return false; // admin: only `both`
+}
+
+// Resolve the Authorization bearer to the scope of the configured token it matches,
+// or null if it matches none. The token is read from the Authorization header only,
+// never the URL/query. Every configured token is compared constant-time and the
+// loop does not break on a match, so the check does not leak WHICH token matched
+// via timing; the token LENGTH may leak (tokens are high-entropy), the bytes must
+// not. Precedence is fixed (both, then read, then send): distinct per-function
+// values are expected, so at most one matches, but on an accidental value
+// collision the more-permissive `both` wins to avoid locking out the primary key.
+function resolveScope(request: Request, env: Env): Scope | null {
   const auth = request.headers.get("authorization") ?? "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  return apiToken.length > 0 && timingSafeEqual(token, apiToken);
+  const got = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (got.length === 0) return null;
+
+  const candidates: Array<[Scope, string]> = [
+    ["both", env.POSTERN_API_TOKEN || env.RELAY_TOKEN || ""],
+    ["read", env.POSTERN_API_TOKEN_READ || ""],
+    ["send", env.POSTERN_API_TOKEN_SEND || ""],
+  ];
+
+  let matched: Scope | null = null;
+  for (const [scope, token] of candidates) {
+    const eq = token.length > 0 && timingSafeEqual(got, token);
+    if (eq && matched === null) matched = scope;
+  }
+  return matched;
 }
 
 async function readJson<T>(request: Request): Promise<T> {

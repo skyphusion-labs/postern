@@ -237,10 +237,25 @@ Presence-check with `${VAR:+SET}` only.
 | Secret (env var) | Function | Held by | Stored | Gate |
 |---|---|---|---|---|
 | `POSTERN_TRANSPORT_TOKEN` | transport seam (`/ingest`, `/dispatch`, native `/api/smtp-auth`) | relay (inbound + native submission) | crew-secrets -> `/etc/...env` 0600 | exists |
-| `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | 587 submission server | crew-secrets -> `/etc/postern-submission.env` 0600 | exists (mailbox API token) |
-| `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store (`/api/messages`, `/search`) in `ldap`/`pam` mode | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | exists (mailbox API token) |
+| `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | 587 submission server | crew-secrets -> `/etc/postern-submission.env` 0600 | exists; holds a `send`-scoped value once provisioned (worker `POSTERN_API_TOKEN_SEND`, #85) |
+| `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store (`/api/messages`, `/search`) in `ldap`/`pam` mode | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | exists; holds a `read`-scoped value once provisioned (worker `POSTERN_API_TOKEN_READ`, #85) |
 | `POSTERN_LDAP_BIND_PASSWORD` | scoped read-only LDAP search bind (`cn=postern-mail-ro`) | relay + proxy, **direct-LDAP only** | crew-secrets (staged) | section 8, gated |
 | `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname | 587 submission server | crew-secrets / cert store (staged) | **gated** (exposure) |
+
+**Worker-side scope secrets (#85).** The two consumer env vars above present a
+token VALUE; the inbound worker classifies that value by which of ITS secrets it
+equals. The worker secrets (set via `wrangler secret put`) define the scopes:
+
+| Worker secret | Scope | Reaches |
+|---|---|---|
+| `POSTERN_API_TOKEN` (or `RELAY_TOKEN`) | `both` | read + send + credential-admin (the egalitarian single-key default) |
+| `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
+| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only |
+
+Unknown token -> `401`; known token outside its scope -> `403`. Credential-admin
+(`/api/admin/smtp-credentials`) is reachable ONLY by a `both` token. Provisioning
+the two scoped secrets is OPTIONAL and non-breaking: with only `POSTERN_API_TOKEN`
+set, every consumer keeps using that one `both` value exactly as before.
 
 **Posture change to bake in (per #75).** The IMAP proxy moves from "holds no
 secret" (token mode: each session carries the user's own token) to "holds a
@@ -248,14 +263,17 @@ per-function service token" (`ldap`/`pam` mode: the proxy authenticates the huma
 against the directory, then reads the store with its OWN labelled service token).
 This must be stated in `imap/DEPLOY.md` (it is).
 
-**v1 reality vs end state (honest).** Postern is one mailbox gated by a single
-mailbox API token today; scoped/multi tokens are post-v1 (`auth.py` /
-`docs/CONTRACT.md` section 5). So in v1 the "store-read" and "send" functions both
-resolve to the **same** single `POSTERN_API_TOKEN` value. The per-function split in
-the table above is the end state and the wiring is already by-function (two env
-vars, two consumers); it becomes two distinct secrets the moment worker-side
-multi-token lands. Until then, document that the two labels share one value -- do
-not pretend they are isolated.
+**v1 reality vs end state (honest).** Postern is one mailbox, and the egalitarian
+single-key posture (one `both` token sends AND receives) is a first-class supported
+mode, not a deficiency. Worker-side per-function scoping landed in #85, so the
+"store-read" and "send" functions CAN now be two distinct, independently-rotatable
+secrets (`POSTERN_API_TOKEN_READ` / `POSTERN_API_TOKEN_SEND`). Until an operator
+provisions those distinct values, every consumer still presents the SAME single
+`POSTERN_API_TOKEN` (`both`) value -- so do not pretend the two labels are isolated
+in a deployment that has not provisioned the scoped secrets; they share one value
+until it is split. The split is optional hardening to bound a leaked credential's
+blast radius (a stolen read-door token cannot send), never a per-principal or
+human-vs-agent two-tier default.
 
 ## 8. What is staged / gated for Conrad (do NOT do unattended)
 

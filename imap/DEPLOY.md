@@ -134,6 +134,32 @@ Rotation: rotate the service token at the worker, re-encrypt, redeploy the
 EnvironmentFile, restart the unit; no client is affected (clients authenticate
 with their own user credential, not the service token).
 
+**Worker-side token scopes (#85, optional hardening).** The inbound worker can
+gate its `/api/*` surface with per-function SCOPED tokens, each independently
+rotatable, so a leaked token's blast radius is bounded. The proxy's service token
+(`native`/`ldap`/`system` modes) only ever READS the store (`GET /api/messages`,
+`/api/search`, `/api/threads`, attachment bytes), so it should hold the
+read-scoped value -- it then physically cannot send mail even if the
+EnvironmentFile leaks. The worker resolves the presented bearer to its scope and
+authorizes per route; scopes are defined worker-side by which secret is set:
+
+| worker secret | scope | reaches | held by |
+|---|---|---|---|
+| `POSTERN_API_TOKEN` (or `RELAY_TOKEN`) | `both` | read + send + credential-admin | default single-token deployments; any full-trust client |
+| `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` ONLY | the IMAP read-door proxy (this service) and the read-only webmail |
+| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` ONLY | a send-only client (e.g. an alerts/notify sender) |
+
+A presented token matching none of the configured secrets is `401`; a known token
+used outside its scope is `403`. Credential-admin routes
+(`POST`/`DELETE /api/admin/smtp-credentials`) are the most privileged and are
+reachable ONLY by a `both` token. This is OPTIONAL: with only `POSTERN_API_TOKEN`
+set, that lone token is `both` and the whole surface behaves exactly as before --
+the egalitarian single-key posture is a first-class supported mode, not something
+to "fix". To put the proxy on a read-only token, set this unit's
+`POSTERN_API_TOKEN` to the VALUE provisioned worker-side as `POSTERN_API_TOKEN_READ`
+(the proxy presents whatever token VALUE it holds; the worker classifies it). The
+worker secrets are set with `wrangler secret put <NAME>`.
+
 **Optional dependencies.** `ldap` needs `ldap3`, `system` needs `python-pam`
 (both pure-Python, no C build step, imported lazily). Install the extra alongside
 the package on the box:
