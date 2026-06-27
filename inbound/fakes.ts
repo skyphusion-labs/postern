@@ -394,6 +394,18 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           .slice(0, topK);
         return { matches: scored };
       },
+      // #134 reconcile: report the live vector total (legacy binding field name).
+      async describe() {
+        return { vectorsCount: vectors.length };
+      },
+      // #134 reconcile: fetch raw vectors (with values + metadata) by id, the only
+      // way to confirm an expected id is present and to pull probe values for sampling.
+      async getByIds(ids: string[]) {
+        const want = new Set(ids);
+        return (vectors as { id: string; values: number[]; metadata?: unknown }[]).filter((v) =>
+          want.has(v.id),
+        );
+      },
     },
     AI: {
       // Deterministic bag-of-words embedding over a tiny fixed vocabulary, so the

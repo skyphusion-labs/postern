@@ -1208,3 +1208,238 @@ export async function reindexPage(
   if (!opts.cursor) result.total = await countMessages(env);
   return result;
 }
+
+// --- Reconcile / orphan-vector audit (#134, read-only) ---
+//
+// The #130 backfill proved current-mail coverage but the live index settled ABOVE
+// it: vectors with no live message behind them ("orphans"). Two roots are possible:
+//   (a) a message deleted from the store with no Vectorize delete propagated, and/or
+//   (b) a pre-#116 id scheme the unified `embedAndUpsert` id does not overwrite.
+//
+// HARD CONSTRAINT (investigated first): Vectorize exposes NO "list all vectors" API
+// (describe / query / insert / upsert / getByIds / deleteByIds only). So the orphan
+// COUNT is exact (describe.vectorsCount minus the verified-present expected set), but
+// the orphan SET is NOT cleanly enumerable by id-listing. We therefore:
+//   1. enumerate the EXPECTED id set from D1 via the SAME id scheme embedAndUpsert
+//      uses (sha256hex(message_id)[:56] + "." + chunk), applying the same gate;
+//   2. read describe() for the live count and getByIds() to verify the expected set
+//      is actually present (catches under-coverage too);
+//   3. SAMPLE the index by querying with stored vector values as probes (no new
+//      embeddings, so zero Workers-AI spend) and classify every surfaced orphan id
+//      as cause (a) vs (b) by whether its metadata.message_id is still in D1.
+// The sample yields a PARTIAL, honestly-labelled orphan id set (enumerable: false)
+// plus a cause determination. THIS PATH NEVER DELETES (no deleteByIds call exists
+// here): the prune is a separate, Conrad-supervised, gated step.
+
+/** Vectorize getByIds is batched; keep each call well under the binding's id cap. */
+const RECONCILE_GETBYIDS_BATCH = 100;
+/** Default number of live vectors used as similarity probes when sampling for cause. */
+const RECONCILE_DEFAULT_SAMPLE = 32;
+/** topK per sampling probe: over-fetch so near-neighbour orphans surface. */
+const RECONCILE_SAMPLE_TOPK = 50;
+/** Cap on concrete orphan ids returned, so the report stays bounded. */
+const RECONCILE_MAX_ORPHAN_IDS = 200;
+
+export interface ReconcileSample {
+  probes: number; // live vectors used as query probes
+  matchesInspected: number; // total match ids inspected across all probes
+  distinctOrphans: number; // distinct orphan ids surfaced by sampling
+  causeA: number; // orphans whose metadata.message_id is NOT in D1 (deleted-message)
+  causeB: number; // orphans whose metadata.message_id IS in D1 (pre-#116 id scheme)
+  unknown: number; // orphans with no usable metadata.message_id to classify
+  orphanIds: string[]; // concrete orphan ids found (PARTIAL set), present iff requested
+}
+
+export interface ReconcileResult {
+  // --- D1 side: the authoritative EXPECTED state ---
+  messages: number; // total messages in the store
+  gatedMessages: number; // messages that pass the vectorize gate AND have a non-empty body
+  expectedVectors: number; // total expected chunk-vectors across gated messages
+  // --- Vectorize side: what is actually in the index ---
+  liveVectorCount: number; // describe(): vectors actually present (may lag, eventually-consistent)
+  verified: boolean; // whether the getByIds presence check ran
+  presentExpected: number; // expected ids confirmed present via getByIds (verified runs only)
+  missingExpected: number; // expected ids NOT found -- coverage gaps (verified runs only)
+  missingExpectedSample: string[]; // up to a few missing ids, for diagnosis
+  // --- The headline ---
+  orphanCount: number; // liveVectorCount - (verified ? presentExpected : expectedVectors)
+  enumerable: false; // CONSTANT: Vectorize has no list API; the orphan SET is not fully enumerable
+  // --- Cause attribution (probabilistic, via sampling) ---
+  sample: ReconcileSample;
+  causeDetermination: "a" | "b" | "mixed" | "indeterminate";
+  note: string;
+}
+
+interface ReconcileOpts {
+  /** Skip the getByIds presence check (cheaper; orphanCount falls back to expectedVectors). */
+  verify?: boolean;
+  /** Number of live vectors to use as similarity probes for cause sampling (0 disables). */
+  sampleSize?: number;
+  /** Include the concrete (partial) orphan id set in the report. */
+  includeOrphanIds?: boolean;
+}
+
+/** Compute the expected vector id SET from D1 using the SAME scheme + gate as the
+ *  live/backfill path. Pages internally so one request covers the whole store. */
+async function expectedVectorIds(
+  env: Env,
+): Promise<{ messages: number; gatedMessages: number; ids: Set<string>; liveMessageIds: Set<string> }> {
+  const allowlist = vectorizeAllowlist(env);
+  const ids = new Set<string>();
+  const liveMessageIds = new Set<string>();
+  let messages = 0;
+  let gatedMessages = 0;
+  let cursor: string | undefined;
+  for (;;) {
+    const { rows, nextCursor } = await pageForReindex(env, cursor, 200);
+    for (const r of rows) {
+      messages++;
+      liveMessageIds.add(r.message_id);
+      const direction = r.direction === "outbound" ? "outbound" : "inbound";
+      if (!shouldVectorize(allowlist, direction, parseRecipients(r.to_addr))) continue;
+      const chunks = plannedChunks(r.body_text);
+      if (chunks === 0) continue;
+      gatedMessages++;
+      const base = (await sha256hex(r.message_id)).slice(0, 56);
+      for (let i = 0; i < chunks; i++) ids.add(`${base}.${i}`);
+    }
+    if (nextCursor === null) break;
+    cursor = nextCursor;
+  }
+  return { messages, gatedMessages, ids, liveMessageIds };
+}
+
+/** describe() spans two binding generations: legacy VectorizeIndex reports
+ *  `vectorsCount`, post-beta Vectorize reports `vectorCount`. Read whichever is set. */
+async function liveVectorCount(env: Env): Promise<number> {
+  const vi = env.VECTORIZE as unknown as {
+    describe?: () => Promise<{ vectorsCount?: number; vectorCount?: number }>;
+  };
+  if (!vi?.describe) return 0;
+  const d = await vi.describe();
+  return d.vectorsCount ?? d.vectorCount ?? 0;
+}
+
+interface ByIdVector {
+  id: string;
+  values?: number[];
+  metadata?: { message_id?: unknown } | null;
+}
+
+async function getByIdsBatched(env: Env, ids: string[]): Promise<ByIdVector[]> {
+  const vi = env.VECTORIZE as unknown as { getByIds?: (ids: string[]) => Promise<ByIdVector[]> };
+  if (!vi?.getByIds) return [];
+  const out: ByIdVector[] = [];
+  for (let i = 0; i < ids.length; i += RECONCILE_GETBYIDS_BATCH) {
+    const batch = ids.slice(i, i + RECONCILE_GETBYIDS_BATCH);
+    out.push(...(await vi.getByIds(batch)));
+  }
+  return out;
+}
+
+/**
+ * reconcile audits the live Vectorize index against the expected id set derived from
+ * D1, returning the orphan count, an honest enumerability verdict, and a sampled
+ * cause (a vs b) determination. READ-ONLY: it never deletes. See the block comment
+ * above for the constraint that makes the orphan SET non-enumerable.
+ */
+export async function reconcile(env: Env, opts: ReconcileOpts = {}): Promise<ReconcileResult> {
+  const verify = opts.verify !== false;
+  const sampleSize = opts.sampleSize ?? RECONCILE_DEFAULT_SAMPLE;
+  const includeOrphanIds = opts.includeOrphanIds === true;
+
+  const expected = await expectedVectorIds(env);
+  const expectedVectors = expected.ids.size;
+  const live = await liveVectorCount(env);
+
+  // Presence check: confirm the expected set is actually in the index (and surface
+  // under-coverage, a distinct bug from over-coverage/orphans).
+  let presentExpected = expectedVectors;
+  let missingExpected = 0;
+  const missingExpectedSample: string[] = [];
+  if (verify && expectedVectors > 0) {
+    const expectedList = [...expected.ids];
+    const found = await getByIdsBatched(env, expectedList);
+    const foundIds = new Set(found.map((v) => v.id));
+    presentExpected = foundIds.size;
+    for (const id of expectedList) {
+      if (!foundIds.has(id)) {
+        missingExpected++;
+        if (missingExpectedSample.length < 10) missingExpectedSample.push(id);
+      }
+    }
+  }
+
+  const baseline = verify ? presentExpected : expectedVectors;
+  const orphanCount = Math.max(0, live - baseline);
+
+  // Cause sampling: probe with stored vector VALUES (no new embeddings -> zero
+  // Workers-AI spend), classify every surfaced non-expected id by whether its
+  // message_id is still in D1.
+  const sample: ReconcileSample = {
+    probes: 0,
+    matchesInspected: 0,
+    distinctOrphans: 0,
+    causeA: 0,
+    causeB: 0,
+    unknown: 0,
+    orphanIds: [],
+  };
+  const seenOrphans = new Set<string>();
+  if (sampleSize > 0 && expectedVectors > 0) {
+    const probeIds = [...expected.ids].slice(0, sampleSize);
+    const probes = (await getByIdsBatched(env, probeIds)).filter(
+      (v): v is ByIdVector & { values: number[] } => Array.isArray(v.values) && v.values.length > 0,
+    );
+    const vi = env.VECTORIZE as unknown as {
+      query?: (
+        v: number[],
+        o: { topK: number; returnMetadata: string },
+      ) => Promise<{ matches?: { id: string; metadata?: { message_id?: unknown } | null }[] }>;
+    };
+    for (const p of probes) {
+      if (!vi.query) break;
+      sample.probes++;
+      const res = await vi.query(p.values, { topK: RECONCILE_SAMPLE_TOPK, returnMetadata: "all" });
+      for (const m of res.matches ?? []) {
+        sample.matchesInspected++;
+        if (expected.ids.has(m.id) || seenOrphans.has(m.id)) continue;
+        seenOrphans.add(m.id);
+        const mid = typeof m.metadata?.message_id === "string" ? m.metadata.message_id : "";
+        if (!mid) sample.unknown++;
+        else if (expected.liveMessageIds.has(mid)) sample.causeB++; // live message, stale id scheme
+        else sample.causeA++; // message gone from D1: deleted-message orphan
+        if (includeOrphanIds && sample.orphanIds.length < RECONCILE_MAX_ORPHAN_IDS) {
+          sample.orphanIds.push(m.id);
+        }
+      }
+    }
+    sample.distinctOrphans = seenOrphans.size;
+  }
+
+  let causeDetermination: ReconcileResult["causeDetermination"] = "indeterminate";
+  if (sample.causeA > 0 && sample.causeB > 0) causeDetermination = "mixed";
+  else if (sample.causeA > 0) causeDetermination = "a";
+  else if (sample.causeB > 0) causeDetermination = "b";
+
+  const note =
+    "Vectorize has no list API: orphanCount is exact, but the orphan SET is sampled, " +
+    "not fully enumerable (enumerable=false). causeDetermination is from the sample only. " +
+    "READ-ONLY: no vectors were deleted.";
+
+  return {
+    messages: expected.messages,
+    gatedMessages: expected.gatedMessages,
+    expectedVectors,
+    liveVectorCount: live,
+    verified: verify && expectedVectors > 0,
+    presentExpected,
+    missingExpected,
+    missingExpectedSample,
+    orphanCount,
+    enumerable: false,
+    sample,
+    causeDetermination,
+    note,
+  };
+}
