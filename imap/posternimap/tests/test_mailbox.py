@@ -56,7 +56,11 @@ class MailboxTest(unittest.TestCase):
         subjects = [m._summary.subject for _, m in got]
         self.assertEqual(subjects, ["first", "second", "sent reply"])
 
-    def test_uid_equals_seq_in_snapshot(self):
+    def test_uid_is_store_rowid_not_position(self):
+        # UID is the store insertion key (rowid). For this contiguous fixture the
+        # rowids happen to be 1..3, so UID coincides with the sequence number; the
+        # backdated-arrival tests below prove the two DIVERGE the moment arrival
+        # order and date order disagree (the whole point of fault F9).
         from twisted.mail.imap4 import MessageSet
 
         mb = self._mailbox()
@@ -166,19 +170,20 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(hdrs["subject"], "second")
         self.assertEqual(self.transport.body_fetches, 0)
 
-    def test_window_caps_to_recent_and_uid_is_global_ordinal(self):
-        # 3 messages oldest-first [m1, m2, m3]; window=2 shows the recent two.
+    def test_window_caps_to_recent_and_uid_is_store_rowid(self):
+        # 3 messages, store rowids 1..3 (uid == arrival ordinal); window=2 shows the
+        # most-recent two (the highest uids), NOT a window-relative 1..2.
         mb = self._mailbox(window=2)
         self.assertEqual(mb.getMessageCount(), 2)
         from twisted.mail.imap4 import MessageSet
 
         got = list(mb.fetch(MessageSet(1, 2), uid=False))
         self.assertEqual([m._summary.subject for _, m in got], ["second", "sent reply"])
-        # UID == global arrival ordinal (base = N - window = 1), not window position.
+        # UID is the store rowid (2, 3), not the window position (1, 2).
         self.assertEqual([m.getUID() for _, m in got], [2, 3])
         self.assertEqual(mb.getUID(1), 2)
         self.assertEqual(mb.getUID(2), 3)
-        # UIDNEXT is the next global ordinal (total + 1), regardless of the window.
+        # UIDNEXT is the next rowid above the highest UID, regardless of the window.
         self.assertEqual(mb.getUIDNext(), 4)
         self.assertEqual(mb.requestStatus(["MESSAGES", "UIDNEXT"]),
                          {"MESSAGES": 2, "UIDNEXT": 4})
@@ -238,6 +243,85 @@ class MailboxTest(unittest.TestCase):
         mb._poll_tick()
         self.assertEqual(mb._listeners, [])
         self.assertEqual(dead.events, [])
+
+
+    # --- #102 fault F9: durable UID == store insertion key (uid-ordering) ---
+
+    def _custom_mailbox(self, msgs, **kw):
+        from posternimap.mailbox import PosternMailbox
+
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
+        client = PosternClient("https://x", "t", transport=transport)
+        return PosternMailbox(client, page_size=2, **kw), transport
+
+    def test_backdated_arrival_orders_by_uid_not_date(self):
+        # F9: a NEW message carrying an OLD Date header must take the next-highest
+        # UID and appear LAST (arrival order), NOT insert mid-order by date. The
+        # fake derives uid from arrival position, so "back" (newest arrival, index 0)
+        # gets the highest uid (3) despite the oldest Date header.
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [
+            make_message("back", subject="backdated", date="2026-06-01T00:00:00Z"),
+            make_message("b", subject="second", date="2026-06-20T00:00:00Z"),
+            make_message("a", subject="first", date="2026-06-10T00:00:00Z"),
+        ]
+        mb, _ = self._custom_mailbox(msgs)
+        got = list(mb.fetch(MessageSet(1, 3), uid=False))
+        # Sorted by uid (arrival), NOT by date: date order would have put "back" first.
+        self.assertEqual([m._summary.subject for _, m in got],
+                         ["first", "second", "backdated"])
+        self.assertEqual([m.getUID() for _, m in got], [1, 2, 3])
+        # UIDs are strictly ascending with sequence number (RFC 3501).
+        uids = [m.getUID() for _, m in got]
+        self.assertEqual(uids, sorted(uids))
+
+    def test_refresh_backdated_arrival_appends_without_shifting_uids(self):
+        # A backdated NEW arrival (highest uid, old Date) that the poll DOES see must
+        # append at the high end and leave every existing UID/seq untouched.
+        msgs = [
+            make_message("b", subject="second", date="2026-06-20T00:00:00Z"),
+            make_message("a", subject="first", date="2026-06-10T00:00:00Z"),
+        ]
+        mb, _ = self._custom_mailbox(msgs)
+        mb.getMessageCount()  # snapshot: a(uid1, seq1), b(uid2, seq2)
+        listener = _FakeListener()
+        mb.addListener(listener)
+        # New arrival at the front (newest -> uid 3) but with an OLDER Date header.
+        msgs.insert(0, make_message("back", subject="backdated",
+                                    date="2026-06-01T00:00:00Z"))
+        mb._poll_tick()
+        self.assertEqual(mb.getMessageCount(), 3)
+        self.assertEqual(listener.events, [(3, None)])
+        from twisted.mail.imap4 import MessageSet
+
+        got = list(mb.fetch(MessageSet(1, 3), uid=False))
+        # Existing a/b keep uid 1/2 at seq 1/2; "back" appends as seq 3, uid 3.
+        self.assertEqual([(seq, m.getUID(), m._summary.subject) for seq, m in got],
+                         [(1, 1, "first"), (2, 2, "second"), (3, 3, "backdated")])
+
+    def test_uid_fetch_resolves_sparse_rowids(self):
+        # UIDs are store rowids, not 1..n; a UID FETCH must map each requested UID
+        # back to its sequence number, and skip UIDs not present.
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [
+            make_message("m30", subject="c", uid=30),
+            make_message("m20", subject="b", uid=20),
+            make_message("m10", subject="a", uid=10),
+        ]
+        mb, _ = self._custom_mailbox(msgs)
+        # Snapshot sorted by uid: a(10, seq1), b(20, seq2), c(30, seq3).
+        got = list(mb.fetch(MessageSet(20, 30), uid=True))
+        self.assertEqual([(seq, m.getUID()) for seq, m in got], [(2, 20), (3, 30)])
+        # UID '*' resolves to the highest UID present (30), not the message count.
+        star = list(mb.fetch(MessageSet(1, None), uid=True))
+        self.assertEqual([(seq, m.getUID()) for seq, m in star],
+                         [(1, 10), (2, 20), (3, 30)])
+        # A gap UID (25, absent) yields nothing rather than a wrong message.
+        self.assertEqual(list(mb.fetch(MessageSet(25, 25), uid=True)), [])
+        # UIDNEXT is one past the highest rowid.
+        self.assertEqual(mb.getUIDNext(), 31)
 
 
 class _FakeListener:

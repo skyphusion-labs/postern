@@ -27,25 +27,26 @@ Read-only is deliberate for v1 (#12): humans read here and *send* through the
 structured API, not by IMAP APPEND. Write paths raise so a client gets a clean
 "read-only" rather than silent data loss.
 
-UID model (v1 INTERIM, documented; conformant fix tracked in #103): UID == the
-message's position in the snapshot, which is ordered by `date` (the store returns
-date DESC). A window-relative UID would shift as the window moves, so we use the
-GLOBAL ordinal instead and keep UIDVALIDITY constant, which preserves a client's
-cache across reconnects in the common case.
+UID model (#102 / fault F9, DURABLE): the mailbox is ordered by the store's
+monotonic insertion key (StoredMessageSummary.uid == messages.id, the D1
+AUTOINCREMENT rowid) and exposes that key AS the IMAP UID under a constant
+UIDVALIDITY. This is RFC 3501's model: UIDs are strictly ascending in arrival
+order and stable within a UIDVALIDITY. The read API returns rows newest-first by
+(date DESC, id DESC), so we SORT the collected summaries by `uid` ascending -- not
+a plain reverse, which would order by `date` and reintroduce the F9 shift. A
+backdated arrival (a new message carrying an OLD Date header) simply takes the
+next-highest uid and appears LAST; it never inserts mid-order, so no existing UID
+shifts. uid is contract-guaranteed present and > 0 on every row (#103), populated
+for ALL rows at insert (it is the rowid; the Vectorize backfill writes vectors
+only and never touches messages.id), so no null-fallback path is needed.
 
-RFC 3501 boundary (state it plainly, do not paper over it): an ordinal keyed on
-`date` is NOT a true UID. It shifts -- silently, under a constant UIDVALIDITY --
-in TWO cases, and a silent shift is OUR spec violation:
-  1. Deletion: removing an older message renumbers everything above it.
-  2. Backdated arrival: a newly-arrived message carrying an OLD Date header inserts
-     mid-order (the snapshot is date-ordered), shifting every higher UID. Real mail
-     does not arrive in Date order, so this is not rare.
-The conformant fix is arrival-order with a monotonic insertion key as the UID
-(RFC 3501's model): #103 exposes that key in StoredMessageSummary; a follow-up to
-THIS PR will order the mailbox by it and use it as the UID. Until then, if either
-trigger above is ever observed we must consume #103's key OR bump UIDVALIDITY (so a
-conformant client re-syncs) -- never let UIDs shift silently. #103 is Rollins's;
-Stage 1 only documents this boundary, it does not build the consumption.
+Never-reuse note (migration 0005): SQLite can reuse the highest rowid after that
+row is deleted UNLESS the column is AUTOINCREMENT; migration 0005 adds AUTOINCREMENT
+to make never-reuse-after-delete total. Meanwhile this is SAFE because the proxy is
+strictly READ-ONLY -- expunge/store/destroy all raise, so no delete happens through
+it and no rowid is ever freed for reuse within a UIDVALIDITY. If hard deletes are
+ever introduced on the store side before 0005 lands, bump UIDVALIDITY so conformant
+clients re-sync rather than letting a reused UID alias a different message.
 """
 
 from __future__ import annotations
@@ -62,9 +63,11 @@ from .message import PosternIMAPMessage
 if TYPE_CHECKING:  # annotation only; the runtime import stays lazy (see _maybe_start_poll)
     from twisted.internet.task import LoopingCall
 
-# Stable across the life of a proxy process. Append-only store + global-ordinal
-# UIDs means a message's UID does not change across snapshots, so we never need to
-# bump this; documented as a v1 simplification (and see #103 for the durable fix).
+# Stable across the life of a proxy process (and across reconnects). The mailbox
+# UID is the store's never-reused insertion key (the rowid), so a message's UID is
+# identical in every snapshot and we never need to bump this. (If pre-0005 hard
+# deletes are ever added on the store side, bump it so clients re-sync -- see the
+# module docstring's never-reuse note.)
 _UID_VALIDITY = 1
 
 
@@ -125,13 +128,10 @@ class PosternMailbox:
         self._poll_seconds = poll_seconds
         self._summaries: List[MessageSummary] = []
         self._loaded = False
-        # _base = number of older messages hidden below the window at SELECT time,
-        # so UID == _base + sequenceNumber == the message's global arrival ordinal.
-        self._base = 0
-        # _n = total messages in the store for this view (grows as the poll appends
-        # new arrivals). UIDNEXT == _n + 1 (the next arrival's global ordinal).
-        self._n = 0
-        # message_id of the newest message we have seen, used as the poll boundary.
+        # Highest UID (== store rowid) currently in the snapshot. UIDNEXT is this
+        # + 1 (the next arrival takes the next-highest rowid). 0 until loaded/empty.
+        self._newest_uid = 0
+        # message_id of the highest-uid (newest-arrival) message; the poll boundary.
         self._newest_id: Optional[str] = None
         self._listeners: list = []
         self._poll: Optional["LoopingCall"] = None
@@ -158,19 +158,21 @@ class PosternMailbox:
             cursor = page.cursor
             if not cursor:
                 break
-        # The API returns newest-first; IMAP sequence numbers ascend with arrival,
-        # so reverse to oldest-first. all[i] is global ordinal i+1.
-        items.reverse()
+        # The API returns newest-first by (date DESC, id DESC). IMAP UIDs must ascend
+        # with ARRIVAL, which is the store's insertion key (uid == rowid), NOT date:
+        # sort by uid ascending so a backdated arrival lands LAST instead of shifting
+        # every higher UID (fault F9). Treating uid as a stable, never-reused UID is
+        # safe while the proxy is read-only (no deletes free a rowid); migration 0005
+        # (AUTOINCREMENT) makes never-reuse total -- see the module docstring.
+        items.sort(key=lambda s: s.uid)
         n = len(items)
-        self._n = n
+        self._newest_uid = items[-1].uid if items else 0
         self._newest_id = items[-1].message_id if items else None
         if self._window and n > self._window:
-            # Show only the most-recent window; the hidden older count is the base
-            # so UID stays the GLOBAL ordinal, not a window-relative position.
-            self._base = n - self._window
-            self._summaries = items[self._base:]
+            # Show only the most-recent window (the highest uids); older mail stays
+            # reachable via All or by raising the window.
+            self._summaries = items[n - self._window:]
         else:
-            self._base = 0
             self._summaries = items
         self._loaded = True
 
@@ -178,16 +180,25 @@ class PosternMailbox:
         """Append any new arrivals to the snapshot; return how many were added.
 
         Reads the store newest-first only as far back as the message we already
-        treat as newest (the poll boundary), so the work tracks new-mail volume,
-        not mailbox size, and never re-fetches bodies. New arrivals append to the
-        high end (sequence/UID of existing messages are untouched). If the boundary
-        message is not found (deletion/reorder -- not expected in an append-only
-        store), we skip the append rather than risk re-adding the whole mailbox; the
-        next SELECT re-snapshots cleanly.
+        treat as newest (the highest-uid message, our poll boundary), so the work
+        tracks new-mail volume, not mailbox size, and never re-fetches bodies. A new
+        arrival has a higher insertion key (uid > the current max), so we collect by
+        that test and the snapshot stays strictly uid-ascending after a re-sort; the
+        uid filter also means nothing already present is re-added (no duplicates).
+        New arrivals grow EXISTS at the high end; existing sequence numbers and UIDs
+        are untouched. If the boundary message is not found (deletion/reorder -- not
+        expected in an append-only store), we skip the append rather than risk a bad
+        merge; the next SELECT re-snapshots cleanly.
+
+        A backdated NEW arrival (high uid, old Date) sits below the boundary in the
+        date-ordered stream, so this bounded poll may not see it until the next
+        SELECT re-snapshots; that is acceptable for the live-refresh path and never
+        produces a wrong or shifted UID (the re-snapshot orders it correctly by uid).
         """
         if self._empty or not self._loaded:
             return 0
         boundary = self._newest_id
+        max_uid = self._newest_uid
         new_items: List[MessageSummary] = []
         cursor: Optional[str] = None
         found = False
@@ -195,11 +206,12 @@ class PosternMailbox:
             page = self._client.list_messages(
                 direction=self._direction, limit=self._page_size, cursor=cursor
             )
-            for item in page.items:  # newest-first
+            for item in page.items:  # newest-first by (date DESC, id DESC)
                 if boundary is not None and item.message_id == boundary:
                     found = True
                     break
-                new_items.append(item)
+                if item.uid > max_uid:  # a genuine new arrival (higher insertion key)
+                    new_items.append(item)
             cursor = page.cursor
             if found or not cursor:
                 break
@@ -208,10 +220,14 @@ class PosternMailbox:
             return 0
         if not new_items:
             return 0
-        new_items.reverse()  # newest-first -> oldest-first (arrival order)
+        # Merge in UID order. New arrivals carry higher uids than everything present
+        # (the uid > max_uid filter guarantees it), so the sort settles them at the
+        # high end and keeps the snapshot strictly ascending even if a batch arrived
+        # out of date order.
         self._summaries.extend(new_items)
-        self._n += len(new_items)
-        self._newest_id = new_items[-1].message_id
+        self._summaries.sort(key=lambda s: s.uid)
+        self._newest_uid = self._summaries[-1].uid
+        self._newest_id = self._summaries[-1].message_id
         return len(new_items)
 
     # --- IMailbox: metadata ---
@@ -221,11 +237,14 @@ class PosternMailbox:
 
     def getUIDNext(self) -> int:
         self._ensure_loaded()
-        return self._n + 1
+        # The next arrival takes the next rowid above the current highest UID.
+        return self._newest_uid + 1
 
     def getUID(self, message: int) -> int:
-        # `message` is a 1-based sequence number; UID is its global arrival ordinal.
-        return self._base + message
+        # `message` is a 1-based sequence number; its UID is the store insertion key
+        # (the rowid), read straight off the summary -- no positional arithmetic.
+        self._ensure_loaded()
+        return self._summaries[message - 1].uid
 
     def getMessageCount(self) -> int:
         self._ensure_loaded()
@@ -260,7 +279,7 @@ class PosternMailbox:
         data = {
             "MESSAGES": len(self._summaries),
             "RECENT": 0,
-            "UIDNEXT": self._n + 1,
+            "UIDNEXT": self._newest_uid + 1,
             "UIDVALIDITY": _UID_VALIDITY,
             "UNSEEN": 0,
         }
@@ -276,7 +295,7 @@ class PosternMailbox:
         # capture bug; the body GET happens only if the client opens the message.
         return seq, PosternIMAPMessage(
             summary,
-            uid=self._base + seq,
+            uid=summary.uid,
             seq=seq,
             hydrate=lambda: self._client.get_message(mid),
         )
@@ -284,24 +303,28 @@ class PosternMailbox:
     def fetch(self, messages, uid):
         """Yield (sequenceNumber, PosternIMAPMessage) for the requested set.
 
-        `messages` is a twisted MessageSet. When uid is true the set is in UIDs
-        (UID == _base + sequenceNumber), otherwise in sequence numbers; we resolve
-        the open upper bound accordingly and convert UIDs back to sequence numbers.
-        The untagged FETCH always keys on the sequence number (Twisted adds the UID
-        as a data item via the message's getUID); bodies hydrate lazily per message.
+        `messages` is a twisted MessageSet. When uid is true the set is in UIDs (the
+        store rowids -- sparse and not derivable from the sequence number), so we map
+        each requested UID back to its sequence number via the snapshot. Otherwise
+        the set is in sequence numbers. The untagged FETCH always keys on the
+        sequence number (Twisted adds the UID as a data item via getUID); bodies
+        hydrate lazily per message.
         """
         self._ensure_loaded()
         n = len(self._summaries)
         if n == 0:
             return
         if uid:
-            # '*' resolves to the highest UID present (base + count).
-            messages.last = self._base + n
+            # UIDs are not contiguous (rowids), so resolve via a uid -> seq map.
+            # '*' resolves to the highest UID present (the snapshot is uid-ascending,
+            # so that is the last summary).
+            by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
+            messages.last = self._summaries[-1].uid
             for num in messages:
                 if num is None:
                     continue
-                seq = num - self._base
-                if seq < 1 or seq > n:
+                seq = by_uid.get(num)
+                if seq is None:
                     continue
                 yield self._wrap(seq)
         else:

@@ -176,5 +176,31 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
 
+    @defer.inlineCallbacks
+    def test_uid_fetch_returns_ascending_and_stable_uids(self):
+        # F9 end-to-end: a UID FETCH over the real wire must return UIDs that are
+        # strictly ascending and equal to the store rowids (the All folder is
+        # unfiltered, so all three: rowids 1, 2, 3), and the SAME UIDs across a
+        # re-SELECT -- the stability a client relies on to reconcile its cache.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"All")
+            self.assertEqual(info["EXISTS"], 3)
+            result = yield proto.fetchUID("1:*")
+            # result maps sequence number -> {"UID": <value>}; key in seq order.
+            uids = [int(result[seq]["UID"]) for seq in sorted(result, key=int)]
+            self.assertEqual(uids, [1, 2, 3])
+            self.assertEqual(uids, sorted(uids))  # strictly ascending (RFC 3501)
+            # Re-SELECT and re-fetch: identical UIDs (stable within UIDVALIDITY).
+            yield proto.select(b"All")
+            again = yield proto.fetchUID("1:*")
+            self.assertEqual(
+                [int(again[seq]["UID"]) for seq in sorted(again, key=int)], [1, 2, 3]
+            )
+        finally:
+            yield proto.logout()
+
+
 if __name__ == "__main__":
     unittest.main()
