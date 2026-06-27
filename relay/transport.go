@@ -17,6 +17,20 @@ type OutboundMessage struct {
 	HTML      string            `json:"html,omitempty"`
 	Text      string            `json:"text,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"` // carries In-Reply-To / References on replies
+	// Attachments (#92): present only when the send carries files. Mirrors the TS
+	// OutboundAttachment 1:1 so core's RelayTransport POSTs it verbatim. The relay's
+	// SMTP transport builds the multipart/mixed MIME (unlike the CF binding, which
+	// assembles MIME itself).
+	Attachments []OutboundAttachment `json:"attachments,omitempty"`
+}
+
+// OutboundAttachment mirrors the TS OutboundAttachment (inbound/src/transport):
+// content is base64 over JSON (the transport base64-decodes it to bytes); filename
+// and mimeType are optional (mimeType defaults to application/octet-stream).
+type OutboundAttachment struct {
+	Filename string `json:"filename,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	Content  string `json:"content"` // base64
 }
 
 // EmailAddress mirrors the TS {email, name} pair.

@@ -62,6 +62,13 @@ through the configured upstream SMTP server (`smtp_transport.go`):
 - **BCC is envelope-only**, never written as a header;
 - text-only -> `text/plain`; html-only -> `text/html`; both ->
   `multipart/alternative`; bodies are quoted-printable;
+- **attachments** (#92): `OutboundMessage.attachments` (base64 over JSON) are
+  decoded and wrapped with the body in a `multipart/mixed` message (the relay
+  builds the MIME itself, since the BYO upstream is real SMTP, not the CF binding);
+  each part is base64, re-wrapped at 76 cols. Filenames are reduced to a safe token
+  and media types validated (else `application/octet-stream`), so attachment
+  metadata cannot inject a header. Total size is bounded by the dispatch body cap
+  (`413` over the limit);
 - reply threading headers (`In-Reply-To` / `References`) ride in `headers`;
 - all header values are **CR/LF-sanitized** (no header injection), and any
   caller header that collides with a reserved name is dropped.
