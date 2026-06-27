@@ -172,10 +172,34 @@ accountability (as themselves) in one mechanism. The stored `From` equalling the
 identity is the load-bearing assertion: it is both the wire From (DKIM-signed) and the
 stored/threaded `from_addr`, which is the field that gets indexed.
 
-Per-message `messageId` / `threadId` are in Strummer's lane-B run log and readable back
-via the read MCP (`mailbox_search` for `loopback-test@skyphusion.org` / the outbound
-copies); the security-critical assertions (correct bound From per token, on-domain
-spoof override, unknown-token `401`) are the table above.
+### Stored messages (independent read-back)
+
+The stored outbound copies were independently read back by Joan (lane C) with a
+read-scoped token -- a SECOND party and a separate method from Strummer's send, so the
+bound From is two-party verified, not a single self-report. Pulled via
+`GET /api/messages?direction=outbound` and `GET /api/search` against
+`https://postern.skyphusion.org`; all four are stored `direction: outbound` to
+`loopback-test@skyphusion.org`, returned by FTS search (indexed), and each `messageId`
+equals its `threadId` (a fresh thread per send):
+
+| Identity | Stored From | direction | messageId (== threadId) | FTS |
+|---|---|---|---|---|
+| mackaye | `mackaye@skyphusion.org` | outbound | `9764fcfb-e11c-4ea8-9103-7633268f6882@skyphusion.org` | indexed |
+| strummer | `strummer@skyphusion.org` | outbound | `a1500e0b-c429-4ae7-94b8-42d323c1fea9@skyphusion.org` | indexed |
+| rollins | `rollins@skyphusion.org` | outbound | `239b4871-d922-41b5-9d8e-3ad6199d7cf7@skyphusion.org` | indexed |
+| joan | `joan@skyphusion.org` | outbound | `42e30c38-987b-49ef-b2e8-63423d66111b@skyphusion.org` | indexed |
+
+Bonus (no-spoof selftest): `strummer@skyphusion.org`, messageId
+`013cba0d-ff1b-4a50-9003-3318923e0466@skyphusion.org`, outbound. In every row the
+stored `From` is the bound identity, matching both the wire From (DKIM-signed) and
+Strummer's send-side report; the spoofed caller `from` was discarded by the worker and
+never stored. Two independent parties (Strummer sending, Joan reading the store)
+confirm the same bound From per identity.
+
+Reproducible: with a read token,
+`GET https://postern.skyphusion.org/api/messages?direction=outbound` (custom
+`User-Agent` -- the CF WAF requires it) returns these rows; `GET /api/search?q=lane-B
+proof` returns all four (indexed).
 
 ---
 
@@ -189,8 +213,8 @@ is the lane-C closeout at the crew refresh -- the **client-path reconfirmation**
 
 The gate, per Strummer (lane B):
 
-1. crew-secrets #29 merges (adds each member's per-identity `secrets-send-<member>.env.age`,
-   encrypted to that member alone; `load.sh` sources it).
+1. crew-secrets #29 merges (**merged, `38d6c07`**: adds each member's per-identity
+   `secrets-send-<member>.env.age`, encrypted to that member alone; `load.sh` sources it).
 2. On the member's account: `chezmoi update && chezmoi apply` places the encrypted send
    file at `~/.config/crew/`.
 3. Claude Code restarts from a fresh login shell, so `.bashrc -> load.sh` exports
