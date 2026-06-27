@@ -1,0 +1,221 @@
+# Unified mail-auth contract (IMAP read + SMTP submission, one login)
+
+Status: **contract / design of record**. The code that consumes it is tracked in
+skyphusion-labs/postern#76 (Go 587 submission server) and #77 (IMAP `ldap`/`pam`
+mode); the umbrella is #75. This document is the single source the two consumers
+read from, so a binding never gets invented per-component. It is reproducible from
+the docs alone (ICD discipline): every DN, base, filter, attribute, and token here
+was verified read-only against the live Authentik directory on dischord.
+
+## 1. The requirement
+
+An external mail client (Thunderbird, Apple Mail, mutt, mobile) configures **one
+username and one password**, and it authenticates **both** doors:
+
+- **Read** door: IMAP, served by the `imap/` proxy (`posternimap`).
+- **Send** door: SMTP submission on 587, served by the Go `relay/` binary in its
+  submission role.
+
+Both doors verify the **same** end-user credential against the **same** directory,
+so a credential can never drift between protocols. The directory is the same
+Authentik instance that backs crew SSH, so there is one identity per human.
+
+## 2. The directory (verified ground truth)
+
+Authentik LDAP outpost on **dischord** (`ghcr.io/goauthentik/ldap:2024.12.3`),
+published on the VLAN:
+
+| Fact | Value |
+|---|---|
+| Primary LDAP URI | `ldap://10.1.1.2:389` (dischord) |
+| Failover LDAP URI | `ldap://10.1.1.3:389` (fugazi) |
+| Transport offered | **plaintext 389 only** (no 636, no StartTLS today; see section 6) |
+| Base DN | `dc=ldap,dc=goauthentik,dc=io` |
+| Users OU | `ou=users,dc=ldap,dc=goauthentik,dc=io` |
+| Groups OU | `ou=groups,dc=ldap,dc=goauthentik,dc=io` |
+| User DN shape | `cn=<username>,ou=users,dc=ldap,dc=goauthentik,dc=io` |
+| Login attributes | `cn` (short username, == SSH login), `mail` (full address), `sAMAccountName` |
+| Bound-identity attribute | `mail` (e.g. `conrad@skyphusion.org`) |
+| Mailbox authorization group | `cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io` (gid 24352) |
+| Scoped-search group (exists) | `cn=authentik Read-only,ou=groups,...` |
+| Admin group (do NOT bind as) | `cn=authentik Admins,ou=groups,...` |
+
+Anonymous bind is refused (`Insufficient access (50)`); the directory only answers
+an authenticated bind. The existing fleet bind account `cn=ldap-svc` is a member of
+**`authentik Admins`** and is used by nslcd/SSH; **it must not be reused as a mail
+bind account** (coupling mail to an admin-grade, SSH-critical credential violates
+per-function-key discipline and widens blast radius).
+
+### Authorization gate
+
+Membership in `cn=mail-users` is the gate for "this account may use mail." It is a
+real, nss-visible group (`getent group mail-users` resolves on dischord) and today
+contains `conrad`. Adding a mailbox user = add them to `mail-users` (additive
+Authentik blueprint edit, supervised). Both doors enforce this gate (section 4/5).
+
+## 3. The two backends, and why PAM is the fleet default
+
+Both consumers can authenticate a user two ways. They are equivalent in result
+(same directory, same bound identity); they differ in the path to it.
+
+### 3a. PAM (`system` mode) -- the fleet default
+
+The box already speaks to the directory: dischord runs `nslcd` (libpam-ldapd), and
+`/etc/pam.d/common-auth` chains `pam_unix` then `pam_ldap` (`minimum_uid=1000
+use_first_pass`). PAM auth for an Authentik account therefore flows
+**process -> pam_ldap -> nslcd -> LDAP bind**. nslcd already holds the bind
+credential, so:
+
+- **No new mail bind service account** is needed (nslcd binds, not Postern).
+- **No TLS-to-directory mutation** is needed: nslcd uses plaintext 389 over the
+  trusted VLAN, the posture already accepted fleet-wide for nss/SSH.
+- The bind credential is the existing `ldap-svc` (already IaC, already rotatable
+  via `system/provision/RUNBOOK-rotate-ldap-bind-pw.md` in fleet-chezmoi).
+
+This is why **PAM is the recommended backend for both doors on dischord**, and it
+is the posture Conrad asked for ("PAM on both doors"). The PAM service file is
+`/etc/pam.d/postern` (section 4).
+
+Hardening note (load-bearing): the hardened unit runs `DynamicUser` +
+`NoNewPrivileges=yes`. That is compatible with the **pam_ldap** path (it only
+connects to the `nslcd` socket; no setuid, no `/etc/shadow` read). It is **not**
+compatible with verifying a purely-local `/etc/shadow` password (that needs the
+setuid `unix_chkpwd` helper, which `NoNewPrivileges` blocks). On the fleet the mail
+accounts are LDAP accounts (uid >= 1000), so the pam_ldap path is the one taken and
+the hardening stands. Do not "fix" a local-shadow login by dropping
+`NoNewPrivileges`; mail accounts live in the directory.
+
+### 3b. Direct LDAP (`ldap` mode) -- portable / off-fleet
+
+The Go relay (`auth_ldap.go`) and the Python proxy (#77) can also bind the
+directory directly (pure-Go `go-ldap`; Python `ldap3`/equivalent). This is the
+right path for a non-fleet operator (a clone with no nslcd). On dischord it is the
+**alternative**, gated behind one IdP change: the relay's LDAP backend **mandates
+TLS** (`ldap auth requires TLS`), but the outpost offers plaintext 389 only.
+Enabling direct-LDAP on the fleet therefore requires section 6 (provision 636 + a
+cert on the LDAP provider) and a scoped read-only bind account. Until then, use
+PAM on the fleet.
+
+The direct-LDAP env (consumed identically by #76 and #77) is in section 5b.
+
+## 4. PAM service file (`/etc/pam.d/postern`)
+
+Tracked as IaC in fleet-chezmoi at `system/pam.d/postern` (deployed to
+`/etc/pam.d/postern`, root 0644). Both doors name this service:
+
+- Go submission: `AUTH_SYSTEM_PAM_SERVICE=postern` (default).
+- Python IMAP `pam` mode (#77): the same service name.
+
+Contents and rationale live with the file; the shape is: gate on
+`pam_succeed_if user ingroup mail-users`, then delegate to the system
+`common-auth` / `common-account` (which is where pam_ldap lives). Gating on
+`mail-users` means a valid directory password for a non-mail account still cannot
+open a mail door.
+
+## 5. The exact bindings each consumer reads
+
+### 5a. PAM path (fleet default)
+
+Go submission server (`relay/`, built `-tags pam`):
+
+```
+AUTH_BACKEND=system
+AUTH_SYSTEM_DOMAIN=skyphusion.org      # bound identity = <login>@skyphusion.org
+AUTH_SYSTEM_PAM_SERVICE=postern        # -> /etc/pam.d/postern
+```
+
+Python IMAP proxy (`imap/`, #77 `pam` mode): same PAM service `postern`, same
+resulting identity. The proxy still needs the store-read service token (section 7).
+
+Login: the user types their **short username** (`conrad`) or full address; PAM
+resolves it. Bound/From identity = `<login-localpart>@skyphusion.org`.
+
+### 5b. Direct-LDAP path (portable; fleet only after section 6)
+
+Search+bind is the contract shape (it lets the user log in with their email
+address and reads `mail` with a low-privilege account). The filter encodes the
+`mail-users` authorization gate. Note the Go backend substitutes the username into
+the filter **exactly once** (`fmt.Sprintf` with one arg), so the filter uses
+exactly one `%s`:
+
+```
+AUTH_BACKEND=ldap                       # (Go) ; POSTERN_IMAP_AUTH_MODE=ldap (Python)
+LDAP_URL=ldaps://dischord.internal:636  # TLS mandatory; see section 6
+# (or LDAP_URL=ldap://10.1.1.2:389 + LDAP_STARTTLS=true once StartTLS is provisioned)
+LDAP_BIND_DN=cn=postern-mail-ro,ou=users,dc=ldap,dc=goauthentik,dc=io
+LDAP_BIND_PASSWORD=${POSTERN_LDAP_BIND_PASSWORD}    # secret; section 7
+LDAP_SEARCH_BASE=ou=users,dc=ldap,dc=goauthentik,dc=io
+LDAP_SEARCH_FILTER=(&(mail=%s)(memberOf=cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io))
+LDAP_MAIL_ATTR=mail
+```
+
+`cn=postern-mail-ro` is a **new, scoped, read-only** bind account (member of
+`authentik Read-only`, never `authentik Admins`), used only to search. Creating it
+is an IdP mutation -- **staged, gated for Conrad** (section 8). Simple-bind
+(`LDAP_BIND_DN_TEMPLATE=cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io`, login = short
+username, no service account) is a fallback, but it depends on a bound user being
+able to read their own `mail` attribute through the outpost (verify during
+bring-up; if the search returns nothing the identity cannot be resolved).
+
+Failover: list both directories where the client supports it
+(`ldaps://dischord.internal:636 ldaps://fugazi.internal:636`); the current Go
+backend dials a single `LDAP_URL`, so fleet HA for direct-LDAP is a follow-up.
+
+## 6. TLS-to-directory (only for direct-LDAP on the fleet) -- GATED
+
+The outpost publishes `10.1.1.2:389` (plaintext) only. The direct-LDAP backend
+requires TLS. To enable it on the fleet (NOT needed for the PAM path):
+
+1. Issue an internal cert with SAN `dischord.internal` (+ `10.1.1.2`); a real cert
+   via DNS-01 against the Cloudflare DNS API for an internal name is cleanest.
+2. Bind a certificate-keypair to the Authentik LDAP provider and publish 636 (or
+   enable StartTLS on 389): an edit to `system/stacks/dischord/auth/` (compose port
+   map + provider config) -- an **IdP-stack change, supervised**.
+3. Point `LDAP_URL` at `ldaps://dischord.internal:636`.
+
+This is deliberately deferred; PAM needs none of it.
+
+## 7. Token / secret inventory (by function, by location)
+
+Every secret each component holds, labelled by function. All values are
+age-encrypted in **crew-secrets** (PR, never direct-push) and projected to a
+root-`0600` EnvironmentFile at deploy. None is ever committed in cleartext.
+Presence-check with `${VAR:+SET}` only.
+
+| Secret (env var) | Function | Held by | Stored | Gate |
+|---|---|---|---|---|
+| `POSTERN_TRANSPORT_TOKEN` | transport seam (`/ingest`, `/dispatch`, native `/api/smtp-auth`) | relay (inbound + native submission) | crew-secrets -> `/etc/...env` 0600 | exists |
+| `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | 587 submission server | crew-secrets -> `/etc/postern-submission.env` 0600 | exists (mailbox API token) |
+| `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store (`/api/messages`, `/search`) in `ldap`/`pam` mode | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | exists (mailbox API token) |
+| `POSTERN_LDAP_BIND_PASSWORD` | scoped read-only LDAP search bind (`cn=postern-mail-ro`) | relay + proxy, **direct-LDAP only** | crew-secrets (staged) | section 8, gated |
+| `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname | 587 submission server | crew-secrets / cert store (staged) | **gated** (exposure) |
+
+**Posture change to bake in (per #75).** The IMAP proxy moves from "holds no
+secret" (token mode: each session carries the user's own token) to "holds a
+per-function service token" (`ldap`/`pam` mode: the proxy authenticates the human
+against the directory, then reads the store with its OWN labelled service token).
+This must be stated in `imap/DEPLOY.md` (it is).
+
+**v1 reality vs end state (honest).** Postern is one mailbox gated by a single
+mailbox API token today; scoped/multi tokens are post-v1 (`auth.py` /
+`docs/CONTRACT.md` section 5). So in v1 the "store-read" and "send" functions both
+resolve to the **same** single `POSTERN_API_TOKEN` value. The per-function split in
+the table above is the end state and the wiring is already by-function (two env
+vars, two consumers); it becomes two distinct secrets the moment worker-side
+multi-token lands. Until then, document that the two labels share one value -- do
+not pretend they are isolated.
+
+## 8. What is staged / gated for Conrad (do NOT do unattended)
+
+- Provision public **TLS certs** for the mail hostname(s); **open 587/993 in ufw**;
+  add **public DNS A records** for the mail host. (Exposure flip, #75/#76/#77 HARD
+  GATE.)
+- Create the scoped `cn=postern-mail-ro` LDAP bind account in Authentik
+  (blueprint + secret) -- only needed for direct-LDAP; PAM does not need it.
+- Provision **636 + a cert** on the Authentik LDAP provider (section 6) -- only for
+  direct-LDAP on the fleet.
+- The #74 deploy-drift fix (inbound rename + `postern.skyphusion.org` custom
+  domain): a downtime gate on live email.
+
+Everything else (PAM file, hardened units, deploy runbooks, the contract, loopback
+build + test) is buildable/testable now without touching exposure or the IdP.

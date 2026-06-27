@@ -137,6 +137,41 @@ Mail client: server `127.0.0.1`, port `1143`, no TLS (the SSH tunnel is the
 transport security); username = your mailbox label, password = your Postern API
 token.
 
+## LDAP / PAM mode posture (per #75 / #77)
+
+v1 above is `token` mode: the proxy holds **no** secret; each IMAP session carries
+the user's own Postern API token and the proxy validates it live. The unified
+mail-auth contract (`docs/AUTH-CONTRACT.md`) adds `ldap` / `pam` modes so a user
+logs in with their **Authentik** credential (the same login as the 587 submission
+server and crew SSH). That changes the secret posture of this box:
+
+- The proxy authenticates the **human** against the directory (PAM ->
+  `/etc/pam.d/postern` -> nslcd -> Authentik, the fleet default; or a direct LDAP
+  bind, the portable alternative).
+- But the proxy still must **read the store** (the inbound/store worker, D1/R2) over
+  the Postern API, which is gated by the mailbox API token. So in `ldap`/`pam` mode
+  the proxy reads the store with a **per-function SERVICE credential** it holds:
+  `POSTERN_API_TOKEN`, decoupled from the human's login.
+- Net: the proxy moves from "holds no secret" (token mode) to "holds a
+  per-function, labelled, age-encrypted service token" (`ldap`/`pam` mode).
+
+**What secret this component holds, by function, and where:**
+
+| Secret | Function | Where stored |
+|---|---|---|
+| `POSTERN_API_TOKEN` | postern-imap reads the store (`/api/messages`, `/search`) | crew-secrets (age-encrypted) -> appended to `/etc/postern-imap.env` (root 0600) at deploy; **never** committed |
+
+This is the same single mailbox API token the 587 submission server uses for its
+`/api/send` hand-off in v1 (scoped/per-function-distinct tokens are post-v1; see
+`docs/AUTH-CONTRACT.md` section 7). Presence-check it with `${POSTERN_API_TOKEN:+SET}`
+only. The hardened unit must allow `AF_UNIX` in `RestrictAddressFamilies` for the
+PAM path (pam_ldap talks to the nslcd socket) -- see `docs/AUTH-CONTRACT.md` and the
+submission unit for the same requirement.
+
+LDAP bind details (base, user DN shape, the `mail-users` authorization gate, the
+search filter) are in `docs/AUTH-CONTRACT.md` and are identical to what the 587
+submission server consumes, by design (one contract, both doors).
+
 ## Public IMAPS (later phase, gated)
 
 Exposing IMAP to the internet is out of scope for v1 and is a downtime/exposure
