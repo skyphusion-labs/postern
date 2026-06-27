@@ -1,9 +1,20 @@
-// Read-only HTTP client over the Postern mailbox API. Zero runtime deps beyond
-// Node's global fetch (Node >= 18). Every request carries a custom User-Agent:
-// the API sits behind Cloudflare, which 403s default bot UAs ("error 1010"), so
-// a real UA is mandatory and must never regress.
+// HTTP client over the Postern mailbox API. Zero runtime deps beyond Node's global
+// fetch (Node >= 18). Every request carries a custom User-Agent: the API sits behind
+// Cloudflare, which 403s default bot UAs ("error 1010"), so a real UA is mandatory
+// and must never regress. Read methods (search/list/get/thread) GET the read door;
+// write methods (send/reply) POST the write door and require a send-scoped token.
 
-import type { Direction, Message, MessageSummary, Page, SearchHit, SearchMode } from "./types.js";
+import type {
+  Direction,
+  Message,
+  MessageSummary,
+  Page,
+  ReplyInput,
+  SearchHit,
+  SearchMode,
+  SendInput,
+  SendResult,
+} from "./types.js";
 
 export const USER_AGENT = "postern-mcp (+https://github.com/skyphusion-labs/postern)";
 
@@ -49,7 +60,7 @@ export class PosternClient {
     // the API has not yet wired it on /api/search the param is simply ignored,
     // so this is forward-compatible, never an error.
     if (args.direction) params.direction = args.direction;
-    const body = await this.request("/api/search", params);
+    const body = await this.requestGet("/api/search", params);
     return { items: (body.items as SearchHit[]) ?? [], cursor: body.cursor ?? null };
   }
 
@@ -70,13 +81,13 @@ export class PosternClient {
     if (args.q) params.q = args.q;
     if (args.limit !== undefined) params.limit = String(args.limit);
     if (args.cursor) params.cursor = args.cursor;
-    const body = await this.request("/api/messages", params);
+    const body = await this.requestGet("/api/messages", params);
     return { items: (body.items as MessageSummary[]) ?? [], cursor: body.cursor ?? null };
   }
 
   async get(messageId: string): Promise<Message | null> {
     try {
-      const body = await this.request(`/api/messages/${encodeURIComponent(messageId)}`, {});
+      const body = await this.requestGet(`/api/messages/${encodeURIComponent(messageId)}`, {});
       return (body.message as Message) ?? null;
     } catch (err) {
       if (err instanceof PosternError && err.status === 404) return null;
@@ -85,49 +96,110 @@ export class PosternClient {
   }
 
   async thread(threadId: string): Promise<Message[]> {
-    const body = await this.request(`/api/threads/${encodeURIComponent(threadId)}`, {});
+    const body = await this.requestGet(`/api/threads/${encodeURIComponent(threadId)}`, {});
     return (body.messages as Message[]) ?? [];
+  }
+
+  // --- write (send scope) ---
+
+  // POST /api/send. The worker owns From-enforcement, DKIM signing, threading, and
+  // storing the sent copy; we forward the composed message and unwrap the result.
+  async send(input: SendInput): Promise<SendResult> {
+    const body = await this.requestPost("/api/send", input);
+    return this.asSendResult(body);
+  }
+
+  // POST /api/reply. The worker pulls the referenced stored message and fills
+  // to / subject / In-Reply-To / References / thread; we forward the new body.
+  async reply(input: ReplyInput): Promise<SendResult> {
+    const body = await this.requestPost("/api/reply", input);
+    return this.asSendResult(body);
+  }
+
+  private asSendResult(body: Record<string, any>): SendResult {
+    return {
+      messageId: String(body.messageId ?? ""),
+      threadId: String(body.threadId ?? ""),
+      providerMessageId: body.providerMessageId ? String(body.providerMessageId) : undefined,
+    };
   }
 
   // --- internals ---
 
-  private async request(path: string, params: Record<string, string>): Promise<Record<string, any>> {
+  private requestGet(path: string, params: Record<string, string>): Promise<Record<string, any>> {
     const qs = new URLSearchParams(params).toString();
-    const url = this.base + path + (qs ? `?${qs}` : "");
+    return this.request("GET", path + (qs ? `?${qs}` : ""), undefined);
+  }
+
+  private requestPost(path: string, payload: unknown): Promise<Record<string, any>> {
+    return this.request("POST", path, payload);
+  }
+
+  private async request(method: "GET" | "POST", pathAndQuery: string, payload: unknown): Promise<Record<string, any>> {
+    const url = this.base + pathAndQuery;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.token}`,
+      Accept: "application/json",
+      "User-Agent": this.userAgent,
+    };
+    if (payload !== undefined) headers["Content-Type"] = "application/json";
     let resp: Response;
     try {
       resp = await fetch(url, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          Accept: "application/json",
-          "User-Agent": this.userAgent,
-        },
+        method,
+        headers,
+        body: payload !== undefined ? JSON.stringify(payload) : undefined,
         signal: ctrl.signal,
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      throw new PosternError(`request to ${path} failed: ${reason}`);
+      throw new PosternError(`request to ${pathAndQuery} failed: ${reason}`);
     } finally {
       clearTimeout(timer);
     }
     if (resp.status === 401) {
-      throw new PosternError("Postern API rejected the token (check POSTERN_API_TOKEN; a read scope is required)", 401);
+      throw new PosternError("Postern API rejected the token (check the token; the required scope must be granted)", 401);
     }
     if (resp.status === 403) {
-      throw new PosternError("Postern API returned 403 (Cloudflare WAF or scope); ensure the custom User-Agent is sent and the token has read scope", 403);
+      // Either the CF WAF (missing/non-custom User-Agent) or a scope mismatch (#85):
+      // a read-scoped token on a write route, or vice versa. Surface the body's
+      // message when present so "requires send scope" reaches the agent verbatim.
+      const detail = await safeErrorMessage(resp);
+      throw new PosternError(
+        `Postern API returned 403${detail ? `: ${detail}` : " (Cloudflare WAF or token scope; ensure the custom User-Agent is sent and the token carries the required scope)"}`,
+        403,
+      );
+    }
+    if (resp.status === 400 || resp.status === 413) {
+      // Caller-fixable validation/size errors from the mailbox core (e.g. invalid
+      // recipient, body too large). Surface the worker's message so the agent can fix it.
+      const detail = await safeErrorMessage(resp);
+      throw new PosternError(`Postern API rejected the request (HTTP ${resp.status})${detail ? `: ${detail}` : ""}`, resp.status);
     }
     if (!resp.ok) {
-      throw new PosternError(`Postern API error (HTTP ${resp.status}) on ${path}`, resp.status);
+      throw new PosternError(`Postern API error (HTTP ${resp.status}) on ${pathAndQuery}`, resp.status);
     }
     const text = await resp.text();
     if (!text) return {};
     try {
       return JSON.parse(text) as Record<string, any>;
     } catch {
-      throw new PosternError(`invalid JSON from Postern API on ${path}`);
+      throw new PosternError(`invalid JSON from Postern API on ${pathAndQuery}`);
     }
+  }
+}
+
+// Best-effort extraction of the worker's `{ ok:false, error, message }` body so a
+// caller sees the real reason. Never throws: a missing/non-JSON body yields "".
+async function safeErrorMessage(resp: Response): Promise<string> {
+  try {
+    const text = await resp.text();
+    if (!text) return "";
+    const body = JSON.parse(text) as { error?: string; message?: string };
+    return body.message || body.error || "";
+  } catch {
+    return "";
   }
 }

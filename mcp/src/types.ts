@@ -42,3 +42,39 @@ export interface Page<T> {
 
 export type SearchMode = "fts" | "semantic" | "hybrid";
 export type Direction = "inbound" | "outbound";
+
+// Result of a send/reply (POST /api/send, POST /api/reply). The worker wraps it
+// as `{ ok: true, ...SendResult }`; the client unwraps to this. threadId is the
+// thread the sent copy joined; providerMessageId is best-effort (provider/transport
+// dependent), so a caller threads/stores on the core messageId, never on it.
+export interface SendResult {
+  messageId: string;
+  threadId: string;
+  providerMessageId?: string;
+}
+
+// What an agent may set on mailbox_send. A deliberate, safe subset of the worker's
+// SendRequest (no raw headers, no attachments in v1.1): an agent composes a plain
+// message; the worker owns From-enforcement, DKIM, threading, and the sent-copy store.
+export interface SendInput {
+  to: string | string[];
+  subject: string;
+  text?: string;
+  html?: string;
+  cc?: string | string[];
+  bcc?: string | string[];
+  // Optional From override; the worker rejects any From outside ALLOWED_FROM_DOMAIN.
+  from?: string;
+  replyTo?: string;
+}
+
+// What an agent may set on mailbox_reply. The worker pulls the referenced stored
+// message and fills to / subject / In-Reply-To / References / thread itself.
+export interface ReplyInput {
+  messageId: string;
+  text?: string;
+  html?: string;
+  cc?: string | string[];
+  bcc?: string | string[];
+  from?: string;
+}
