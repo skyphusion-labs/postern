@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/mail"
+	"os"
 	"strings"
 
 	"github.com/emersion/go-smtp"
@@ -147,11 +148,34 @@ func onDomain(addr, domain string) bool {
 	return strings.EqualFold(addr[at+1:], domain)
 }
 
+// inboundIntakeAddrs returns the SMTP intake addresses run() will bind. It is
+// empty unless inbound is active (an inbound destination is configured); this is
+// the seam that lets a submission-only or dispatch-only deploy bind no intake
+// port. Pure and side-effect free, so the binding decision is directly testable.
+func inboundIntakeAddrs(cfg Config) []string {
+	if !cfg.inboundActive() {
+		return nil
+	}
+	return splitListen(cfg.Listen)
+}
+
 func run(cfg Config) error {
 	be := &Backend{cfg: cfg, client: NewClient(cfg)}
-	addrs := splitListen(cfg.Listen)
-	if len(addrs) == 0 {
-		return fmt.Errorf("no listen address configured (SMTP_LISTEN)")
+
+	// Intake listeners are bound ONLY when an inbound destination is configured
+	// (see inboundIntakeAddrs). A submission-only or dispatch-only deploy leaves the
+	// inbound vars unset and therefore binds NO intake port (no more vestigial dead
+	// loopback listener).
+	addrs := inboundIntakeAddrs(cfg)
+	if len(addrs) == 0 && os.Getenv("SMTP_LISTEN") != "" {
+		// Footgun: an operator set SMTP_LISTEN intending inbound but configured no
+		// destination, so intake is skipped. Warn loudly rather than fail: a valid
+		// submission-only or dispatch-only deploy may still carry a leftover (or
+		// default-shaped) SMTP_LISTEN, and we must not block those.
+		log.Printf("WARNING: SMTP_LISTEN=%q is set but no inbound destination "+
+			"(POSTERN_INGEST_URL or EMAIL_WORKER_URL) is configured; inbound intake is DISABLED. "+
+			"Set an inbound destination to enable intake, or unset SMTP_LISTEN to silence this.",
+			os.Getenv("SMTP_LISTEN"))
 	}
 
 	// Parse submission listeners up front so the error channel is sized exactly.
@@ -162,6 +186,13 @@ func run(cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("submission: %w", err)
 		}
+	}
+
+	// Nothing-to-do guard. loadConfig already enforces this, but run() is also
+	// driven directly from tests, so guard here too: with no intake, no submission,
+	// and no /dispatch bridge there is nothing to serve.
+	if len(addrs) == 0 && len(subListeners) == 0 && cfg.HTTPListen == "" {
+		return fmt.Errorf("nothing to do: set POSTERN_INGEST_URL (inbound), SUBMISSION_LISTENERS (submission), or POSTERN_RELAY_HTTP_LISTEN (dispatch)")
 	}
 
 	// The function blocks until any listener exits. Size the channel for the intake

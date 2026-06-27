@@ -213,18 +213,23 @@ func loadConfig() (Config, error) {
 		},
 	}
 
-	// At least one inbound destination must be configured.
-	switch {
-	case c.IngestURL != "":
-		if c.TransportToken == "" {
-			return c, fmt.Errorf("POSTERN_TRANSPORT_TOKEN is required when POSTERN_INGEST_URL is set")
+	// Inbound intake is keyed off the DESTINATION (inboundActive), not off
+	// SMTP_LISTEN. SMTP_LISTEN has a non-empty default, so it cannot distinguish a
+	// real inbound deploy from a submission-only or dispatch-only one; the presence
+	// of a destination can. When inbound IS active, the chosen destination needs its
+	// matching credential. When it is NOT active there is simply no intake to wire
+	// (a submission-only deploy leaves these vars unset and binds no intake port).
+	if c.inboundActive() {
+		switch {
+		case c.IngestURL != "":
+			if c.TransportToken == "" {
+				return c, fmt.Errorf("POSTERN_TRANSPORT_TOKEN is required when POSTERN_INGEST_URL is set")
+			}
+		case c.WorkerURL != "":
+			if c.Token == "" {
+				return c, fmt.Errorf("EMAIL_RELAY_TOKEN is required when using the legacy EMAIL_WORKER_URL path")
+			}
 		}
-	case c.WorkerURL != "":
-		if c.Token == "" {
-			return c, fmt.Errorf("EMAIL_RELAY_TOKEN is required when using the legacy EMAIL_WORKER_URL path")
-		}
-	default:
-		return c, fmt.Errorf("set POSTERN_INGEST_URL (preferred) or EMAIL_WORKER_URL (legacy) so inbound mail has a destination")
 	}
 
 	// The outbound /dispatch bridge is opt-in. If it is enabled it needs a token
@@ -276,7 +281,25 @@ func loadConfig() (Config, error) {
 		}
 	}
 
+	// Nothing-to-do guard. The relay needs at least one active seam: inbound
+	// (keyed off the destination), submission (keyed off its listeners), or the
+	// outbound /dispatch bridge (keyed off its HTTP listener). With none of them
+	// there is no port to bind and no work to do, so fail loudly at config time
+	// rather than start a daemon that serves nothing.
+	if !c.inboundActive() && !c.Submission.enabled() && c.HTTPListen == "" {
+		return c, fmt.Errorf("nothing to do: set POSTERN_INGEST_URL (inbound), SUBMISSION_LISTENERS (submission), or POSTERN_RELAY_HTTP_LISTEN (dispatch)")
+	}
+
 	return c, nil
+}
+
+// inboundActive reports whether inbound intake is configured. It is keyed off the
+// inbound DESTINATION (the /ingest seam or the legacy worker /send seam), NOT off
+// SMTP_LISTEN: the listener carries a non-empty default, so only the presence of a
+// destination distinguishes a real inbound deploy from a submission-only or
+// dispatch-only one. When this is false the relay binds no intake listener.
+func (c Config) inboundActive() bool {
+	return c.IngestURL != "" || c.WorkerURL != ""
 }
 
 // inboundMode reports whether the relay delivers inbound mail via the modern

@@ -41,18 +41,23 @@ distinct binary name and a distinct env file. Ports must not collide:
 | 2525 | live `skyphusion-email-relay` | inbound SMTP bridge -- do NOT touch |
 | 1143 | `postern-imap` | IMAP read proxy (loopback) |
 | 1587 | `postern-submission` (this unit) | submission listener (loopback, v1) |
-| 2587 | `postern-submission` inbound stub | see the "submission-only wart" below |
 
-### The submission-only wart (read before deploy)
+### Submission-only mode (no inbound intake port)
 
-The relay binary **always** starts an inbound SMTP listener and **always** requires
-an inbound destination, even when you only want submission (`relay/smtp.go run()`;
-`relay/config.go loadConfig()`). So the submission instance must also set a harmless
-`SMTP_LISTEN` (a dead loopback port, `127.0.0.1:2587`, NOT the live 2525) and a real
-`POSTERN_INGEST_URL` + `POSTERN_TRANSPORT_TOKEN`. The clean end-state is an
-"empty `SMTP_LISTEN` = submission-only, no inbound destination required" relay flag;
-that is a small relay change tracked under #76. Until it lands, the dead-port stub is
-the documented workaround.
+As of #93 the relay keys inbound intake off the inbound DESTINATION, not off
+`SMTP_LISTEN` (`relay/smtp.go run()` + `inboundIntakeAddrs`; `relay/config.go
+loadConfig()` + `Config.inboundActive()`). A submission-only instance leaves the
+inbound vars (`POSTERN_INGEST_URL` / `EMAIL_WORKER_URL`) UNSET, so the relay binds
+NO inbound intake port: the old `2587` dead-loopback stub is gone. Leave
+`SMTP_LISTEN` unset as well; if a leftover value is present the relay logs a startup
+`WARNING` that intake is disabled (set an inbound destination to enable it). The
+relay still needs at least one active seam (submission, inbound, or the `/dispatch`
+bridge) or `loadConfig` fails with a `nothing to do: ...` error.
+
+**Live-unit follow-up:** the running `postern-submission` unit on dischord still
+carries the `2587` `SMTP_LISTEN` stub + dummy `POSTERN_INGEST_URL`. Dropping those
+from `/etc/postern-submission.env` (and the deployed unit) is a separate mesh-side
+change, NOT part of this code PR; do it on the next supervised deploy.
 
 ## Prerequisites
 - Go >= 1.22 and **libpam headers** (`libpam0g-dev`) to build `-tags pam`; `libpam`
