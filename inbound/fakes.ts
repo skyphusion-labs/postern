@@ -400,7 +400,10 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
       },
       // #134 reconcile: fetch raw vectors (with values + metadata) by id, the only
       // way to confirm an expected id is present and to pull probe values for sampling.
+      // Enforces the live Vectorize cap (max 20 ids/call, VECTOR_GET_ERROR 40007 above)
+      // so the batching in store.getByIdsBatched is pinned by the test suite.
       async getByIds(ids: string[]) {
+        if (ids.length > 20) throw new Error("too many ids in payload; max id count is 20");
         const want = new Set(ids);
         return (vectors as { id: string; values: number[]; metadata?: unknown }[]).filter((v) =>
           want.has(v.id),

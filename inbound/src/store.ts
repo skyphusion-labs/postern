@@ -1226,17 +1226,18 @@ export async function reindexPage(
 //      is actually present (catches under-coverage too);
 //   3. SAMPLE the index by querying with stored vector values as probes (no new
 //      embeddings, so zero Workers-AI spend) and classify every surfaced orphan id
-//      as cause (a) vs (b) by whether its metadata.message_id is still in D1.
+//      as cause (a) vs (b) by EVERY linkage it exposes (metadata.message_id, the
+//      vector id itself as a message_id, or its (date,subject) metadata) vs live D1.
 // The sample yields a PARTIAL, honestly-labelled orphan id set (enumerable: false)
 // plus a cause determination. THIS PATH NEVER DELETES (no deleteByIds call exists
 // here): the prune is a separate, Conrad-supervised, gated step.
 
-/** Vectorize getByIds is batched; keep each call well under the binding's id cap. */
-const RECONCILE_GETBYIDS_BATCH = 100;
+/** Vectorize getByIds caps at 20 ids per call (VECTOR_GET_ERROR 40007 above that). */
+const RECONCILE_GETBYIDS_BATCH = 20;
 /** Default number of live vectors used as similarity probes when sampling for cause. */
 const RECONCILE_DEFAULT_SAMPLE = 32;
-/** topK per sampling probe: over-fetch so near-neighbour orphans surface. */
-const RECONCILE_SAMPLE_TOPK = 50;
+/** topK per sampling probe. Vectorize caps topK at 20 when returnMetadata="all". */
+const RECONCILE_SAMPLE_TOPK = 20;
 /** Cap on concrete orphan ids returned, so the report stays bounded. */
 const RECONCILE_MAX_ORPHAN_IDS = 200;
 
@@ -1244,9 +1245,9 @@ export interface ReconcileSample {
   probes: number; // live vectors used as query probes
   matchesInspected: number; // total match ids inspected across all probes
   distinctOrphans: number; // distinct orphan ids surfaced by sampling
-  causeA: number; // orphans whose metadata.message_id is NOT in D1 (deleted-message)
-  causeB: number; // orphans whose metadata.message_id IS in D1 (pre-#116 id scheme)
-  unknown: number; // orphans with no usable metadata.message_id to classify
+  causeA: number; // orphans pointing at a message (by id or metadata) NOT in D1 (deleted)
+  causeB: number; // orphans tied to a STILL-LIVE message (pre-#116 id scheme)
+  unknown: number; // orphans with no usable linkage signal to attribute
   orphanIds: string[]; // concrete orphan ids found (PARTIAL set), present iff requested
 }
 
@@ -1281,12 +1282,17 @@ interface ReconcileOpts {
 
 /** Compute the expected vector id SET from D1 using the SAME scheme + gate as the
  *  live/backfill path. Pages internally so one request covers the whole store. */
-async function expectedVectorIds(
-  env: Env,
-): Promise<{ messages: number; gatedMessages: number; ids: Set<string>; liveMessageIds: Set<string> }> {
+async function expectedVectorIds(env: Env): Promise<{
+  messages: number;
+  gatedMessages: number;
+  ids: Set<string>;
+  liveMessageIds: Set<string>;
+  liveMetaKeys: Set<string>;
+}> {
   const allowlist = vectorizeAllowlist(env);
   const ids = new Set<string>();
   const liveMessageIds = new Set<string>();
+  const liveMetaKeys = new Set<string>();
   let messages = 0;
   let gatedMessages = 0;
   let cursor: string | undefined;
@@ -1295,6 +1301,7 @@ async function expectedVectorIds(
     for (const r of rows) {
       messages++;
       liveMessageIds.add(r.message_id);
+      liveMetaKeys.add(metaKey(r.date, r.subject));
       const direction = r.direction === "outbound" ? "outbound" : "inbound";
       if (!shouldVectorize(allowlist, direction, parseRecipients(r.to_addr))) continue;
       const chunks = plannedChunks(r.body_text);
@@ -1306,7 +1313,13 @@ async function expectedVectorIds(
     if (nextCursor === null) break;
     cursor = nextCursor;
   }
-  return { messages, gatedMessages, ids, liveMessageIds };
+  return { messages, gatedMessages, ids, liveMessageIds, liveMetaKeys };
+}
+
+/** Stable key linking an old-scheme orphan (which lacks a message_id) back to a live
+ *  message by its (date, subject) metadata. */
+function metaKey(date: unknown, subject: unknown): string {
+  return `${typeof date === "string" ? date : ""}\u0000${typeof subject === "string" ? subject : ""}`;
 }
 
 /** describe() spans two binding generations: legacy VectorizeIndex reports
@@ -1320,21 +1333,80 @@ async function liveVectorCount(env: Env): Promise<number> {
   return d.vectorsCount ?? d.vectorCount ?? 0;
 }
 
+/** Bounded concurrency for the audit's independent Vectorize reads: enough to beat
+ *  the per-request wall-clock on a real mailbox, low enough to stay polite. */
+const RECONCILE_CONCURRENCY = 8;
+
 interface ByIdVector {
   id: string;
   values?: number[];
-  metadata?: { message_id?: unknown } | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+/** Run `fn` over `items` with at most `limit` in flight, preserving input order. The
+ *  audit's getByIds/query calls are independent reads, so this just trades a long
+ *  sequential chain for a bounded-parallel one (the 60s/subrequest wall otherwise
+ *  trips on a full-size index). */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return out;
 }
 
 async function getByIdsBatched(env: Env, ids: string[]): Promise<ByIdVector[]> {
   const vi = env.VECTORIZE as unknown as { getByIds?: (ids: string[]) => Promise<ByIdVector[]> };
   if (!vi?.getByIds) return [];
-  const out: ByIdVector[] = [];
+  const getByIds = vi.getByIds.bind(vi);
+  const batches: string[][] = [];
   for (let i = 0; i < ids.length; i += RECONCILE_GETBYIDS_BATCH) {
-    const batch = ids.slice(i, i + RECONCILE_GETBYIDS_BATCH);
-    out.push(...(await vi.getByIds(batch)));
+    batches.push(ids.slice(i, i + RECONCILE_GETBYIDS_BATCH));
   }
-  return out;
+  const results = await mapWithConcurrency(batches, RECONCILE_CONCURRENCY, (b) => getByIds(b));
+  return results.flat();
+}
+
+/**
+ * classifyOrphan attributes a sampled orphan vector to cause (a) deleted-message or
+ * (b) pre-#116 id scheme, using EVERY linkage the orphan exposes -- because the older
+ * schemes carry NEITHER the unified vector id NOR a message_id metadata field:
+ *   - unified scheme: metadata.message_id present -> live? b : a;
+ *   - raw-message-id scheme: the vector id IS the message_id -> live id => b;
+ *   - early metadata scheme: only {date, subject, from} -> (date,subject) live => b.
+ * Any live linkage => (b) (the message still exists, the vector id is just stale). A
+ * present-but-dead message_id, or dead (date,subject), => (a). No usable signal at all
+ * => unknown (honest: we cannot attribute it from the sample).
+ */
+function classifyOrphan(
+  id: string,
+  metadata: Record<string, unknown> | null,
+  liveMessageIds: Set<string>,
+  liveMetaKeys: Set<string>,
+): "a" | "b" | "unknown" {
+  const mid = typeof metadata?.message_id === "string" ? (metadata.message_id as string) : "";
+  const date = metadata?.date;
+  const subject = metadata?.subject;
+  const hasMetaPair = typeof date === "string" && typeof subject === "string";
+  // (b): any signal ties the orphan to a still-live message.
+  if (mid && liveMessageIds.has(mid)) return "b";
+  if (liveMessageIds.has(id)) return "b"; // raw-message-id-as-vector-id scheme
+  if (hasMetaPair && liveMetaKeys.has(metaKey(date, subject))) return "b"; // early metadata scheme
+  // (a): the orphan points at a message (by id or by metadata) that is NOT in D1.
+  if (mid) return "a";
+  if (hasMetaPair) return "a";
+  return "unknown";
 }
 
 /**
@@ -1395,7 +1467,7 @@ export async function reconcile(env: Env, opts: ReconcileOpts = {}): Promise<Rec
       query?: (
         v: number[],
         o: { topK: number; returnMetadata: string },
-      ) => Promise<{ matches?: { id: string; metadata?: { message_id?: unknown } | null }[] }>;
+      ) => Promise<{ matches?: { id: string; metadata?: Record<string, unknown> | null }[] }>;
     };
     for (const p of probes) {
       if (!vi.query) break;
@@ -1405,10 +1477,10 @@ export async function reconcile(env: Env, opts: ReconcileOpts = {}): Promise<Rec
         sample.matchesInspected++;
         if (expected.ids.has(m.id) || seenOrphans.has(m.id)) continue;
         seenOrphans.add(m.id);
-        const mid = typeof m.metadata?.message_id === "string" ? m.metadata.message_id : "";
-        if (!mid) sample.unknown++;
-        else if (expected.liveMessageIds.has(mid)) sample.causeB++; // live message, stale id scheme
-        else sample.causeA++; // message gone from D1: deleted-message orphan
+        const cause = classifyOrphan(m.id, m.metadata ?? null, expected.liveMessageIds, expected.liveMetaKeys);
+        if (cause === "a") sample.causeA++;
+        else if (cause === "b") sample.causeB++;
+        else sample.unknown++;
         if (includeOrphanIds && sample.orphanIds.length < RECONCILE_MAX_ORPHAN_IDS) {
           sample.orphanIds.push(m.id);
         }
