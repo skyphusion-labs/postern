@@ -161,6 +161,40 @@ Failover: list both directories where the client supports it
 (`ldaps://dischord.internal:636 ldaps://fugazi.internal:636`); the current Go
 backend dials a single `LDAP_URL`, so fleet HA for direct-LDAP is a follow-up.
 
+## 5c. Shared env namespace (cross-component contract)
+
+The Go relay (`relay/config.go`) and the Python IMAP proxy mirror the SAME env-var
+names, so these names ARE the contract. Deploy EnvironmentFiles MUST use them
+verbatim; do not rename per component.
+
+| Env knob | Read by | Meaning |
+|---|---|---|
+| `AUTH_BACKEND` (Go) / `POSTERN_IMAP_AUTH_MODE` (Python) | both | mode selector: `native`/`ldap`/`system` (Go), `token`/`fixed`/`ldap`/`pam` (Python). Proxy-local name differs because the Python proxy also has token/fixed modes. |
+| `AUTH_SYSTEM_PAM_SERVICE` | both | PAM service name. Value: **`postern`**. |
+| `AUTH_SYSTEM_DOMAIN` | Go (PAM) | bound identity domain. Value: **`skyphusion.org`**. |
+| `POSTERN_SMTP_AUTH_URL` | Go (native) | worker `/api/smtp-auth` endpoint (native backend). |
+| `POSTERN_TRANSPORT_TOKEN` | Go | transport-seam bearer (native auth + inbound). |
+| `POSTERN_SEND_TOKEN` / `POSTERN_SEND_URL` | Go (submission) | worker `/api/send` hand-off + its mailbox token. |
+| `POSTERN_API_TOKEN` | Python proxy | the proxy's per-function **store-read** service token (in `ldap`/`pam` mode). |
+| `POSTERN_API_URL` | Python proxy | the Postern store origin the proxy reads. |
+| `LDAP_URL` | both | `ldap://10.1.1.2:389` (+ `10.1.1.3` failover); `ldaps://dischord.internal:636` when TLS is provisioned. |
+| `LDAP_STARTTLS` | both | upgrade an `ldap://` conn before binding (needs section 6). |
+| `LDAP_BIND_DN_TEMPLATE` | both | simple-bind DN template: **`cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io`**. |
+| `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | both | search+bind service account DN + password. DN: **`cn=postern-mail-ro,ou=users,dc=ldap,dc=goauthentik,dc=io`** (staged). |
+| `LDAP_SEARCH_BASE` | both | **`ou=users,dc=ldap,dc=goauthentik,dc=io`**. |
+| `LDAP_SEARCH_FILTER` | both | **`(&(mail=%s)(memberOf=cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io))`** (single `%s`). |
+| `LDAP_MAIL_ATTR` | both | **`mail`**. |
+
+Crew-secrets storage labels are per-function and may differ from the env knob; the
+deploy maps label -> knob in the 0600 EnvironmentFile. The only such mapping today:
+crew-secrets `POSTERN_LDAP_BIND_PASSWORD` (labelled, direct-LDAP only) is written as
+`LDAP_BIND_PASSWORD=` in the file. `POSTERN_API_TOKEN`, `POSTERN_SEND_TOKEN`, and
+`POSTERN_TRANSPORT_TOKEN` are stored and consumed under the same name.
+
+Timeouts: the Python proxy has `POSTERN_API_TIMEOUT` (store API). The Go relay has
+no LDAP-bind timeout knob (go-ldap dial default); if an `LDAP_TIMEOUT` is added it
+must land on both sides to stay symmetric.
+
 ## 6. TLS-to-directory (only for direct-LDAP on the fleet) -- GATED
 
 The outpost publishes `10.1.1.2:389` (plaintext) only. The direct-LDAP backend
