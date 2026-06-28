@@ -46,10 +46,15 @@ state-channel shape, made to be parsed, not read:
 Read them off the box with:
 
 ```bash
-journalctl -u postern-imap -o cat | grep '^@measure '
+journalctl -u postern-imap -o cat | grep '@measure '
 # one event type:
-journalctl -u postern-imap -o cat | grep '^@measure cold_sync '
+journalctl -u postern-imap -o cat | grep '@measure cold_sync '
 ```
+
+The proxy logs through Twisted's legacy observer, so each journald line is
+PREFIXED (`<ts> [postern-imap] @measure <event> {json}`); the `@measure` token is
+NOT at column 0. Grep for `@measure` unanchored (no `^`), or real lines are
+silently missed -- which reads as a false "channel is silent."
 
 Assert on the JSON (the machine-readable channel), not on prose.
 
@@ -124,7 +129,7 @@ the proxy log**:
 
 1. **Metrics populate.** A `SELECT INBOX` emits one `cold_sync` and its
    `api_request` lines; a body fetch emits one `hydrate`; an idle selected session
-   emits a `poll_refresh` per interval. (`journalctl ... | grep '^@measure'` is
+   emits a `poll_refresh` per interval. (`journalctl ... | grep '@measure'` is
    non-empty and well-formed JSON.)
 2. **Lazy hydration holds.** A `FETCH 1:* (ENVELOPE FLAGS INTERNALDATE)` over the
    window emits **zero** `hydrate` lines (and the upstream worker logs zero
@@ -143,6 +148,35 @@ Tuning signals the window may surface: many sessions with `windowed: true` (real
 mailboxes routinely exceed 500 -> consider raising the window or the
 message-size-aware follow-up); `poll_refresh.elapsed_ms` large under concurrent
 SELECTs (-> the `deferToThread` follow-up the config note flags).
+
+## Post-deploy emit-sanity gate (deploy-mechanism-agnostic)
+
+The layer only emits if the RUNNING process is actually a build that carries it
+(#102+). Whatever the deploy mechanism -- host venv, a container image, a future
+`console_script` entrypoint -- a freshly-set `POSTERN_IMAP_MEASURE=on` is silently
+inert if the loaded code predates #102, and repo CI cannot see a stale deploy. (The
+0.6 go-live hit exactly this: the box ran pre-#102 source while the venv wheel that
+carried the layer was shadowed, so the channel was silent with the flag on.) So
+make this a standing gate on EVERY (re)deploy, before any measurement run:
+
+> With the flag on and the door (re)started, a single authenticated
+> `LOGIN -> SELECT INBOX` MUST produce exactly one `@measure cold_sync`
+> (`direction: inbound`). If it does not, the measurement build is NOT live --
+> stop and fix the deploy; do not start a measurement run.
+
+```bash
+# provoke one cold sync: LOGIN + SELECT INBOX only (no SEARCH, no body open).
+# system/PAM mode reads the shared store, so any crew login proves the wiring.
+python3 imap/smoke/emit_sanity.py --host <live-door-host>   # 10.1.1.2 (host) or the container addr
+
+# assert it landed. Twisted's observer PREFIXES the line, so grep UNANCHORED:
+journalctl -u postern-imap -o cat | grep '@measure cold_sync'   # expect one, direction=inbound
+```
+
+The integration test (`posternimap/tests/test_measure_integration.py`) guards the
+config->emit WIRING against a code regression; this gate guards the DEPLOY -- the
+test cannot see a stale install, only an on-door check can. Turn the flag back off
+after the window (off is the production default and a true no-op).
 
 ## Tests
 
