@@ -2,8 +2,11 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -16,8 +19,9 @@ import (
 // account searches for the user's DN, then the user's password is bound to
 // verify it). TLS is mandatory; a bind carries the password in the clear.
 type ldapAuth struct {
-	cfg  LDAPCfg
-	dial func(url string) (ldapConn, error)
+	cfg     LDAPCfg
+	tlsConf *tls.Config // nil unless an LDAP_TLS_* knob is set; pins RootCAs + ServerName for the directory connection
+	dial    func(url string) (ldapConn, error)
 }
 
 // ldapConn is the slice of *ldap.Conn the backend uses, behind an interface so
@@ -34,10 +38,15 @@ type ldapConn interface {
 // (SetTimeout: bind/search read deadline), so a dead or slow directory can neither
 // hang the connect nor hang a bind/search mid-login. A non-positive timeout leaves
 // go-ldap's defaults in place (no timeout); the config default is 10s.
-var ldapDial = func(url string, timeout time.Duration) (ldapConn, error) {
+var ldapDial = func(url string, timeout time.Duration, tlsConf *tls.Config) (ldapConn, error) {
 	var opts []ldap.DialOpt
 	if timeout > 0 {
 		opts = append(opts, ldap.DialWithDialer(&net.Dialer{Timeout: timeout}))
+	}
+	if tlsConf != nil {
+		// Applies to an ldaps:// dial (implicit TLS). Harmless for ldap://, where TLS
+		// is negotiated later via StartTLS (which uses the same tlsConf, below).
+		opts = append(opts, ldap.DialWithTLSConfig(tlsConf))
 	}
 	c, err := ldap.DialURL(url, opts...)
 	if err != nil {
@@ -64,12 +73,59 @@ func newLDAPAuth(cfg LDAPCfg) (*ldapAuth, error) {
 	if cfg.MailAttr == "" {
 		cfg.MailAttr = "mail"
 	}
+	tlsConf, err := buildLDAPTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 	// Bind the production dialer with the configured timeout. The struct's dial
 	// seam stays a func(url) so tests inject a fake directory unchanged; the real
-	// wiring carries LDAP_TIMEOUT through to the net.Dialer + conn read deadline.
-	return &ldapAuth{cfg: cfg, dial: func(url string) (ldapConn, error) {
-		return ldapDial(url, cfg.Timeout)
+	// wiring carries LDAP_TIMEOUT through to the net.Dialer + conn read deadline,
+	// and the pinned TLS config (nil unless an LDAP_TLS_* knob is set) through to
+	// both the ldaps:// dial and the ldap:// StartTLS upgrade.
+	return &ldapAuth{cfg: cfg, tlsConf: tlsConf, dial: func(url string) (ldapConn, error) {
+		return ldapDial(url, cfg.Timeout, tlsConf)
 	}}, nil
+}
+
+// buildLDAPTLSConfig assembles the tls.Config for the directory connection, used
+// for BOTH StartTLS (ldap://) and implicit TLS (ldaps://). It returns nil when no
+// LDAP_TLS_* knob is set, so the default path (system roots) is byte-for-byte
+// unchanged.
+//
+// LDAP_TLS_CA, when set, makes the PEM bundle the ONLY trust anchor: the directory
+// cert must chain to it (an exact pin, NOT added to the system roots), so a private
+// CA such as an Authentik outpost self-signed CA is trusted with FULL verification
+// (a pinned root, never an insecure-skip).
+//
+// ServerName is the name verified against the cert SANs. go-ldap StartTLS hands the
+// config straight to tls.Client WITHOUT deriving ServerName, so we MUST set it or
+// verification fails: LDAP_TLS_SERVER_NAME when given (the cert name when LDAP_URL
+// dials an IP), else the LDAP_URL host.
+func buildLDAPTLSConfig(cfg LDAPCfg) (*tls.Config, error) {
+	if cfg.TLSCAFile == "" && cfg.TLSServerName == "" {
+		return nil, nil
+	}
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	tc.ServerName = cfg.TLSServerName
+	if tc.ServerName == "" {
+		if u, err := url.Parse(cfg.URL); err == nil {
+			tc.ServerName = u.Hostname()
+		}
+	}
+
+	if cfg.TLSCAFile != "" {
+		pem, err := os.ReadFile(cfg.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("ldap tls: reading LDAP_TLS_CA %q: %w", cfg.TLSCAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("ldap tls: LDAP_TLS_CA %q contained no valid PEM certificate", cfg.TLSCAFile)
+		}
+		tc.RootCAs = pool
+	}
+	return tc, nil
 }
 
 func (a *ldapAuth) Authenticate(username, secret string) (string, error) {
@@ -87,7 +143,14 @@ func (a *ldapAuth) Authenticate(username, secret string) (string, error) {
 	defer conn.Close()
 
 	if a.cfg.StartTLS && strings.HasPrefix(strings.ToLower(a.cfg.URL), "ldap://") {
-		if err := conn.StartTLS(&tls.Config{}); err != nil {
+		// a.tlsConf is nil unless an LDAP_TLS_* knob is set, so the default stays the
+		// empty config (system roots). go-ldap passes this straight to tls.Client, so
+		// when a CA is pinned the config carries RootCAs + ServerName.
+		tc := a.tlsConf
+		if tc == nil {
+			tc = &tls.Config{}
+		}
+		if err := conn.StartTLS(tc); err != nil {
 			return "", fmt.Errorf("ldap starttls: %w", err)
 		}
 	}

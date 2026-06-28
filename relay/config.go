@@ -132,6 +132,13 @@ type LDAPCfg struct {
 	SearchBase     string // LDAP_SEARCH_BASE, e.g. "ou=people,dc=example,dc=com"
 	SearchFilter   string // LDAP_SEARCH_FILTER, e.g. "(uid=%s)"
 	MailAttr       string // LDAP_MAIL_ATTR, the attribute holding the bound identity (default mail)
+	// TLS trust for the StartTLS/ldaps connection. By default the directory cert is
+	// verified against the system roots, with the verified name taken from LDAP_URL.
+	// These two knobs let an operator trust a PRIVATE CA (e.g. an Authentik outpost
+	// self-signed CA) without ever weakening verification (strict verification
+	// against a pinned root, never an insecure-skip):
+	TLSCAFile     string // LDAP_TLS_CA, path to a PEM CA bundle; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots)
+	TLSServerName string // LDAP_TLS_SERVER_NAME, the name verified against the cert SANs; set when LDAP_URL dials an IP but the cert names a host. Defaults to the LDAP_URL host
 	// Timeout (LDAP_TIMEOUT, integer seconds, default 10) bounds the directory
 	// dial AND each bind/search, so a dead or slow directory cannot hang a login.
 	// Symmetric with the Python IMAP proxy's ldap mode (#88). 0 disables it (not
@@ -232,6 +239,8 @@ func loadConfig() (Config, error) {
 				SearchBase:     os.Getenv("LDAP_SEARCH_BASE"),
 				SearchFilter:   os.Getenv("LDAP_SEARCH_FILTER"),
 				MailAttr:       env("LDAP_MAIL_ATTR", "mail"),
+				TLSCAFile:      os.Getenv("LDAP_TLS_CA"),
+				TLSServerName:  os.Getenv("LDAP_TLS_SERVER_NAME"),
 				Timeout:        time.Duration(envInt("LDAP_TIMEOUT", 10)) * time.Second,
 			},
 			SystemDomain:  os.Getenv("AUTH_SYSTEM_DOMAIN"),
