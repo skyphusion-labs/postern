@@ -1,0 +1,110 @@
+name: relay-image
+
+# Build the postern-relay door image and push it to GHCR.
+#
+# WHY: the Go relay (587 submission door + loopback intake) is moving off the host
+# systemd install onto a versioned container image (CI -> GHCR -> Swarm), the same
+# move the 993 IMAP door made (#150/#152). The image is the unit of deploy; the
+# Swarm stack pins it by the immutable git short-SHA tag this workflow produces, so
+# `docker service update --image ...:<sha>` is exact.
+#
+# Triggers:
+#   - push to main that touches relay/** (or this workflow): rebuild on real
+#     changes, not on every unrelated main push.
+#   - a v* tag: cut a release-tagged image.
+#   - workflow_dispatch: a reliable manual build (also the dependable path for a
+#     release tag whose commit did not itself change relay/**, since GitHub ANDs the
+#     paths filter onto tag pushes).
+#
+# Runner: GitHub-hosted ubuntu-latest. PUBLIC repo -> fork-safe hosted runner, per
+# the house CI policy (matches ci.yml / deploy.yml / imap-image.yml). The image is a
+# slim Debian base, so no disk-reclaim step is needed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'relay/**'
+      - '.github/workflows/relay-image.yml'
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+# Least privilege: read the repo, write GHCR packages. Nothing else.
+permissions:
+  contents: read
+  packages: write
+
+# A newer push to the same ref supersedes an in-flight build.
+concurrency:
+  group: relay-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/skyphusion-labs/postern-relay
+
+jobs:
+
+  # Gate: the same core checks ci.yml runs for the relay (vet + build + the
+  # race-enabled test suite, incl. the email-injection regression guards), so the
+  # image is only built from code that passes the project gate. CI parity is the
+  # house convention. The image is cgo-free (CGO_ENABLED=0), matching the Dockerfile
+  # build, so `system`/PAM is intentionally not exercised here.
+  gate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          # Track the relay go.mod toolchain so CI never drifts from the code.
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - run: go vet ./...
+      - env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+      - run: go test -race ./...
+
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # Immutable git short-SHA (bare, the pin target for `service update
+          # --image`), a moving `latest` on the default branch, and the v* tag on a
+          # release.
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./relay
+          file: ./relay/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Fleet is Hetzner x86_64; a single linux/amd64 image keeps the GHCR
+          # package and the short-SHA digest clean for swarm pinning.
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
