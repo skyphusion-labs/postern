@@ -102,6 +102,11 @@ type SubmissionCfg struct {
 
 	// Online brute-force throttle on the AUTH door (#105).
 	Throttle ThrottleCfg
+
+	// PROXY protocol on the listener edge (#155). The mail edge moved to an L4
+	// load balancer that prepends a PROXY header carrying the real client IP;
+	// honored only from a trusted source. Default off (mesh-internal / dev direct).
+	ProxyProtocol ProxyProtocolCfg
 }
 
 // ThrottleCfg configures the per-account online brute-force throttle (#105). The
@@ -239,7 +244,36 @@ func loadConfig() (Config, error) {
 				GlobalMax:    envInt("AUTH_THROTTLE_GLOBAL_MAX_FAILURES", 100),
 				GlobalWindow: time.Duration(envInt("AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS", 60)) * time.Second,
 			},
+			ProxyProtocol: ProxyProtocolCfg{
+				Mode:    proxyMode(strings.ToLower(env("PROXY_PROTOCOL", "off"))),
+				Timeout: time.Duration(envInt("PROXY_PROTOCOL_TIMEOUT_SECONDS", 5)) * time.Second,
+			},
 		},
+	}
+
+	// Parse + validate the PROXY protocol config eagerly (#155) so a misconfigured
+	// edge fails at startup, not on the first connection. The trusted set is parsed
+	// regardless of mode (so an off deploy with a stray bad CIDR still surfaces it),
+	// but is REQUIRED to be non-empty whenever the feature is enabled: an enabled
+	// door with no trusted source could honor no header at all (require would reject
+	// everything, optional would never honor), which is always a misconfiguration.
+	{
+		trusted, err := parseProxyTrusted(os.Getenv("PROXY_PROTOCOL_TRUSTED"))
+		if err != nil {
+			return c, err
+		}
+		c.Submission.ProxyProtocol.Trusted = trusted
+		switch c.Submission.ProxyProtocol.Mode {
+		case proxyOff, proxyOptional, proxyRequire:
+		default:
+			return c, fmt.Errorf("unknown PROXY_PROTOCOL %q (want off|optional|require)", c.Submission.ProxyProtocol.Mode)
+		}
+		if c.Submission.ProxyProtocol.enabled() && len(trusted) == 0 {
+			return c, fmt.Errorf("PROXY_PROTOCOL=%s requires PROXY_PROTOCOL_TRUSTED (>=1 CIDR of the trusted proxy source)", c.Submission.ProxyProtocol.Mode)
+		}
+		if c.Submission.ProxyProtocol.Timeout < time.Second {
+			c.Submission.ProxyProtocol.Timeout = time.Second
+		}
 	}
 
 	// Inbound intake is keyed off the DESTINATION (inboundActive), not off

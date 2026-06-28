@@ -41,10 +41,15 @@ type submissionBackend struct {
 }
 
 func (b *submissionBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	// RemoteAddr is the real client IP recovered from a trusted PROXY header when
+	// PROXY protocol is on (#155), else the raw peer. It is the remote-addr for
+	// logging and the key context any future per-IP control would use; #105 stays
+	// per-account. Capture it once at session open so every log line is consistent.
+	remote := c.Conn().RemoteAddr().String()
 	if submissionDebug {
-		log.Printf("submission session opened from %v", c.Conn().RemoteAddr())
+		log.Printf("submission session opened from %s", remote)
 	}
-	return &submissionSession{cfg: b.cfg, auth: b.auth, sender: b.sender, throttle: b.throttle}, nil
+	return &submissionSession{cfg: b.cfg, auth: b.auth, sender: b.sender, throttle: b.throttle, remote: remote}, nil
 }
 
 // submissionSession holds per-connection auth + envelope state. authed flips true
@@ -55,6 +60,7 @@ type submissionSession struct {
 	auth      AuthProvider
 	sender    sender
 	throttle  *authThrottle
+	remote    string // real client IP (PROXY-recovered when trusted, #155), for logging
 	authed    bool
 	boundFrom string
 	rcpts     []string
@@ -188,7 +194,7 @@ func (s *submissionSession) Data(r io.Reader) error {
 	if err := s.sender.Send(payload); err != nil {
 		return mapSendError(payload, err)
 	}
-	log.Printf("submitted from=%s to=%v cc=%v bcc=%d attachments=%d subject=%q", payload.From, payload.To, payload.CC, len(payload.BCC), len(payload.Attachments), payload.Subject)
+	log.Printf("submitted client=%s from=%s to=%v cc=%v bcc=%d attachments=%d subject=%q", s.remote, payload.From, payload.To, payload.CC, len(payload.BCC), len(payload.Attachments), payload.Subject)
 	return nil
 }
 

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // clearRelayEnv unsets every variable loadConfig reads so each case starts clean.
@@ -20,6 +22,7 @@ func clearRelayEnv(t *testing.T) {
 		"SUBMISSION_LISTENERS", "SUBMISSION_TLS_CERT", "SUBMISSION_TLS_KEY",
 		"SUBMISSION_HOSTNAME", "AUTH_BACKEND",
 		"POSTERN_SEND_URL", "POSTERN_SEND_TOKEN", "POSTERN_SMTP_AUTH_URL",
+		"PROXY_PROTOCOL", "PROXY_PROTOCOL_TRUSTED", "PROXY_PROTOCOL_TIMEOUT_SECONDS",
 	} {
 		t.Setenv(k, "") // t.Setenv restores the prior value at test end
 	}
@@ -262,5 +265,83 @@ func TestRun_RejectsNonLoopbackIntake(t *testing.T) {
 	err = run(cfg)
 	if err == nil || !strings.Contains(err.Error(), "loopback only") {
 		t.Fatalf("run() err = %v, want a loopback-only rejection", err)
+	}
+}
+
+// --- PROXY protocol config (#155) ---------------------------------------
+
+func TestLoadConfig_ProxyProtocolDefaultsOff(t *testing.T) {
+	setSubmissionOnlyEnv(t)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Submission.ProxyProtocol.Mode != proxyOff {
+		t.Errorf("default PROXY mode = %q, want off", cfg.Submission.ProxyProtocol.Mode)
+	}
+	if cfg.Submission.ProxyProtocol.enabled() {
+		t.Errorf("default PROXY config reports enabled; want disabled")
+	}
+}
+
+func TestLoadConfig_ProxyProtocolParsesTrusted(t *testing.T) {
+	setSubmissionOnlyEnv(t)
+	t.Setenv("PROXY_PROTOCOL", "require")
+	t.Setenv("PROXY_PROTOCOL_TRUSTED", "10.1.0.0/16, 203.0.113.5")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	pp := cfg.Submission.ProxyProtocol
+	if pp.Mode != proxyRequire || !pp.enabled() {
+		t.Fatalf("mode = %q enabled=%v, want require/enabled", pp.Mode, pp.enabled())
+	}
+	if len(pp.Trusted) != 2 {
+		t.Fatalf("parsed %d trusted nets, want 2", len(pp.Trusted))
+	}
+	if !pp.trusts(net.ParseIP("10.1.0.3")) || pp.trusts(net.ParseIP("8.8.8.8")) {
+		t.Errorf("trust gate wrong: 10.1.0.3 must be trusted, 8.8.8.8 must not")
+	}
+}
+
+func TestLoadConfig_ProxyProtocolEnabledRequiresTrusted(t *testing.T) {
+	setSubmissionOnlyEnv(t)
+	t.Setenv("PROXY_PROTOCOL", "require")
+	// No PROXY_PROTOCOL_TRUSTED: an enabled door with no trusted source is a
+	// misconfiguration (require would reject everything) and must fail at load.
+	if _, err := loadConfig(); err == nil {
+		t.Fatalf("want error when PROXY_PROTOCOL is enabled with no trusted set")
+	}
+}
+
+func TestLoadConfig_ProxyProtocolUnknownModeFails(t *testing.T) {
+	setSubmissionOnlyEnv(t)
+	t.Setenv("PROXY_PROTOCOL", "banana")
+	t.Setenv("PROXY_PROTOCOL_TRUSTED", "10.0.0.0/8")
+	if _, err := loadConfig(); err == nil {
+		t.Fatalf("want error on unknown PROXY_PROTOCOL mode")
+	}
+}
+
+func TestLoadConfig_ProxyProtocolBadCIDRFails(t *testing.T) {
+	setSubmissionOnlyEnv(t)
+	t.Setenv("PROXY_PROTOCOL", "optional")
+	t.Setenv("PROXY_PROTOCOL_TRUSTED", "not-a-cidr")
+	if _, err := loadConfig(); err == nil {
+		t.Fatalf("want error on malformed PROXY_PROTOCOL_TRUSTED")
+	}
+}
+
+func TestLoadConfig_ProxyProtocolTimeoutFloor(t *testing.T) {
+	setSubmissionOnlyEnv(t)
+	t.Setenv("PROXY_PROTOCOL", "optional")
+	t.Setenv("PROXY_PROTOCOL_TRUSTED", "10.1.0.0/16")
+	t.Setenv("PROXY_PROTOCOL_TIMEOUT_SECONDS", "0")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Submission.ProxyProtocol.Timeout < time.Second {
+		t.Errorf("timeout floor not applied: got %v", cfg.Submission.ProxyProtocol.Timeout)
 	}
 }
