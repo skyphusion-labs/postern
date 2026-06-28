@@ -25,6 +25,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -124,12 +125,13 @@ func (c *proxyConn) resolve() {
 
 		// Untrusted peer: NEVER honor a header (anti-spoof). In require mode the
 		// door is strictly behind the trusted proxy, so an untrusted connection is
-		// rejected; in optional mode it simply keeps its raw peer address. Either
-		// way we do NOT consume any bytes, so a forged header is left in the stream
-		// and the SMTP command parser rejects it as garbage.
+		// dropped (a CLEAN close, see rejectClean); in optional mode it simply keeps
+		// its raw peer address. Either way we do NOT consume any bytes, so a forged
+		// header is left in the stream and the SMTP command parser rejects it as
+		// garbage.
 		if !trusted {
 			if c.cfg.Mode == proxyRequire {
-				c.err = fmt.Errorf("proxyproto: rejecting untrusted peer %s in require mode", peerIP)
+				c.rejectClean("untrusted peer in require mode", peerIP)
 			}
 			return
 		}
@@ -146,17 +148,23 @@ func (c *proxyConn) resolve() {
 
 		real, hadHeader, err := parseProxyHeader(br)
 		if err != nil {
-			// A malformed header from a TRUSTED peer is a hard error (fail loud):
+			// A malformed header from a TRUSTED peer is a hard error (fail LOUD):
 			// the LB is expected to speak the protocol correctly, so corrupt framing
-			// is a real fault, not something to paper over.
+			// is a real fault, surfaced to the operator, not papered over. This is the
+			// ONLY proxy outcome that is logged at the go-smtp connection layer.
 			c.err = err
 			return
 		}
 		if !hadHeader {
-			// No header from a trusted peer. require rejects; optional falls back to
-			// the raw peer IP (already set above).
+			// No header from a trusted peer. In require mode this is a clean drop:
+			// the LB's own TCP health check is a bare connect with NO PROXY header
+			// (Strummer's caveat), and so is any trusted client that has not yet been
+			// taught to prepend one. Closing it cleanly (NOT a loud error, NOT an auth
+			// event, NOT counted toward the #105 throttle which this path never
+			// reaches) keeps the health probes and logs clean. In optional mode we
+			// simply fall back to the raw peer IP (already set above).
 			if c.cfg.Mode == proxyRequire {
-				c.err = fmt.Errorf("proxyproto: trusted peer %s sent no PROXY header in require mode", peerIP)
+				c.rejectClean("trusted peer sent no PROXY header in require mode", peerIP)
 			}
 			return
 		}
@@ -167,6 +175,20 @@ func (c *proxyConn) resolve() {
 			c.remote = real
 		}
 	})
+}
+
+// rejectClean marks the connection for a CLEAN drop: Read returns io.EOF, which
+// go-smtp treats as a normal client disconnect (it returns nil and logs nothing),
+// so an expected operational reject (an untrusted peer, or a headerless connection
+// in require mode such as the LB's TCP health check) does not pollute the logs.
+// A diagnostic line is emitted only under SUBMISSION_DEBUG, so forensics is opt-in
+// without prod log noise. This path never touches the #105 throttle (it never
+// reaches the auth code), so a probe or a spoof can never poison the throttle.
+func (c *proxyConn) rejectClean(reason string, peerIP net.IP) {
+	c.err = io.EOF
+	if submissionDebug {
+		log.Printf("proxyproto: dropping connection (%s) peer=%s", reason, peerIP)
+	}
 }
 
 func (c *proxyConn) Read(p []byte) (int, error) {
