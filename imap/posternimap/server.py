@@ -28,6 +28,7 @@ from twisted.python.compat import networkString
 from .auth import build_portal
 from .config import Config
 from .mailbox import MailboxLoadError
+from .proxywrap import wrap_listener_factory
 
 
 class PosternIMAP4Server(imap4.IMAP4Server):
@@ -148,19 +149,34 @@ def run(cfg: Config) -> None:
     log.startLogging(sys.stdout)
     factory = build_factory(cfg)
 
+    proxy = cfg.proxy_protocol
     if cfg.tls_cert and cfg.tls_key:
-        from twisted.internet import ssl
-
         ctx = _build_tls_context_factory(cfg.tls_cert, cfg.tls_key)
-        reactor.listenSSL(cfg.listen_port, factory, ctx, interface=cfg.listen_host)
         scheme = "imaps"
+        if proxy.enabled():
+            # 993 is implicit TLS, but the L4 LB prepends the PROXY header on the RAW
+            # TCP stream ahead of the TLS ClientHello. So we listen plain TCP with the
+            # PROXY wrapper OUTERMOST (it strips the header off the raw bytes) and the
+            # TLS factory as the wrapped factory: raw bytes -> PROXY strip -> TLS ->
+            # IMAP. (docs/PROXY-PROTOCOL.md section 8.)
+            from twisted.protocols.tls import TLSMemoryBIOFactory
+
+            tls_factory = TLSMemoryBIOFactory(ctx, False, factory)  # type: ignore[arg-type]
+            wrapped = wrap_listener_factory(proxy, tls_factory, reactor=reactor)
+            reactor.listenTCP(cfg.listen_port, wrapped, interface=cfg.listen_host)  # type: ignore
+        else:
+            # Unchanged default path: native IMAPS, no PROXY handling.
+            reactor.listenSSL(cfg.listen_port, factory, ctx, interface=cfg.listen_host)
     else:
-        reactor.listenTCP(cfg.listen_port, factory, interface=cfg.listen_host)  # type: ignore
         scheme = "imap"
+        # Plaintext/loopback listener; PROXY wrapper applied only when enabled (else
+        # the factory is returned unwrapped -- byte-for-byte the prior behavior).
+        wrapped = wrap_listener_factory(proxy, factory, reactor=reactor)
+        reactor.listenTCP(cfg.listen_port, wrapped, interface=cfg.listen_host)  # type: ignore
 
     # Never log the token or any secret. URL + mode only.
     log.msg(
         f"postern-imap listening {scheme}://{cfg.listen_host}:{cfg.listen_port} "
-        f"-> {cfg.api_url} (auth_mode={cfg.auth_mode})"
+        f"-> {cfg.api_url} (auth_mode={cfg.auth_mode}, proxy_protocol={cfg.proxy_protocol.mode})"
     )
     reactor.run()  # type: ignore
