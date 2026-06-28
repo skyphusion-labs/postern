@@ -225,8 +225,8 @@ func TestProxyConnTrustAndModeMatrix(t *testing.T) {
 
 	type want struct {
 		remote    string // expected RemoteAddr after resolve
-		readErr   bool   // first Read returns a rejection error
-		firstRead string // when no reject: the bytes the first Read should surface (header consumed or not)
+		cleanDrop bool   // first Read returns io.EOF (a clean operational drop: untrusted, or headerless in require)
+		firstRead string // when no drop: the bytes the first Read should surface (header consumed or not)
 	}
 
 	tests := []struct {
@@ -276,18 +276,21 @@ func TestProxyConnTrustAndModeMatrix(t *testing.T) {
 			want:   want{remote: realClient, firstRead: "EHLO x\r\n"},
 		},
 		{
-			name:   "require trusted no header: rejected",
+			// The LB's TCP health check is a bare connect with NO header; in require
+			// mode from the trusted LB source it must be a CLEAN drop (io.EOF), not a
+			// loud error, so the probes never pollute logs or the throttle.
+			name:   "require trusted no header (LB health check): clean drop",
 			mode:   proxyRequire,
 			peer:   tcp("10.1.0.3", 5000),
 			script: []byte("EHLO x\r\n"),
-			want:   want{remote: "10.1.0.3:5000", readErr: true},
+			want:   want{remote: "10.1.0.3:5000", cleanDrop: true},
 		},
 		{
-			name:   "require UNTRUSTED: rejected",
+			name:   "require UNTRUSTED: clean drop",
 			mode:   proxyRequire,
 			peer:   tcp("203.0.113.50", 6000),
 			script: header,
-			want:   want{remote: "203.0.113.50:6000", readErr: true},
+			want:   want{remote: "203.0.113.50:6000", cleanDrop: true},
 		},
 	}
 
@@ -303,10 +306,13 @@ func TestProxyConnTrustAndModeMatrix(t *testing.T) {
 			}
 
 			buf := make([]byte, 64)
-			if tt.want.readErr {
-				n, err := c.Read(buf)
-				if err == nil {
-					t.Fatalf("want a rejection error from Read, got %q", buf[:n])
+			if tt.want.cleanDrop {
+				_, err := c.Read(buf)
+				// go-smtp treats io.EOF as a normal disconnect (returns nil, logs
+				// nothing): that is what makes the drop "clean". Anything else would
+				// surface as a logged "error handling" line.
+				if err != io.EOF {
+					t.Fatalf("want a clean io.EOF drop, got err=%v", err)
 				}
 				return
 			}
@@ -323,6 +329,25 @@ func TestProxyConnTrustAndModeMatrix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A malformed PROXY header from a TRUSTED peer is a hard fault, not a clean drop:
+// the LB is expected to speak the protocol correctly, so corrupt framing must
+// surface LOUD (a non-EOF error go-smtp logs), never be silently swallowed.
+func TestProxyConnMalformedFromTrustedIsLoud(t *testing.T) {
+	trusted := []*net.IPNet{mustNet(t, "10.1.0.0/16")}
+	// A v1 header that begins correctly but has a bad source IP (parse fault).
+	bad := []byte("PROXY TCP4 not-an-ip 198.51.100.2 51000 587\r\n")
+	sc := newScriptConn(bad, tcp("10.1.0.3", 5000))
+	c := &proxyConn{Conn: sc, cfg: ProxyProtocolCfg{Mode: proxyRequire, Trusted: trusted, Timeout: time.Second}}
+
+	_, err := c.Read(make([]byte, 64))
+	if err == nil || err == io.EOF {
+		t.Fatalf("want a loud (non-EOF) error for a malformed header from a trusted peer, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "proxyproto v1") {
+		t.Fatalf("error %q should identify the proxyproto v1 parse fault", err)
 	}
 }
 

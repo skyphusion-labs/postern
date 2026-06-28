@@ -52,7 +52,7 @@ garbage.
 | --- | --- | --- | --- |
 | `PROXY_PROTOCOL` | `off` \| `optional` \| `require` | `off` | Header-handling mode (section 4). |
 | `PROXY_PROTOCOL_TRUSTED` | comma-separated CIDR list | (empty) | The trusted proxy source(s). A bare IP is accepted as `/32` (IPv4) or `/128` (IPv6). |
-| `PROXY_PROTOCOL_TIMEOUT_SECONDS` | integer seconds | `5` | Bound on reading the header from a trusted peer (section 6). Floored at 1s. |
+| `PROXY_PROTOCOL_TIMEOUT_SECONDS` | integer seconds | `5` | Bound on reading the header from a trusted peer (section 7). Floored at 1s. |
 
 Validation (fail at startup, not on first connection):
 
@@ -78,7 +78,7 @@ the immediate socket source address.
 | `off` | any | (not read) | Raw peer. Header, if any, is left in the stream and the protocol parser handles it. |
 | `optional` | trusted | yes (valid) | Real client IP. |
 | `optional` | trusted | no | Raw peer (fall back). |
-| `optional` | trusted | yes (malformed) | Reject the connection (section 5). |
+| `optional` | trusted | yes (malformed) | Reject the connection (section 6). |
 | `optional` | untrusted | (not honored) | Raw peer. Any header bytes are left in the stream; the protocol parser rejects them. |
 | `require` | trusted | yes (valid) | Real client IP. |
 | `require` | trusted | no | Reject the connection. |
@@ -92,12 +92,76 @@ Notes:
   trusted peer that sends no header, and any untrusted peer, are rejected.
 - `optional` is the migration / mixed posture: a trusted proxy MAY prepend a
   header; a trusted client connecting directly (no header) still works, falling
-  back to its raw peer address. See the latency note in section 6.
+  back to its raw peer address. See the latency note in section 7.
 - "Reject the connection" means the door drops the connection without serving
   the protocol. It is a connection-level refusal, not a protocol-level error
-  reply (the door has not yet spoken).
+  reply. The EXPECTED operational rejects (an untrusted peer; a trusted peer with
+  no header in `require` mode, e.g. the LB's bare-TCP health check) are a CLEAN
+  drop: the connection is closed quietly, NOT logged as an error and NOT counted
+  toward any throttle (the reject happens before the auth code, so it can never
+  reach #105). A diagnostic line is emitted only under the door's debug switch.
+  The one LOUD reject is a malformed header from a trusted peer (section 6): a
+  real protocol fault from the LB, surfaced to the operator.
 
-## 5. Header parsing (what "valid" means)
+## 5. Deploy ordering (HARD) and health checks
+
+### 5.1 Cutover sequence
+
+This ordering is a HARD operational constraint, not a preference. Hetzner makes
+the service INACCESSIBLE if the load balancer has the proxy-protocol flag enabled
+while the target is not yet parsing it (the LB prepends a header the door does not
+understand, the door treats it as a malformed greeting, and every connection
+fails). Therefore:
+
+1. **Deploy BOTH doors with `PROXY_PROTOCOL=optional` first.** Optional is the
+   migration-safe mode that bridges the cutover: it parses a header if one is
+   present, and falls back to the raw peer IP if one is absent. So the door works
+   correctly BOTH before the LB flag is on (no header yet -> raw peer) AND after
+   (header present -> real client). This is what makes the flip safe.
+2. **THEN enable the proxy-protocol flag at the load balancer.** Now every
+   connection carries a header; the doors, already in optional, honor it.
+3. **(Optional, later) tighten the doors to `PROXY_PROTOCOL=require`** once the LB
+   is the proven SOLE ingress. Require rejects any connection that does not arrive
+   through the trusted proxy with a header; do this only after step 2 is verified
+   stable, because require depends on the header always being present.
+
+> The REVERSE order is the outage. Enabling the LB flag BEFORE the doors parse the
+> header (or jumping straight to `require` before the LB sends headers) takes the
+> service down. `optional` is the bridge; never flip the LB against an off/require
+> door that is not yet receiving the headers it expects.
+
+The same sequence governs both doors (587 Go submission, 993 Python IMAP), the
+fleet-chezmoi LB IaC, and the GO-LIVE runbook; they all reference THIS section.
+
+### 5.2 Bind surface
+
+Each door binds the PRIVATE VLAN address only (e.g. the 587 door on
+`10.1.1.2:587`), never `0.0.0.0` and never a public bind. dischord stays dark; the
+load balancer is the only public surface, and the host firewall admits the door's
+port only FROM the LB's private source (the estate `10.1.0.0/16`). The trusted set
+in `PROXY_PROTOCOL_TRUSTED` is that same LB private source.
+
+### 5.3 Health checks
+
+The load balancer health check is a BARE TCP connect with NO PROXY header. This is
+handled benignly by construction:
+
+- The TCP connection is accepted at the socket layer (so a TCP-level health check
+  sees the port as healthy) before any header handling runs.
+- In `optional` mode (the cutover/steady mode of 5.1 step 1-2) a headerless
+  connection falls back to the raw peer and is served normally; a bare connect
+  that sends no command simply disconnects. It never issues an AUTH, so it never
+  reaches the #105 throttle and is never logged as an auth failure.
+- In `require` mode a headerless connection from the trusted LB source is a CLEAN
+  drop (section 4): closed quietly, not logged as an error, not throttled. So the
+  probes do not pollute logs or the throttle even under require.
+
+Use a TCP-level health check. On the STARTTLS door (587) a clean drop is silent at
+the application layer; on an implicit-TLS door (465) a bare-TCP probe never
+completes the TLS handshake, so a TCP check (not an application check) is required
+there regardless of PROXY protocol.
+
+## 6. Header parsing (what "valid" means)
 
 Both PROXY protocol versions defined by the HAProxy specification are accepted;
 the door auto-detects which one is present.
@@ -140,7 +204,7 @@ expected to speak the protocol correctly, so corrupt framing is a real fault, no
 something to paper over): reject the connection. This is the only place the door
 fails loud on header content; everything else degrades to the raw peer.
 
-## 6. The optional-mode latency note (server-speaks-first)
+## 7. The optional-mode latency note (server-speaks-first)
 
 SMTP and IMAP are both server-speaks-first: the server sends a greeting and the
 client stays silent until it arrives. The PROXY protocol is the inverse: the
@@ -162,7 +226,7 @@ This is inherent to optional + server-speaks-first; production uses `require`
 The timeout also bounds a trusted peer that connects and then stalls, so a slow
 or silent peer cannot pin a connection while the door waits for a header.
 
-## 7. How the recovered IP is used
+## 8. How the recovered IP is used
 
 - It becomes the connection's remote address for ALL logging on that connection,
   so logs name the true client, not the load balancer.
@@ -172,8 +236,13 @@ or silent peer cannot pin a connection while the door waits for a header.
   accurate remote IP for logs and leaves the per-account throttle exactly as is.
   Per-IP control is a possible future layer that this accurate IP now enables; it
   is not part of this contract.
+- The PROXY layer sits entirely BEFORE the auth code: header handling (including
+  every reject in section 4) happens on the raw connection before a single SMTP/
+  IMAP command is processed. So a health-check probe, an untrusted peer, or a
+  spoofed header can never reach the auth path and therefore can never touch the
+  #105 throttle.
 
-## 8. Header reading happens off the accept path
+## 9. Header reading happens off the accept path
 
 A door MUST NOT read the header inside its accept loop: a slow or silent peer
 would otherwise stall acceptance of every other connection. The header is read
