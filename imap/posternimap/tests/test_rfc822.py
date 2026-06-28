@@ -5,8 +5,8 @@ from __future__ import annotations
 import email
 import unittest
 
-from posternimap.client import Attachment, Message
-from posternimap.rfc822 import render_rfc822
+from posternimap.client import Attachment, Message, MessageSummary
+from posternimap.rfc822 import envelope_headers, render_rfc822
 
 
 def _msg(**over) -> Message:
@@ -63,6 +63,85 @@ class RenderTest(unittest.TestCase):
         parsed = email.message_from_bytes(render_rfc822(_msg(date="not-a-date")))
         # Either a parsed date or the raw fallback, but never a crash / empty msg.
         self.assertIsNotNone(parsed.get_payload())
+
+
+def _summary(**over) -> MessageSummary:
+    base = dict(
+        uid=1,
+        message_id="abc123",
+        direction="inbound",
+        thread_id="abc123",
+        from_addr="alice@example.com",
+        to_addr="agent@skyphusion.org",
+        subject="Hello",
+        date="2026-06-18T12:00:00Z",
+        in_reply_to=None,
+        trusted=True,
+        received_at="2026-06-18T12:00:01Z",
+        attachment_count=0,
+    )
+    base.update(over)
+    return MessageSummary(**base)
+
+
+def _is_ascii(s: str) -> bool:
+    return all(ord(c) < 128 for c in s)
+
+
+class EnvelopeUnicodeTest(unittest.TestCase):
+    """#161: non-ASCII envelope fields must be RFC 2047 encoded-words (pure ASCII,
+    single line), so the IMAP ENVELOPE serializer never hits an implicit-ASCII
+    encode crash that drops the connection on a folder scan."""
+
+    # U+2026 (the exact char from the live crash) + a CJK run + a Latin-1 accent.
+    UNICODE_SUBJECT = "Re: café … 日本語 meeting"
+    UNICODE_FROM = "Élodie Café … <elodie@example.com>"
+
+    def test_envelope_headers_are_ascii_encoded_words(self):
+        h = envelope_headers(_summary(subject=self.UNICODE_SUBJECT, from_addr=self.UNICODE_FROM))
+        for k, v in h.items():
+            self.assertTrue(_is_ascii(v), f"{k} not ASCII: {v!r}")
+            self.assertNotIn("\n", v)
+            self.assertNotIn("\r", v)
+        # The non-ASCII fields became RFC 2047 encoded-words.
+        self.assertIn("=?utf-8?", h["subject"].lower())
+        self.assertIn("=?utf-8?", h["from"].lower())
+        # The address spec stays a parseable bare ASCII addr-spec next to the
+        # encoded display name, so a client still resolves the mailbox.
+        self.assertIn("<elodie@example.com>", h["from"])
+
+    def test_envelope_subject_roundtrips_back_to_unicode(self):
+        # A client decoding the encoded-word must recover the original text.
+        from email.header import decode_header, make_header
+
+        h = envelope_headers(_summary(subject=self.UNICODE_SUBJECT))
+        decoded = str(make_header(decode_header(h["subject"])))
+        self.assertEqual(decoded, self.UNICODE_SUBJECT)
+
+    def test_long_unicode_subject_stays_single_line(self):
+        # A long non-ASCII subject would fold across lines when serialized; the
+        # ENVELOPE value must be unfolded to one line (a raw newline in an ENVELOPE
+        # quoted-string would desync the IMAP response).
+        long_subject = ("café … 日本語 " * 12).strip()
+        h = envelope_headers(_summary(subject=long_subject))
+        self.assertTrue(_is_ascii(h["subject"]))
+        self.assertNotIn("\n", h["subject"])
+        self.assertNotIn("\r", h["subject"])
+
+    def test_render_rfc822_encodes_unicode_headers(self):
+        raw = render_rfc822(_msg(subject=self.UNICODE_SUBJECT, from_addr=self.UNICODE_FROM))
+        # The serialized message is pure ASCII on the header lines (encoded-words).
+        header_block = raw.split(b"\r\n\r\n", 1)[0].split(b"\n\n", 1)[0]
+        self.assertTrue(all(b < 128 for b in header_block))
+        from email.header import decode_header, make_header
+
+        parsed = email.message_from_bytes(raw)
+        decoded = str(make_header(decode_header(parsed["Subject"])))
+        self.assertEqual(decoded, self.UNICODE_SUBJECT)
+
+    def test_empty_and_plain_subjects_unaffected(self):
+        self.assertEqual(envelope_headers(_summary(subject="Hello"))["subject"], "Hello")
+        self.assertEqual(envelope_headers(_summary(subject=""))["subject"], "")
 
 
 if __name__ == "__main__":

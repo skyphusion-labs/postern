@@ -328,5 +328,84 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
             yield proto.transport.loseConnection()
 
 
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerEnvelopeUnicodeE2ETest(twisted_unittest.TestCase):
+    """#161 over the wire: a FETCH (ENVELOPE) scan over a mailbox holding a message
+    with non-ASCII envelope fields (U+2026 + CJK in Subject + display-name) must NOT
+    raise Twisted's UnicodeEncodeError and drop the connection. It must return valid
+    RFC 2047 encoded-words. This is the exact failure that aborted Conrad's live 0.6
+    measurement scan (every MUA runs `1:* (ENVELOPE ...)` on folder open)."""
+
+    UNICODE_SUBJECT = "Re: caf\u00e9 \u2026 \u65e5\u672c\u8a9e meeting"
+    UNICODE_FROM = "\u00c9lodie Caf\u00e9 \u2026 <elodie@example.com>"
+
+    def setUp(self):
+        self.msgs = [
+            make_message("m2", subject=self.UNICODE_SUBJECT, **{"from": self.UNICODE_FROM}),
+            make_message("m1", subject="plain ascii", body="hello"),
+        ]
+        self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=2)
+        self.cfg = Config(
+            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+        )
+        self.factory, self._restore = _patched_factory(self.cfg, self.transport)
+        self.port = reactor.listenTCP(0, self.factory, interface="127.0.0.1")
+        self.addr = self.port.getHost()
+
+    def tearDown(self):
+        cls, attr, orig = self._restore
+        setattr(cls, attr, orig)
+        return self.port.stopListening()
+
+    @defer.inlineCallbacks
+    def _client(self):
+        cc = ClientCreator(reactor, imap4.IMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", self.addr.port)
+        defer.returnValue(proto)
+
+    @defer.inlineCallbacks
+    def test_fetch_envelope_over_unicode_mailbox_does_not_crash(self):
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"INBOX")
+            self.assertEqual(info["EXISTS"], 2)
+            # The whole-mailbox ENVELOPE scan every MUA does on folder open. Pre-fix
+            # this raised UnicodeEncodeError server-side and the client saw socket EOF.
+            result = yield proto.fetchEnvelope("1:*")
+            self.assertEqual(len(result), 2)
+            # The unicode message is seq 2 (oldest-first: m1=1, m2=2). Its ENVELOPE
+            # subject (index 1) must be an ASCII RFC 2047 encoded-word.
+            envelope = result[2]["ENVELOPE"]
+            subject = envelope[1]
+            subject_s = subject.decode() if isinstance(subject, bytes) else str(subject)
+            self.assertIn("=?", subject_s)  # RFC 2047 encoded-word
+            self.assertTrue(all(ord(c) < 128 for c in subject_s))
+            # And it decodes back to the original Subject.
+            from email.header import decode_header, make_header
+
+            self.assertEqual(str(make_header(decode_header(subject_s))), self.UNICODE_SUBJECT)
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_fetch_full_envelope_specific_unicode_message(self):
+        # A direct ENVELOPE fetch of just the unicode message (a client opening it).
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"INBOX")
+            result = yield proto.fetchEnvelope("2")
+            envelope = result[2]["ENVELOPE"]
+            # from (index 2) is a list of (name, source-route, mailbox, host); the
+            # display-name carries the encoded-word, the mailbox/host stay ASCII.
+            from_field = envelope[2]
+            flat = repr(from_field)
+            self.assertIn("=?", flat)
+            self.assertIn("elodie", flat)
+        finally:
+            yield proto.logout()
+
+
 if __name__ == "__main__":
     unittest.main()
