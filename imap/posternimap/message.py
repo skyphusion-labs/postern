@@ -41,7 +41,7 @@ from twisted.mail import imap4
 
 from .client import Message, MessageSummary
 from .measure import Meter
-from .rfc822 import envelope_headers, render_rfc822
+from .rfc822 import _to_wire, envelope_headers, render_rfc822
 
 # Header names the summary can answer authoritatively WITHOUT a body fetch: the
 # ones the store carries, plus the four the store never has (Cc/Bcc/Sender/Reply-To
@@ -184,7 +184,11 @@ class PosternIMAPMessage:
                 # headers.get("subject"); _formatHeaders title-cases for output).
                 # Returning upper-cased keys (the pre-#102 behaviour) silently
                 # produced blank ENVELOPEs for clients that FETCH ENVELOPE.
-                result[key.lower()] = value
+                # _to_wire: a hydrated message's headers are already RFC 2047
+                # encoded-words (render_rfc822 -> EmailMessage), but may be FOLDED
+                # across lines; unfold + ASCII-guard so the ENVELOPE/FETCH serializer
+                # gets one safe ASCII line and never crashes the connection (#161).
+                result[key.lower()] = _to_wire(value)
         return result
 
     def getBodyFile(self) -> BytesIO:
