@@ -27,6 +27,7 @@ from twisted.python.compat import networkString
 
 from .auth import build_portal
 from .config import Config
+from .mailbox import MailboxLoadError
 
 
 class PosternIMAP4Server(imap4.IMAP4Server):
@@ -49,6 +50,57 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             )
             return
         self.sendBadResponse(tag, b"APPEND failed: " + networkString(str(failure.value)))
+        log.err(failure)
+
+    def _ebSelectWork(self, failure, cmdName, tag):  # overrides IMAP4Server._ebSelectWork
+        """Map an upstream mailbox-load failure on SELECT/EXAMINE to a tagged NO (#144).
+
+        Twisted's stock _ebSelectWork answers every SELECT-path failure with a tagged
+        BAD 'Server error' and log.err()s the traceback. A transient store/auth blip on
+        the lazy load (`_ensure_loaded`, surfaced via getMessageCount in _cbSelectWork)
+        is not a protocol error: it should degrade to a clean tagged NO with an
+        [UNAVAILABLE] hint (RFC 5530) the client can retry, with no noisy traceback. A
+        MailboxLoadError gets that treatment; any other (genuinely unexpected) failure
+        keeps the stock BAD + log so real defects stay loud. Name-unmangled single
+        underscore, so this is a plain override; if a future Twisted renames it the
+        response simply degrades to the stock BAD (no crash, SELECT still fails).
+        """
+        if failure.check(MailboxLoadError):
+            self.sendNegativeResponse(
+                tag,
+                b"[UNAVAILABLE] " + cmdName + b" failed: " + networkString(str(failure.value)),
+            )
+            return
+        self.sendBadResponse(tag, cmdName + b" failed: Server error")
+        log.err(failure)
+
+    def _IMAP4Server__ebStatus(self, failure, tag, box):  # overrides IMAP4Server.__ebStatus
+        """Fix the STATUS error path: bytes-safe response + upstream-error -> NO (#143).
+
+        Twisted 26.4.0's __ebStatus builds `b"STATUS " + box + ...` where `box` is a
+        str (the parsed mailbox name), so a STATUS whose backend call FAILS raises
+        `TypeError: can't concat str to bytes` inside the errback -- an unhandled error
+        on a hostile/buggy client's malformed or failing STATUS. We rebuild the response
+        with bytes throughout (encode the box name as imap4-utf-7, matching __cbStatus),
+        and additionally map our transient mailbox-load failure (MailboxLoadError, e.g. a
+        stale read token / upstream 5xx surfaced via requestStatus) to a clean tagged NO
+        with an [UNAVAILABLE] hint instead of a BAD. Any other failure keeps a bytes-safe
+        BAD + log so unexpected defects stay loud. Name-mangled like __ebAppend; if a
+        future Twisted renames the handler the override stops applying and STATUS simply
+        falls back to the library default (the command still fails -- no silent loss)."""
+        box_bytes = box.encode("imap4-utf-7") if isinstance(box, str) else box
+        if failure.check(MailboxLoadError):
+            self.sendNegativeResponse(
+                tag,
+                b"[UNAVAILABLE] STATUS "
+                + box_bytes
+                + b" failed: "
+                + networkString(str(failure.value)),
+            )
+            return
+        self.sendBadResponse(
+            tag, b"STATUS " + box_bytes + b" failed: " + networkString(str(failure.value))
+        )
         log.err(failure)
 
 

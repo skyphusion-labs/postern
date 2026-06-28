@@ -57,7 +57,7 @@ from zope.interface import implementer
 
 from twisted.mail import imap4
 
-from .client import MessageSummary, PosternClient
+from .client import MessageSummary, PosternClient, PosternError
 from .measure import Meter
 from .message import PosternIMAPMessage
 
@@ -82,6 +82,20 @@ class AppendRejectedError(imap4.MailboxException):
     A MailboxException so the server maps it to a tagged NO (see server.py): the
     client learns the save did not persist instead of the message being silently
     dropped with a fake OK (RFC 3501 / audit F11)."""
+
+
+class MailboxLoadError(imap4.MailboxException):
+    """The mailbox snapshot could not be loaded from the Postern read API (#144).
+
+    Raised when the lazy SELECT/STATUS load (`_ensure_loaded`) hits an upstream
+    failure -- a 401 (stale read token), a 5xx, or a transport error. Carried as a
+    MailboxException so the server maps it to a clean tagged IMAP NO with a transient
+    [UNAVAILABLE] hint (see server.py), instead of letting the raw PosternError
+    propagate through Twisted's SELECT/STATUS callbacks as an unhandled error -- a
+    client-facing BAD 'Server error' plus a logged traceback (#143/#144). The text
+    is generic and transient (never the token or internal detail), and the snapshot
+    stays unloaded so a later command re-attempts the load: the failure is transient,
+    not sticky. Distinct from 'no such mailbox' (that path returns None in select)."""
 
 
 @implementer(imap4.IMailbox)
@@ -156,44 +170,55 @@ class PosternMailbox:
         # Measure the cold sync: how many pages/summaries a SELECT pulls and how often
         # the window cap truncates a real mailbox (validates POSTERN_IMAP_WINDOW=500 as
         # a "measurement-informed" floor). Counts/sizes only, never message content.
-        with self._meter.timed("cold_sync", direction=self._direction or "all") as span:
-            items: List[MessageSummary] = []
-            cursor: Optional[str] = None
-            pages = 0
-            while True:
-                page = self._client.list_messages(
-                    direction=self._direction, limit=self._page_size, cursor=cursor
+        try:
+            with self._meter.timed("cold_sync", direction=self._direction or "all") as span:
+                items: List[MessageSummary] = []
+                cursor: Optional[str] = None
+                pages = 0
+                while True:
+                    page = self._client.list_messages(
+                        direction=self._direction, limit=self._page_size, cursor=cursor
+                    )
+                    items.extend(page.items)
+                    pages += 1
+                    cursor = page.cursor
+                    if not cursor:
+                        break
+                # The API returns newest-first by (date DESC, id DESC). IMAP UIDs must ascend
+                # with ARRIVAL, which is the store's insertion key (uid == rowid), NOT date:
+                # sort by uid ascending so a backdated arrival lands LAST instead of shifting
+                # every higher UID (fault F9). Treating uid as a stable, never-reused UID is
+                # safe while the proxy is read-only (no deletes free a rowid); migration 0005
+                # (AUTOINCREMENT) makes never-reuse total -- see the module docstring.
+                items.sort(key=lambda s: s.uid)
+                n = len(items)
+                self._newest_uid = items[-1].uid if items else 0
+                self._newest_id = items[-1].message_id if items else None
+                if self._window and n > self._window:
+                    # Show only the most-recent window (the highest uids); older mail stays
+                    # reachable via All or by raising the window.
+                    self._summaries = items[n - self._window:]
+                else:
+                    self._summaries = items
+                self._loaded = True
+                span.set(
+                    pages=pages,
+                    collected=n,
+                    presented=len(self._summaries),
+                    window=self._window,
+                    windowed=bool(self._window and n > self._window),
+                    newest_uid=self._newest_uid,
                 )
-                items.extend(page.items)
-                pages += 1
-                cursor = page.cursor
-                if not cursor:
-                    break
-            # The API returns newest-first by (date DESC, id DESC). IMAP UIDs must ascend
-            # with ARRIVAL, which is the store's insertion key (uid == rowid), NOT date:
-            # sort by uid ascending so a backdated arrival lands LAST instead of shifting
-            # every higher UID (fault F9). Treating uid as a stable, never-reused UID is
-            # safe while the proxy is read-only (no deletes free a rowid); migration 0005
-            # (AUTOINCREMENT) makes never-reuse total -- see the module docstring.
-            items.sort(key=lambda s: s.uid)
-            n = len(items)
-            self._newest_uid = items[-1].uid if items else 0
-            self._newest_id = items[-1].message_id if items else None
-            if self._window and n > self._window:
-                # Show only the most-recent window (the highest uids); older mail stays
-                # reachable via All or by raising the window.
-                self._summaries = items[n - self._window:]
-            else:
-                self._summaries = items
-            self._loaded = True
-            span.set(
-                pages=pages,
-                collected=n,
-                presented=len(self._summaries),
-                window=self._window,
-                windowed=bool(self._window and n > self._window),
-                newest_uid=self._newest_uid,
-            )
+        except PosternError as exc:
+            # An upstream store/auth failure (401 stale read token, 5xx, or a transport
+            # error) must degrade to a clean tagged IMAP NO, not propagate unhandled as
+            # a BAD 'Server error' + traceback (#144). Re-raise as a MailboxException the
+            # server maps to NO; the snapshot stays unloaded (nothing above was assigned
+            # before the raise), so a later command re-attempts the load. The text is
+            # generic and transient -- never the token or any internal detail.
+            raise MailboxLoadError(
+                "mailbox temporarily unavailable; please retry"
+            ) from exc
 
     def _refresh(self) -> int:
         """Append any new arrivals to the snapshot; return how many were added.

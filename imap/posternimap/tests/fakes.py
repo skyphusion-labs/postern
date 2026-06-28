@@ -139,3 +139,26 @@ class FakeTransport:
             if q in m.get("subject", "").lower() or q in m.get("bodyText", "").lower()
         ]
         return 200, json.dumps({"ok": True, "items": hits, "cursor": None}).encode()
+
+
+class ErrorTransport:
+    """A transport that answers every Postern API call with a fixed error status.
+
+    Drives the mailbox lazy-load path (SELECT/STATUS -> _ensure_loaded) into its
+    upstream-error branch: status 401 -> PosternAuthError, any other >=400 ->
+    PosternError, mirroring the real client._get mapping. `expected_token` is carried
+    only for parity with FakeTransport (the e2e harness short-circuits auth via its
+    verify lambda, so LOGIN still succeeds and the failure surfaces on the store read,
+    exactly like the #143/#144 production traces). `calls` records the attempts so a
+    test can assert the load was actually retried after a transient failure.
+    """
+
+    def __init__(self, status: int = 401, *, expected_token: Optional[str] = "tok") -> None:
+        self.status = status
+        self.expected_token = expected_token
+        self.calls: List[str] = []
+
+    def __call__(self, req):
+        self.calls.append(req.full_url)
+        body = json.dumps({"ok": False, "error": "injected"}).encode()
+        return self.status, body
