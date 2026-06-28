@@ -150,6 +150,17 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
   error. Build it with `go build -tags pam` (needs libpam headers) and add a PAM
   service file (default `/etc/pam.d/postern`).
 
+> **Container deploys use `AUTH_BACKEND=ldap` (search+bind), never `system`/PAM.**
+> The published image (`ghcr.io/skyphusion-labs/postern-relay`) is cgo-free, so the
+> `system`/PAM backend is not compiled in; PAM stays a host (`-tags pam`) build. On
+> the fleet the door uses **search+bind**, not simple-bind, because the relay
+> enforces `From == mail` and so MUST read the `mail` attribute (search+bind reads
+> it with a low-privilege service account; simple-bind would depend on a bound user
+> self-reading `mail`), and because the `memberOf=mail-users` **authorization gate**
+> lives in the search filter (simple-bind drops it, so any directory account could
+> send). See `docs/AUTH-CONTRACT.md` section 5b ("the contract shape") and
+> `imap/DEPLOY.md`; the two doors share one login by design (#75).
+
 ### Online brute-force throttle (`AUTH_THROTTLE_*`, #105)
 
 PBKDF2 + dummy-hash timing equalization defeat OFFLINE cracking and user
@@ -232,6 +243,23 @@ See `skyphusion-email-relay.env.example` for every variable. Quick inbound test:
 swaks --server 127.0.0.1:2525 --from cron@skyphusion.org \
       --to you@example.com --header "Subject: relay test" --body "hello"
 ```
+
+## Install (container / Swarm)
+
+The relay also ships as a versioned image, built + pushed by
+`.github/workflows/relay-image.yml` to `ghcr.io/skyphusion-labs/postern-relay`
+(bare git short-SHA tag, pin that, not `latest`). The image is cgo-free
+(`CGO_ENABLED=0`), runs non-root (uid 10001), and `setcap`s the binary so it binds
+the privileged submission port without root. `docker-entrypoint.sh` expands `*_FILE`
+secrets (`POSTERN_SEND_TOKEN`, `POSTERN_TRANSPORT_TOKEN`, `EMAIL_RELAY_TOKEN`,
+`SMTP_OUT_PASSWORD`, `LDAP_BIND_PASSWORD`) from their mount paths; the TLS cert/key
+are read as PATHs directly (`SUBMISSION_TLS_CERT` / `_KEY`).
+
+Container deploys use **`AUTH_BACKEND=ldap` (search+bind)** -- the cgo-free image
+has no `system`/PAM backend (see the auth-backend note above). The fleet Swarm
+stack + secret wiring live in `fleet-chezmoi` (`postern-submission.stack.yml`); the
+door binds its private VLAN address only (e.g. `10.1.1.2:587`), never `0.0.0.0`. The
+PROXY-protocol edge contract (the L4 LB in front) is `docs/PROXY-PROTOCOL.md`.
 
 ## Files
 
