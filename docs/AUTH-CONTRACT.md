@@ -197,6 +197,8 @@ verbatim; do not rename per component.
 | `POSTERN_API_URL` | Python proxy | the Postern store origin the proxy reads. |
 | `LDAP_URL` | both | `ldap://10.1.1.2:389` (+ `10.1.1.3` failover); `ldaps://dischord.internal:636` when TLS is provisioned. |
 | `LDAP_STARTTLS` | both | upgrade an `ldap://` conn before binding (needs section 6). |
+| `LDAP_TLS_CA` | Go (today); Python (follow-on) | PEM CA bundle to trust the directory cert; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots). The crew-ownable alternative to provisioning 636 + a chained cert (section 6): pin the outpost's existing self-signed CA, no IdP mutation. Strict verification against a pinned root, never an insecure-skip. |
+| `LDAP_TLS_SERVER_NAME` | Go (today); Python (follow-on) | name verified against the cert SANs; set when `LDAP_URL` dials an IP (e.g. `10.1.1.2`) but the cert names a host. Defaults to the `LDAP_URL` host. Required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). |
 | `LDAP_BIND_DN_TEMPLATE` | both | simple-bind DN template: **`cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io`**. |
 | `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | both | search+bind service account DN + password. DN: **`cn=postern-mail-ro,ou=users,dc=ldap,dc=goauthentik,dc=io`** (staged). |
 | `LDAP_SEARCH_BASE` | both | **`ou=users,dc=ldap,dc=goauthentik,dc=io`**. |
@@ -217,19 +219,40 @@ relay (`relay/config.go` + `relay/auth_ldap.go`) and Python proxy
 (`imap/posternimap/config.py` + `imap/posternimap/auth.py`). The Python side rejects
 a negative value (`LDAP_TIMEOUT must be >= 0`).
 
-## 6. TLS-to-directory (only for direct-LDAP on the fleet) -- GATED
+## 6. TLS-to-directory (only for direct-LDAP on the fleet)
 
-The outpost publishes `10.1.1.2:389` (plaintext) only. The direct-LDAP backend
-requires TLS. To enable it on the fleet (NOT needed for the PAM path):
+The outpost publishes `10.1.1.2:389` (plaintext) only, and the direct-LDAP backend
+requires TLS. There are two ways to satisfy that; the first is crew-ownable today.
+
+### 6a. CA-pin (crew-ownable, no IdP mutation) -- BUILT (Go door)
+
+Authentik's LDAP outpost already serves StartTLS on 389 with a SELF-SIGNED cert.
+Pin that cert's CA in the Go door instead of trusting it via the public roots:
+
+1. Export the outpost CA (PEM) and seed it as a swarm secret (e.g.
+   `postern_ldap_ca`), mounted at a path.
+2. Set `LDAP_URL=ldap://10.1.1.2:389` + `LDAP_STARTTLS=true`,
+   `LDAP_TLS_CA=/run/secrets/postern_ldap_ca`, and
+   `LDAP_TLS_SERVER_NAME=<the outpost cert name>` (the dial is by IP, so the
+   verified name must be set explicitly; go-ldap's StartTLS does not derive it).
+
+The pinned CA becomes the ONLY trust anchor (an exact pin, not added to the system
+roots): strict verification against a private root, never an insecure-skip. This
+needs NO IdP-stack change and is strictly more secure than the IMAP proxy's current
+`CERT_NONE` (#153); that door can adopt the same `LDAP_TLS_CA` trust as a follow-on.
+
+### 6b. Provision 636 + a chained cert (later hardening, retires #87/#153) -- GATED
 
 1. Issue an internal cert with SAN `dischord.internal` (+ `10.1.1.2`); a real cert
    via DNS-01 against the Cloudflare DNS API for an internal name is cleanest.
 2. Bind a certificate-keypair to the Authentik LDAP provider and publish 636 (or
    enable StartTLS on 389): an edit to `system/stacks/dischord/auth/` (compose port
    map + provider config) -- an **IdP-stack change, supervised**.
-3. Point `LDAP_URL` at `ldaps://dischord.internal:636`.
+3. Point `LDAP_URL` at `ldaps://dischord.internal:636`; no relay code change.
 
-This is deliberately deferred; PAM needs none of it.
+6b is the cleaner long-term shape (it retires #87/#153 for BOTH doors) but is a
+Conrad-gated IdP mutation; 6a unblocks the Go door's Wave-B logins without it. PAM
+(section 3a) needs neither.
 
 ## 7. Token / secret inventory (by function, by location)
 

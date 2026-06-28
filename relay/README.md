@@ -141,7 +141,12 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
 - **ldap**: simple-bind (`LDAP_BIND_DN_TEMPLATE`) or search+bind (`LDAP_BIND_DN` +
   `LDAP_SEARCH_BASE` + `LDAP_SEARCH_FILTER`) over TLS (`ldaps://` or
   `LDAP_STARTTLS=true`). Bound identity = the `LDAP_MAIL_ATTR` attribute (default
-  `mail`). Pure-Go (`go-ldap`), no cgo. `LDAP_TIMEOUT` (seconds, default 10) bounds
+  `mail`). To trust a private directory CA (e.g. an Authentik outpost self-signed
+  CA) without weakening verification, set `LDAP_TLS_CA` (a PEM bundle that becomes
+  the ONLY trust anchor, an exact pin) and `LDAP_TLS_SERVER_NAME` (the name verified
+  against the cert SANs; needed when the URL dials an IP, default = the URL host).
+  This is strict verification against a pinned root, never an insecure-skip. Pure-Go
+  (`go-ldap`), no cgo. `LDAP_TIMEOUT` (seconds, default 10) bounds
   the directory dial AND each bind/search so a dead or slow directory cannot hang a
   login; symmetric with the Python IMAP proxy's `ldap` mode (#88).
 - **system**: local Unix accounts via PAM. Bound identity = `<user>@AUTH_SYSTEM_DOMAIN`.

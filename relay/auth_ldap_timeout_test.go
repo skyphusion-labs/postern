@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ func TestLDAPAuth_TimeoutWiredToDialer(t *testing.T) {
 
 	var got time.Duration
 	called := false
-	ldapDial = func(url string, timeout time.Duration) (ldapConn, error) {
+	ldapDial = func(url string, timeout time.Duration, _ *tls.Config) (ldapConn, error) {
 		called = true
 		got = timeout
 		return &fakeLDAP{
