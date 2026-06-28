@@ -516,7 +516,7 @@ class ProxyOverTLSChainTest(unittest.TestCase):
         self._dir.cleanup()
 
     def test_proxy_then_tls_engages_handshake(self):
-        from OpenSSL import SSL
+        import ssl as stdssl
         from twisted.internet.address import IPv4Address
         from twisted.internet.task import Clock
         from twisted.internet.testing import StringTransport
@@ -543,14 +543,23 @@ class ProxyOverTLSChainTest(unittest.TestCase):
         st = StringTransport(peerAddress=IPv4Address("TCP", "127.0.0.1", 5000))
         proto.makeConnection(st)
 
-        # A real TLS ClientHello from a memory-BIO client.
-        client = SSL.Connection(SSL.Context(SSL.TLS_METHOD), None)
-        client.set_connect_state()
+        # A real TLS ClientHello from a stdlib memory-BIO client. PROTOCOL_TLS_CLIENT
+        # is the recommended secure constant (no deprecated SSLv2/SSLv3/TLSv1/TLSv1.1),
+        # and the 1.2 floor matches the server floor _build_tls_context_factory enforces
+        # (#106), so only TLS 1.2+ is ever offered. Verification is off: this client
+        # only needs to emit a ClientHello to drive the server handshake through the
+        # wrapper, not to trust the self-signed test cert.
+        client_ctx = stdssl.SSLContext(stdssl.PROTOCOL_TLS_CLIENT)
+        client_ctx.minimum_version = stdssl.TLSVersion.TLSv1_2
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = stdssl.CERT_NONE
+        incoming, outgoing = stdssl.MemoryBIO(), stdssl.MemoryBIO()
+        client = client_ctx.wrap_bio(incoming, outgoing, server_hostname="postern.test")
         try:
             client.do_handshake()
-        except SSL.WantReadError:
+        except stdssl.SSLWantReadError:
             pass
-        client_hello = client.bio_read(65536)
+        client_hello = outgoing.read()
 
         header = b"PROXY TCP4 198.51.100.7 203.0.113.1 4444 993\r\n"
         proto.dataReceived(header + client_hello)
