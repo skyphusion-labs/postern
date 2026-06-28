@@ -321,7 +321,7 @@ class PosternMailbox:
         )
 
     def fetch(self, messages, uid):
-        """Yield (sequenceNumber, PosternIMAPMessage) for the requested set.
+        """Return a list of (sequenceNumber, PosternIMAPMessage) for the requested set.
 
         `messages` is a twisted MessageSet. When uid is true the set is in UIDs (the
         store rowids -- sparse and not derivable from the sequence number), so we map
@@ -329,7 +329,22 @@ class PosternMailbox:
         the set is in sequence numbers. The untagged FETCH always keys on the
         sequence number (Twisted adds the UID as a data item via getUID); bodies
         hydrate lazily per message.
+
+        This MUST return a materialized list, not a generator: Twisted's IMAP4Server
+        consumes IMailbox.fetch in two incompatible ways. do_FETCH wraps the result in
+        iter() before pulling with next(), so a generator is fine there; but because
+        this mailbox is not ISearchableMailbox, do_SEARCH takes the manual-search
+        fallback __cbManualSearch, whose first line subscripts the result
+        (result[-1][0]) and which later slices it (result[5:]). A generator cannot be
+        subscripted ('generator' object is not subscriptable), which surfaces to the
+        client as `BAD [SEARCH failed: ...]`. A list satisfies both paths. Materializing
+        only builds the lazy message wrappers (see _wrap); it fires no body GETs, so an
+        ENVELOPE-only scan stays body-free.
         """
+        return list(self._iter_fetch(messages, uid))
+
+    def _iter_fetch(self, messages, uid):
+        """The fetch body as a generator; fetch() materializes it (see fetch docstring)."""
         self._ensure_loaded()
         n = len(self._summaries)
         if n == 0:
