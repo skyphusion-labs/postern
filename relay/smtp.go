@@ -318,17 +318,32 @@ func startSubmission(cfg Config, listeners []submissionListener, errc chan error
 	if cfg.Submission.Throttle.Enabled {
 		log.Printf("submission auth throttle: per-account lockout after %d failures (#105)", cfg.Submission.Throttle.MaxFailures)
 	}
+	proxyCfg := cfg.Submission.ProxyProtocol
+	if proxyCfg.enabled() {
+		log.Printf("submission PROXY protocol = %s (%d trusted CIDR(s), real client IP recovered for logging + #105) (#155)", proxyCfg.Mode, len(proxyCfg.Trusted))
+	}
 
 	for _, l := range listeners {
 		srv := newSubmissionServer(be, tlsCfg, cfg)
 		srv.Addr = l.Addr
+
+		// Listen on the raw TCP socket ourselves so the PROXY header is read off the
+		// front of the stream BEFORE any TLS handshake. The wrap is a no-op when
+		// PROXY protocol is off, so the default deploy is unchanged. For implicit
+		// TLS we then layer tls.NewListener exactly as go-smtp's ListenAndServeTLS
+		// would; for STARTTLS go-smtp upgrades the (already PROXY-stripped) conn.
+		ln, err := net.Listen("tcp", l.Addr)
+		if err != nil {
+			return fmt.Errorf("submission listen %s: %w", l.Addr, err)
+		}
+		ln = wrapProxyListener(ln, proxyCfg)
 		if l.Implicit {
+			ln = tls.NewListener(ln, tlsCfg)
 			log.Printf("submission (implicit TLS) listening on %s", l.Addr)
-			go func(s *smtp.Server) { errc <- s.ListenAndServeTLS() }(srv)
 		} else {
 			log.Printf("submission (STARTTLS) listening on %s", l.Addr)
-			go func(s *smtp.Server) { errc <- s.ListenAndServe() }(srv)
 		}
+		go func(s *smtp.Server, ln net.Listener) { errc <- s.Serve(ln) }(srv, ln)
 	}
 	return nil
 }
