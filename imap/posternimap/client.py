@@ -15,6 +15,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .measure import Meter
+
 # Identify the proxy to the Postern API. The default urllib User-Agent
 # ("Python-urllib/x.y") is a known-bot signature that Cloudflare blocks with HTTP
 # 403 "error code: 1010" (browser-signature ban) in front of the worker, which would
@@ -148,10 +150,20 @@ class PosternClient:
     Postern API token sent as Authorization: Bearer. The token is never logged.
     """
 
-    def __init__(self, base_url: str, token: str, timeout: float = 15.0, transport: Any = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        timeout: float = 15.0,
+        transport: Any = None,
+        meter: Optional[Meter] = None,
+    ) -> None:
         self._base = base_url.rstrip("/")
         self._token = token
         self._transport = transport or _UrllibTransport(timeout)
+        # A disabled Meter by default: all measurement hooks are no-ops unless an
+        # enabled meter is injected (POSTERN_IMAP_MEASURE, threaded in from the account).
+        self._meter = meter or Meter(False)
 
     # --- API surface (mirrors CONTRACT section 4 read half) ---
 
@@ -230,7 +242,12 @@ class PosternClient:
         req.add_header("Authorization", f"Bearer {self._token}")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", USER_AGENT)
-        status, raw = self._transport(req)
+        # Measure only the transport round-trip (the blocking-urllib I/O cost). The
+        # path is the API endpoint, never a token or message content; on a transport
+        # error the timed block still records the latency it took to fail.
+        with self._meter.timed("api_request", path=path) as span:
+            status, raw = self._transport(req)
+            span.set(status=status, bytes=len(raw))
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
         if status >= 400:

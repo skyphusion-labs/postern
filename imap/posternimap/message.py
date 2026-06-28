@@ -40,6 +40,7 @@ from zope.interface import implementer
 from twisted.mail import imap4
 
 from .client import Message, MessageSummary
+from .measure import Meter
 from .rfc822 import envelope_headers, render_rfc822
 
 # Header names the summary can answer authoritatively WITHOUT a body fetch: the
@@ -68,11 +69,15 @@ class PosternIMAPMessage:
         uid: int,
         seq: int,
         hydrate: Callable[[], Optional[Message]],
+        meter: Optional[Meter] = None,
     ) -> None:
         self._summary = summary
         self._uid = uid
         self._seq = seq
         self._hydrate_cb = hydrate
+        # A disabled Meter by default: the hydrate hook is a no-op unless an enabled
+        # meter is injected (threaded in from the mailbox / account).
+        self._meter = meter or Meter(False)
         self._loaded = False
         self._rendered: bytes = b""
         self._parsed: Optional[PyMessage] = None
@@ -103,12 +108,19 @@ class PosternIMAPMessage:
     def _hydrate(self) -> None:
         if self._loaded:
             return
-        full = self._hydrate_cb()
-        if full is None:
-            full = self._placeholder()
-        self._rendered = render_rfc822(full)
-        self._parsed = email.message_from_bytes(self._rendered)
-        self._loaded = True
+        # One @measure line per body ACTUALLY fetched: an ENVELOPE / header scan that
+        # stays body-free never reaches here, so a "FETCH 1:* ENVELOPE" over the window
+        # emits zero hydrate lines -- the #102 lazy-hydration claim, made checkable.
+        # uid + rendered size only, never the body itself.
+        with self._meter.timed("hydrate", uid=self._uid) as span:
+            full = self._hydrate_cb()
+            placeholder = full is None
+            if full is None:
+                full = self._placeholder()
+            self._rendered = render_rfc822(full)
+            self._parsed = email.message_from_bytes(self._rendered)
+            self._loaded = True
+            span.set(bytes=len(self._rendered), placeholder=placeholder)
 
     # --- IMessage ---
 
