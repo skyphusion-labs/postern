@@ -17,7 +17,7 @@ except ImportError:
     HAVE_TWISTED = False
 
 from posternimap.client import PosternClient
-from posternimap.tests.fakes import FakeTransport, make_message
+from posternimap.tests.fakes import ErrorTransport, FakeTransport, make_message
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
@@ -448,3 +448,68 @@ class AccountTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class MailboxLoadErrorTest(unittest.TestCase):
+    """#144: an upstream store/auth failure on the lazy load must raise the typed
+    MailboxLoadError (a MailboxException the server maps to a tagged NO), not let a
+    raw PosternError/PosternAuthError escape -- and must leave the snapshot unloaded
+    so a later command re-attempts the load."""
+
+    def _mailbox(self, status):
+        from posternimap.mailbox import PosternMailbox
+
+        transport = ErrorTransport(status=status)
+        client = PosternClient("https://x", "tok", transport=transport)
+        return PosternMailbox(client, page_size=2), transport
+
+    def test_401_load_raises_mailbox_load_error(self):
+        from posternimap.mailbox import MailboxLoadError
+
+        mb, _ = self._mailbox(401)
+        with self.assertRaises(MailboxLoadError):
+            mb.getMessageCount()
+
+    def test_5xx_load_raises_mailbox_load_error(self):
+        from posternimap.mailbox import MailboxLoadError
+
+        mb, _ = self._mailbox(503)
+        with self.assertRaises(MailboxLoadError):
+            mb.getMessageCount()
+
+    def test_load_error_message_is_generic_and_transient(self):
+        # The client-facing text must not leak the token or internal detail; it is a
+        # generic, retry-appropriate hint (the server prepends the [UNAVAILABLE] code).
+        from posternimap.mailbox import MailboxLoadError
+
+        mb, _ = self._mailbox(401)
+        try:
+            mb.getMessageCount()
+            self.fail("expected MailboxLoadError")
+        except MailboxLoadError as exc:
+            text = str(exc).lower()
+            self.assertIn("temporarily unavailable", text)
+            self.assertNotIn("token", text)
+
+    def test_snapshot_stays_unloaded_so_a_retry_reattempts(self):
+        # First load fails (snapshot unloaded); a STATUS/SELECT retry must hit the API
+        # again rather than caching the failure -- the failure is transient, not sticky.
+        from posternimap.mailbox import MailboxLoadError
+
+        mb, transport = self._mailbox(401)
+        with self.assertRaises(MailboxLoadError):
+            mb.getMessageCount()
+        first = len(transport.calls)
+        with self.assertRaises(MailboxLoadError):
+            mb.requestStatus(["MESSAGES"])
+        self.assertGreater(len(transport.calls), first)
+
+    def test_requestStatus_propagates_load_error(self):
+        # requestStatus is the STATUS entry point (#143); it must surface the typed
+        # error so the server's __ebStatus override maps it to a NO.
+        from posternimap.mailbox import MailboxLoadError
+
+        mb, _ = self._mailbox(500)
+        with self.assertRaises(MailboxLoadError):
+            mb.requestStatus(["MESSAGES", "UIDNEXT"])

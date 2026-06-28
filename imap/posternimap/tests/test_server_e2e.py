@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover
     twisted_unittest = unittest  # type: ignore
 
 from posternimap.config import Config
-from posternimap.tests.fakes import FakeTransport, make_message
+from posternimap.tests.fakes import ErrorTransport, FakeTransport, make_message
 
 
 def _patched_factory(cfg, transport):
@@ -237,6 +237,95 @@ class ServerE2ETest(twisted_unittest.TestCase):
             self.assertEqual(sorted(int(n) for n in uids), [1, 2, 3])
         finally:
             yield proto.logout()
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerErrorPathE2ETest(twisted_unittest.TestCase):
+    """#143/#144 over the wire: a failing upstream store read on SELECT or STATUS must
+    return a clean tagged NO (no server-side TypeError, no unhandled traceback), not a
+    BAD 'Server error' or a str/bytes crash in __ebStatus."""
+
+    def _spin(self, status):
+        transport = ErrorTransport(status=status)
+        cfg = Config(
+            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+        )
+        factory, restore = _patched_factory(cfg, transport)
+        port = reactor.listenTCP(0, factory, interface="127.0.0.1")
+        self._restore = restore
+        self._port = port
+        return port.getHost(), transport
+
+    def tearDown(self):
+        cls, attr, orig = self._restore
+        setattr(cls, attr, orig)
+        return self._port.stopListening()
+
+    @defer.inlineCallbacks
+    def _client(self, addr):
+        cc = ClientCreator(reactor, imap4.IMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", addr.port)
+        defer.returnValue(proto)
+
+    @defer.inlineCallbacks
+    def test_select_upstream_401_returns_tagged_no(self):
+        # #144: SELECT INBOX with a stale read token (upstream 401) must be a tagged NO
+        # the client can retry, not a BAD 'Server error' + logged traceback.
+        addr, _ = self._spin(401)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent", b"tok")
+            d = proto.select(b"INBOX")
+            exc = yield self.assertFailure(d, imap4.IMAP4Exception)
+            msg = str(exc)
+            self.assertIn("UNAVAILABLE", msg)
+            self.assertIn("temporarily unavailable", msg)
+            self.assertNotIn("Server error", msg)
+        finally:
+            yield proto.transport.loseConnection()
+
+    @defer.inlineCallbacks
+    def test_select_upstream_5xx_returns_tagged_no(self):
+        addr, _ = self._spin(503)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent", b"tok")
+            d = proto.select(b"INBOX")
+            exc = yield self.assertFailure(d, imap4.IMAP4Exception)
+            self.assertIn("UNAVAILABLE", str(exc))
+        finally:
+            yield proto.transport.loseConnection()
+
+    @defer.inlineCallbacks
+    def test_status_upstream_error_returns_tagged_no_no_crash(self):
+        # #143: STATUS INBOX whose backend read FAILS must NOT trip the Twisted 26.4.0
+        # __ebStatus str/bytes TypeError; it returns a clean tagged NO. (Pre-fix this
+        # raised `can't concat str to bytes` in the errback and produced no clean
+        # response.) Trial fails the test if any error is logged and unflushed, which is
+        # exactly the "no unhandled traceback" guarantee the issue asks for.
+        addr, _ = self._spin(401)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent", b"tok")
+            d = proto.status(b"INBOX", "MESSAGES", "UIDNEXT")
+            exc = yield self.assertFailure(d, imap4.IMAP4Exception)
+            msg = str(exc)
+            self.assertIn("UNAVAILABLE", msg)
+            self.assertIn("STATUS", msg)
+        finally:
+            yield proto.transport.loseConnection()
+
+    @defer.inlineCallbacks
+    def test_status_5xx_returns_tagged_no(self):
+        addr, _ = self._spin(502)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent", b"tok")
+            d = proto.status(b"INBOX", "MESSAGES")
+            exc = yield self.assertFailure(d, imap4.IMAP4Exception)
+            self.assertIn("UNAVAILABLE", str(exc))
+        finally:
+            yield proto.transport.loseConnection()
 
 
 if __name__ == "__main__":
