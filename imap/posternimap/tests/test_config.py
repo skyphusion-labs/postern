@@ -229,5 +229,63 @@ class SystemModeConfigTest(unittest.TestCase):
             Config.from_env(e)
 
 
+class ProxyProtocolConfigTest(unittest.TestCase):
+    """PROXY protocol env plumbing (#155): names + validation match the Go door."""
+
+    def _cfg(self, **over):
+        env = {"POSTERN_API_URL": "https://x"}
+        env.update(over)
+        return Config.from_env(env)
+
+    def test_default_off(self):
+        cfg = self._cfg()
+        self.assertEqual(cfg.proxy_protocol.mode, "off")
+        self.assertFalse(cfg.proxy_protocol.enabled())
+        self.assertEqual(cfg.proxy_protocol.trusted, ())
+
+    def test_require_needs_trusted(self):
+        with self.assertRaises(ConfigError):
+            self._cfg(PROXY_PROTOCOL="require")
+
+    def test_optional_needs_trusted(self):
+        with self.assertRaises(ConfigError):
+            self._cfg(PROXY_PROTOCOL="optional")
+
+    def test_require_with_trusted_ok(self):
+        cfg = self._cfg(PROXY_PROTOCOL="require", PROXY_PROTOCOL_TRUSTED="10.1.0.0/16")
+        self.assertEqual(cfg.proxy_protocol.mode, "require")
+        self.assertTrue(cfg.proxy_protocol.enabled())
+        self.assertTrue(cfg.proxy_protocol.trusts("10.1.0.3"))
+        self.assertFalse(cfg.proxy_protocol.trusts("8.8.8.8"))
+
+    def test_unknown_mode_errors(self):
+        with self.assertRaises(ConfigError):
+            self._cfg(PROXY_PROTOCOL="sometimes", PROXY_PROTOCOL_TRUSTED="10.1.0.0/16")
+
+    def test_bad_cidr_errors(self):
+        with self.assertRaises(ConfigError):
+            self._cfg(PROXY_PROTOCOL="require", PROXY_PROTOCOL_TRUSTED="not-a-cidr")
+
+    def test_timeout_floored_at_one_second(self):
+        cfg = self._cfg(
+            PROXY_PROTOCOL="require",
+            PROXY_PROTOCOL_TRUSTED="10.1.0.0/16",
+            PROXY_PROTOCOL_TIMEOUT_SECONDS="0",
+        )
+        self.assertEqual(cfg.proxy_protocol.timeout, 1.0)
+
+    def test_timeout_custom(self):
+        cfg = self._cfg(
+            PROXY_PROTOCOL="optional",
+            PROXY_PROTOCOL_TRUSTED="10.1.0.0/16",
+            PROXY_PROTOCOL_TIMEOUT_SECONDS="8",
+        )
+        self.assertEqual(cfg.proxy_protocol.timeout, 8.0)
+
+    def test_mode_is_case_insensitive(self):
+        cfg = self._cfg(PROXY_PROTOCOL="REQUIRE", PROXY_PROTOCOL_TRUSTED="10.1.0.0/16")
+        self.assertEqual(cfg.proxy_protocol.mode, "require")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover
     twisted_unittest = unittest  # type: ignore
 
 from posternimap.config import Config
+from posternimap.proxyproto import ProxyProtocolConfig, parse_trusted
 from posternimap.tests.fakes import ErrorTransport, FakeTransport, make_message
 
 
@@ -336,8 +337,8 @@ class ServerEnvelopeUnicodeE2ETest(twisted_unittest.TestCase):
     RFC 2047 encoded-words. This is the exact failure that aborted Conrad's live 0.6
     measurement scan (every MUA runs `1:* (ENVELOPE ...)` on folder open)."""
 
-    UNICODE_SUBJECT = "Re: caf\u00e9 \u2026 \u65e5\u672c\u8a9e meeting"
-    UNICODE_FROM = "\u00c9lodie Caf\u00e9 \u2026 <elodie@example.com>"
+    UNICODE_SUBJECT = "Re: café … 日本語 meeting"
+    UNICODE_FROM = "Élodie Café … <elodie@example.com>"
 
     def setUp(self):
         self.msgs = [
@@ -405,6 +406,170 @@ class ServerEnvelopeUnicodeE2ETest(twisted_unittest.TestCase):
             self.assertIn("elodie", flat)
         finally:
             yield proto.logout()
+
+
+if HAVE_TWISTED:
+    class _ProxyHeaderIMAP4Client(imap4.IMAP4Client):
+        """An IMAP4 client that prepends a PROXY protocol v1 header on connect, the
+        way the L4 load balancer would. Server-speaks-first, so writing the header
+        before waiting for the greeting is correct (the wrapper strips it, then the
+        real IMAP greeting flows)."""
+
+        PROXY_HEADER = b"PROXY TCP4 198.51.100.7 203.0.113.1 4444 993\r\n"
+
+        def connectionMade(self):
+            self.transport.write(self.PROXY_HEADER)
+            imap4.IMAP4Client.connectionMade(self)
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerProxyProtocolE2ETest(twisted_unittest.TestCase):
+    """#155 over a real socket: with PROXY require + a trusted loopback source, a
+    client that prepends a v1 PROXY header logs in and selects normally. This proves
+    the header is stripped off the raw stream BEFORE the IMAP parser sees a byte (a
+    leftover header byte would corrupt the very first IMAP command), end to end with
+    real TCP segmentation -- not just the unit-level wrapper."""
+
+    def setUp(self):
+        self.msgs = [
+            make_message("m2", subject="meeting tuesday", body="lunch?"),
+            make_message("m1", subject="welcome aboard", body="hello"),
+        ]
+        self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=2)
+        # require + loopback trusted; a generous timeout that resolve() cancels the
+        # instant the (immediately-sent) header is parsed, so no callLater is left to
+        # dirty trial's reactor.
+        self.cfg = Config(
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            proxy_protocol=ProxyProtocolConfig(
+                mode="require", trusted=parse_trusted("127.0.0.0/8"), timeout=5.0
+            ),
+        )
+        factory, self._restore = _patched_factory(self.cfg, self.transport)
+        from posternimap.proxywrap import wrap_listener_factory
+
+        wrapped = wrap_listener_factory(self.cfg.proxy_protocol, factory, reactor=reactor)
+        self.port = reactor.listenTCP(0, wrapped, interface="127.0.0.1")
+        self.addr = self.port.getHost()
+
+    def tearDown(self):
+        cls, attr, orig = self._restore
+        setattr(cls, attr, orig)
+        return self.port.stopListening()
+
+    @defer.inlineCallbacks
+    def test_login_select_through_proxy_header(self):
+        cc = ClientCreator(reactor, _ProxyHeaderIMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", self.addr.port)
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            info = yield proto.select(b"INBOX")
+            self.assertEqual(info["EXISTS"], 2)
+        finally:
+            yield proto.logout()
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ProxyOverTLSChainTest(unittest.TestCase):
+    """#155 on the real 993 path (PROXY then implicit TLS): prove the composed chain
+    raw -> PROXY strip -> TLS engages a real handshake. The wrapper hands `self` to
+    the TLSMemoryBIOProtocol as its transport, so this confirms the wrapper-as-
+    transport delegation (write/registerProducer/disconnecting) works for the TLS
+    protocol too, not just the IMAP LineReceiver covered by the socket e2e above. In
+    memory (no reactor): feed a real ClientHello after the header and assert the TLS
+    server wrote a handshake response back through the wrapper."""
+
+    def setUp(self):
+        try:
+            from OpenSSL import SSL  # noqa: F401
+            from posternimap.tests.test_tls import _gen_self_signed
+        except ImportError:
+            self.skipTest("pyOpenSSL / TLS extra not installed")
+        import tempfile
+
+        from twisted.internet import reactor
+
+        self._reactor = reactor
+        # Snapshot pre-existing reactor timers so tearDown cancels ONLY the ones this
+        # in-memory test creates (a real TLS engine + the inner IMAP server schedule
+        # real-reactor calls: the TLS small-write flush and the IMAP idle timeout).
+        # We drive no real socket, so nothing here runs them; cancelling our own keeps
+        # the reactor clean for the next test without touching anyone else's timers.
+        self._pre_calls = {id(c) for c in reactor.getDelayedCalls()}
+        self._proto = None
+        self._dir = tempfile.TemporaryDirectory()
+        self.cert, self.key = _gen_self_signed(self._dir.name)
+
+    def tearDown(self):
+        from twisted.internet import protocol
+
+        if self._proto is not None:
+            # Tear the wrapper down: this propagates connectionLost into the TLS
+            # protocol and the inner IMAP server, cancelling the IMAP idle timeout.
+            self._proto.connectionLost(protocol.connectionDone)
+        for call in list(self._reactor.getDelayedCalls()):
+            if id(call) not in self._pre_calls and call.active():
+                call.cancel()
+        self._dir.cleanup()
+
+    def test_proxy_then_tls_engages_handshake(self):
+        import ssl as stdssl
+        from twisted.internet.address import IPv4Address
+        from twisted.internet.task import Clock
+        from twisted.internet.testing import StringTransport
+        from twisted.protocols.tls import TLSMemoryBIOFactory
+
+        from posternimap.proxyproto import ProxyProtocolConfig, parse_trusted
+        from posternimap.proxywrap import ProxyProtocolWrappingFactory
+        from posternimap.server import _build_tls_context_factory
+
+        msgs = [make_message("m1", subject="x", body="y")]
+        fake = FakeTransport(msgs, expected_token="tok", page_size=2)
+        cfg = Config(api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0)
+        factory, restore = _patched_factory(cfg, fake)
+        self.addCleanup(lambda: setattr(restore[0], restore[1], restore[2]))
+
+        ctx = _build_tls_context_factory(self.cert, self.key)
+        tls_factory = TLSMemoryBIOFactory(ctx, False, factory)
+        proxy_cfg = ProxyProtocolConfig(
+            mode="require", trusted=parse_trusted("127.0.0.0/8"), timeout=5.0
+        )
+        wf = ProxyProtocolWrappingFactory(proxy_cfg, tls_factory, reactor=Clock())
+        proto = wf.buildProtocol(None)
+        self._proto = proto
+        st = StringTransport(peerAddress=IPv4Address("TCP", "127.0.0.1", 5000))
+        proto.makeConnection(st)
+
+        # A real TLS ClientHello from a stdlib memory-BIO client. PROTOCOL_TLS_CLIENT
+        # is the recommended secure constant (no deprecated SSLv2/SSLv3/TLSv1/TLSv1.1),
+        # and the 1.2 floor matches the server floor _build_tls_context_factory enforces
+        # (#106), so only TLS 1.2+ is ever offered. Verification is off: this client
+        # only needs to emit a ClientHello to drive the server handshake through the
+        # wrapper, not to trust the self-signed test cert.
+        client_ctx = stdssl.SSLContext(stdssl.PROTOCOL_TLS_CLIENT)
+        client_ctx.minimum_version = stdssl.TLSVersion.TLSv1_2
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = stdssl.CERT_NONE
+        incoming, outgoing = stdssl.MemoryBIO(), stdssl.MemoryBIO()
+        client = client_ctx.wrap_bio(incoming, outgoing, server_hostname="postern.test")
+        try:
+            client.do_handshake()
+        except stdssl.SSLWantReadError:
+            pass
+        client_hello = outgoing.read()
+
+        header = b"PROXY TCP4 198.51.100.7 203.0.113.1 4444 993\r\n"
+        proto.dataReceived(header + client_hello)
+
+        # The TLS server, reached through the wrapper transport, must have written a
+        # handshake response (ServerHello, ...) back out. Empty output would mean the
+        # header was not stripped (TLS saw garbage) or the wrapper transport failed.
+        self.assertGreater(len(st.value()), 0)
+        # And the wrapper presents the recovered client to everything downstream.
+        self.assertEqual(proto.getPeer().host, "198.51.100.7")
 
 
 if __name__ == "__main__":

@@ -29,8 +29,10 @@ native/ldap/system it holds a per-function service token (see imap/DEPLOY.md).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Optional
+
+from . import proxyproto
 
 # The auth modes that authenticate the USER and then read the store with the
 # proxy-held service token (POSTERN_API_TOKEN). Kept as a set so resolve_token and
@@ -146,6 +148,18 @@ class Config:
     throttle_global_max_failures: int = 100  # aggregate failures/window before global cooldown (0 = off)
     throttle_global_window_seconds: int = 60  # aggregate window + cooldown
 
+    # --- PROXY protocol on the listener edge (#155) ---
+    # The mail edge moved to a single Hetzner L4 load balancer targeting dischord
+    # directly (no bastion). An L4 LB rewrites the source address, so the door
+    # recovers the REAL client IP from a PROXY header the LB prepends, HONORED ONLY
+    # from a trusted source (anti-spoof). Config names (PROXY_PROTOCOL /
+    # PROXY_PROTOCOL_TRUSTED / PROXY_PROTOCOL_TIMEOUT_SECONDS) are shared 1:1 with the
+    # Go 587 door per docs/PROXY-PROTOCOL.md. Default off = the listener is not
+    # wrapped at all (byte-for-byte the prior behavior). See proxyproto.py / proxywrap.py.
+    proxy_protocol: proxyproto.ProxyProtocolConfig = field(
+        default_factory=proxyproto.ProxyProtocolConfig
+    )
+
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":
         e = os.environ if env is None else env
@@ -259,6 +273,32 @@ class Config:
             if _val < 0:
                 raise ConfigError(f"{_name} must be >= 0")
 
+        # PROXY protocol (#155). Parse + validate eagerly so a misconfigured edge
+        # fails at startup, not on the first connection. Identical names + rules to
+        # the Go door (relay/config.go): an enabled mode REQUIRES a trusted set (an
+        # enabled door with no trusted source could honor no header at all), and the
+        # header-read timeout is floored at 1s.
+        proxy_mode = (e.get("PROXY_PROTOCOL") or proxyproto.OFF).strip().lower()
+        if proxy_mode not in proxyproto.MODES:
+            raise ConfigError(
+                "PROXY_PROTOCOL must be one of: " + ", ".join(proxyproto.MODES)
+            )
+        try:
+            proxy_trusted = proxyproto.parse_trusted(e.get("PROXY_PROTOCOL_TRUSTED") or "")
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        if proxy_mode in (proxyproto.OPTIONAL, proxyproto.REQUIRE) and not proxy_trusted:
+            raise ConfigError(
+                f"PROXY_PROTOCOL={proxy_mode} requires PROXY_PROTOCOL_TRUSTED "
+                "(>=1 CIDR of the trusted proxy source)"
+            )
+        proxy_timeout_secs = _int(e, "PROXY_PROTOCOL_TIMEOUT_SECONDS", 5)
+        if proxy_timeout_secs < 1:
+            proxy_timeout_secs = 1  # floored at 1s, matching the Go door
+        proxy_protocol = proxyproto.ProxyProtocolConfig(
+            mode=proxy_mode, trusted=proxy_trusted, timeout=float(proxy_timeout_secs)
+        )
+
         return cls(
             api_url=api_url,
             listen_host=(e.get("POSTERN_IMAP_HOST") or "127.0.0.1").strip(),
@@ -292,6 +332,7 @@ class Config:
             throttle_max_lockout_seconds=throttle_max_lockout_seconds,
             throttle_global_max_failures=throttle_global_max_failures,
             throttle_global_window_seconds=throttle_global_window_seconds,
+            proxy_protocol=proxy_protocol,
         )
 
 
