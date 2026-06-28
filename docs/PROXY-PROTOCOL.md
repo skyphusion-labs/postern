@@ -204,6 +204,24 @@ expected to speak the protocol correctly, so corrupt framing is a real fault, no
 something to paper over): reject the connection. This is the only place the door
 fails loud on header content; everything else degrades to the raw peer.
 
+### No header vs. truncated header (the boundary)
+
+"No header" and "truncated header" are distinguished by the SIGNATURE, and the
+distinction is the full v1 prefix (`PROXY`, 5 bytes) or the full v2 signature
+(12 bytes):
+
+- If the timeout (section 7) fires WITHOUT a complete signature having arrived
+  (the peer sent nothing, or only a partial/non-matching prefix), that is NO
+  HEADER: optional falls back to the raw peer, require rejects (a clean drop). A
+  trusted peer that sends a non-PROXY command (e.g. `EHLO`) is also "no header"
+  and is served normally in optional.
+- Once a COMPLETE signature has arrived, the peer has COMMITTED to a header. If the
+  remainder is then incomplete (a stall mid-header that trips the timeout, or a
+  v1 line with no CRLF in bound, or a v2 address block shorter than declared), that
+  is a TRUNCATED = MALFORMED header, and it is REJECTED in BOTH optional and
+  require (it is no longer "silence"). Both doors implement this identical boundary:
+  reject-on-incomplete fires only after the signature has matched.
+
 ## 7. The optional-mode latency note (server-speaks-first)
 
 SMTP and IMAP are both server-speaks-first: the server sends a greeting and the
@@ -217,8 +235,9 @@ In `optional` mode a trusted peer MAY or MAY NOT send a header. If it does, the
 bytes are there at once. If it does not (a direct trusted client), the client is
 waiting for the greeting and sends nothing, so the door cannot tell "no header"
 from "header not yet arrived" except by waiting. It waits up to
-`PROXY_PROTOCOL_TIMEOUT_SECONDS`, then treats the silence as "no header" and falls
-back to the raw peer (and finally sends its greeting). So a no-header connection
+`PROXY_PROTOCOL_TIMEOUT_SECONDS`, then treats the silence (no complete PROXY
+signature, per section 6) as "no header" and falls back to the raw peer (and
+finally sends its greeting). So a no-header connection
 in `optional` mode pays up to the timeout in added latency before its greeting.
 This is inherent to optional + server-speaks-first; production uses `require`
 (header always present) and pays no such penalty.
