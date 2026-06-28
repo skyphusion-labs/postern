@@ -201,6 +201,43 @@ class ServerE2ETest(twisted_unittest.TestCase):
         finally:
             yield proto.logout()
 
+    @defer.inlineCallbacks
+    def test_search_all_over_the_wire(self):
+        # Regression: SEARCH used to crash the server. PosternMailbox is not an
+        # ISearchableMailbox, so IMAP4Server.do_SEARCH takes its manual-search
+        # fallback (__cbManualSearch), which subscripts the IMailbox.fetch result
+        # (result[-1][0]). fetch() returned a GENERATOR, so the server raised
+        # `TypeError: 'generator' object is not subscriptable` and answered
+        # `BAD [SEARCH failed: ...]`. The fix materializes fetch() to a list. This
+        # asserts a plain SEARCH ALL completes and returns the sequence numbers.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"All")
+            self.assertEqual(info["EXISTS"], 3)
+            # SEARCH ALL -> message sequence numbers (1-based, oldest-first).
+            seqs = yield proto.search(imap4.Query(all=True))
+            self.assertEqual(sorted(int(n) for n in seqs), [1, 2, 3])
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_uid_search_all_over_the_wire(self):
+        # The exact failure Conrad's --phase-on run hit: `UID SEARCH` returned
+        # `BAD [SEARCH failed: 'generator' object is not subscriptable']`. With the
+        # fetch()-returns-a-list fix the manual-search path can subscript/slice the
+        # result, so UID SEARCH ALL completes and returns the store UIDs (the All
+        # folder is unfiltered: rowids 1, 2, 3).
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"All")
+            self.assertEqual(info["EXISTS"], 3)
+            uids = yield proto.search(imap4.Query(all=True), uid=True)
+            self.assertEqual(sorted(int(n) for n in uids), [1, 2, 3])
+        finally:
+            yield proto.logout()
+
 
 if __name__ == "__main__":
     unittest.main()
