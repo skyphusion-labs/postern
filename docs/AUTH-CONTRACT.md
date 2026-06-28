@@ -199,6 +199,7 @@ verbatim; do not rename per component.
 | `LDAP_STARTTLS` | both | upgrade an `ldap://` conn before binding (needs section 6). |
 | `LDAP_TLS_CA` | Go (today); Python (follow-on) | PEM CA bundle to trust the directory cert; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots). The crew-ownable alternative to provisioning 636 + a chained cert (section 6): pin the outpost's existing self-signed CA, no IdP mutation. Strict verification against a pinned root, never an insecure-skip. |
 | `LDAP_TLS_SERVER_NAME` | Go (today); Python (follow-on) | name verified against the cert SANs; set when `LDAP_URL` dials an IP (e.g. `10.1.1.2`) but the cert names a host. Defaults to the `LDAP_URL` host. Required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). |
+| `LDAP_TLS_PIN_SHA256` | Go (today); Python (follow-on) | exact-leaf SHA-256 pin (hex, colons optional, any case), SAN-independent. THE mechanism for Authentik's default outpost cert (bare-`*` SAN, unverifiable by CA-pin). A NON-secret public value (plain env, not a swarm secret). Mutually exclusive with `LDAP_TLS_CA`. Under the hood: `InsecureSkipVerify` + an exact-leaf check = stricter than a CA, not a bypass. |
 | `LDAP_BIND_DN_TEMPLATE` | both | simple-bind DN template: **`cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io`**. |
 | `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | both | search+bind service account DN + password. DN: **`cn=postern-mail-ro,ou=users,dc=ldap,dc=goauthentik,dc=io`** (staged). |
 | `LDAP_SEARCH_BASE` | both | **`ou=users,dc=ldap,dc=goauthentik,dc=io`**. |
@@ -224,22 +225,57 @@ a negative value (`LDAP_TIMEOUT must be >= 0`).
 The outpost publishes `10.1.1.2:389` (plaintext) only, and the direct-LDAP backend
 requires TLS. There are two ways to satisfy that; the first is crew-ownable today.
 
-### 6a. CA-pin (crew-ownable, no IdP mutation) -- BUILT (Go door)
+### 6a. Pin the directory cert in the Go door (crew-ownable, no IdP mutation) -- BUILT
 
-Authentik's LDAP outpost already serves StartTLS on 389 with a SELF-SIGNED cert.
-Pin that cert's CA in the Go door instead of trusting it via the public roots:
+Authentik's LDAP outpost serves StartTLS on 389 with its DEFAULT self-signed cert:
+`CN=authentik default certificate`, and its ONLY SAN is the bare wildcard `DNS:*`.
+That SAN is the deciding constraint. In modern Go (verified on 1.26) a wildcard must
+be the left-most label of a `>=2`-label name (`*.example`); a BARE `*` matches no DNS
+name and is not an IP SAN. So `crypto/tls` hostname verification fails against this
+cert under EVERY `LDAP_TLS_SERVER_NAME` (single-label, multi-label, or IP), and an
+empty ServerName is not allowed without skipping verification. **The CA-pin
+(`LDAP_TLS_CA` + `LDAP_TLS_SERVER_NAME`) therefore cannot verify this exact cert.**
 
-1. Export the outpost CA (PEM) and seed it as a swarm secret (e.g.
-   `postern_ldap_ca`), mounted at a path.
-2. Set `LDAP_URL=ldap://10.1.1.2:389` + `LDAP_STARTTLS=true`,
-   `LDAP_TLS_CA=/run/secrets/postern_ldap_ca`, and
-   `LDAP_TLS_SERVER_NAME=<the outpost cert name>` (the dial is by IP, so the
-   verified name must be set explicitly; go-ldap's StartTLS does not derive it).
+The door-side mechanism for the default cert is the **fingerprint-pin**: pin the
+EXACT leaf by its SHA-256, which is SAN-independent.
 
-The pinned CA becomes the ONLY trust anchor (an exact pin, not added to the system
-roots): strict verification against a private root, never an insecure-skip. This
-needs NO IdP-stack change and is strictly more secure than the IMAP proxy's current
-`CERT_NONE` (#153); that door can adopt the same `LDAP_TLS_CA` trust as a follow-on.
+1. Capture the leaf fingerprint -- a NON-secret public value, so it is a plain env,
+   not a swarm secret:
+   `openssl s_client -connect 10.1.1.2:389 -starttls ldap </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout`
+2. Set `LDAP_URL=ldap://10.1.1.2:389` + `LDAP_STARTTLS=true` and
+   `LDAP_TLS_PIN_SHA256=<the fingerprint>` (colon-separated or bare hex, any case).
+   Leave `LDAP_TLS_CA` unset (the two are mutually exclusive; setting both is a
+   startup error).
+
+Under the pin the door sets `InsecureSkipVerify=true` and installs a
+`VerifyPeerCertificate` callback that constant-time-compares the presented leaf's
+SHA-256 to the pin. **`InsecureSkipVerify` here is an EXACT PIN, not a bypass:** it
+trusts one specific certificate (stricter than CA verification, which trusts anything
+a CA signed) and is MITM-resistant -- a swapped cert fails the match. A gosec G402 or
+CodeQL `InsecureSkipVerify` finding at that call site is a JUSTIFIED suppression
+(annotated `#nosec G402` in `relay/auth_ldap.go`), expected, not a real issue.
+
+**Threat model.** The door dials dischord's own `:389` from a container ON dischord
+(same box, same VLAN), so this verification is belt-and-suspenders hardening, not
+load-bearing against a realistic MITM. The fingerprint-pin is cheap and strictly
+stronger than the IMAP proxy's `CERT_NONE` (#153), so it is the go-live posture (and
+that door can adopt the same pin as a follow-on).
+
+**Re-pin runbook (the pinning tradeoff).** A leaf pin breaks if Authentik
+REGENERATES its default cert (expiry, rotation, reinstall): the new leaf has a new
+SHA-256, the pin stops matching, and 587 LDAP auth fails closed. This is DOOR-SIDE
+ONLY -- crew SSH rides the same outpost but does not pin, so it is unaffected.
+Recover (no code change, no IdP touch):
+1. Re-capture the leaf fingerprint (the `openssl ... -fingerprint -sha256` above).
+2. Update `LDAP_TLS_PIN_SHA256` in the 587 door's env and roll the service
+   (`docker service update --force postern-submission_postern-submission`).
+This fragility is the accepted tradeoff for pinning the default cert without an IdP
+mutation; 6b (a properly-named cert) removes it for both doors.
+
+For a directory cert with a USABLE name (the future 6b path), use the CA-pin instead:
+`LDAP_TLS_CA=/run/secrets/postern_ldap_ca` (the PEM becomes the ONLY trust anchor) +
+`LDAP_TLS_SERVER_NAME=<the cert name>`. Strict verification against a private root,
+never an insecure-skip; no relay code change.
 
 ### 6b. Provision 636 + a chained cert (later hardening, retires #87/#153) -- GATED
 

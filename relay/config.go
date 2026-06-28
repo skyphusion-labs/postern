@@ -134,11 +134,17 @@ type LDAPCfg struct {
 	MailAttr       string // LDAP_MAIL_ATTR, the attribute holding the bound identity (default mail)
 	// TLS trust for the StartTLS/ldaps connection. By default the directory cert is
 	// verified against the system roots, with the verified name taken from LDAP_URL.
-	// These two knobs let an operator trust a PRIVATE CA (e.g. an Authentik outpost
-	// self-signed CA) without ever weakening verification (strict verification
-	// against a pinned root, never an insecure-skip):
+	// Two ALTERNATIVE trust models for a private or awkward directory cert (mutually
+	// exclusive with each other), both strict verification, never an insecure-skip:
+	//   - CA-pin: LDAP_TLS_CA + LDAP_TLS_SERVER_NAME -- chain to a pinned private CA
+	//     and verify the SANs. Use when the cert carries a usable name.
+	//   - fingerprint-pin: LDAP_TLS_PIN_SHA256 -- pin the EXACT leaf by SHA-256,
+	//     SAN-independent. Use when the SAN is unusable (e.g. an Authentik default
+	//     cert whose only SAN is the bare wildcard `*`, which matches no name in
+	//     modern Go). Stricter than CA-pin (it trusts one specific certificate).
 	TLSCAFile     string // LDAP_TLS_CA, path to a PEM CA bundle; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots)
-	TLSServerName string // LDAP_TLS_SERVER_NAME, the name verified against the cert SANs; set when LDAP_URL dials an IP but the cert names a host. Defaults to the LDAP_URL host
+	TLSServerName string // LDAP_TLS_SERVER_NAME, the name verified against the cert SANs (CA-pin mode); SNI only under the fingerprint-pin. Defaults to the LDAP_URL host
+	TLSPinSHA256  string // LDAP_TLS_PIN_SHA256, exact-leaf SHA-256 (hex, colons optional); SAN-independent. Mutually exclusive with LDAP_TLS_CA
 	// Timeout (LDAP_TIMEOUT, integer seconds, default 10) bounds the directory
 	// dial AND each bind/search, so a dead or slow directory cannot hang a login.
 	// Symmetric with the Python IMAP proxy's ldap mode (#88). 0 disables it (not
@@ -241,6 +247,7 @@ func loadConfig() (Config, error) {
 				MailAttr:       env("LDAP_MAIL_ATTR", "mail"),
 				TLSCAFile:      os.Getenv("LDAP_TLS_CA"),
 				TLSServerName:  os.Getenv("LDAP_TLS_SERVER_NAME"),
+				TLSPinSHA256:   os.Getenv("LDAP_TLS_PIN_SHA256"),
 				Timeout:        time.Duration(envInt("LDAP_TIMEOUT", 10)) * time.Second,
 			},
 			SystemDomain:  os.Getenv("AUTH_SYSTEM_DOMAIN"),

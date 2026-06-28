@@ -141,11 +141,15 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
 - **ldap**: simple-bind (`LDAP_BIND_DN_TEMPLATE`) or search+bind (`LDAP_BIND_DN` +
   `LDAP_SEARCH_BASE` + `LDAP_SEARCH_FILTER`) over TLS (`ldaps://` or
   `LDAP_STARTTLS=true`). Bound identity = the `LDAP_MAIL_ATTR` attribute (default
-  `mail`). To trust a private directory CA (e.g. an Authentik outpost self-signed
-  CA) without weakening verification, set `LDAP_TLS_CA` (a PEM bundle that becomes
-  the ONLY trust anchor, an exact pin) and `LDAP_TLS_SERVER_NAME` (the name verified
-  against the cert SANs; needed when the URL dials an IP, default = the URL host).
-  This is strict verification against a pinned root, never an insecure-skip. Pure-Go
+  `mail`). Two mutually-exclusive trust models for a private/awkward directory cert
+  (both strict verification, never an insecure-skip): `LDAP_TLS_PIN_SHA256` pins the
+  EXACT leaf by SHA-256 (SAN-independent, for a cert with an unusable SAN such as an
+  Authentik default cert whose only SAN is the bare wildcard `*`); or `LDAP_TLS_CA`
+  (a PEM bundle that becomes the ONLY trust anchor) + `LDAP_TLS_SERVER_NAME` (the
+  name verified against the cert SANs), for a cert with a usable name. The pin uses
+  `InsecureSkipVerify` paired with an exact-leaf SHA-256 check, which is STRICTER
+  than CA verification (one specific cert, not anything a CA signed), not a bypass.
+  Pure-Go
   (`go-ldap`), no cgo. `LDAP_TIMEOUT` (seconds, default 10) bounds
   the directory dial AND each bind/search so a dead or slow directory cannot hang a
   login; symmetric with the Python IMAP proxy's `ldap` mode (#88).

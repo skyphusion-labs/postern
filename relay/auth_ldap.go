@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
@@ -20,7 +23,7 @@ import (
 // verify it). TLS is mandatory; a bind carries the password in the clear.
 type ldapAuth struct {
 	cfg     LDAPCfg
-	tlsConf *tls.Config // nil unless an LDAP_TLS_* knob is set; pins RootCAs + ServerName for the directory connection
+	tlsConf *tls.Config // nil unless an LDAP_TLS_* knob is set; carries the pinned trust (CA-pin or fingerprint-pin) for the directory connection
 	dial    func(url string) (ldapConn, error)
 }
 
@@ -102,11 +105,55 @@ func newLDAPAuth(cfg LDAPCfg) (*ldapAuth, error) {
 // verification fails: LDAP_TLS_SERVER_NAME when given (the cert name when LDAP_URL
 // dials an IP), else the LDAP_URL host.
 func buildLDAPTLSConfig(cfg LDAPCfg) (*tls.Config, error) {
-	if cfg.TLSCAFile == "" && cfg.TLSServerName == "" {
+	if cfg.TLSCAFile == "" && cfg.TLSServerName == "" && cfg.TLSPinSHA256 == "" {
 		return nil, nil
 	}
+
+	// A CA-pin and a fingerprint-pin are two distinct trust models; refuse to guess
+	// which the operator meant rather than silently pick one.
+	if cfg.TLSCAFile != "" && cfg.TLSPinSHA256 != "" {
+		return nil, fmt.Errorf("ldap tls: set LDAP_TLS_CA or LDAP_TLS_PIN_SHA256, not both (they are different trust models)")
+	}
+
 	tc := &tls.Config{MinVersion: tls.VersionTLS12}
 
+	// Fingerprint-pin mode: pin the EXACT leaf certificate by its SHA-256. This is
+	// SAN-independent, which is the point: a directory cert can carry an unusable SAN
+	// (e.g. an Authentik default cert whose only SAN is the bare wildcard `*`, which
+	// matches NO name in modern Go, so CA-pin + ServerName cannot verify it at all).
+	//
+	// InsecureSkipVerify is set ONLY so our VerifyPeerCertificate becomes the sole
+	// gate. Despite the field name this is NOT an insecure bypass: it is an EXACT
+	// certificate pin, STRICTER than CA verification (it trusts one specific cert, not
+	// anything a CA signed) and MITM-resistant -- a swapped cert fails the SHA-256
+	// match. crypto/tls honors VerifyPeerCertificate even when InsecureSkipVerify is
+	// true. (Static analysis note: gosec G402 / a CodeQL InsecureSkipVerify finding
+	// here is a JUSTIFIED suppression, not a real issue -- the pin is the verification.)
+	if cfg.TLSPinSHA256 != "" {
+		want, err := normalizePinSHA256(cfg.TLSPinSHA256)
+		if err != nil {
+			return nil, err
+		}
+		// ServerName, when given, is sent as SNI only; it plays no verification role
+		// under the pin (the SHA-256 match is the verification).
+		tc.ServerName = cfg.TLSServerName
+		tc.InsecureSkipVerify = true // #nosec G402 -- gated by the exact-leaf SHA-256 pin below; verification is stricter, not skipped
+		tc.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("ldap tls: peer presented no certificate")
+			}
+			got := sha256.Sum256(rawCerts[0]) // rawCerts[0] is the leaf DER
+			if subtle.ConstantTimeCompare(got[:], want) != 1 {
+				return fmt.Errorf("ldap tls: leaf certificate SHA-256 does not match LDAP_TLS_PIN_SHA256")
+			}
+			return nil
+		}
+		return tc, nil
+	}
+
+	// CA-pin / system-roots mode: verify the chain to a trusted root (a pinned
+	// private CA when LDAP_TLS_CA is set, else the system roots) and the ServerName
+	// against the cert SANs.
 	tc.ServerName = cfg.TLSServerName
 	if tc.ServerName == "" {
 		if u, err := url.Parse(cfg.URL); err == nil {
@@ -126,6 +173,30 @@ func buildLDAPTLSConfig(cfg LDAPCfg) (*tls.Config, error) {
 		tc.RootCAs = pool
 	}
 	return tc, nil
+}
+
+// normalizePinSHA256 parses an LDAP_TLS_PIN_SHA256 value into its 32 raw bytes. It
+// accepts the common fingerprint spellings -- colon-separated or bare hex, any case,
+// surrounding whitespace -- so an operator can paste `openssl x509 -fingerprint
+// -sha256` output directly. A SHA-256 is 32 bytes / 64 hex chars; anything else is a
+// loud config error (we never start with a malformed pin that would reject every cert).
+func normalizePinSHA256(s string) ([]byte, error) {
+	clean := strings.Map(func(r rune) rune {
+		switch r {
+		case ':', ' ', '\t', '\n', '\r':
+			return -1
+		}
+		return r
+	}, s)
+	clean = strings.ToLower(clean)
+	b, err := hex.DecodeString(clean)
+	if err != nil {
+		return nil, fmt.Errorf("ldap tls: LDAP_TLS_PIN_SHA256 is not valid hex: %w", err)
+	}
+	if len(b) != sha256.Size {
+		return nil, fmt.Errorf("ldap tls: LDAP_TLS_PIN_SHA256 must be a %d-byte SHA-256 (%d hex chars), got %d bytes", sha256.Size, sha256.Size*2, len(b))
+	}
+	return b, nil
 }
 
 func (a *ldapAuth) Authenticate(username, secret string) (string, error) {
