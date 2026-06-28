@@ -194,6 +194,108 @@ class ProxyWrapTest(unittest.TestCase):
         self.assertEqual(len(fac.built), 1)
         self.assertTrue(transport.connected)
 
+    # --- committed-then-truncated header (contract section 6 boundary) ------------
+
+    def test_committed_v2_signature_then_stall_optional_rejects(self):
+        # A FULL v2 signature has arrived (the peer COMMITTED to a header), then the
+        # remainder stalls past the timeout. That is a TRUNCATED = malformed header,
+        # rejected even in optional (it is no longer "silence" -> no fall-back).
+        cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED, timeout=5.0)
+        proto, fac, transport, clock = self._spin(cfg)
+        proto.dataReceived(proxyproto.V2_SIGNATURE)  # committed, body never arrives
+        self.assertEqual(len(fac.built), 0)
+        clock.advance(5.1)
+        self.assertEqual(len(fac.built), 0)  # NOT a raw-peer fall-back
+        self.assertFalse(transport.connected)
+
+    def test_committed_v1_prefix_then_stall_optional_rejects(self):
+        # Full "PROXY" prefix (committed), then no CRLF before the deadline: truncated.
+        cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED, timeout=5.0)
+        proto, fac, transport, clock = self._spin(cfg)
+        proto.dataReceived(b"PROXY TCP4 198.51.100.7")  # committed, no CRLF
+        clock.advance(5.1)
+        self.assertEqual(len(fac.built), 0)
+        self.assertFalse(transport.connected)
+
+    def test_committed_then_stall_require_rejects(self):
+        cfg = ProxyProtocolConfig(mode=proxyproto.REQUIRE, trusted=TRUSTED, timeout=5.0)
+        proto, fac, transport, clock = self._spin(cfg)
+        proto.dataReceived(proxyproto.V2_SIGNATURE)
+        clock.advance(5.1)
+        self.assertEqual(len(fac.built), 0)
+        self.assertFalse(transport.connected)
+
+    def test_partial_signature_then_stall_optional_falls_back(self):
+        # A PARTIAL signature (not committed) that stalls is NO HEADER, not truncated:
+        # optional still falls back to the raw peer (the contract's other side of the
+        # boundary). Confirms signature_committed gates the reject correctly.
+        cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED, timeout=5.0)
+        proto, fac, transport, clock = self._spin(cfg, peer_ip="10.1.0.7")
+        proto.dataReceived(proxyproto.V2_SIGNATURE[:6])  # partial v2 sig only
+        clock.advance(5.1)
+        self.assertEqual(len(fac.built), 1)
+        self.assertEqual(fac.built[0].conn_transport.getPeer().host, "10.1.0.7")
+        self.assertTrue(transport.connected)
+
+    # --- clean (quiet) drop vs. loud malformed reject (contract sections 4 + 5.3) -
+
+    def _capture_proxy_logs(self):
+        from twisted.python import log
+
+        events = []
+        observer = events.append
+        log.addObserver(observer)
+        self.addCleanup(log.removeObserver, observer)
+        return events
+
+    def _reject_lines(self, events):
+        out = []
+        for ev in events:
+            msg = ev.get("message")
+            text = " ".join(str(m) for m in msg) if msg else str(ev.get("format", ""))
+            if "rejecting connection" in text:
+                out.append(text)
+        return out
+
+    def test_clean_drops_are_quiet(self):
+        # The EXPECTED operational rejects (untrusted peer in require; trusted peer
+        # with no header in require, i.e. the LB's bare-TCP health probe) must NOT log
+        # a line, so health probes do not pollute the logs.
+        events = self._capture_proxy_logs()
+        cfg = ProxyProtocolConfig(mode=proxyproto.REQUIRE, trusted=TRUSTED, timeout=5.0)
+        # untrusted peer -> clean drop at connectionMade
+        p1, f1, t1, _ = self._spin(cfg, peer_ip="8.8.8.8")
+        self.assertFalse(t1.connected)
+        # trusted peer, no header, timeout -> clean drop
+        p2, f2, t2, clock2 = self._spin(cfg, peer_ip="10.1.0.5")
+        clock2.advance(5.1)
+        self.assertFalse(t2.connected)
+        # trusted peer, no PROXY signature at all -> clean drop
+        p3, f3, t3, _ = self._spin(cfg, peer_ip="10.1.0.5")
+        p3.dataReceived(PAYLOAD)
+        self.assertFalse(t3.connected)
+        self.assertEqual(self._reject_lines(events), [])
+
+    def test_malformed_from_trusted_logs_loud(self):
+        # The ONE loud reject: a malformed header from a trusted peer is surfaced.
+        events = self._capture_proxy_logs()
+        cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED)
+        proto, fac, transport, _ = self._spin(cfg)
+        proto.dataReceived(b"PROXY TCP4 bad-ip 203.0.113.1 4444 993\r\n")
+        self.assertFalse(transport.connected)
+        self.assertEqual(len(self._reject_lines(events)), 1)
+
+    def test_truncated_committed_header_logs_loud(self):
+        # A committed-then-truncated header (timeout after a full signature) is the
+        # malformed branch, so it logs loud too.
+        events = self._capture_proxy_logs()
+        cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED, timeout=5.0)
+        proto, fac, transport, clock = self._spin(cfg)
+        proto.dataReceived(proxyproto.V2_SIGNATURE)
+        clock.advance(5.1)
+        self.assertFalse(transport.connected)
+        self.assertEqual(len(self._reject_lines(events)), 1)
+
     # --- connection teardown -----------------------------------------------------
 
     def test_connection_lost_propagates_to_wrapped(self):

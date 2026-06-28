@@ -133,6 +133,26 @@ def parse_trusted(spec: str) -> Tuple[Network, ...]:
     return tuple(out)
 
 
+def signature_committed(buf: bytes) -> bool:
+    """True once a COMPLETE PROXY signature has arrived: the peer has COMMITTED to a
+    header. The boundary is the full v1 prefix (5 bytes ``PROXY``) or the full v2
+    signature (12 bytes).
+
+    The adapter uses this to resolve the no-header-vs-truncated-header ambiguity on a
+    read timeout (docs/PROXY-PROTOCOL.md section 6, "No header vs. truncated header"):
+
+      - NOT committed (nothing, or only a partial/non-matching prefix) on timeout is
+        NO HEADER -> optional falls back to the raw peer, require is a clean drop.
+      - committed, then the remainder stalls past the timeout, is a TRUNCATED =
+        MALFORMED header -> rejected in BOTH optional and require (a real LB fault).
+
+    This is exactly the Go door's commit point (a successful signature ``Peek`` before
+    it reads the rest), so both doors implement the identical boundary. A slice longer
+    than ``buf`` simply does not match, so a short buffer is never "committed".
+    """
+    return buf[: len(V1_PREFIX)] == V1_PREFIX or buf[: len(V2_SIGNATURE)] == V2_SIGNATURE
+
+
 def parse_header(buf: bytes) -> ParseResult:
     """Inspect the front of `buf` for a PROXY header. Pure, incremental, no I/O.
 

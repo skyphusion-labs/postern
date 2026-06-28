@@ -114,8 +114,8 @@ class _ProxyProtocolConnection(protocol.Protocol):
         try:
             outcome, addr, consumed = proxyproto.parse_header(self._buf)
         except proxyproto.ProxyProtocolError as exc:
-            # Malformed header from a trusted peer: hard fault, reject.
-            self._drop(f"malformed PROXY header: {exc}")
+            # Malformed header from a trusted peer: a hard fault, the ONE loud reject.
+            self._drop(f"malformed PROXY header: {exc}", loud=True)
             return
         if outcome == proxyproto.NEED_MORE:
             return  # the read timeout bounds an indefinite wait
@@ -136,9 +136,16 @@ class _ProxyProtocolConnection(protocol.Protocol):
         self._timeout = None
         if self._resolved:
             return
-        # Contract section 6: treat silence as "no header". require rejects; optional
-        # falls back to the raw peer (delivering whatever bytes arrived, if any).
-        if self._cfg.mode == proxyproto.REQUIRE:
+        # Contract section 6 (no header vs. truncated header). Once a COMPLETE
+        # signature has buffered, the peer has COMMITTED to a header; a stall that
+        # trips the timeout is a TRUNCATED = MALFORMED header, rejected in BOTH
+        # optional and require (the one loud reject -- a real LB protocol fault),
+        # exactly as the Go door rejects a committed-then-stalled read. Without a
+        # complete signature the silence is NO HEADER: require is a clean (quiet)
+        # drop, optional falls back to the raw peer (delivering whatever arrived).
+        if proxyproto.signature_committed(self._buf):
+            self._drop("truncated PROXY header (timed out after signature)", loud=True)
+        elif self._cfg.mode == proxyproto.REQUIRE:
             self._drop("no PROXY header within timeout in require mode")
         else:
             self._resolve(self._raw, self._buf)
@@ -159,10 +166,21 @@ class _ProxyProtocolConnection(protocol.Protocol):
         if leftover:
             self._wrapped.dataReceived(leftover)
 
-    def _drop(self, reason: str) -> None:
+    def _drop(self, reason: str, loud: bool = False) -> None:
         # A connection-level refusal: the door has not spoken, so there is no
-        # protocol reply to send. Log the reason (never any header content/secret).
-        log.msg(f"postern-imap proxyproto: rejecting connection: {reason}", system="postern-imap")
+        # protocol reply to send. The EXPECTED operational rejects (an untrusted peer;
+        # a trusted peer with no header in require mode, e.g. the LB's bare-TCP health
+        # probe) are a CLEAN, QUIET drop: closed without a log line, so the probes do
+        # not pollute the logs (contract sections 4 + 5.3). They never reach the auth
+        # code, so they can never touch the #105 throttle either. The ONE loud reject
+        # is a malformed/truncated header from a TRUSTED peer (a real LB protocol
+        # fault), surfaced to the operator -- mirroring the Go door's quiet rejectClean
+        # vs. its always-logged malformed parse error. Never logs header content/secret.
+        if loud:
+            log.msg(
+                f"postern-imap proxyproto: rejecting connection: {reason}",
+                system="postern-imap",
+            )
         self._cancel_timeout()
         t: Any = self.transport
         t.loseConnection()

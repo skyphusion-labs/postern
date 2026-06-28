@@ -20,6 +20,7 @@ from posternimap.proxyproto import (
     ProxyProtocolError,
     parse_header,
     parse_trusted,
+    signature_committed,
 )
 
 
@@ -200,6 +201,33 @@ class NoHeaderTest(unittest.TestCase):
     def test_p_then_divergent_is_no_header(self):
         out, _, _ = parse_header(b"PONG\r\n")
         self.assertEqual(out, NO_HEADER)
+
+
+class SignatureCommittedTest(unittest.TestCase):
+    """The no-header-vs-truncated boundary (docs/PROXY-PROTOCOL.md section 6): a
+    COMPLETE signature (full v1 ``PROXY`` prefix or full 12-byte v2 signature) means
+    the peer has committed to a header. The adapter rejects a committed-then-stalled
+    header as malformed; an uncommitted timeout is just "no header"."""
+
+    def test_full_v1_prefix_is_committed(self):
+        self.assertTrue(signature_committed(b"PROXY"))
+        self.assertTrue(signature_committed(b"PROXY TCP4 1.2.3.4"))  # mid-line, committed
+
+    def test_partial_v1_prefix_is_not_committed(self):
+        self.assertFalse(signature_committed(b""))
+        self.assertFalse(signature_committed(b"PROX"))
+
+    def test_full_v2_signature_is_committed(self):
+        self.assertTrue(signature_committed(proxyproto.V2_SIGNATURE))
+        self.assertTrue(signature_committed(proxyproto.V2_SIGNATURE + b"\x21\x11"))
+
+    def test_partial_v2_signature_is_not_committed(self):
+        self.assertFalse(signature_committed(proxyproto.V2_SIGNATURE[:11]))
+
+    def test_non_proxy_bytes_are_not_committed(self):
+        # A plain IMAP command never looks committed (it is just "no header").
+        self.assertFalse(signature_committed(b"a LOGIN user pass\r\n"))
+        self.assertFalse(signature_committed(b"\r\nxyz"))  # starts 0x0D, not the v2 sig
 
 
 class TrustedSetTest(unittest.TestCase):
