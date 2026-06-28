@@ -28,3 +28,8 @@ __pycache__/
 imap/*.egg-info/
 imap/_trial_temp/
 _trial_temp/
+
+# Build artifacts (untracked dist/build dirs seen in clones)
+imap/build/
+imap/dist/
+relay/dist/
