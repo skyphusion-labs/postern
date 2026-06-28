@@ -36,6 +36,7 @@ from twisted.mail import imap4
 from .client import PosternClient
 from .config import Config
 from .mailbox import PosternMailbox
+from .measure import Meter
 
 
 class _Folder:
@@ -81,9 +82,14 @@ class PosternAccount:
         self._cfg = cfg
         self._username = username
         self._token = token
+        # One meter per session, gated by POSTERN_IMAP_MEASURE (default off = no-op),
+        # shared by every client + mailbox + message this account builds.
+        self._meter = Meter(cfg.measure)
 
     def _client(self) -> PosternClient:
-        return PosternClient(self._cfg.api_url, self._token, timeout=self._cfg.api_timeout)
+        return PosternClient(
+            self._cfg.api_url, self._token, timeout=self._cfg.api_timeout, meter=self._meter
+        )
 
     def _mailbox(self, folder: _Folder, *, list_view: bool) -> PosternMailbox:
         return PosternMailbox(
@@ -94,6 +100,7 @@ class PosternAccount:
             list_view=list_view,
             window=self._cfg.imap_window if folder.windowed else 0,
             poll_seconds=self._cfg.imap_poll_seconds,
+            meter=self._meter,
         )
 
     # --- IAccount: read ---

@@ -125,6 +125,16 @@ class Config:
     # reactor stalls under concurrent SELECTs.
     imap_poll_seconds: int = 30
 
+    # --- Stage-1 read-path measurement (#102 / GO-LIVE 0.6) ---
+    # POSTERN_IMAP_MEASURE: when true, the proxy emits additive, structured
+    # `@measure <event> {json}` lines (Twisted log -> journald) for cold-sync cost +
+    # window saturation, per-request API latency, the live-refresh poll's reactor-
+    # thread blocking time, and lazy-body hydration. OFF by default and behaviour-
+    # neutral: disabled, every hook is a no-op, so the read path is byte-for-byte the
+    # un-instrumented path. No message content or token is ever emitted -- only counts,
+    # sizes, and timings. See measure.py + imap/MEASUREMENT.md for the event catalogue.
+    measure: bool = False
+
     # --- auth brute-force throttle (#105) ---
     # RATIFIED cross-door contract: identical AUTH_THROTTLE_* knobs on the SMTP
     # relay (587) and this IMAP door (993), integer seconds. Account-keyed +
@@ -229,6 +239,7 @@ class Config:
         imap_poll_seconds = _int(e, "POSTERN_IMAP_POLL_SECONDS", 30)
         if imap_poll_seconds < 0:
             raise ConfigError("POSTERN_IMAP_POLL_SECONDS must be >= 0 (0 disables the poll)")
+        measure = _bool(e, "POSTERN_IMAP_MEASURE", False)
 
         # Auth throttle (#105). Door-agnostic AUTH_THROTTLE_* names, integer seconds,
         # shared verbatim with the relay so one vocabulary configures both doors.
@@ -274,6 +285,7 @@ class Config:
             api_timeout=_float(e, "POSTERN_API_TIMEOUT", 15.0),
             imap_window=imap_window,
             imap_poll_seconds=imap_poll_seconds,
+            measure=measure,
             throttle_enabled=throttle_enabled,
             throttle_max_failures=throttle_max_failures,
             throttle_lockout_seconds=throttle_lockout_seconds,

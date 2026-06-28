@@ -58,6 +58,7 @@ from zope.interface import implementer
 from twisted.mail import imap4
 
 from .client import MessageSummary, PosternClient
+from .measure import Meter
 from .message import PosternIMAPMessage
 
 if TYPE_CHECKING:  # annotation only; the runtime import stays lazy (see _maybe_start_poll)
@@ -117,8 +118,12 @@ class PosternMailbox:
         window: int = 0,
         poll_seconds: int = 0,
         clock=None,
+        meter: Optional[Meter] = None,
     ) -> None:
         self._client = client
+        # A disabled Meter by default: measurement hooks are no-ops unless an enabled
+        # meter is injected (POSTERN_IMAP_MEASURE, threaded in from the account).
+        self._meter = meter or Meter(False)
         self._direction = direction
         self._special_use = list(special_use or [])
         self._list_view = list_view
@@ -148,33 +153,47 @@ class PosternMailbox:
             self._summaries = []
             self._loaded = True
             return
-        items: List[MessageSummary] = []
-        cursor: Optional[str] = None
-        while True:
-            page = self._client.list_messages(
-                direction=self._direction, limit=self._page_size, cursor=cursor
+        # Measure the cold sync: how many pages/summaries a SELECT pulls and how often
+        # the window cap truncates a real mailbox (validates POSTERN_IMAP_WINDOW=500 as
+        # a "measurement-informed" floor). Counts/sizes only, never message content.
+        with self._meter.timed("cold_sync", direction=self._direction or "all") as span:
+            items: List[MessageSummary] = []
+            cursor: Optional[str] = None
+            pages = 0
+            while True:
+                page = self._client.list_messages(
+                    direction=self._direction, limit=self._page_size, cursor=cursor
+                )
+                items.extend(page.items)
+                pages += 1
+                cursor = page.cursor
+                if not cursor:
+                    break
+            # The API returns newest-first by (date DESC, id DESC). IMAP UIDs must ascend
+            # with ARRIVAL, which is the store's insertion key (uid == rowid), NOT date:
+            # sort by uid ascending so a backdated arrival lands LAST instead of shifting
+            # every higher UID (fault F9). Treating uid as a stable, never-reused UID is
+            # safe while the proxy is read-only (no deletes free a rowid); migration 0005
+            # (AUTOINCREMENT) makes never-reuse total -- see the module docstring.
+            items.sort(key=lambda s: s.uid)
+            n = len(items)
+            self._newest_uid = items[-1].uid if items else 0
+            self._newest_id = items[-1].message_id if items else None
+            if self._window and n > self._window:
+                # Show only the most-recent window (the highest uids); older mail stays
+                # reachable via All or by raising the window.
+                self._summaries = items[n - self._window:]
+            else:
+                self._summaries = items
+            self._loaded = True
+            span.set(
+                pages=pages,
+                collected=n,
+                presented=len(self._summaries),
+                window=self._window,
+                windowed=bool(self._window and n > self._window),
+                newest_uid=self._newest_uid,
             )
-            items.extend(page.items)
-            cursor = page.cursor
-            if not cursor:
-                break
-        # The API returns newest-first by (date DESC, id DESC). IMAP UIDs must ascend
-        # with ARRIVAL, which is the store's insertion key (uid == rowid), NOT date:
-        # sort by uid ascending so a backdated arrival lands LAST instead of shifting
-        # every higher UID (fault F9). Treating uid as a stable, never-reused UID is
-        # safe while the proxy is read-only (no deletes free a rowid); migration 0005
-        # (AUTOINCREMENT) makes never-reuse total -- see the module docstring.
-        items.sort(key=lambda s: s.uid)
-        n = len(items)
-        self._newest_uid = items[-1].uid if items else 0
-        self._newest_id = items[-1].message_id if items else None
-        if self._window and n > self._window:
-            # Show only the most-recent window (the highest uids); older mail stays
-            # reachable via All or by raising the window.
-            self._summaries = items[n - self._window:]
-        else:
-            self._summaries = items
-        self._loaded = True
 
     def _refresh(self) -> int:
         """Append any new arrivals to the snapshot; return how many were added.
@@ -298,6 +317,7 @@ class PosternMailbox:
             uid=summary.uid,
             seq=seq,
             hydrate=lambda: self._client.get_message(mid),
+            meter=self._meter,
         )
 
     def fetch(self, messages, uid):
@@ -421,7 +441,12 @@ class PosternMailbox:
         # stage (see config POSTERN_IMAP_POLL_SECONDS). Errors are swallowed so a
         # transient store blip never tears down the LoopingCall or the session.
         try:
-            added = self._refresh()
+            # Time the blocking _refresh: this runs urllib in the reactor thread, so
+            # its duration IS the per-tick reactor stall (validates the "deferToThread
+            # if measurement shows reactor stalls" note in config).
+            with self._meter.timed("poll_refresh", direction=self._direction or "all") as span:
+                added = self._refresh()
+                span.set(added=added, listeners=len(self._listeners))
         except Exception:
             from twisted.python import log
 
