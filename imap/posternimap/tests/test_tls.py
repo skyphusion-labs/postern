@@ -189,12 +189,16 @@ class TLSChainTest(unittest.TestCase):
     def test_server_presents_full_chain(self):
         from posternimap.server import _build_tls_context_factory
 
-        server_ctx = _build_tls_context_factory(self.fullchain, self.key).getContext()
-        server = SSL.Connection(server_ctx, None)
-        # Floor the client at TLS 1.2 too; never model an insecure context.
-        client_ctx = SSL.Context(SSL.TLS_METHOD)
-        client_ctx.set_min_proto_version(SSL.TLS1_2_VERSION)
-        client = SSL.Connection(client_ctx, None)
+        # Build BOTH ends from the door's own factory so the test never
+        # constructs a bare (insecure-by-default) SSL context; both inherit the
+        # TLS 1.2 floor. The client never sends its loaded cert (the server does
+        # not request one), it just drives the handshake and reads the chain.
+        server = SSL.Connection(
+            _build_tls_context_factory(self.fullchain, self.key).getContext(), None
+        )
+        client = SSL.Connection(
+            _build_tls_context_factory(self.fullchain, self.key).getContext(), None
+        )
         _drive_handshake(client, server)
         chain = client.get_peer_cert_chain()
         self.assertEqual(
