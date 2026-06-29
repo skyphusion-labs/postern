@@ -105,5 +105,79 @@ class TLSFloorTest(unittest.TestCase):
             _drive_handshake(client, server)
 
 
+def _gen_chain(dirpath: str):
+    """Generate a leaf signed by a separate intermediate CA, and write a
+    fullchain.pem (leaf + intermediate) plus the leaf key.
+
+    This mirrors a real Let's Encrypt fullchain so we can prove the 993 door
+    presents the intermediate, not just the leaf (#175).
+    """
+    ca_key = crypto.PKey()
+    ca_key.generate_key(crypto.TYPE_RSA, 2048)
+    ca = crypto.X509()
+    ca.get_subject().CN = "Postern Test Intermediate CA"
+    ca.set_serial_number(100)
+    ca.gmtime_adj_notBefore(0)
+    ca.gmtime_adj_notAfter(3600)
+    ca.set_issuer(ca.get_subject())
+    ca.set_pubkey(ca_key)
+    ca.add_extensions([crypto.X509Extension(b"basicConstraints", True, b"CA:TRUE")])
+    ca.sign(ca_key, "sha256")
+
+    leaf_key = crypto.PKey()
+    leaf_key.generate_key(crypto.TYPE_RSA, 2048)
+    leaf = crypto.X509()
+    leaf.get_subject().CN = "localhost"
+    leaf.set_serial_number(101)
+    leaf.gmtime_adj_notBefore(0)
+    leaf.gmtime_adj_notAfter(3600)
+    leaf.set_issuer(ca.get_subject())
+    leaf.set_pubkey(leaf_key)
+    leaf.sign(ca_key, "sha256")
+
+    fullchain_path = os.path.join(dirpath, "fullchain.pem")
+    key_path = os.path.join(dirpath, "leaf.key")
+    with open(fullchain_path, "wb") as f:
+        f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, leaf))
+        f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, ca))
+    with open(key_path, "wb") as f:
+        f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, leaf_key))
+    return fullchain_path, key_path
+
+
+@unittest.skipUnless(HAVE_TLS, "pyOpenSSL / Twisted TLS extra not installed")
+class TLSChainTest(unittest.TestCase):
+    """The door must present leaf + intermediate, not the leaf alone (#175).
+
+    DefaultOpenSSLContextFactory loads the leaf only (use_certificate_file), which
+    yields Verify code 21 at the client. The fix reloads the cert as a chain
+    (use_certificate_chain_file), so a client must see BOTH certs in the chain.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.fullchain, self.key = _gen_chain(self._dir.name)
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def test_server_presents_full_chain(self):
+        from posternimap.server import _build_tls_context_factory
+
+        server_ctx = _build_tls_context_factory(self.fullchain, self.key).getContext()
+        server = SSL.Connection(server_ctx, None)
+        client = SSL.Connection(SSL.Context(SSL.TLS_METHOD), None)
+        _drive_handshake(client, server)
+        chain = client.get_peer_cert_chain()
+        self.assertEqual(
+            len(chain),
+            2,
+            "server must present leaf + intermediate (use_certificate_chain_file)",
+        )
+        subjects = [c.get_subject().CN for c in chain]
+        self.assertEqual(subjects[0], "localhost")
+        self.assertEqual(subjects[1], "Postern Test Intermediate CA")
+
+
 if __name__ == "__main__":
     unittest.main()

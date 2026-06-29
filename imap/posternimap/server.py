@@ -122,20 +122,32 @@ class PosternIMAPFactory(protocol.Factory):
 
 
 def _build_tls_context_factory(cert_path: str, key_path: str):
-    """An IMAPS context factory with a TLS 1.2 floor (#106).
+    """An IMAPS context factory with a TLS 1.2 floor (#106) that presents the
+    full certificate chain (#175).
 
     Twisted's stock DefaultOpenSSLContextFactory negotiates down to TLS 1.0/1.1,
     which are deprecated and must not be offered. We build it on TLS_METHOD and
     raise the minimum protocol version to TLS 1.2, mirroring the SMTP relay's
     tls.VersionTLS12 floor so both doors share one posture. TLS deps are imported
     lazily here so a non-TLS (loopback) deployment never needs pyOpenSSL.
+
+    DefaultOpenSSLContextFactory loads the cert with use_certificate_file, which
+    sends the LEAF only. A client then sees Verify code 21 (unable to verify the
+    first certificate) because the intermediate(s) are absent. We reload the cert
+    as a CHAIN with use_certificate_chain_file so the intermediate(s) are sent,
+    matching the 587 door (Verify 0). cert_path MUST be the Let's Encrypt
+    fullchain.pem (leaf + intermediate), not the leaf-only cert.pem; a single-cert
+    PEM still loads correctly (chain of one), so loopback self-signed tests pass.
     """
     from twisted.internet import ssl
     from OpenSSL import SSL
 
     factory = ssl.DefaultOpenSSLContextFactory(key_path, cert_path, sslmethod=SSL.TLS_METHOD)
     # getContext() returns the cached context served to every connection.
-    factory.getContext().set_min_proto_version(SSL.TLS1_2_VERSION)
+    ctx = factory.getContext()
+    # Present leaf + intermediate(s), not just the leaf the default factory loaded.
+    ctx.use_certificate_chain_file(cert_path)
+    ctx.set_min_proto_version(SSL.TLS1_2_VERSION)
     return factory
 
 
