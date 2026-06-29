@@ -9,6 +9,7 @@ and negotiate >= TLS 1.2. Skips cleanly where the optional TLS stack is absent.
 
 from __future__ import annotations
 
+import datetime
 import os
 import tempfile
 import unittest
@@ -109,39 +110,63 @@ def _gen_chain(dirpath: str):
     """Generate a leaf signed by a separate intermediate CA, and write a
     fullchain.pem (leaf + intermediate) plus the leaf key.
 
-    This mirrors a real Let's Encrypt fullchain so we can prove the 993 door
-    presents the intermediate, not just the leaf (#175).
+    Built with the modern `cryptography` x509 API (pyOpenSSL removed
+    X509.add_extensions in 23.3+, which diverged local from CI). cryptography is
+    a pyOpenSSL dependency, so it is present wherever HAVE_TLS is true. Mirrors a
+    real Let's Encrypt fullchain so we can prove the 993 door presents the
+    intermediate, not just the leaf (#175). Fixed validity dates keep it
+    deterministic and clock-independent.
     """
-    ca_key = crypto.PKey()
-    ca_key.generate_key(crypto.TYPE_RSA, 2048)
-    ca = crypto.X509()
-    ca.get_subject().CN = "Postern Test Intermediate CA"
-    ca.set_serial_number(100)
-    ca.gmtime_adj_notBefore(0)
-    ca.gmtime_adj_notAfter(3600)
-    ca.set_issuer(ca.get_subject())
-    ca.set_pubkey(ca_key)
-    ca.add_extensions([crypto.X509Extension(b"basicConstraints", True, b"CA:TRUE")])
-    ca.sign(ca_key, "sha256")
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
 
-    leaf_key = crypto.PKey()
-    leaf_key.generate_key(crypto.TYPE_RSA, 2048)
-    leaf = crypto.X509()
-    leaf.get_subject().CN = "localhost"
-    leaf.set_serial_number(101)
-    leaf.gmtime_adj_notBefore(0)
-    leaf.gmtime_adj_notAfter(3600)
-    leaf.set_issuer(ca.get_subject())
-    leaf.set_pubkey(leaf_key)
-    leaf.sign(ca_key, "sha256")
+    not_before = datetime.datetime(2020, 1, 1)
+    not_after = datetime.datetime(2100, 1, 1)
+
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name(
+        [x509.NameAttribute(NameOID.COMMON_NAME, "Postern Test Intermediate CA")]
+    )
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(100)
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256())
+    )
+
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(leaf_name)
+        .issuer_name(ca_name)
+        .public_key(leaf_key.public_key())
+        .serial_number(101)
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .sign(ca_key, hashes.SHA256())
+    )
 
     fullchain_path = os.path.join(dirpath, "fullchain.pem")
     key_path = os.path.join(dirpath, "leaf.key")
     with open(fullchain_path, "wb") as f:
-        f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, leaf))
-        f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, ca))
+        f.write(leaf_cert.public_bytes(serialization.Encoding.PEM))
+        f.write(ca_cert.public_bytes(serialization.Encoding.PEM))
     with open(key_path, "wb") as f:
-        f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, leaf_key))
+        f.write(
+            leaf_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
     return fullchain_path, key_path
 
 
@@ -166,7 +191,10 @@ class TLSChainTest(unittest.TestCase):
 
         server_ctx = _build_tls_context_factory(self.fullchain, self.key).getContext()
         server = SSL.Connection(server_ctx, None)
-        client = SSL.Connection(SSL.Context(SSL.TLS_METHOD), None)
+        # Floor the client at TLS 1.2 too; never model an insecure context.
+        client_ctx = SSL.Context(SSL.TLS_METHOD)
+        client_ctx.set_min_proto_version(SSL.TLS1_2_VERSION)
+        client = SSL.Connection(client_ctx, None)
         _drive_handshake(client, server)
         chain = client.get_peer_cert_chain()
         self.assertEqual(
