@@ -17,10 +17,15 @@ import (
 )
 
 // ldapAuth is the LDAP auth backend (#68): it verifies a login by binding to the
-// directory over TLS, then resolves the bound identity from the mail attribute.
-// Two modes: simple bind (LDAP_BIND_DN_TEMPLATE) or search+bind (a service
-// account searches for the user's DN, then the user's password is bound to
-// verify it). TLS is mandatory; a bind carries the password in the clear.
+// directory over TLS DIRECTLY as the authenticating user (no privileged service
+// account), then SELF-READS that user's own entry (base scope, their own DN) for
+// the mail identity and, when LDAP_REQUIRE_GROUP is set, the memberOf authz gate.
+// Auth success is bind success; the self-read resolves From == mail and enforces
+// the group gate. This is the "direct-bind + self-read" model of record (Option A):
+// the directory (Authentik 2024.12.3) has no privileged search account to do a
+// service-account search+bind, so the user reads its OWN entry instead, which a
+// non-superuser bind is permitted to do. TLS is mandatory; a bind carries the
+// password in the clear. See docs/AUTH-CONTRACT.md section 5b.
 type ldapAuth struct {
 	cfg     LDAPCfg
 	tlsConf *tls.Config // nil unless an LDAP_TLS_* knob is set; carries the pinned trust (CA-pin or fingerprint-pin) for the directory connection
@@ -70,11 +75,14 @@ func newLDAPAuth(cfg LDAPCfg) (*ldapAuth, error) {
 	if !secure {
 		return nil, fmt.Errorf("ldap auth requires TLS: use an ldaps:// LDAP_URL or set LDAP_STARTTLS=true")
 	}
-	if cfg.BindDNTemplate == "" && (cfg.BindDN == "" || cfg.SearchBase == "" || cfg.SearchFilter == "") {
-		return nil, fmt.Errorf("ldap auth needs LDAP_BIND_DN_TEMPLATE (simple bind) or LDAP_BIND_DN + LDAP_SEARCH_BASE + LDAP_SEARCH_FILTER (search+bind)")
+	if cfg.BindDNTemplate == "" {
+		return nil, fmt.Errorf("ldap auth needs LDAP_BIND_DN_TEMPLATE for direct-bind (e.g. cn=%%s,ou=users,dc=ldap,dc=goauthentik,dc=io)")
 	}
 	if cfg.MailAttr == "" {
 		cfg.MailAttr = "mail"
+	}
+	if cfg.GroupAttr == "" {
+		cfg.GroupAttr = "memberOf"
 	}
 	tlsConf, err := buildLDAPTLSConfig(cfg)
 	if err != nil {
@@ -226,59 +234,90 @@ func (a *ldapAuth) Authenticate(username, secret string) (string, error) {
 		}
 	}
 
-	if a.cfg.BindDNTemplate != "" {
-		return a.simpleBind(conn, username, secret)
-	}
-	return a.searchBind(conn, username, secret)
+	return a.directBind(conn, username, secret)
 }
 
-// simpleBind binds as the templated DN, then resolves the mail attribute.
-func (a *ldapAuth) simpleBind(conn ldapConn, username, secret string) (string, error) {
+// directBind binds DIRECTLY as the templated user DN (auth success == bind
+// success), then self-reads that DN for the identity + authz gate. No privileged
+// service account is involved.
+func (a *ldapAuth) directBind(conn ldapConn, username, secret string) (string, error) {
 	dn := fmt.Sprintf(a.cfg.BindDNTemplate, ldap.EscapeDN(username))
 	if err := conn.Bind(dn, secret); err != nil {
 		return "", errAuthFailed
 	}
-	return a.resolveMail(conn, dn, username)
+	return a.selfRead(conn, dn, username)
 }
 
-// searchBind binds a service account, searches for the user's DN, binds the
-// user's password to verify it, then returns the mail attribute.
-func (a *ldapAuth) searchBind(conn ldapConn, username, secret string) (string, error) {
-	if err := conn.Bind(a.cfg.BindDN, a.cfg.BindPassword); err != nil {
-		return "", fmt.Errorf("ldap service bind failed: %w", err)
+// selfRead reads the bound user's OWN entry (base scope, their own DN) for the
+// mail identity and, when a group gate is configured (LDAP_REQUIRE_GROUP), the
+// memberOf attribute. A non-superuser bind is permitted to read its own entry, so
+// no privileged account is needed.
+//
+// The authz gate is FAIL-CLOSED: when LDAP_REQUIRE_GROUP is set, a self-read that
+// errors, returns no entry, or returns an entry NOT carrying the required group is
+// a denied login (never authenticate an account we cannot positively authorize).
+// When no gate is set the prior behavior is preserved: a missing/failed self-read
+// falls back to the login (pickIdentity) so a directory that hides own-mail still
+// resolves an email-shaped login.
+func (a *ldapAuth) selfRead(conn ldapConn, dn, username string) (string, error) {
+	gate := a.cfg.RequireGroup != ""
+
+	attrs := []string{a.cfg.MailAttr}
+	if gate {
+		attrs = append(attrs, a.cfg.GroupAttr)
 	}
-	filter := fmt.Sprintf(a.cfg.SearchFilter, ldap.EscapeFilter(username))
 	req := ldap.NewSearchRequest(
-		a.cfg.SearchBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 2, 0, false,
-		filter, []string{a.cfg.MailAttr}, nil,
+		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false,
+		"(objectClass=*)", attrs, nil,
 	)
 	res, err := conn.Search(req)
 	if err != nil {
-		return "", fmt.Errorf("ldap search: %w", err)
+		if gate {
+			// Cannot confirm authorization -> deny. An infra fault, not a bad
+			// credential, so surface the error (the session maps it to 535 too).
+			return "", fmt.Errorf("ldap self-read for the %s authz gate failed: %w", a.cfg.GroupAttr, err)
+		}
+		return pickIdentity("", username, a.cfg.MailAttr)
 	}
 	if len(res.Entries) != 1 {
-		// 0 = no such user; >1 = ambiguous. Either way, do not authenticate.
+		if gate {
+			return "", errAuthFailed
+		}
+		return pickIdentity("", username, a.cfg.MailAttr)
+	}
+
+	entry := res.Entries[0]
+	if gate && !hasGroupValue(entry.GetAttributeValues(a.cfg.GroupAttr), a.cfg.RequireGroup) {
+		// Bound OK (valid password) but NOT in the required group: a non-mail
+		// account must not open the mail door. Denied, not an infra fault.
 		return "", errAuthFailed
 	}
-	userDN := res.Entries[0].DN
-	mail := res.Entries[0].GetAttributeValue(a.cfg.MailAttr)
-	if err := conn.Bind(userDN, secret); err != nil {
-		return "", errAuthFailed
-	}
-	return pickIdentity(mail, username, a.cfg.MailAttr)
+	return pickIdentity(entry.GetAttributeValue(a.cfg.MailAttr), username, a.cfg.MailAttr)
 }
 
-// resolveMail reads the mail attribute from a base-scoped lookup of the bound DN.
-func (a *ldapAuth) resolveMail(conn ldapConn, dn, username string) (string, error) {
-	req := ldap.NewSearchRequest(
-		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false,
-		"(objectClass=*)", []string{a.cfg.MailAttr}, nil,
-	)
-	mail := ""
-	if res, err := conn.Search(req); err == nil && len(res.Entries) == 1 {
-		mail = res.Entries[0].GetAttributeValue(a.cfg.MailAttr)
+// hasGroupValue reports whether want appears among the entry's group-attribute
+// values, comparing as DNs: case-insensitive and insensitive to whitespace around
+// the RDN separators (a directory may render memberOf with or without spaces after
+// commas). This is a membership check, not full RFC 4514 normalization, which is
+// sufficient for the fixed mail-users gate DN.
+func hasGroupValue(values []string, want string) bool {
+	target := normalizeDN(want)
+	for _, v := range values {
+		if normalizeDN(v) == target {
+			return true
+		}
 	}
-	return pickIdentity(mail, username, a.cfg.MailAttr)
+	return false
+}
+
+// normalizeDN lower-cases a DN and trims whitespace around each RDN so two
+// spellings of the same DN compare equal.
+func normalizeDN(dn string) string {
+	parts := strings.Split(dn, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return strings.ToLower(strings.Join(parts, ","))
 }
 
 // pickIdentity prefers the directory mail attribute; if absent it falls back to

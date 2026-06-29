@@ -121,17 +121,16 @@ type ThrottleCfg struct {
 	GlobalWindow time.Duration // AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS, the aggregate window + cooldown (default 60)
 }
 
-// LDAPCfg configures the ldap auth backend. TLS is mandatory (ldaps:// or
-// StartTLS): a bind sends the password, so it must never cross cleartext.
+// LDAPCfg configures the ldap auth backend (direct-bind + self-read). TLS is
+// mandatory (ldaps:// or StartTLS): a bind sends the password, so it must never
+// cross cleartext.
 type LDAPCfg struct {
 	URL            string // LDAP_URL, ldaps://host:636 (preferred) or ldap://host:389
 	StartTLS       bool   // LDAP_STARTTLS, upgrade an ldap:// connection before binding
-	BindDNTemplate string // LDAP_BIND_DN_TEMPLATE, e.g. "uid=%s,ou=people,dc=example,dc=com" (simple bind)
-	BindDN         string // LDAP_BIND_DN, service account DN for search+bind
-	BindPassword   string // LDAP_BIND_PASSWORD, service account password
-	SearchBase     string // LDAP_SEARCH_BASE, e.g. "ou=people,dc=example,dc=com"
-	SearchFilter   string // LDAP_SEARCH_FILTER, e.g. "(uid=%s)"
+	BindDNTemplate string // LDAP_BIND_DN_TEMPLATE (required), the direct-bind DN, e.g. "cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io"
 	MailAttr       string // LDAP_MAIL_ATTR, the attribute holding the bound identity (default mail)
+	RequireGroup   string // LDAP_REQUIRE_GROUP, a group DN the bound user must carry in GroupAttr on self-read (the authz gate); empty = no gate
+	GroupAttr      string // LDAP_GROUP_ATTR, the attribute listing the user's groups for the gate (default memberOf)
 	// TLS trust for the StartTLS/ldaps connection. By default the directory cert is
 	// verified against the system roots, with the verified name taken from LDAP_URL.
 	// Two ALTERNATIVE trust models for a private or awkward directory cert (mutually
@@ -240,11 +239,9 @@ func loadConfig() (Config, error) {
 				URL:            os.Getenv("LDAP_URL"),
 				StartTLS:       envBool("LDAP_STARTTLS", false),
 				BindDNTemplate: os.Getenv("LDAP_BIND_DN_TEMPLATE"),
-				BindDN:         os.Getenv("LDAP_BIND_DN"),
-				BindPassword:   os.Getenv("LDAP_BIND_PASSWORD"),
-				SearchBase:     os.Getenv("LDAP_SEARCH_BASE"),
-				SearchFilter:   os.Getenv("LDAP_SEARCH_FILTER"),
 				MailAttr:       env("LDAP_MAIL_ATTR", "mail"),
+				RequireGroup:   os.Getenv("LDAP_REQUIRE_GROUP"),
+				GroupAttr:      env("LDAP_GROUP_ATTR", "memberOf"),
 				TLSCAFile:      os.Getenv("LDAP_TLS_CA"),
 				TLSServerName:  os.Getenv("LDAP_TLS_SERVER_NAME"),
 				TLSPinSHA256:   os.Getenv("LDAP_TLS_PIN_SHA256"),
@@ -347,9 +344,8 @@ func loadConfig() (Config, error) {
 			if !secure {
 				return c, fmt.Errorf("ldap auth requires TLS: use an ldaps:// LDAP_URL or set LDAP_STARTTLS=true")
 			}
-			if c.Submission.LDAP.BindDNTemplate == "" &&
-				(c.Submission.LDAP.BindDN == "" || c.Submission.LDAP.SearchBase == "" || c.Submission.LDAP.SearchFilter == "") {
-				return c, fmt.Errorf("ldap auth needs LDAP_BIND_DN_TEMPLATE (simple bind) or LDAP_BIND_DN + LDAP_SEARCH_BASE + LDAP_SEARCH_FILTER (search+bind)")
+			if c.Submission.LDAP.BindDNTemplate == "" {
+				return c, fmt.Errorf("ldap auth needs LDAP_BIND_DN_TEMPLATE for direct-bind (e.g. cn=%%s,ou=users,dc=ldap,dc=goauthentik,dc=io)")
 			}
 		case "system":
 			if c.Submission.SystemDomain == "" {

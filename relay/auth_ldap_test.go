@@ -97,70 +97,185 @@ func TestLDAPAuth_SimpleBind(t *testing.T) {
 	})
 }
 
-func TestLDAPAuth_SearchBind(t *testing.T) {
-	t.Run("service search then user bind returns mail", func(t *testing.T) {
+// entryResultAttrs builds a single-entry result carrying several attributes (mail
+// + memberOf), so the self-read group gate can be exercised.
+func entryResultAttrs(dn string, attrs map[string][]string) *ldap.SearchResult {
+	return &ldap.SearchResult{Entries: []*ldap.Entry{ldap.NewEntry(dn, attrs)}}
+}
+
+// The mail-users gate DN exactly as Authentik renders it (and as the deploy sets
+// LDAP_REQUIRE_GROUP).
+const mailUsersDN = "cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io"
+
+func TestLDAPAuth_DirectBind_SelfRead(t *testing.T) {
+	cfg := func() LDAPCfg {
+		return LDAPCfg{
+			URL:            "ldaps://x",
+			BindDNTemplate: "cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io",
+			MailAttr:       "mail",
+			GroupAttr:      "memberOf",
+			RequireGroup:   mailUsersDN,
+		}
+	}
+
+	t.Run("good password, in mail-users -> returns mail, binds ONCE as the user", func(t *testing.T) {
+		userDN := "cn=conrad,ou=users,dc=ldap,dc=goauthentik,dc=io"
 		fake := &fakeLDAP{
 			searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) {
-				return entryResult("uid=carol,ou=people,dc=x", "mail", "carol@example.com"), nil
+				return entryResultAttrs(userDN, map[string][]string{
+					"mail":     {"conrad@skyphusion.org"},
+					"memberOf": {"cn=other,ou=groups,dc=ldap,dc=goauthentik,dc=io", mailUsersDN},
+				}), nil
 			},
 		}
-		a := &ldapAuth{
-			cfg: LDAPCfg{
-				URL: "ldaps://x", BindDN: "cn=svc,dc=x", BindPassword: "svcpw",
-				SearchBase: "ou=people,dc=x", SearchFilter: "(uid=%s)", MailAttr: "mail",
-			},
-			dial: func(string) (ldapConn, error) { return fake, nil },
-		}
-		id, err := a.Authenticate("carol", "pw")
+		a := &ldapAuth{cfg: cfg(), dial: func(string) (ldapConn, error) { return fake, nil }}
+		id, err := a.Authenticate("conrad", "pw")
 		if err != nil {
 			t.Fatalf("Authenticate: %v", err)
 		}
-		if id != "carol@example.com" {
-			t.Errorf("identity = %q", id)
+		if id != "conrad@skyphusion.org" {
+			t.Errorf("identity = %q, want conrad@skyphusion.org", id)
 		}
-		// First bind is the service account, second is the user DN.
-		if len(fake.bindCalls) != 2 || fake.bindCalls[0] != "cn=svc,dc=x" || fake.bindCalls[1] != "uid=carol,ou=people,dc=x" {
-			t.Errorf("bindCalls = %#v, want [service, userDN]", fake.bindCalls)
+		// Direct-bind = exactly ONE bind, as the user's own DN (no service account).
+		if len(fake.bindCalls) != 1 || fake.bindCalls[0] != userDN {
+			t.Errorf("bindCalls = %#v, want exactly [%q]", fake.bindCalls, userDN)
 		}
 	})
 
-	t.Run("no entry is errAuthFailed", func(t *testing.T) {
-		fake := &fakeLDAP{searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) { return &ldap.SearchResult{}, nil }}
-		a := &ldapAuth{
-			cfg: LDAPCfg{
-				URL: "ldaps://x", BindDN: "cn=svc,dc=x", BindPassword: "svcpw",
-				SearchBase: "ou=people,dc=x", SearchFilter: "(uid=%s)", MailAttr: "mail",
+	t.Run("the self-read is base-scoped on the user's OWN DN", func(t *testing.T) {
+		userDN := "cn=conrad,ou=users,dc=ldap,dc=goauthentik,dc=io"
+		var gotBase string
+		var gotScope int
+		fake := &fakeLDAP{
+			searchFn: func(r *ldap.SearchRequest) (*ldap.SearchResult, error) {
+				gotBase, gotScope = r.BaseDN, r.Scope
+				return entryResultAttrs(userDN, map[string][]string{
+					"mail": {"conrad@skyphusion.org"}, "memberOf": {mailUsersDN},
+				}), nil
 			},
-			dial: func(string) (ldapConn, error) { return fake, nil },
 		}
-		if _, err := a.Authenticate("ghost", "pw"); err != errAuthFailed {
+		a := &ldapAuth{cfg: cfg(), dial: func(string) (ldapConn, error) { return fake, nil }}
+		if _, err := a.Authenticate("conrad", "pw"); err != nil {
+			t.Fatalf("Authenticate: %v", err)
+		}
+		if gotBase != userDN {
+			t.Errorf("self-read base = %q, want the user's own DN %q", gotBase, userDN)
+		}
+		if gotScope != ldap.ScopeBaseObject {
+			t.Errorf("self-read scope = %d, want ScopeBaseObject (%d)", gotScope, ldap.ScopeBaseObject)
+		}
+	})
+
+	t.Run("bad password is errAuthFailed (no self-read attempted)", func(t *testing.T) {
+		searched := false
+		fake := &fakeLDAP{
+			bindFn: func(dn, pw string) error { return fmt.Errorf("invalid credentials") },
+			searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) {
+				searched = true
+				return &ldap.SearchResult{}, nil
+			},
+		}
+		a := &ldapAuth{cfg: cfg(), dial: func(string) (ldapConn, error) { return fake, nil }}
+		if _, err := a.Authenticate("conrad", "wrong"); err != errAuthFailed {
 			t.Errorf("err = %v, want errAuthFailed", err)
 		}
+		if searched {
+			t.Error("self-read ran after a failed bind")
+		}
 	})
 
-	t.Run("wrong user password after a found entry is errAuthFailed", func(t *testing.T) {
+	t.Run("valid password but NOT in mail-users is errAuthFailed", func(t *testing.T) {
 		fake := &fakeLDAP{
 			searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) {
-				return entryResult("uid=dave,ou=people,dc=x", "mail", "dave@example.com"), nil
-			},
-			bindFn: func(dn, pw string) error {
-				if dn == "uid=dave,ou=people,dc=x" {
-					return fmt.Errorf("invalid credentials")
-				}
-				return nil // service bind ok
+				return entryResultAttrs("cn=nobody,ou=users,dc=ldap,dc=goauthentik,dc=io", map[string][]string{
+					"mail":     {"nobody@skyphusion.org"},
+					"memberOf": {"cn=other,ou=groups,dc=ldap,dc=goauthentik,dc=io"},
+				}), nil
 			},
 		}
-		a := &ldapAuth{
-			cfg: LDAPCfg{
-				URL: "ldaps://x", BindDN: "cn=svc,dc=x", BindPassword: "svcpw",
-				SearchBase: "ou=people,dc=x", SearchFilter: "(uid=%s)", MailAttr: "mail",
-			},
-			dial: func(string) (ldapConn, error) { return fake, nil },
-		}
-		if _, err := a.Authenticate("dave", "wrong"); err != errAuthFailed {
-			t.Errorf("err = %v, want errAuthFailed", err)
+		a := &ldapAuth{cfg: cfg(), dial: func(string) (ldapConn, error) { return fake, nil }}
+		if _, err := a.Authenticate("nobody", "pw"); err != errAuthFailed {
+			t.Errorf("err = %v, want errAuthFailed (gate must reject a non-mail-users account)", err)
 		}
 	})
+
+	t.Run("gate DN match is case- and whitespace-insensitive", func(t *testing.T) {
+		fake := &fakeLDAP{
+			searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) {
+				return entryResultAttrs("cn=conrad,ou=users,dc=ldap,dc=goauthentik,dc=io", map[string][]string{
+					"mail":     {"conrad@skyphusion.org"},
+					"memberOf": {"CN=mail-users, OU=groups, DC=ldap, DC=goauthentik, DC=io"},
+				}), nil
+			},
+		}
+		a := &ldapAuth{cfg: cfg(), dial: func(string) (ldapConn, error) { return fake, nil }}
+		if _, err := a.Authenticate("conrad", "pw"); err != nil {
+			t.Errorf("Authenticate: %v, want success (DN compare must ignore case + spacing)", err)
+		}
+	})
+
+	t.Run("gate FAILS CLOSED when the self-read errors", func(t *testing.T) {
+		fake := &fakeLDAP{
+			searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) {
+				return nil, fmt.Errorf("directory unavailable")
+			},
+		}
+		a := &ldapAuth{cfg: cfg(), dial: func(string) (ldapConn, error) { return fake, nil }}
+		// A gate that cannot be confirmed must DENY, not authenticate.
+		if id, err := a.Authenticate("conrad", "pw"); err == nil {
+			t.Errorf("got id=%q err=nil, want a denial when the authz self-read fails", id)
+		}
+	})
+
+	t.Run("gate FAILS CLOSED when the self-read returns no entry", func(t *testing.T) {
+		fake := &fakeLDAP{
+			searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) {
+				return &ldap.SearchResult{}, nil
+			},
+		}
+		a := &ldapAuth{cfg: cfg(), dial: func(string) (ldapConn, error) { return fake, nil }}
+		if _, err := a.Authenticate("conrad", "pw"); err != errAuthFailed {
+			t.Errorf("err = %v, want errAuthFailed when the self-read returns no entry", err)
+		}
+	})
+
+	t.Run("no gate configured: self-read failure falls back to an email-shaped login", func(t *testing.T) {
+		c := cfg()
+		c.RequireGroup = "" // gate off
+		fake := &fakeLDAP{
+			searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) {
+				return &ldap.SearchResult{}, nil
+			},
+		}
+		a := &ldapAuth{cfg: c, dial: func(string) (ldapConn, error) { return fake, nil }}
+		id, err := a.Authenticate("bob@example.com", "pw")
+		if err != nil || id != "bob@example.com" {
+			t.Errorf("id=%q err=%v, want bob@example.com fallback with no gate", id, err)
+		}
+	})
+}
+
+func TestHasGroupValue(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []string
+		want   string
+		ok     bool
+	}{
+		{"exact match", []string{mailUsersDN}, mailUsersDN, true},
+		{"absent", []string{"cn=other,ou=groups,dc=ldap,dc=goauthentik,dc=io"}, mailUsersDN, false},
+		{"case-insensitive", []string{"CN=Mail-Users,OU=Groups,DC=ldap,DC=goauthentik,DC=io"}, mailUsersDN, true},
+		{"spaces after commas", []string{"cn=mail-users, ou=groups, dc=ldap, dc=goauthentik, dc=io"}, mailUsersDN, true},
+		{"empty values", nil, mailUsersDN, false},
+		{"one of several", []string{"cn=a,dc=x", mailUsersDN, "cn=b,dc=x"}, mailUsersDN, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasGroupValue(tc.values, tc.want); got != tc.ok {
+				t.Errorf("hasGroupValue(%#v, %q) = %v, want %v", tc.values, tc.want, got, tc.ok)
+			}
+		})
+	}
 }
 
 func TestNewLDAPAuth_Validation(t *testing.T) {
@@ -169,18 +284,21 @@ func TestNewLDAPAuth_Validation(t *testing.T) {
 			t.Error("want TLS-required error")
 		}
 	})
-	t.Run("missing bind config rejected", func(t *testing.T) {
+	t.Run("missing bind template rejected", func(t *testing.T) {
 		if _, err := newLDAPAuth(LDAPCfg{URL: "ldaps://x"}); err == nil {
-			t.Error("want error for no template and no search config")
+			t.Error("want error for a missing LDAP_BIND_DN_TEMPLATE")
 		}
 	})
-	t.Run("ldaps simple bind ok, defaults mail attr", func(t *testing.T) {
-		a, err := newLDAPAuth(LDAPCfg{URL: "ldaps://x", BindDNTemplate: "uid=%s,dc=x"})
+	t.Run("ldaps direct-bind ok, defaults mail + group attrs", func(t *testing.T) {
+		a, err := newLDAPAuth(LDAPCfg{URL: "ldaps://x", BindDNTemplate: "cn=%s,dc=x"})
 		if err != nil {
 			t.Fatalf("newLDAPAuth: %v", err)
 		}
 		if a.cfg.MailAttr != "mail" {
 			t.Errorf("MailAttr default = %q, want mail", a.cfg.MailAttr)
+		}
+		if a.cfg.GroupAttr != "memberOf" {
+			t.Errorf("GroupAttr default = %q, want memberOf", a.cfg.GroupAttr)
 		}
 	})
 }
