@@ -165,13 +165,20 @@ retired search+bind path and are GONE from the Go relay. The `cn=postern-mail-ro
 service account is **not created** (Option A eliminates it); the staged
 `POSTERN_LDAP_BIND_PASSWORD` secret is not needed.
 
-**Verified self-read returns memberOf.** The whole model rests on a non-superuser
-bind being able to read its own `memberOf` on a base-scoped self-read; this was
-byte-confirmed against the live outpost during bring-up (a real user self-bind +
-self-read of its own DN returns both `mail` and `memberOf` including
-`cn=mail-users`). If a future directory change stops returning `memberOf` on a
-self-read, the gate fails closed (denies), and the gate would need another path
-before mail logins work again.
+**Self-read returns the user's full group set (proven), so the gate composes.**
+The whole model rests on a non-superuser bind being able to read its own `memberOf`
+on a base-scoped self-read. What was **byte-proven** against the live outpost during
+bring-up: a real crew member self-bound as themselves and the base-scope self-read
+of their own DN returned both `mail` AND their **complete** `memberOf` set (every
+group DN they belong to) -- proven with an account that is NOT in `mail-users`, so
+it establishes that the mechanism returns ALL of a user's groups, not a curated
+subset. The `cn=mail-users`-specific ALLOW then follows **by composition**: a
+separate read confirmed `cn=mail-users` has exactly one member (`cn=conrad`), so by
+the same full-set mechanism conrad's self-read `memberOf` will include
+`cn=mail-users` and the gate allows. That composed step is **validated live at
+deploy** (a `conrad`-send through the door is the final acceptance test). If a
+future directory change stops returning `memberOf` on a self-read, the gate fails
+closed (denies), and it would need another path before mail logins work again.
 
 **Per-door difference (verified against the #77 IMAP code).** The `mail`-attribute
 resolution is the **SMTP relay's** need: the relay uses `mail` as the authenticated
