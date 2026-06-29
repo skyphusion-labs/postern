@@ -140,14 +140,12 @@ func TestBuildLDAPTLSConfig_PinAndCAMutuallyExclusive(t *testing.T) {
 func TestNewLDAPAuth_CarriesPinnedTLSConf(t *testing.T) {
 	der := selfSignedDER(t)
 	a, err := newLDAPAuth(LDAPCfg{
-		URL:          "ldap://10.1.1.2:389",
-		StartTLS:     true,
-		BindDN:       "cn=postern-mail-ro,ou=users,dc=ldap,dc=goauthentik,dc=io",
-		SearchBase:   "ou=users,dc=ldap,dc=goauthentik,dc=io",
-		SearchFilter: "(mail=%s)",
-		MailAttr:     "mail",
-		TLSPinSHA256: fpHex(der),
-		Timeout:      10 * time.Second,
+		URL:            "ldap://10.1.1.2:389",
+		StartTLS:       true,
+		BindDNTemplate: "cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io",
+		MailAttr:       "mail",
+		TLSPinSHA256:   fpHex(der),
+		Timeout:        10 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("newLDAPAuth: %v", err)

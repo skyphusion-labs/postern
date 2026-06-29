@@ -128,20 +128,18 @@ func TestBuildLDAPTLSConfig_GarbageCAFileErrors(t *testing.T) {
 }
 
 // newLDAPAuth wires the built TLS config onto the provider (so the dialer and the
-// StartTLS upgrade both use the pinned trust). A search+bind config with a CA pin
+// StartTLS upgrade both use the pinned trust). A direct-bind config with a CA pin
 // must construct cleanly and carry a non-nil tlsConf.
 func TestNewLDAPAuth_CarriesTLSConf(t *testing.T) {
 	ca := writeTestCAPEM(t)
 	a, err := newLDAPAuth(LDAPCfg{
-		URL:           "ldap://10.1.1.2:389",
-		StartTLS:      true,
-		BindDN:        "cn=postern-mail-ro,ou=users,dc=ldap,dc=goauthentik,dc=io",
-		SearchBase:    "ou=users,dc=ldap,dc=goauthentik,dc=io",
-		SearchFilter:  "(mail=%s)",
-		MailAttr:      "mail",
-		TLSCAFile:     ca,
-		TLSServerName: "ak-outpost.internal",
-		Timeout:       10 * time.Second,
+		URL:            "ldap://10.1.1.2:389",
+		StartTLS:       true,
+		BindDNTemplate: "cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io",
+		MailAttr:       "mail",
+		TLSCAFile:      ca,
+		TLSServerName:  "ak-outpost.internal",
+		Timeout:        10 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("newLDAPAuth: %v", err)
