@@ -1,6 +1,6 @@
 [Unit]
 Description=Postern SMTP submission server (587, authenticated, LDAP/PAM) -> worker /api/send
-Documentation=https://github.com/skyphusion-labs/postern/blob/main/relay/SUBMISSION-DEPLOY.md
+Documentation=https://github.com/skyphusion-labs/postern/blob/main/relay/README.md
 After=network-online.target nslcd.service
 Wants=network-online.target
 # nslcd.service: PAM auth (AUTH_BACKEND=system) flows pam_ldap -> nslcd -> Authentik.
@@ -11,7 +11,7 @@ Type=simple
 EnvironmentFile=/etc/postern-submission.env
 # The submission build is the relay binary compiled WITH PAM (`go build -tags pam`),
 # installed under a distinct name so it coexists with the cgo-free inbound relay
-# (/usr/local/bin/skyphusion-email-relay). See SUBMISSION-DEPLOY.md.
+# (/usr/local/bin/skyphusion-email-relay). See README.md.
 ExecStart=/usr/local/bin/postern-submission
 Restart=always
 RestartSec=5

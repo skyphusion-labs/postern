@@ -2,8 +2,8 @@ package main
 
 // PROXY protocol (HAProxy spec, v1 text + v2 binary) on the submission edge.
 //
-// WHY: the postern mail edge moved to a single Hetzner L4 load balancer that
-// targets dischord DIRECTLY (no bastion, no HAProxy middle layer). An L4 LB
+// WHY: the postern mail edge moved to a single L4 load balancer that
+// targets the directory host DIRECTLY (no bastion, no HAProxy middle layer). An L4 LB
 // rewrites the source address, so without help every connection would appear to
 // originate from the LB. The LB instead prepends a PROXY protocol header carrying
 // the REAL client address; this file recovers it so logs and any per-IP control

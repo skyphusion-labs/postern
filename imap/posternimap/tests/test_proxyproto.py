@@ -232,18 +232,18 @@ class SignatureCommittedTest(unittest.TestCase):
 
 class TrustedSetTest(unittest.TestCase):
     def test_cidr_and_bare_ip(self):
-        nets = parse_trusted("10.1.0.0/16, 198.51.100.7 , 2001:db8::/32")
+        nets = parse_trusted("192.0.2.0/24, 198.51.100.7 , 2001:db8::/32")
         self.assertEqual(len(nets), 3)
         cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=nets)
-        self.assertTrue(cfg.trusts("10.1.0.3"))
+        self.assertTrue(cfg.trusts("192.0.2.3"))
         self.assertTrue(cfg.trusts("198.51.100.7"))  # bare IP -> /32
         self.assertFalse(cfg.trusts("198.51.100.8"))
         self.assertTrue(cfg.trusts("2001:db8::dead"))
         self.assertFalse(cfg.trusts("8.8.8.8"))
 
     def test_host_bits_tolerated(self):
-        nets = parse_trusted("10.1.2.3/16")  # strict=False masks to 10.1.0.0/16
-        self.assertEqual(str(nets[0]), "10.1.0.0/16")
+        nets = parse_trusted("192.0.2.3/24")  # strict=False masks to 192.0.2.0/24
+        self.assertEqual(str(nets[0]), "192.0.2.0/24")
 
     def test_empty_spec_is_empty(self):
         self.assertEqual(parse_trusted(""), ())
@@ -254,7 +254,7 @@ class TrustedSetTest(unittest.TestCase):
             parse_trusted("not-an-ip")
 
     def test_trusts_handles_garbage_host(self):
-        cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=parse_trusted("10.0.0.0/8"))
+        cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=parse_trusted("192.0.2.0/24"))
         self.assertFalse(cfg.trusts(None))
         self.assertFalse(cfg.trusts(""))
         self.assertFalse(cfg.trusts("not-an-ip"))

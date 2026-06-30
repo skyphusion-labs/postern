@@ -8,7 +8,7 @@ import (
 
 // authThrottle is the application-level online brute-force throttle for the
 // submission auth door (#105, audit F2). It is keyed on the presented ACCOUNT, not
-// the source IP: behind the lagwagon bastion every public connection presents one
+// the source IP: behind the bastion every public connection presents one
 // source IP (the bastion masquerade), so per-IP throttling is blind. A second,
 // GLOBAL layer bounds spread-account spraying (one guess each across many accounts)
 // through that single IP.

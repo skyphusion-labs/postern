@@ -23,7 +23,7 @@ Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/A
   is written in the same isolate as the store. This is the heart of postern.
 - **`worker/`** -- the legacy standalone send-only Worker (`EmailService` RPC + token-gated
   `POST /send`). Kept for back-compat; folds into `inbound/` in a later release.
-- **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) on **dischord** for local services that
+- **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) on the **directory host** for local services that
   can only speak SMTP (cron, backups, CI failure mail). Accepts MIME on `127.0.0.1:2525`, parses it,
   POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP).
 - **`mcp/`** -- the MCP server (TypeScript) so agents speak the mailbox over MCP. **Per-identity send**
@@ -47,7 +47,7 @@ When a change touches one of these areas, update the matching doc.
 - `docs/AUTH-CONTRACT.md` -- the auth model across the seams.
 - `docs/SEND-IDENTITIES.md` -- per-identity send (every caller sends as itself).
 - `docs/INTEGRATION.md` -- caller setup (service-binding RPC + REST).
-- `docs/GO-LIVE.md` -- production cutover.
+- Production cutover runbook: maintained out-of-tree in the operator private infrastructure repository (not in this product tree).
 - `DEPLOY.md` -- clean-install quickstart from a fresh clone.
 
 ## Commands
@@ -63,7 +63,7 @@ npx wrangler d1 migrations apply postern   # apply D1 migrations
 # worker/  (legacy send Worker) -- same npm scripts as inbound/
 # mcp/     (TypeScript)  -- npm run typecheck; npx vitest run
 # relay/   (Go 1.22+)    -- go vet ./... ; go build -o skyphusion-email-relay .
-# imap/    (Python/Twisted) -- see imap/DEPLOY.md; trial-based tests
+# imap/    (Python/Twisted) -- see imap/README.md; trial-based tests
 ```
 
 ### Verifying changes
@@ -78,7 +78,7 @@ End-to-end: verify against `npm run dev` + `curl` the mailbox API; verify the re
   `sendEmail()` so behavior cannot drift. `POST /send` does a **constant-time** Bearer-token compare
   before parsing the body. Keep it constant-time; never replace with `===`.
 - **Sender-domain rewriting.** The worker only accepts `from` on `ALLOWED_FROM_DOMAIN`
-  (`skyphusion.org`); the relay rewrites off-domain senders (e.g. `root@dischord`) to `DEFAULT_FROM`
+  (`skyphusion.org`); the relay rewrites off-domain senders (e.g. `root@directory-host`) to `DEFAULT_FROM`
   and moves the original into `Reply-To`, so CI/cron mail is not rejected.
 - **Store:** D1 (`messages`/`attachments`, FTS5), R2 (attachment bytes), Vectorize (embeddings for RAG).
 
@@ -98,7 +98,7 @@ End-to-end: verify against `npm run dev` + `curl` the mailbox API; verify the re
 **GitHub Actions**. On push to `main`, `deploy.yml` deploys the workers (the live
 inbound worker stays named `skyphusion-email-inbound`; the send worker -> `postern-send`) and runs
 `wrangler d1 migrations apply` first. Public repo -> GitHub-hosted `ubuntu-latest`. The relay is rebuilt
-and reinstalled on dischord by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
+and reinstalled on the directory host by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
 
 ## Conventions (SkyPhusion house style)
 

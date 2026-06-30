@@ -10,7 +10,7 @@
 # native + ldap auth backends but NOT the system/PAM backend (auth_system_pam.go is
 # behind the `pam` build tag and needs cgo + host nslcd/PAM, which does not belong
 # in a clean container). The fleet container deploy selects AUTH_BACKEND=ldap and
-# binds LDAPS to dischord -- symmetric with the IMAP door's pure-Python ldap choice.
+# binds LDAPS to the directory host -- symmetric with the IMAP door's pure-Python ldap choice.
 # A PAM deploy stays a host build; it is intentionally not a container target.
 #
 # Build context is relay/ (see .github/workflows/relay-image.yml).

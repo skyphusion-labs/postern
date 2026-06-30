@@ -1,5 +1,5 @@
 // Core send logic shared by the RPC entrypoint (service-binding callers) and
-// the public HTTP endpoint (the dischord SMTP relay). Validation lives here so
+// the public HTTP endpoint (the on-host SMTP relay). Validation lives here so
 // both surfaces behave identically.
 
 export interface EmailAddress {

@@ -49,7 +49,7 @@ func writeTestCAPEM(t *testing.T) string {
 // With no LDAP_TLS_* knob, buildLDAPTLSConfig returns nil so the default
 // verification path (system roots, go-ldap's own ServerName handling) is unchanged.
 func TestBuildLDAPTLSConfig_NilWhenUnset(t *testing.T) {
-	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389"})
+	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389"})
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestBuildLDAPTLSConfig_NilWhenUnset(t *testing.T) {
 
 // LDAP_TLS_SERVER_NAME alone pins the verified name (no CA => system roots).
 func TestBuildLDAPTLSConfig_ServerNameExplicit(t *testing.T) {
-	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389", TLSServerName: "ak-outpost.internal"})
+	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389", TLSServerName: "ak-outpost.internal"})
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig: %v", err)
 	}
@@ -82,22 +82,22 @@ func TestBuildLDAPTLSConfig_ServerNameExplicit(t *testing.T) {
 // LDAP_URL host. This matters because go-ldap's StartTLS does NOT derive it.
 func TestBuildLDAPTLSConfig_ServerNameDerivedFromURLHost(t *testing.T) {
 	ca := writeTestCAPEM(t)
-	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldaps://dischord.internal:636", TLSCAFile: ca})
+	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldaps://directory.example.internal:636", TLSCAFile: ca})
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig: %v", err)
 	}
 	if tc == nil || tc.RootCAs == nil {
 		t.Fatal("expected a non-nil tls.Config with RootCAs set when LDAP_TLS_CA is given")
 	}
-	if tc.ServerName != "dischord.internal" {
-		t.Errorf("ServerName = %q, want host-derived dischord.internal", tc.ServerName)
+	if tc.ServerName != "directory.example.internal" {
+		t.Errorf("ServerName = %q, want host-derived directory.example.internal", tc.ServerName)
 	}
 }
 
 // An explicit LDAP_TLS_SERVER_NAME overrides the host-derived default even with a CA.
 func TestBuildLDAPTLSConfig_ServerNameOverridesHost(t *testing.T) {
 	ca := writeTestCAPEM(t)
-	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389", TLSCAFile: ca, TLSServerName: "ak-outpost.internal"})
+	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389", TLSCAFile: ca, TLSServerName: "ak-outpost.internal"})
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestBuildLDAPTLSConfig_ServerNameOverridesHost(t *testing.T) {
 
 // A missing or unreadable CA file is a loud startup error, not a silent fallback.
 func TestBuildLDAPTLSConfig_MissingCAFileErrors(t *testing.T) {
-	_, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389", TLSCAFile: "/nonexistent/ca.pem"})
+	_, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389", TLSCAFile: "/nonexistent/ca.pem"})
 	if err == nil {
 		t.Fatal("expected an error for an unreadable LDAP_TLS_CA path")
 	}
@@ -121,7 +121,7 @@ func TestBuildLDAPTLSConfig_GarbageCAFileErrors(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not a certificate\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	_, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389", TLSCAFile: path})
+	_, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389", TLSCAFile: path})
 	if err == nil {
 		t.Fatal("expected an error for an LDAP_TLS_CA file with no PEM certificate")
 	}
@@ -133,7 +133,7 @@ func TestBuildLDAPTLSConfig_GarbageCAFileErrors(t *testing.T) {
 func TestNewLDAPAuth_CarriesTLSConf(t *testing.T) {
 	ca := writeTestCAPEM(t)
 	a, err := newLDAPAuth(LDAPCfg{
-		URL:            "ldap://10.1.1.2:389",
+		URL:            "ldap://192.0.2.10:389",
 		StartTLS:       true,
 		BindDNTemplate: "cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io",
 		MailAttr:       "mail",
@@ -169,10 +169,10 @@ func TestNewLDAPAuth_TLSConfReachesDialer(t *testing.T) {
 	}
 
 	a, err := newLDAPAuth(LDAPCfg{
-		URL:            "ldaps://dischord.internal:636",
+		URL:            "ldaps://directory.example.internal:636",
 		BindDNTemplate: "uid=%s,dc=x",
 		MailAttr:       "mail",
-		TLSServerName:  "dischord.internal",
+		TLSServerName:  "directory.example.internal",
 		Timeout:        5 * time.Second,
 	})
 	if err != nil {
@@ -184,7 +184,7 @@ func TestNewLDAPAuth_TLSConfReachesDialer(t *testing.T) {
 	if gotTLS == nil {
 		t.Fatal("production dialer received a nil *tls.Config; the pinned trust did not reach it")
 	}
-	if gotTLS.ServerName != "dischord.internal" {
-		t.Errorf("dialer tls ServerName = %q, want dischord.internal", gotTLS.ServerName)
+	if gotTLS.ServerName != "directory.example.internal" {
+		t.Errorf("dialer tls ServerName = %q, want directory.example.internal", gotTLS.ServerName)
 	}
 }

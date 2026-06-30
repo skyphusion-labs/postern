@@ -5,7 +5,7 @@ skyphusion-labs/postern#76 (Go 587 submission server) and #77 (IMAP `ldap`/`pam`
 mode); the umbrella is #75. This document is the single source the two consumers
 read from, so a binding never gets invented per-component. It is reproducible from
 the docs alone (ICD discipline): every DN, base, filter, attribute, and token here
-was verified read-only against the live Authentik directory on dischord.
+was verified read-only against a reference Authentik directory.
 
 ## 1. The requirement
 
@@ -22,13 +22,13 @@ Authentik instance that backs crew SSH, so there is one identity per human.
 
 ## 2. The directory (verified ground truth)
 
-Authentik LDAP outpost on **dischord** (`ghcr.io/goauthentik/ldap:2024.12.3`),
+Authentik LDAP outpost on the **directory host** (`ghcr.io/goauthentik/ldap:<pinned-version>`),
 published on the VLAN:
 
 | Fact | Value |
 |---|---|
-| Primary LDAP URI | `ldap://10.1.1.2:389` (dischord) |
-| Failover LDAP URI | `ldap://10.1.1.3:389` (fugazi) |
+| Primary LDAP URI | `ldap://192.0.2.10:389` (directory host) |
+| Failover LDAP URI | `ldap://192.0.2.11:389` (failover host) |
 | Transport offered | **plaintext 389 only** (no 636, no StartTLS today; see section 6) |
 | Base DN | `dc=ldap,dc=goauthentik,dc=io` |
 | Users OU | `ou=users,dc=ldap,dc=goauthentik,dc=io` |
@@ -49,7 +49,7 @@ per-function-key discipline and widens blast radius).
 ### Authorization gate
 
 Membership in `cn=mail-users` is the gate for "this account may use mail." It is a
-real, nss-visible group (`getent group mail-users` resolves on dischord) and today
+real, nss-visible group (`getent group mail-users` resolves on the directory host) and today
 contains `conrad`. Adding a mailbox user = add them to `mail-users` (additive
 Authentik blueprint edit, supervised). Both doors enforce this gate (section 4/5).
 
@@ -60,7 +60,7 @@ Both consumers can authenticate a user two ways. They are equivalent in result
 
 ### 3a. PAM (`system` mode) -- the fleet default
 
-The box already speaks to the directory: dischord runs `nslcd` (libpam-ldapd), and
+The box already speaks to the directory: the directory host runs `nslcd` (libpam-ldapd), and
 `/etc/pam.d/common-auth` chains `pam_unix` then `pam_ldap` (`minimum_uid=1000
 use_first_pass`). PAM auth for an Authentik account therefore flows
 **process -> pam_ldap -> nslcd -> LDAP bind**. nslcd already holds the bind
@@ -70,9 +70,9 @@ credential, so:
 - **No TLS-to-directory mutation** is needed: nslcd uses plaintext 389 over the
   trusted VLAN, the posture already accepted fleet-wide for nss/SSH.
 - The bind credential is the existing `ldap-svc` (already IaC, already rotatable
-  via `system/provision/RUNBOOK-rotate-ldap-bind-pw.md` in fleet-chezmoi).
+  via the operator private infrastructure repository's LDAP bind-password rotation runbook).
 
-This is why **PAM is the recommended backend for both doors on dischord**, and it
+This is why **PAM is the recommended backend for both doors on the directory host**, and it
 is the posture Conrad asked for ("PAM on both doors"). The PAM service file is
 `/etc/pam.d/postern` (section 4).
 
@@ -89,7 +89,7 @@ the hardening stands. Do not "fix" a local-shadow login by dropping
 
 The Go relay (`auth_ldap.go`) and the Python proxy (#77) can also bind the
 directory directly (pure-Go `go-ldap`; Python `ldap3`/equivalent). This is the
-right path for a non-fleet operator (a clone with no nslcd). On dischord it is the
+right path for a non-fleet operator (a clone with no nslcd). On the directory host it is the
 **alternative**, gated behind one IdP change: the relay's LDAP backend **mandates
 TLS** (`ldap auth requires TLS`), but the outpost offers plaintext 389 only.
 Enabling direct-LDAP on the fleet therefore requires section 6 (provision 636 + a
@@ -100,7 +100,7 @@ The direct-LDAP env (consumed identically by #76 and #77) is in section 5b.
 
 ## 4. PAM service file (`/etc/pam.d/postern`)
 
-Tracked as IaC in fleet-chezmoi at `system/pam.d/postern` (deployed to
+Tracked as IaC in the operator private infrastructure repository as the `postern` PAM service file (deployed to
 `/etc/pam.d/postern`, root 0644). Both doors name this service:
 
 - Go submission: `AUTH_SYSTEM_PAM_SERVICE=postern` (default).
@@ -151,7 +151,7 @@ once (`fmt.Sprintf`, one `%s`).
 
 ```
 AUTH_BACKEND=ldap                       # (Go) ; POSTERN_IMAP_AUTH_MODE=ldap (Python)
-LDAP_URL=ldap://10.1.1.2:389            # fleet outpost; TLS mandatory, see section 6
+LDAP_URL=ldap://192.0.2.10:389          # directory outpost; TLS mandatory, see section 6
 LDAP_STARTTLS=true
 LDAP_TLS_PIN_SHA256=<leaf SHA-256>      # pin the outpost's default cert (section 6a); non-secret
 LDAP_BIND_DN_TEMPLATE=cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io
@@ -189,14 +189,14 @@ applies to the proxy; under direct-bind it is the same `memberOf` self-read chec
 (`LDAP_REQUIRE_GROUP` / `LDAP_GROUP_ATTR`), not a search filter.
 
 **TLS is mandatory on BOTH doors for direct-LDAP.** The relay and the IMAP proxy
-each refuse a plaintext `ldap://10.1.1.2:389` bind unless `LDAP_STARTTLS=true` (or
+each refuse a plaintext `ldap://192.0.2.10:389` bind unless `LDAP_STARTTLS=true` (or
 an `ldaps://` URL). A bind carries the password, so it never crosses cleartext. On
 the fleet the outpost publishes plaintext 389 only, so the StartTLS upgrade pins the
 outpost's default cert by leaf SHA-256 (`LDAP_TLS_PIN_SHA256`, section 6a); PAM
 (section 3a) needs none of it.
 
 Failover: the current Go backend dials a single `LDAP_URL`, so fleet HA for
-direct-LDAP (a second outpost at `10.1.1.3`) is a follow-up.
+direct-LDAP (a second outpost at `192.0.2.11`) is a follow-up.
 
 ## 5c. Shared env namespace (cross-component contract)
 
@@ -214,10 +214,10 @@ verbatim; do not rename per component.
 | `POSTERN_SEND_TOKEN` / `POSTERN_SEND_URL` | Go (submission) | worker `/api/send` hand-off + its mailbox token. |
 | `POSTERN_API_TOKEN` | Python proxy | the proxy's per-function **store-read** service token (in `ldap`/`pam` mode). |
 | `POSTERN_API_URL` | Python proxy | the Postern store origin the proxy reads. |
-| `LDAP_URL` | both | `ldap://10.1.1.2:389` (+ `10.1.1.3` failover); `ldaps://dischord.internal:636` when TLS is provisioned. |
+| `LDAP_URL` | both | `ldap://192.0.2.10:389` (+ `192.0.2.11` failover); `ldaps://directory.example.internal:636` when TLS is provisioned. |
 | `LDAP_STARTTLS` | both | upgrade an `ldap://` conn before binding (needs section 6). |
 | `LDAP_TLS_CA` | Go (today); Python (follow-on) | PEM CA bundle to trust the directory cert; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots). The crew-ownable alternative to provisioning 636 + a chained cert (section 6): pin the outpost's existing self-signed CA, no IdP mutation. Strict verification against a pinned root, never an insecure-skip. |
-| `LDAP_TLS_SERVER_NAME` | Go (today); Python (follow-on) | name verified against the cert SANs; set when `LDAP_URL` dials an IP (e.g. `10.1.1.2`) but the cert names a host. Defaults to the `LDAP_URL` host. Required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). |
+| `LDAP_TLS_SERVER_NAME` | Go (today); Python (follow-on) | name verified against the cert SANs; set when `LDAP_URL` dials an IP (e.g. `192.0.2.10`) but the cert names a host. Defaults to the `LDAP_URL` host. Required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). |
 | `LDAP_TLS_PIN_SHA256` | Go (today); Python (follow-on) | exact-leaf SHA-256 pin (hex, colons optional, any case), SAN-independent. THE mechanism for Authentik's default outpost cert (bare-`*` SAN, unverifiable by CA-pin). A NON-secret public value (plain env, not a swarm secret). Mutually exclusive with `LDAP_TLS_CA`. Under the hood: `InsecureSkipVerify` + an exact-leaf check = stricter than a CA, not a bypass. |
 | `LDAP_BIND_DN_TEMPLATE` | both | **direct-bind** DN template (REQUIRED): **`cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io`** (single `%s` = the short login). |
 | `LDAP_REQUIRE_GROUP` | both | the group DN the bound user must carry in `LDAP_GROUP_ATTR` on self-read = the **`mail-users` authz gate**: **`cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io`**. Empty = no gate. Fail-closed. |
@@ -240,7 +240,7 @@ a negative value (`LDAP_TIMEOUT must be >= 0`).
 
 ## 6. TLS-to-directory (only for direct-LDAP on the fleet)
 
-The outpost publishes `10.1.1.2:389` (plaintext) only, and the direct-LDAP backend
+The outpost publishes `192.0.2.10:389` (plaintext) only, and the direct-LDAP backend
 requires TLS. There are two ways to satisfy that; the first is crew-ownable today.
 
 ### 6a. Pin the directory cert in the Go door (crew-ownable, no IdP mutation) -- BUILT
@@ -259,8 +259,8 @@ EXACT leaf by its SHA-256, which is SAN-independent.
 
 1. Capture the leaf fingerprint -- a NON-secret public value, so it is a plain env,
    not a swarm secret:
-   `openssl s_client -connect 10.1.1.2:389 -starttls ldap </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout`
-2. Set `LDAP_URL=ldap://10.1.1.2:389` + `LDAP_STARTTLS=true` and
+   `openssl s_client -connect 192.0.2.10:389 -starttls ldap </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout`
+2. Set `LDAP_URL=ldap://192.0.2.10:389` + `LDAP_STARTTLS=true` and
    `LDAP_TLS_PIN_SHA256=<the fingerprint>` (colon-separated or bare hex, any case).
    Leave `LDAP_TLS_CA` unset (the two are mutually exclusive; setting both is a
    startup error).
@@ -273,7 +273,7 @@ a CA signed) and is MITM-resistant -- a swapped cert fails the match. A gosec G4
 CodeQL `InsecureSkipVerify` finding at that call site is a JUSTIFIED suppression
 (annotated `#nosec G402` in `relay/auth_ldap.go`), expected, not a real issue.
 
-**Threat model.** The door dials dischord's own `:389` from a container ON dischord
+**Threat model.** The door dials the directory host's own `:389` from a container ON the directory host
 (same box, same VLAN), so this verification is belt-and-suspenders hardening, not
 load-bearing against a realistic MITM. The fingerprint-pin is cheap and strictly
 stronger than the IMAP proxy's `CERT_NONE` (#153), so it is the go-live posture (and
@@ -297,12 +297,12 @@ never an insecure-skip; no relay code change.
 
 ### 6b. Provision 636 + a chained cert (later hardening, retires #87/#153) -- GATED
 
-1. Issue an internal cert with SAN `dischord.internal` (+ `10.1.1.2`); a real cert
+1. Issue an internal cert with SAN `directory.example.internal` (+ `192.0.2.10`); a real cert
    via DNS-01 against the Cloudflare DNS API for an internal name is cleanest.
 2. Bind a certificate-keypair to the Authentik LDAP provider and publish 636 (or
-   enable StartTLS on 389): an edit to `system/stacks/dischord/auth/` (compose port
+   enable StartTLS on 389): an edit to the IdP stack config in the operator private infrastructure repository (compose port
    map + provider config) -- an **IdP-stack change, supervised**.
-3. Point `LDAP_URL` at `ldaps://dischord.internal:636`; no relay code change.
+3. Point `LDAP_URL` at `ldaps://directory.example.internal:636`; no relay code change.
 
 6b is the cleaner long-term shape (it retires #87/#153 for BOTH doors) but is a
 Conrad-gated IdP mutation; 6a unblocks the Go door's Wave-B logins without it. PAM
@@ -363,7 +363,7 @@ to exactly one scope.
 secret" (token mode: each session carries the user's own token) to "holds a
 per-function service token" (`ldap`/`pam` mode: the proxy authenticates the human
 against the directory, then reads the store with its OWN labelled service token).
-This must be stated in `imap/DEPLOY.md` (it is).
+This must be stated in the IMAP door deploy runbook (maintained out-of-tree) and its README (it is).
 
 **v1 reality vs end state (honest).** Postern is one mailbox, and the egalitarian
 single-key posture (one `both` token sends AND receives) is a first-class supported

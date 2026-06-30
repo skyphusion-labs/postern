@@ -25,7 +25,7 @@ from posternimap import proxyproto
 from posternimap.proxyproto import ProxyProtocolConfig, parse_trusted
 from posternimap.tests.test_proxyproto import v2_ipv4
 
-TRUSTED = parse_trusted("10.1.0.0/16")
+TRUSTED = parse_trusted("192.0.2.0/24")
 V1 = b"PROXY TCP4 198.51.100.7 203.0.113.1 4444 993\r\n"
 PAYLOAD = b"a LOGIN agent tok\r\n"
 
@@ -63,7 +63,7 @@ class _RecordingFactory(protocol.Factory):
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class ProxyWrapTest(unittest.TestCase):
-    def _spin(self, cfg, peer_ip="10.1.0.3", peer_port=5000):
+    def _spin(self, cfg, peer_ip="192.0.2.3", peer_port=5000):
         from posternimap.proxywrap import ProxyProtocolWrappingFactory
 
         clock = Clock()
@@ -115,11 +115,11 @@ class ProxyWrapTest(unittest.TestCase):
 
     def test_v1_unknown_keeps_raw_peer(self):
         cfg = ProxyProtocolConfig(mode=proxyproto.REQUIRE, trusted=TRUSTED)
-        proto, fac, _, _ = self._spin(cfg, peer_ip="10.1.0.9")
+        proto, fac, _, _ = self._spin(cfg, peer_ip="192.0.2.9")
         proto.dataReceived(b"PROXY UNKNOWN\r\n" + PAYLOAD)
         wrapped = fac.built[0]
         self.assertEqual(wrapped.received, PAYLOAD)
-        self.assertEqual(wrapped.conn_transport.getPeer().host, "10.1.0.9")  # raw peer kept
+        self.assertEqual(wrapped.conn_transport.getPeer().host, "192.0.2.9")  # raw peer kept
 
     def test_malformed_header_from_trusted_is_rejected(self):
         cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED)
@@ -152,15 +152,15 @@ class ProxyWrapTest(unittest.TestCase):
         # Trusted peer speaks IMAP directly (no PROXY header): optional falls back to
         # the raw peer and delivers the bytes.
         cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED)
-        proto, fac, _, _ = self._spin(cfg, peer_ip="10.1.0.5")
+        proto, fac, _, _ = self._spin(cfg, peer_ip="192.0.2.5")
         proto.dataReceived(PAYLOAD)
         wrapped = fac.built[0]
         self.assertEqual(wrapped.received, PAYLOAD)
-        self.assertEqual(wrapped.conn_transport.getPeer().host, "10.1.0.5")
+        self.assertEqual(wrapped.conn_transport.getPeer().host, "192.0.2.5")
 
     def test_trusted_require_no_header_is_rejected(self):
         cfg = ProxyProtocolConfig(mode=proxyproto.REQUIRE, trusted=TRUSTED)
-        proto, fac, transport, _ = self._spin(cfg, peer_ip="10.1.0.5")
+        proto, fac, transport, _ = self._spin(cfg, peer_ip="192.0.2.5")
         proto.dataReceived(PAYLOAD)  # first byte is not a PROXY signature
         self.assertEqual(len(fac.built), 0)
         self.assertFalse(transport.connected)
@@ -169,16 +169,16 @@ class ProxyWrapTest(unittest.TestCase):
 
     def test_trusted_optional_timeout_falls_back_to_raw_peer(self):
         cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED, timeout=5.0)
-        proto, fac, transport, clock = self._spin(cfg, peer_ip="10.1.0.7")
+        proto, fac, transport, clock = self._spin(cfg, peer_ip="192.0.2.7")
         self.assertEqual(len(fac.built), 0)  # waiting for a header
         clock.advance(5.1)
         self.assertEqual(len(fac.built), 1)
-        self.assertEqual(fac.built[0].conn_transport.getPeer().host, "10.1.0.7")
+        self.assertEqual(fac.built[0].conn_transport.getPeer().host, "192.0.2.7")
         self.assertTrue(transport.connected)
 
     def test_trusted_require_timeout_is_rejected(self):
         cfg = ProxyProtocolConfig(mode=proxyproto.REQUIRE, trusted=TRUSTED, timeout=5.0)
-        proto, fac, transport, clock = self._spin(cfg, peer_ip="10.1.0.7")
+        proto, fac, transport, clock = self._spin(cfg, peer_ip="192.0.2.7")
         clock.advance(5.1)
         self.assertEqual(len(fac.built), 0)
         self.assertFalse(transport.connected)
@@ -230,11 +230,11 @@ class ProxyWrapTest(unittest.TestCase):
         # optional still falls back to the raw peer (the contract's other side of the
         # boundary). Confirms signature_committed gates the reject correctly.
         cfg = ProxyProtocolConfig(mode=proxyproto.OPTIONAL, trusted=TRUSTED, timeout=5.0)
-        proto, fac, transport, clock = self._spin(cfg, peer_ip="10.1.0.7")
+        proto, fac, transport, clock = self._spin(cfg, peer_ip="192.0.2.7")
         proto.dataReceived(proxyproto.V2_SIGNATURE[:6])  # partial v2 sig only
         clock.advance(5.1)
         self.assertEqual(len(fac.built), 1)
-        self.assertEqual(fac.built[0].conn_transport.getPeer().host, "10.1.0.7")
+        self.assertEqual(fac.built[0].conn_transport.getPeer().host, "192.0.2.7")
         self.assertTrue(transport.connected)
 
     # --- clean (quiet) drop vs. loud malformed reject (contract sections 4 + 5.3) -
@@ -267,11 +267,11 @@ class ProxyWrapTest(unittest.TestCase):
         p1, f1, t1, _ = self._spin(cfg, peer_ip="8.8.8.8")
         self.assertFalse(t1.connected)
         # trusted peer, no header, timeout -> clean drop
-        p2, f2, t2, clock2 = self._spin(cfg, peer_ip="10.1.0.5")
+        p2, f2, t2, clock2 = self._spin(cfg, peer_ip="192.0.2.5")
         clock2.advance(5.1)
         self.assertFalse(t2.connected)
         # trusted peer, no PROXY signature at all -> clean drop
-        p3, f3, t3, _ = self._spin(cfg, peer_ip="10.1.0.5")
+        p3, f3, t3, _ = self._spin(cfg, peer_ip="192.0.2.5")
         p3.dataReceived(PAYLOAD)
         self.assertFalse(t3.connected)
         self.assertEqual(self._reject_lines(events), [])

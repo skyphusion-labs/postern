@@ -1,6 +1,6 @@
 """Flag-gated, structured measurement for the postern-imap read path.
 
-GO-LIVE.md step 0.6 / #102 Stage 1: additive, behaviour-neutral instrumentation on
+Operator go-live runbook (out-of-tree) step 0.6 / #102 Stage 1: additive, behaviour-neutral instrumentation on
 the read path so the Stage-1 windowing / live-refresh / lazy-hydration / UID model
 can be validated on the live (post-0005) store. It answers the questions the code
 comments call "measurement-informed":

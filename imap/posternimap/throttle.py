@@ -13,7 +13,7 @@ seconds) and the two behavioural invariants both doors enforce:
      returns the same generic UnauthorizedLogin it returns for a wrong password,
      and existent + non-existent usernames are throttled identically.
 
-Keyed on the presented ACCOUNT, not the source IP: behind the lagwagon bastion
+Keyed on the presented ACCOUNT, not the source IP: behind the bastion
 every external connection presents one masqueraded source IP, so per-IP is blind.
 A second GLOBAL layer bounds spread-account spraying through that single IP.
 

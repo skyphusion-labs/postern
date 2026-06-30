@@ -10,6 +10,4 @@ relay
 *.env
 !*.env.example
 systemd/
-DEPLOY.md
-SUBMISSION-DEPLOY.md
 README.md
