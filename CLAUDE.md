@@ -1,126 +1,119 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (and the crew) working in this repo.
 
 ## What this is
 
-The transactional email service for the skyphusion stack: it sends mail from `@skyphusion.org`
-through **Cloudflare Email Sending**. This is the skyphusion-specific deployment of the design
-that also lives, generically, in the sibling `cf-email-relay` repo. Two components:
+**Postern: email for humans AND agents.** A self-hostable mailbox on Cloudflare: it sends and
+receives mail, stores every message in a searchable store (D1 full-text + R2 + optional Vectorize),
+and exposes ONE structured mailbox API that agents and human clients (IMAP / webmail) both speak.
+Cloudflare Email is the default transport on each seam, never a hard dependency. From a fresh clone,
+with only your own domain, you can deploy it, send a message, and receive + read it back. Public, on
+CF Email (formerly `skyphusion-email`). See **DEPLOY.md** for the clean-install quickstart.
 
-- `worker/` -- a Cloudflare Worker (TypeScript) that sends the mail via the `send_email`
-  binding. Two front doors into the same `sendEmail()` core:
-  - **RPC**: same-account Workers (notably `skyphusion-llm-public`) call `env.EMAIL.send({...})`
-    through a service binding (typed, no token, no network hop). Class is
-    `EmailService extends WorkerEntrypoint<Env>`.
-  - **Public HTTPS**: `POST /send`, gated by a `RELAY_TOKEN` Bearer secret.
-- `relay/` -- a Go SMTP daemon (`go-smtp` + `enmime`) that runs on **dischord** for services
-  that can only speak SMTP (cron, scripts, backups, CI failure mail). It accepts MIME on
-  `127.0.0.1:2525`, parses it, and POSTs it to the worker over HTTPS.
-- `inbound/` -- a separate Cloudflare Worker that ingests inbound mail via Email Routing: it
-  forwards to `FORWARD_TO`, then parses the MIME and stores it in D1 (`messages`/`attachments`,
-  FTS5 search), R2 (attachment bytes), and Vectorize (chunked embeddings for crew RAG). This is
-  receive-side and independent of the send-side `worker/`.
+Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/AUTH-CONTRACT.md**, and
+**docs/SEND-IDENTITIES.md** before changing behavior.
 
-```
-skyphusion-llm-public ──(service binding RPC: env.EMAIL.send)──┐
-                                                               ├──► worker ──► CF Email Sending ──► inbox
-dischord services ──SMTP──► relay ──(HTTPS + Bearer token)─────┘
-   (cron, backups, CI mail)   (127.0.0.1:2525, systemd)
-```
+## Components (one repo)
+
+- **`inbound/`** -- THE core Cloudflare Worker. Ingests inbound mail via Email Routing, stores it in
+  D1 (FTS5 search), R2 (attachment bytes), and optionally Vectorize (chunked embeddings for crew RAG),
+  and serves the one mailbox API (`/api/messages`, `/api/search`, `/api/send`, `/api/reply`,
+  `/api/threads`) plus a same-account `MailboxService` RPC entrypoint. It also SENDS, so the sent copy
+  is written in the same isolate as the store. This is the heart of postern.
+- **`worker/`** -- the legacy standalone send-only Worker (`EmailService` RPC + token-gated
+  `POST /send`). Kept for back-compat; folds into `inbound/` in a later release.
+- **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) on **dischord** for local services that
+  can only speak SMTP (cron, backups, CI failure mail). Accepts MIME on `127.0.0.1:2525`, parses it,
+  POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP).
+- **`mcp/`** -- the MCP server (TypeScript) so agents speak the mailbox over MCP. **Per-identity send**
+  is first-class here: each human/agent sends under its OWN identity via per-identity creds
+  (`mcp/PROOF-per-identity-send.md`).
+- **`webmail/`** -- a single self-contained page (vanilla HTML/CSS/JS, no build step) served by the
+  worker at **`/webmail`**. Read-only human door: list, read, threads, search. BYO-token in
+  `sessionStorage` only, HTML rendered in a sandboxed iframe (no scripts/trackers), locked-down CSP.
+- **`imap/`** -- a small Twisted server fronting the read API as **read-only IMAP**, so
+  Thunderbird / mutt / iOS Mail can open the mailbox.
+- **`clients/python/`** -- a Python client for the API.
+
+Human doors (webmail, imap) are read-only **clients** of the API, never a second store. Sending always
+goes through the structured API.
+
+## Documentation map
+
+When a change touches one of these areas, update the matching doc.
+
+- `docs/CONTRACT.md` -- authoritative data model + the transport seams. Read FIRST.
+- `docs/AUTH-CONTRACT.md` -- the auth model across the seams.
+- `docs/SEND-IDENTITIES.md` -- per-identity send (every caller sends as itself).
+- `docs/INTEGRATION.md` -- caller setup (service-binding RPC + REST).
+- `docs/GO-LIVE.md` -- production cutover.
+- `DEPLOY.md` -- clean-install quickstart from a fresh clone.
 
 ## Commands
 
-### Worker (`worker/`, Node 22)
 ```bash
-npm run dev          # wrangler dev (local)
-npm run deploy       # wrangler deploy
-npm run typecheck    # tsc --noEmit -- the CI gate; run before pushing
-npm run cf-typegen   # wrangler types (regenerate Env types from wrangler.jsonc)
+# inbound/  (the core Worker, Node 22)
+cd inbound && npm run dev          # wrangler dev (local)
+npm run deploy                     # wrangler deploy
+npm run typecheck                  # tsc --noEmit -- the CI gate; run before pushing
+npm run cf-typegen                 # regenerate Env types from wrangler.jsonc
+npx wrangler d1 migrations apply postern   # apply D1 migrations
+
+# worker/  (legacy send Worker) -- same npm scripts as inbound/
+# mcp/     (TypeScript)  -- npm run typecheck; npx vitest run
+# relay/   (Go 1.22+)    -- go vet ./... ; go build -o skyphusion-email-relay .
+# imap/    (Python/Twisted) -- see imap/DEPLOY.md; trial-based tests
 ```
-First-time secret: `npx wrangler secret put RELAY_TOKEN`. Both `skyphusion.org` and
-`skyphusion.net` are already onboarded to Cloudflare Email Sending (SPF/DKIM in place).
 
-### Relay (`relay/`, Go 1.22+)
-```bash
-go vet ./...                              # lint (runs in CI)
-go build -o skyphusion-email-relay .      # build (runs in CI)
-```
-Install on dischord: binary to `/usr/local/bin/`, env to `/etc/skyphusion-email-relay.env`
-(mode 0600, set `EMAIL_WORKER_URL` + `EMAIL_RELAY_TOKEN`), unit to `/etc/systemd/system/`, then
-`systemctl enable --now skyphusion-email-relay`. See `README.md`.
+### Verifying changes
 
-Tests: the worker has a vitest suite (`worker/smoke.test.ts`) covering `sendEmail()` validation;
-run it with `npx vitest run` (the `ci` workflow gates on `typecheck` only, the
-`code-coverage-ts` workflow runs vitest + `go test`). For end-to-end checks, verify the worker
-with `npm run dev` / `curl .../send` and the relay on the box with `swaks --server 127.0.0.1:2525 ...`.
+The workers have vitest suites; the scripted v1.0 acceptance smoke is `inbound/smoke.mjs` (issue #25).
+End-to-end: verify against `npm run dev` + `curl` the mailbox API; verify the relay on the box with
+`swaks --server 127.0.0.1:2525 ...`. Always `npm run typecheck` first (it is not part of any test run).
 
-## Architecture
+## Architecture (load-bearing)
 
-Both front doors funnel through one function so behavior can't drift:
-
-- `worker/src/index.ts` -- dual entry: `EmailService` (RPC) + the `fetch` handler
-  (`GET /` + `/health`, `POST /send`). `/send` does a **constant-time** Bearer-token compare
-  before parsing the body. Keep it constant-time; do not replace with `===`.
-- `worker/src/email.ts` -- the shared core: `EmailRequest`, `sendEmail(env, req)`, `EmailError`
-  (`.code` + `.status`). Validates fields/recipients, enforces the sender domain, builds the
-  `SendEmailMessage`, calls `env.EMAIL.send()`, maps upstream failures (retryable -> 502,
-  caller-fixable -> 400/403).
-- `worker/src/env.d.ts` -- hand-authored `Env`, `SendEmailMessage`, `EmailSendBinding` types.
-- `relay/config.go` -- env-driven config (no flags/files; built for a systemd `EnvironmentFile`).
-- `relay/smtp.go` -- `go-smtp` Backend/Session, MIME parse (`enmime`), payload build,
-  multi-listen. Recipients come from the **envelope** (RCPT TO), not headers.
-- `relay/client.go` -- the HTTPS POST to the worker's `/send` with the Bearer token.
-
-### Sender-domain rewriting (load-bearing)
-The worker only accepts `from` on `ALLOWED_FROM_DOMAIN` (`skyphusion.org`). The relay's
-`FROM_DOMAIN` rewrites off-domain senders (e.g. `root@dischord`) to `DEFAULT_FROM` and moves
-the original into `Reply-To`, so CI/cron mail does not get rejected.
-
-## Bindings, vars, secrets
-
-**Worker** (`worker/wrangler.jsonc`, `compatibility_date 2025-05-05`):
-- Binding `send_email` -> `EMAIL` (Cloudflare Email Sending).
-- Vars: `DEFAULT_FROM` = `noreply@skyphusion.org`, `DEFAULT_FROM_NAME` = `Skyphusion`,
-  `ALLOWED_FROM_DOMAIN` = `skyphusion.org`.
-- Secret: `RELAY_TOKEN` (`wrangler secret put`; generate with `openssl rand -hex 32`). The same
-  value goes in the relay's env file.
-- No D1/R2/KV -- stateless, zero runtime deps.
-
-**Relay** (`/etc/skyphusion-email-relay.env`): `EMAIL_WORKER_URL` (required), `EMAIL_RELAY_TOKEN`
-(required; must match the worker's `RELAY_TOKEN`), `SMTP_LISTEN` (default `127.0.0.1:2525`),
-`DEFAULT_FROM` (default `noreply@skyphusion.org`), `FROM_DOMAIN` (default `skyphusion.org`),
-`HTTP_TIMEOUT_SECONDS` (default 30), `MAX_MESSAGE_BYTES` (default 25 MiB).
+- **One send core, two front doors.** Both `inbound/` and the legacy `worker/` funnel sends through one
+  `sendEmail()` so behavior cannot drift. `POST /send` does a **constant-time** Bearer-token compare
+  before parsing the body. Keep it constant-time; never replace with `===`.
+- **Sender-domain rewriting.** The worker only accepts `from` on `ALLOWED_FROM_DOMAIN`
+  (`skyphusion.org`); the relay rewrites off-domain senders (e.g. `root@dischord`) to `DEFAULT_FROM`
+  and moves the original into `Reply-To`, so CI/cron mail is not rejected.
+- **Store:** D1 (`messages`/`attachments`, FTS5), R2 (attachment bytes), Vectorize (embeddings for RAG).
 
 ## Gotchas
-- **Never bind the relay to `0.0.0.0`.** It sends as `@skyphusion.org`, so an internet-reachable
-  SMTP port is an open spam relay. Loopback / private bridge IP only.
-- **Max 50 recipients** (to + cc + bcc), enforced in both `email.ts` (`MAX_RECIPIENTS`) and
-  `smtp.go` (`MaxRecipients`). Keep them in sync.
-- **No queue.** Synchronous sends; on worker failure the relay returns SMTP 451 (transient) so
-  the MTA can retry, but nothing is durably buffered.
-- The relay is also usable by any service that needs to send mail (cron / scripts / backups) via
-  `127.0.0.1:2525`, so breaking the relay can silence those alerts.
+
+- **Never bind the relay to `0.0.0.0`.** It sends as `@skyphusion.org`; an internet-reachable SMTP port
+  is an open spam relay. Loopback / private bridge IP only.
+- **Max 50 recipients** (to + cc + bcc), enforced in both `email.ts` (`MAX_RECIPIENTS`) and `smtp.go`
+  (`MaxRecipients`). Keep them in sync.
+- **No queue.** Synchronous sends; on worker failure the relay returns SMTP 451 (transient) so the MTA
+  can retry, but nothing is durably buffered.
+- **Webmail safety:** no `innerHTML` of message content, sandboxed iframe render, locked-down CSP, token
+  in `sessionStorage` only.
 
 ## CI / deploy
-**GitHub Actions** (Jenkins is retired). `.github/workflows/`:
-- `ci` -- typecheck for `worker/` + `inbound/`, `go vet` + build for `relay/` (all branches).
-- `code-coverage-ts` -- vitest + `go test` coverage.
-- `deploy.yml` -- on push to **main**, deploys BOTH workers: `worker/` -> `postern-send`,
-  `inbound/` -> the `postern` template (Conrad's LIVE inbound worker stays named
-  `skyphusion-email-inbound`). The inbound step writes the `POSTERN_INBOUND_WRANGLER` repo secret
-  (full real config) to a runner file + deploys with `-c`, and runs `wrangler d1 migrations apply`
-  before deploy. Public repo -> GitHub-hosted `ubuntu-latest` runner.
 
-**Both Workers auto-deploy on green `main`.** The relay must be rebuilt and reinstalled on
-dischord by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
+**GitHub Actions** (Jenkins retired). On push to `main`, `deploy.yml` deploys the workers (the live
+inbound worker stays named `skyphusion-email-inbound`; the send worker -> `postern-send`) and runs
+`wrangler d1 migrations apply` first. Public repo -> GitHub-hosted `ubuntu-latest`. The relay is rebuilt
+and reinstalled on dischord by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
 
 ## Conventions (SkyPhusion house style)
-- Default handle/username for any service is `skyphusion`.
-- No em-dashes (U+2014) or en-dashes (U+2013) in source, comments, or docs; use commas,
-  semicolons, or parentheses.
+
+- Default handle/username is `skyphusion`.
+- No em-dashes (U+2014) or en-dashes (U+2013) in source, comments, or docs; use commas, semicolons,
+  parentheses, or `--`.
 - `npm run typecheck` must pass before pushing (it is not part of any test run).
-- Conventional Commits: `feat(worker): ...`, `fix(relay): ...`, `ci: ...`, `docs(readme): ...`.
-  Body is the why; footer lists files touched.
-- Keep both components dependency-light (worker: zero runtime deps; relay: only `go-smtp` +
-  `enmime`). New deps need justification.
+- Keep components dependency-light (workers: near-zero runtime deps; relay: only `go-smtp` + `enmime`).
+  New deps need justification.
+- Conventional Commits: `feat(inbound): ...`, `fix(relay): ...`, `ci: ...`, `docs(claude): ...`. Body is
+  the why; footer lists files touched.
+
+## Crew + identity
+
+- Crew work as their own identity: FIRST command in any op is `sudo -u <member> bash -lc '<ops>'` (own
+  `$HOME`, own clone, own creds); commits/PRs land under `skyphusion-<member>`. **SEND is first-class for
+  everyone via per-identity creds** -- a crew member sends as itself, never as a shared mailbox.
+- Operating memory for this repo: `~/.claude/projects/-home-conrad-dev-postern/memory/` (load before acting).
