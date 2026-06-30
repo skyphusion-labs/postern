@@ -95,7 +95,7 @@ End-to-end: verify against `npm run dev` + `curl` the mailbox API; verify the re
 
 ## CI / deploy
 
-**GitHub Actions** (Jenkins retired). On push to `main`, `deploy.yml` deploys the workers (the live
+**GitHub Actions**. On push to `main`, `deploy.yml` deploys the workers (the live
 inbound worker stays named `skyphusion-email-inbound`; the send worker -> `postern-send`) and runs
 `wrangler d1 migrations apply` first. Public repo -> GitHub-hosted `ubuntu-latest`. The relay is rebuilt
 and reinstalled on dischord by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
