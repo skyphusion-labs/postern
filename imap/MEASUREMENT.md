@@ -1,6 +1,6 @@
 # postern-imap Stage-1 measurement
 
-The read-path measurement layer for the IMAP proxy: `GO-LIVE.md` step 0.6 / #102
+The read-path measurement layer for the IMAP proxy: the operator go-live runbook (out-of-tree) step 0.6 / #102
 Stage 1. It is **additive and behaviour-neutral** instrumentation that lets us
 validate the Stage-1 read path (windowing, lazy hydration, the live-refresh poll,
 and the `UID == messages.id` model) against the live store, once migration 0005

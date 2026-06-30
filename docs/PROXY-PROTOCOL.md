@@ -11,8 +11,8 @@ Issue: #155. Companion code: `relay/proxyproto.go` (Go 587), the equivalent in
 
 ## 1. Why this exists
 
-The postern mail edge moved to a single Hetzner L4 load balancer that targets
-dischord DIRECTLY (no bastion, no HAProxy middle layer). An L4 load balancer
+The postern mail edge moved to a single L4 load balancer that targets
+the directory host DIRECTLY (no bastion, no HAProxy middle layer). An L4 load balancer
 forwards the TCP stream but rewrites the source address, so without help every
 connection would appear to originate from the load balancer's own private
 address. The throttle (#105) and the logs would then see one IP for the whole
@@ -107,8 +107,8 @@ Notes:
 
 ### 5.1 Cutover sequence
 
-This ordering is a HARD operational constraint, not a preference. Hetzner makes
-the service INACCESSIBLE if the load balancer has the proxy-protocol flag enabled
+This ordering is a HARD operational constraint, not a preference. The load
+balancer makes the service INACCESSIBLE if it has the proxy-protocol flag enabled
 while the target is not yet parsing it (the LB prepends a header the door does not
 understand, the door treats it as a malformed greeting, and every connection
 fails). Therefore:
@@ -136,9 +136,9 @@ fleet-chezmoi LB IaC, and the GO-LIVE runbook; they all reference THIS section.
 ### 5.2 Bind surface
 
 Each door binds the PRIVATE VLAN address only (e.g. the 587 door on
-`10.1.1.2:587`), never `0.0.0.0` and never a public bind. dischord stays dark; the
-load balancer is the only public surface, and the host firewall admits the door's
-port only FROM the LB's private source (the estate `10.1.0.0/16`). The trusted set
+`192.0.2.10:587`), never `0.0.0.0` and never a public bind. The directory host stays
+dark; the load balancer is the only public surface, and the host firewall admits
+the door's port only FROM the LB's private source (the estate `192.0.2.0/24`). The trusted set
 in `PROXY_PROTOCOL_TRUSTED` is that same LB private source.
 
 ### 5.3 Health checks

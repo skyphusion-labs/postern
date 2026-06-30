@@ -219,7 +219,7 @@ func mustNet(t *testing.T, cidr string) *net.IPNet {
 }
 
 func TestProxyConnTrustAndModeMatrix(t *testing.T) {
-	trusted := []*net.IPNet{mustNet(t, "10.1.0.0/16")}
+	trusted := []*net.IPNet{mustNet(t, "192.0.2.0/24")}
 	header := append([]byte("PROXY TCP4 203.0.113.7 198.51.100.2 51000 587\r\n"), []byte("EHLO x\r\n")...)
 	const realClient = "203.0.113.7:51000"
 
@@ -240,24 +240,24 @@ func TestProxyConnTrustAndModeMatrix(t *testing.T) {
 		{
 			name:   "optional trusted with header: honored",
 			mode:   proxyOptional,
-			peer:   tcp("10.1.0.3", 5000),
+			peer:   tcp("192.0.2.3", 5000),
 			script: header,
 			want:   want{remote: realClient, firstRead: "EHLO x\r\n"},
 		},
 		{
 			name:   "optional trusted no header: fallback to raw peer",
 			mode:   proxyOptional,
-			peer:   tcp("10.1.0.3", 5000),
+			peer:   tcp("192.0.2.3", 5000),
 			script: []byte("EHLO x\r\n"),
-			want:   want{remote: "10.1.0.3:5000", firstRead: "EHLO x\r\n"},
+			want:   want{remote: "192.0.2.3:5000", firstRead: "EHLO x\r\n"},
 		},
 		{
 			name:    "optional trusted silent: deadline -> fallback to raw peer",
 			mode:    proxyOptional,
-			peer:    tcp("10.1.0.3", 5000),
+			peer:    tcp("192.0.2.3", 5000),
 			script:  []byte{},
 			timeout: true,
-			want:    want{remote: "10.1.0.3:5000"},
+			want:    want{remote: "192.0.2.3:5000"},
 		},
 		{
 			name:   "optional UNTRUSTED with header: NOT honored, header left in stream (anti-spoof)",
@@ -271,7 +271,7 @@ func TestProxyConnTrustAndModeMatrix(t *testing.T) {
 		{
 			name:   "require trusted with header: honored",
 			mode:   proxyRequire,
-			peer:   tcp("10.1.0.3", 5000),
+			peer:   tcp("192.0.2.3", 5000),
 			script: header,
 			want:   want{remote: realClient, firstRead: "EHLO x\r\n"},
 		},
@@ -281,9 +281,9 @@ func TestProxyConnTrustAndModeMatrix(t *testing.T) {
 			// loud error, so the probes never pollute logs or the throttle.
 			name:   "require trusted no header (LB health check): clean drop",
 			mode:   proxyRequire,
-			peer:   tcp("10.1.0.3", 5000),
+			peer:   tcp("192.0.2.3", 5000),
 			script: []byte("EHLO x\r\n"),
-			want:   want{remote: "10.1.0.3:5000", cleanDrop: true},
+			want:   want{remote: "192.0.2.3:5000", cleanDrop: true},
 		},
 		{
 			name:   "require UNTRUSTED: clean drop",
@@ -336,10 +336,10 @@ func TestProxyConnTrustAndModeMatrix(t *testing.T) {
 // the LB is expected to speak the protocol correctly, so corrupt framing must
 // surface LOUD (a non-EOF error go-smtp logs), never be silently swallowed.
 func TestProxyConnMalformedFromTrustedIsLoud(t *testing.T) {
-	trusted := []*net.IPNet{mustNet(t, "10.1.0.0/16")}
+	trusted := []*net.IPNet{mustNet(t, "192.0.2.0/24")}
 	// A v1 header that begins correctly but has a bad source IP (parse fault).
 	bad := []byte("PROXY TCP4 not-an-ip 198.51.100.2 51000 587\r\n")
-	sc := newScriptConn(bad, tcp("10.1.0.3", 5000))
+	sc := newScriptConn(bad, tcp("192.0.2.3", 5000))
 	c := &proxyConn{Conn: sc, cfg: ProxyProtocolCfg{Mode: proxyRequire, Trusted: trusted, Timeout: time.Second}}
 
 	_, err := c.Read(make([]byte, 64))
@@ -358,7 +358,7 @@ func TestWrapProxyListenerOffIsNoOp(t *testing.T) {
 	if got := wrapProxyListener(base, ProxyProtocolCfg{Mode: proxyOff}); got != base {
 		t.Fatalf("off mode wrapped the listener (%T); want the raw listener returned unchanged", got)
 	}
-	on := wrapProxyListener(base, ProxyProtocolCfg{Mode: proxyRequire, Trusted: []*net.IPNet{mustNet(t, "10.0.0.0/8")}})
+	on := wrapProxyListener(base, ProxyProtocolCfg{Mode: proxyRequire, Trusted: []*net.IPNet{mustNet(t, "192.0.2.0/24")}})
 	if on == base {
 		t.Fatalf("enabled mode did not wrap the listener")
 	}
@@ -371,7 +371,7 @@ func (*fakeListener) Close() error              { return nil }
 func (*fakeListener) Addr() net.Addr            { return &net.TCPAddr{} }
 
 func TestParseProxyTrusted(t *testing.T) {
-	got, err := parseProxyTrusted("10.1.0.0/16, 203.0.113.5, 2001:db8::/32")
+	got, err := parseProxyTrusted("192.0.2.0/24, 203.0.113.5, 2001:db8::/32")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

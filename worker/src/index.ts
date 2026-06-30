@@ -46,7 +46,7 @@ export default {
       return json({ ok: false, error: "not_found" }, 404);
     }
 
-    // Bearer-token gate for the public endpoint (used by the dischord SMTP
+    // Bearer-token gate for the public endpoint (used by the on-host SMTP
     // relay and any external caller that can't use a service binding). The
     // secret is POSTERN_API_TOKEN; RELAY_TOKEN is honored as a fallback for one
     // release through the rename (see docs/CONTRACT.md section 5).

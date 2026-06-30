@@ -65,8 +65,8 @@ ways via a pluggable `AuthProvider`; the IMAP proxy mirrors the same backends so
   These two steps are deliberately separate: authenticate-the-user, then
   act-on-the-store-with-the-service-token. This is a **posture shift** -- in
   `token` mode the proxy holds no secret; in these modes it holds a service token.
-  See [`DEPLOY.md`](DEPLOY.md) for exactly what secret is held in each mode, by
-  function, and where it is stored.
+  See the operator deploy runbook (maintained out-of-tree) for exactly what
+  secret is held in each mode, by function, and where it is stored.
 
 `native` is stdlib-only (urllib). `ldap` needs the pure-Python `ldap3`
 (`pip install -e '.[ldap]'`) and `system` needs `python-pam`
@@ -77,8 +77,8 @@ Run the proxy **behind TLS or on loopback** (the password is a real credential):
 set `POSTERN_IMAP_TLS_CERT`/`POSTERN_IMAP_TLS_KEY`, or front a loopback listener
 with stunnel. When TLS is enabled the listener enforces a **TLS 1.2 minimum** (the
 deprecated TLS 1.0/1.1 are never offered, mirroring the SMTP relay; #106). By
-default it binds `127.0.0.1:1143`. Exposing **993 (IMAPS)** is gated -- see
-[`DEPLOY.md`](DEPLOY.md).
+default it binds `127.0.0.1:1143`. Exposing **993 (IMAPS)** is gated -- see the
+operator deploy runbook (out-of-tree).
 
 ## Configuration
 
@@ -226,9 +226,9 @@ injectable transport, so no network is touched.
   fetches a body; the per-message body GET happens only when a message is opened
   (or `RFC822.SIZE` is requested), so a large shared mailbox stays snappy.
 
-## Production deploy (dischord)
+## Production deploy
 
-For the self-hosted install on dischord (hardened systemd unit, loopback-only v1,
-EnvironmentFile, smoke, and the gated path to public IMAPS), see
-[`DEPLOY.md`](DEPLOY.md). The unit ships at
-[`systemd/postern-imap.service`](systemd/postern-imap.service).
+The generic self-host path is covered above (Configuration + Run it) and the unit
+ships at [`systemd/postern-imap.service`](systemd/postern-imap.service).
+Internal/production deploy runbooks are maintained out-of-tree in the operator
+private infrastructure repository; this README covers the generic self-host path.

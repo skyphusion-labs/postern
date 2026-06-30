@@ -47,7 +47,7 @@ func fpHex(der []byte) string {
 // it sets no RootCAs (SAN/CA-independent).
 func TestBuildLDAPTLSConfig_PinShape(t *testing.T) {
 	der := selfSignedDER(t)
-	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389", TLSPinSHA256: fpHex(der)})
+	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389", TLSPinSHA256: fpHex(der)})
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestBuildLDAPTLSConfig_PinShape(t *testing.T) {
 // of the unusable bare-* SAN.
 func TestBuildLDAPTLSConfig_PinMatchAndMITM(t *testing.T) {
 	der := selfSignedDER(t)
-	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389", TLSPinSHA256: fpHex(der)})
+	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389", TLSPinSHA256: fpHex(der)})
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestBuildLDAPTLSConfig_PinAcceptsColonsAndCase(t *testing.T) {
 	}
 	colonUpper := "  " + strings.ToUpper(strings.Join(groups, ":")) + "\n"
 
-	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389", TLSPinSHA256: colonUpper})
+	tc, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389", TLSPinSHA256: colonUpper})
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig with colon/upper/space pin: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestBuildLDAPTLSConfig_PinMalformed(t *testing.T) {
 		"00",                     // 1 byte
 		strings.Repeat("ab", 33), // 33 bytes, too long
 	} {
-		if _, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://10.1.1.2:389", TLSPinSHA256: bad}); err == nil {
+		if _, err := buildLDAPTLSConfig(LDAPCfg{URL: "ldap://192.0.2.10:389", TLSPinSHA256: bad}); err == nil {
 			t.Errorf("expected an error for malformed pin %q", bad)
 		}
 	}
@@ -126,7 +126,7 @@ func TestBuildLDAPTLSConfig_PinMalformed(t *testing.T) {
 func TestBuildLDAPTLSConfig_PinAndCAMutuallyExclusive(t *testing.T) {
 	der := selfSignedDER(t)
 	_, err := buildLDAPTLSConfig(LDAPCfg{
-		URL:          "ldap://10.1.1.2:389",
+		URL:          "ldap://192.0.2.10:389",
 		TLSCAFile:    "/some/ca.pem",
 		TLSPinSHA256: fpHex(der),
 	})
@@ -140,7 +140,7 @@ func TestBuildLDAPTLSConfig_PinAndCAMutuallyExclusive(t *testing.T) {
 func TestNewLDAPAuth_CarriesPinnedTLSConf(t *testing.T) {
 	der := selfSignedDER(t)
 	a, err := newLDAPAuth(LDAPCfg{
-		URL:            "ldap://10.1.1.2:389",
+		URL:            "ldap://192.0.2.10:389",
 		StartTLS:       true,
 		BindDNTemplate: "cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io",
 		MailAttr:       "mail",

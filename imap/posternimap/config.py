@@ -23,7 +23,7 @@ In native/ldap/system the proxy authenticates the USER, then reads the store wit
 a per-function SERVICE token it holds (POSTERN_API_TOKEN). The env var names
 mirror relay/config.go so an operator configures both doors from one vocabulary.
 This is a documented posture shift: in token mode the proxy holds NO secret; in
-native/ldap/system it holds a per-function service token (see imap/DEPLOY.md).
+native/ldap/system it holds a per-function service token (see imap/README.md).
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ class Config:
     throttle_global_window_seconds: int = 60  # aggregate window + cooldown
 
     # --- PROXY protocol on the listener edge (#155) ---
-    # The mail edge moved to a single Hetzner L4 load balancer targeting dischord
+    # The mail edge moved to a single L4 load balancer targeting the directory host
     # directly (no bastion). An L4 LB rewrites the source address, so the door
     # recovers the REAL client IP from a PROXY header the LB prepends, HONORED ONLY
     # from a trusted source (anti-spoof). Config names (PROXY_PROTOCOL /

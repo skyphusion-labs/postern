@@ -168,7 +168,7 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
 > self-reading `mail`), and because the `memberOf=mail-users` **authorization gate**
 > lives in the search filter (simple-bind drops it, so any directory account could
 > send). See `docs/AUTH-CONTRACT.md` section 5b ("the contract shape") and
-> `imap/DEPLOY.md`; the two doors share one login by design (#75).
+> `imap/README.md`; the two doors share one login by design (#75).
 
 ### Online brute-force throttle (`AUTH_THROTTLE_*`, #105)
 
@@ -178,7 +178,7 @@ submission AUTH door applies a **per-account** failure counter with lockout +
 exponential backoff (default: lock after 5 consecutive failures, 60s base
 doubling to a 900s cap), plus a **global** aggregate ceiling that cools down ALL
 auth for one window once tripped (default 100 failures / 60s). It is keyed on the
-**account, not the source IP**: behind the lagwagon bastion every public
+**account, not the source IP**: behind the bastion every public
 connection presents one IP, so per-IP throttling (and fail2ban) is blind here. A
 throttled attempt returns the **same generic auth failure** as a wrong password,
 and a locked account is rejected **without** touching the backend, so the throttle
@@ -265,10 +265,14 @@ secrets (`POSTERN_SEND_TOKEN`, `POSTERN_TRANSPORT_TOKEN`, `EMAIL_RELAY_TOKEN`,
 are read as PATHs directly (`SUBMISSION_TLS_CERT` / `_KEY`).
 
 Container deploys use **`AUTH_BACKEND=ldap` (search+bind)** -- the cgo-free image
-has no `system`/PAM backend (see the auth-backend note above). The fleet Swarm
-stack + secret wiring live in `fleet-chezmoi` (`postern-submission.stack.yml`); the
-door binds its private VLAN address only (e.g. `10.1.1.2:587`), never `0.0.0.0`. The
-PROXY-protocol edge contract (the L4 LB in front) is `docs/PROXY-PROTOCOL.md`.
+has no `system`/PAM backend (see the auth-backend note above). The operator Swarm
+stack + secret wiring live out-of-tree in the operator private infrastructure
+repository; the door binds its private VLAN address only (e.g. `192.0.2.10:587`),
+never `0.0.0.0`. The PROXY-protocol edge contract (the L4 LB in front) is
+`docs/PROXY-PROTOCOL.md`.
+
+Internal/production deploy runbooks are maintained out-of-tree in the operator
+private infrastructure repository; this README covers the generic self-host path.
 
 ## Files
 

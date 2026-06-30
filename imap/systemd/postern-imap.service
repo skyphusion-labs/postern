@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/postern-imap.env
-# The venv is created at install time (see imap/DEPLOY.md); the module is
+# The venv is created at install time (see imap/README.md); the module is
 # posternimap, run with -m so no console_script entry point is required.
 WorkingDirectory=/opt/postern-imap
 ExecStart=/opt/postern-imap/.venv/bin/python -m posternimap

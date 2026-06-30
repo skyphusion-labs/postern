@@ -220,7 +220,7 @@ func TestIntakeAddrIsLoopback(t *testing.T) {
 		{":2525", false},         // wildcard bind, every interface
 		{"0.0.0.0:2525", false},
 		{"[::]:2525", false},
-		{"10.1.1.2:2525", false}, // a real interface
+		{"192.0.2.10:2525", false}, // a real interface
 		{"smtp.example.com:2525", false},
 	}
 	for _, tc := range cases {
@@ -287,7 +287,7 @@ func TestLoadConfig_ProxyProtocolDefaultsOff(t *testing.T) {
 func TestLoadConfig_ProxyProtocolParsesTrusted(t *testing.T) {
 	setSubmissionOnlyEnv(t)
 	t.Setenv("PROXY_PROTOCOL", "require")
-	t.Setenv("PROXY_PROTOCOL_TRUSTED", "10.1.0.0/16, 203.0.113.5")
+	t.Setenv("PROXY_PROTOCOL_TRUSTED", "192.0.2.0/24, 203.0.113.5")
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
@@ -299,8 +299,8 @@ func TestLoadConfig_ProxyProtocolParsesTrusted(t *testing.T) {
 	if len(pp.Trusted) != 2 {
 		t.Fatalf("parsed %d trusted nets, want 2", len(pp.Trusted))
 	}
-	if !pp.trusts(net.ParseIP("10.1.0.3")) || pp.trusts(net.ParseIP("8.8.8.8")) {
-		t.Errorf("trust gate wrong: 10.1.0.3 must be trusted, 8.8.8.8 must not")
+	if !pp.trusts(net.ParseIP("192.0.2.3")) || pp.trusts(net.ParseIP("8.8.8.8")) {
+		t.Errorf("trust gate wrong: 192.0.2.3 must be trusted, 8.8.8.8 must not")
 	}
 }
 
@@ -317,7 +317,7 @@ func TestLoadConfig_ProxyProtocolEnabledRequiresTrusted(t *testing.T) {
 func TestLoadConfig_ProxyProtocolUnknownModeFails(t *testing.T) {
 	setSubmissionOnlyEnv(t)
 	t.Setenv("PROXY_PROTOCOL", "banana")
-	t.Setenv("PROXY_PROTOCOL_TRUSTED", "10.0.0.0/8")
+	t.Setenv("PROXY_PROTOCOL_TRUSTED", "192.0.2.0/24")
 	if _, err := loadConfig(); err == nil {
 		t.Fatalf("want error on unknown PROXY_PROTOCOL mode")
 	}
@@ -335,7 +335,7 @@ func TestLoadConfig_ProxyProtocolBadCIDRFails(t *testing.T) {
 func TestLoadConfig_ProxyProtocolTimeoutFloor(t *testing.T) {
 	setSubmissionOnlyEnv(t)
 	t.Setenv("PROXY_PROTOCOL", "optional")
-	t.Setenv("PROXY_PROTOCOL_TRUSTED", "10.1.0.0/16")
+	t.Setenv("PROXY_PROTOCOL_TRUSTED", "192.0.2.0/24")
 	t.Setenv("PROXY_PROTOCOL_TIMEOUT_SECONDS", "0")
 	cfg, err := loadConfig()
 	if err != nil {

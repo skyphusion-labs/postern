@@ -252,15 +252,15 @@ class ProxyProtocolConfigTest(unittest.TestCase):
             self._cfg(PROXY_PROTOCOL="optional")
 
     def test_require_with_trusted_ok(self):
-        cfg = self._cfg(PROXY_PROTOCOL="require", PROXY_PROTOCOL_TRUSTED="10.1.0.0/16")
+        cfg = self._cfg(PROXY_PROTOCOL="require", PROXY_PROTOCOL_TRUSTED="192.0.2.0/24")
         self.assertEqual(cfg.proxy_protocol.mode, "require")
         self.assertTrue(cfg.proxy_protocol.enabled())
-        self.assertTrue(cfg.proxy_protocol.trusts("10.1.0.3"))
+        self.assertTrue(cfg.proxy_protocol.trusts("192.0.2.3"))
         self.assertFalse(cfg.proxy_protocol.trusts("8.8.8.8"))
 
     def test_unknown_mode_errors(self):
         with self.assertRaises(ConfigError):
-            self._cfg(PROXY_PROTOCOL="sometimes", PROXY_PROTOCOL_TRUSTED="10.1.0.0/16")
+            self._cfg(PROXY_PROTOCOL="sometimes", PROXY_PROTOCOL_TRUSTED="192.0.2.0/24")
 
     def test_bad_cidr_errors(self):
         with self.assertRaises(ConfigError):
@@ -269,7 +269,7 @@ class ProxyProtocolConfigTest(unittest.TestCase):
     def test_timeout_floored_at_one_second(self):
         cfg = self._cfg(
             PROXY_PROTOCOL="require",
-            PROXY_PROTOCOL_TRUSTED="10.1.0.0/16",
+            PROXY_PROTOCOL_TRUSTED="192.0.2.0/24",
             PROXY_PROTOCOL_TIMEOUT_SECONDS="0",
         )
         self.assertEqual(cfg.proxy_protocol.timeout, 1.0)
@@ -277,13 +277,13 @@ class ProxyProtocolConfigTest(unittest.TestCase):
     def test_timeout_custom(self):
         cfg = self._cfg(
             PROXY_PROTOCOL="optional",
-            PROXY_PROTOCOL_TRUSTED="10.1.0.0/16",
+            PROXY_PROTOCOL_TRUSTED="192.0.2.0/24",
             PROXY_PROTOCOL_TIMEOUT_SECONDS="8",
         )
         self.assertEqual(cfg.proxy_protocol.timeout, 8.0)
 
     def test_mode_is_case_insensitive(self):
-        cfg = self._cfg(PROXY_PROTOCOL="REQUIRE", PROXY_PROTOCOL_TRUSTED="10.1.0.0/16")
+        cfg = self._cfg(PROXY_PROTOCOL="REQUIRE", PROXY_PROTOCOL_TRUSTED="192.0.2.0/24")
         self.assertEqual(cfg.proxy_protocol.mode, "require")
 
 

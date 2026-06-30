@@ -6,8 +6,8 @@ without a reactor, mirroring the client.py / rfc822.py layering. The Twisted
 adapter that wires it onto a listener (trust-gates the raw peer, strips the header
 before the TLS handshake, recovers the client address) lives in proxywrap.py.
 
-WHY: the postern mail edge moved to a single Hetzner L4 load balancer that targets
-dischord DIRECTLY (no bastion). An L4 LB rewrites the source address, so the door
+WHY: the postern mail edge moved to a single L4 load balancer that targets
+the directory host DIRECTLY (no bastion). An L4 LB rewrites the source address, so the door
 would otherwise see one IP (the LB) for the whole world; the throttle (#105) and
 the logs would be blind. The LB instead PROXY-protocols the connection, prepending
 a header carrying the REAL client address; this module parses that header.

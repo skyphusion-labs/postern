@@ -98,7 +98,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Fleet is Hetzner x86_64; a single linux/amd64 image keeps the GHCR
+          # The runtime target is x86_64; a single linux/amd64 image keeps the GHCR
           # package and the short-SHA digest clean for swarm pinning.
           platforms: linux/amd64
           cache-from: type=gha

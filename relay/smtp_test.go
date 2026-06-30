@@ -21,7 +21,7 @@ func TestFirstAddress(t *testing.T) {
 		{"named single", "Alice <alice@example.com>", "alice@example.com"},
 		{"named list takes first", "Alice <alice@example.com>, Bob <bob@example.com>", "alice@example.com"},
 		{"bare list takes first", "alice@example.com, bob@example.com", "alice@example.com"},
-		{"angle-bracketed local host", "<root@dischord>", "root@dischord"},
+		{"angle-bracketed local host", "<root@directory-host>", "root@directory-host"},
 		{"leading and trailing spaces trimmed", "  bob@example.com  ", "bob@example.com"},
 		// Unparseable header values fall back to the raw (trimmed) string.
 		{"malformed falls back to raw", "not an email", "not an email"},
