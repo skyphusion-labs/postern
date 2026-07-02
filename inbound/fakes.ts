@@ -21,6 +21,12 @@ interface Row {
   received_at: string;
   direction: string;
   thread_id: string | null;
+  delivered_to: string | null;
+  cc_addr: string | null;
+  bcc_addr: string | null;
+  sender_addr: string | null;
+  reply_to_addr: string | null;
+  wire_size: number | null;
 }
 
 interface AttRow {
@@ -126,6 +132,55 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         return null as T | null;
       },
       async all<T>() {
+        // M8 upsert (#178): INSERT ... ON CONFLICT(message_id) DO UPDATE ...
+        // RETURNING thread_id, is_fresh. Faithful to store.put()'s single atomic
+        // statement -- fresh insert (is_fresh=1), merge-append (is_fresh=0), or a
+        // true-dedup no-op (recipient already a member -> WHERE false -> no row).
+        // Bind order: 15 insert values, then delivered_set(15), cc(16), bcc(17),
+        // sender(18), reply_to(19), wire_size(20), merge_rcpt(21), where-rcpt(22),
+        // is_fresh cmp = delivered_set(23).
+        if (/INSERT INTO messages/i.test(sql) && /ON CONFLICT/i.test(sql)) {
+          const b = bound as unknown[];
+          const message_id = b[0] as string;
+          const delivered_set = b[15] as string;
+          const merge_rcpt = b[21] as string;
+          const existing = rows.find((r) => r.message_id === message_id);
+          if (!existing) {
+            rows.push({
+              id: seq++,
+              message_id,
+              from_addr: b[1] as string,
+              to_addr: b[2] as string,
+              subject: b[3] as string,
+              date: b[4] as string,
+              in_reply_to: b[5] as string | null,
+              body_text: b[6] as string,
+              body_html: b[7] as string | null,
+              spf: b[8] as string,
+              dkim: b[9] as string,
+              dmarc: b[10] as string,
+              trusted: b[11] as number,
+              received_at: b[12] as string,
+              direction: b[13] as string,
+              thread_id: b[14] as string | null,
+              delivered_to: delivered_set,
+              cc_addr: b[16] as string | null,
+              bcc_addr: b[17] as string | null,
+              sender_addr: b[18] as string | null,
+              reply_to_addr: b[19] as string | null,
+              wire_size: b[20] as number | null,
+            });
+            return { results: [{ thread_id: b[14] as string | null, is_fresh: 1 }] as unknown as T[] };
+          }
+          // Conflict: SQLite LIKE is case-insensitive, so compare lower-cased.
+          const current = existing.delivered_to ?? `,${existing.to_addr},`;
+          if (current.toLowerCase().includes(`,${merge_rcpt.toLowerCase()},`)) {
+            return { results: [] as unknown as T[] }; // already a member: no-op
+          }
+          existing.delivered_to = `${current}${merge_rcpt},`;
+          const is_fresh = existing.delivered_to === delivered_set ? 1 : 0;
+          return { results: [{ thread_id: existing.thread_id, is_fresh }] as unknown as T[] };
+        }
         if (/FROM attachments WHERE message_id/i.test(sql)) {
           const id = bound[0] as string;
           return { results: atts.filter((a) => a.message_id === id) as unknown as T[] };
@@ -182,6 +237,12 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             in_reply_to: r.in_reply_to,
             trusted: r.trusted,
             received_at: r.received_at,
+            delivered_to: r.delivered_to,
+            cc_addr: r.cc_addr,
+            bcc_addr: r.bcc_addr,
+            sender_addr: r.sender_addr,
+            reply_to_addr: r.reply_to_addr,
+            wire_size: r.wire_size,
             attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
           }));
           return { results: results as unknown as T[] };
@@ -202,9 +263,12 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
               ),
             );
           }
-          if (/lower\(m\.to_addr\) LIKE \?/i.test(sql)) {
-            const v = String(bound[i++]).replace(/%/g, "").toLowerCase();
-            work = work.filter((r) => r.to_addr.toLowerCase().includes(v));
+          // M8 (#178/#189): COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE
+          // '%,' || ? || ',%'. Bind is the bare lower-cased address; match the
+          // delivered set (falling back to a v1 row's to_addr), delimiter-safe.
+          if (/COALESCE\(m\.delivered_to/i.test(sql)) {
+            const v = String(bound[i++]).toLowerCase();
+            work = work.filter((r) => (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`));
           }
           if (/lower\(m\.from_addr\) LIKE \?/i.test(sql)) {
             const v = String(bound[i++]).replace(/%/g, "").toLowerCase();
@@ -240,6 +304,12 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             in_reply_to: r.in_reply_to,
             trusted: r.trusted,
             received_at: r.received_at,
+            delivered_to: r.delivered_to,
+            cc_addr: r.cc_addr,
+            bcc_addr: r.bcc_addr,
+            sender_addr: r.sender_addr,
+            reply_to_addr: r.reply_to_addr,
+            wire_size: r.wire_size,
             attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
           }));
           return { results: results as unknown as T[] };

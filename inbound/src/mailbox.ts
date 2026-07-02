@@ -204,6 +204,15 @@ function toAddress(v: string | EmailAddress | undefined): EmailAddress | undefin
   return typeof v === "string" ? { email: v } : v;
 }
 
+// The first bare address from a raw address-list header (Reply-To / From), for
+// routing a reply (#189). Strips a display name (<addr>) and takes the first entry
+// of a comma-list; the result flows through validateRecipients like any address.
+function firstAddress(raw: string): string {
+  const first = (raw.split(",")[0] ?? "").trim();
+  const angle = first.match(/<([^>]+)>/);
+  return (angle ? angle[1] : first).trim();
+}
+
 // A Message-ID we generate for outbound mail so it dedups, threads, and stores
 // like any received message. Domain taken from the From so it is well-formed.
 function generateMessageId(fromEmail: string): string {
@@ -307,8 +316,12 @@ export async function reply(
     throw new MailboxError("E_NOT_FOUND", `no stored message with id ${req.messageId}`, 404);
   }
 
-  // Route to the original sender. (Reply-all is a post-v1 enhancement.)
-  const to = [original.from];
+  // Route to the stored Reply-To when the original set one (RFC 5322 fidelity,
+  // #189): list / role mail that sets Reply-To must not have replies mis-sent to
+  // its From. Resolved from STORED state, never caller input. Extract the bare
+  // address from the (possibly display-name-bearing, possibly multi-value) header.
+  // (Reply-all is a post-v1 enhancement.)
+  const to = [firstAddress(original.replyTo ?? original.from)];
   validateRecipients("to", to);
   const cc = asArray(req.cc);
   const bcc = asArray(req.bcc);
@@ -401,6 +414,16 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       bodyText: deriveBodyText(d.html, d.text),
       auth: { spf: "none", dkim: "none", dmarc: "none" },
       trusted: true, // we sent it
+      // Envelope fidelity v2 (#189): the sent copy carries the full recipient set
+      // it was addressed to. delivered_to = to + cc + bcc, complete at insert (so
+      // "mail involving X" views are complete for our own sent mail, incl. Bcc,
+      // same privacy boundary as v1's stored body). cc_addr/bcc_addr = the joined
+      // lists; reply_to_addr when set. sender_addr + wire_size stay NULL (we are
+      // the author; CF builds the MIME, so there is no wire size to record).
+      deliveredTo: [...d.to, ...d.cc, ...d.bcc].map((a) => a.toLowerCase()),
+      cc: d.cc.length ? d.cc.join(", ") : null,
+      bcc: d.bcc.length ? d.bcc.join(", ") : null,
+      replyTo: d.replyTo ? (d.replyTo.name ? `${d.replyTo.name} <${d.replyTo.email}>` : d.replyTo.email) : null,
       // Index outbound mail + replies into the semantic store (#116 ws2): our own
       // sends carry status / decisions / answers, so a query like "what's the
       // status of the RunPod API fix?" must be able to find the reply WE wrote.
