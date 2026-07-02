@@ -45,6 +45,20 @@ class RenderTest(unittest.TestCase):
         parsed = email.message_from_bytes(render_rfc822(_msg(in_reply_to="parent-id")))
         self.assertEqual(parsed["In-Reply-To"], "<parent-id>")
 
+    def test_bracketed_identifiers_are_not_double_wrapped(self):
+        # #179 transcript: the store keeps In-Reply-To VERBATIM (with its angle
+        # brackets; only messageId is stripped at ingest), so wrapping again put
+        # "<<...>>" on the wire and broke client threading. Wrapping must be
+        # idempotent for both identifier fields, in the render AND the body-free
+        # envelope scan.
+        m = _msg(in_reply_to="<parent@github.com>", message_id="<abc123>")
+        parsed = email.message_from_bytes(render_rfc822(m))
+        self.assertEqual(parsed["In-Reply-To"], "<parent@github.com>")
+        self.assertEqual(parsed["Message-ID"], "<abc123>")
+        h = envelope_headers(_summary(in_reply_to="<parent@github.com>"))
+        self.assertEqual(h["in-reply-to"], "<parent@github.com>")
+        self.assertEqual(h["message-id"], "<abc123>")
+
     def test_attachment_note_has_real_newlines(self):
         m = _msg(attachments=[Attachment(filename="report.pdf", mime="application/pdf", size=10)])
         body = email.message_from_bytes(render_rfc822(m)).get_payload(decode=True).decode()

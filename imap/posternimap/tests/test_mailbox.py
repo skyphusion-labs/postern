@@ -170,6 +170,32 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(hdrs["subject"], "second")
         self.assertEqual(self.transport.body_fetches, 0)
 
+    def test_header_fields_names_arrive_as_bytes_from_twisted(self):
+        # Regression for #179: Twisted's FETCH parser passes the names inside
+        # BODY[HEADER.FIELDS (...)] to getHeaders as BYTES. The old str-only
+        # comparison matched nothing, so every HEADER.FIELDS FETCH answered an
+        # empty header block and a HEADER.FIELDS-scanning client (the Gmail app)
+        # showed "(no subject)" + a blank sender for every message. Both serving
+        # paths must accept bytes: the summary-served envelope subset, and the
+        # hydrated path (a non-envelope name like Content-Type in the set).
+        from twisted.mail.imap4 import MessageSet
+
+        mb = self._mailbox()
+        (_, msg), = list(mb.fetch(MessageSet(2, 2), uid=False))
+        # Summary-served (all names in the envelope set): no body fetch.
+        hdrs = msg.getHeaders(False, b"subject", b"from", b"to")
+        self.assertEqual(hdrs["subject"], "second")
+        self.assertEqual(hdrs["from"], "m2@example.com")
+        self.assertEqual(self.transport.body_fetches, 0)
+        # Hydrated (content-type is not an envelope name): the Gmail-app scan
+        # shape. Must return the real headers, not an empty block.
+        hdrs = msg.getHeaders(
+            False, b"date", b"subject", b"from", b"content-type", b"to", b"cc", b"message-id"
+        )
+        self.assertEqual(hdrs["subject"], "second")
+        self.assertEqual(hdrs["from"], "m2@example.com")
+        self.assertIn("content-type", hdrs)
+
     def test_window_caps_to_recent_and_uid_is_store_rowid(self):
         # 3 messages, store rowids 1..3 (uid == arrival ordinal); window=2 shows the
         # most-recent two (the highest uids), NOT a window-relative 1..2.

@@ -146,8 +146,21 @@ class PosternIMAPMessage:
 
     # --- IMessagePart ---
 
-    def getHeaders(self, negate: bool, *names: str):
-        names_lower = {n.lower() for n in names}
+    def getHeaders(self, negate: bool, *names):
+        # Twisted's FETCH parser hands BODY[HEADER.FIELDS (...)] field names to
+        # getHeaders as BYTES (the wire is bytes; imap4._FetchParser.state_section
+        # -> spew_body), while its SEARCH handlers pass str. Normalize every name
+        # to a lowercase str BEFORE comparing against our str header keys: the
+        # bytes/str mismatch made every HEADER.FIELDS FETCH return an EMPTY header
+        # block, which a client that scans with HEADER.FIELDS instead of ENVELOPE
+        # (the Gmail app; Thunderbird scans ENVELOPE and was fine) rendered as
+        # "(no subject)" + a blank sender for every message (#179). Header names
+        # are ASCII by RFC 5322; "replace" keeps a pathological name from raising
+        # into the FETCH and dropping the connection.
+        names_lower = {
+            (n.decode("ascii", "replace") if isinstance(n, (bytes, bytearray)) else n).lower()
+            for n in names
+        }
 
         # Once hydrated, the parsed message is the authoritative source.
         if self._loaded:

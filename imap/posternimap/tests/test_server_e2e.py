@@ -124,6 +124,42 @@ class ServerE2ETest(twisted_unittest.TestCase):
         yield proto.transport.loseConnection()
 
     @defer.inlineCallbacks
+    def test_header_fields_fetch_returns_headers(self):
+        # Regression for #179, at the wire: a client that scans with
+        # BODY.PEEK[HEADER.FIELDS (...)] instead of ENVELOPE (the Gmail app's
+        # dialect) must get the real headers back. Twisted's FETCH parser hands
+        # the parenthesized field names to IMessagePart.getHeaders as BYTES; the
+        # old str-only name matching returned an empty header block for EVERY
+        # message, which Gmail rendered as "(no subject)" + a blank sender.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            yield proto.select(b"INBOX")
+            # The Gmail-app scan shape (content-type forces the hydrated path;
+            # a pure envelope subset is covered at the unit layer).
+            result = yield proto.fetchSpecific(
+                "1:*",
+                headerType="HEADER.FIELDS",
+                headerArgs=["DATE", "SUBJECT", "FROM", "CONTENT-TYPE", "TO", "CC"],
+                peek=True,
+            )
+            self.assertEqual(len(result), 2)  # both INBOX messages answered
+            for seq, parts in result.items():
+                blob = "".join(
+                    p.decode("utf-8", "replace") if isinstance(p, bytes) else str(p)
+                    for part in parts
+                    for p in part
+                )
+                self.assertIn("Subject", blob)
+                self.assertIn("From", blob)
+            # And the values are the stored ones, not an empty block.
+            flat = repr(result)
+            self.assertIn("meeting tuesday", flat)
+            self.assertIn("welcome aboard", flat)
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
     def test_sent_mailbox_is_outbound_only(self):
         proto = yield self._client()
         try:
