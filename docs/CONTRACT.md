@@ -576,7 +576,8 @@ listener, these listeners are AUTH-required, so binding them publicly is correct
 The v1 model stores a single `to_addr` string, no Cc/Bcc/Sender/Reply-To, and dedups on
 Message-ID alone. That minimalism is the common root of a live symptom family: IMAP ENVELOPE
 returning NIL for Cc/Bcc/Sender/Reply-To, per-recipient copies of multi-recipient mail dropped
-by the dedup (#178), and RFC822.SIZE served as a projection instead of the wire size. v2 closes
+by the dedup (#178), and no stored record of the wire size (see the RFC822.SIZE rule in
+10.3 for what "spec-true SIZE" actually means for a projection-serving door). v2 closes
 the class. Everything below is ADDITIVE: old rows keep NULL in every new column and render
 exactly as today; no data rewrite, no backfill.
 
@@ -674,9 +675,17 @@ wireSize: number | null;     // messages.wire_size
 ```
 
 The IMAP proxy fills ENVELOPE Cc/Bcc/Sender/Reply-To from the fidelity fields (NIL when
-NULL -- today's render, honest for old rows) and serves RFC822.SIZE from `wireSize` when
-present, falling back to the projection only for pre-v2 rows. That makes SIZE spec-true for
-all new mail (the RFC-compliance doctrine: we serve the feature correctly, we do not fudge).
+NULL -- today's render, honest for old rows).
+
+**RFC822.SIZE (corrected during M8 review; supersedes the first cut of this section).**
+RFC 3501's SIZE is the size of the message AS THE SERVER SERVES IT: a client may validate
+the BODY[] literal against an earlier SIZE, so the two MUST agree byte-for-byte. This
+proxy serves a rendered projection as BODY[] (raw wire bytes are deliberately not stored,
+section 10.7), therefore RFC822.SIZE stays the PROJECTED size -- self-consistent is what
+spec-true means here. `wireSize` is stored fidelity for API consumers and diagnostics; it
+becomes the IMAP SIZE only in a future milestone where FETCH itself is byte-exact (raw
+blob storage). Serving `wireSize` against a projected body would make SIZE and the
+literal disagree, which is the one combination that actually breaks clients.
 
 ### 10.4 Write side: who populates what
 
