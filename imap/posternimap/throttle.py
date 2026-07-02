@@ -35,6 +35,32 @@ def throttle_key(username: str) -> str:
     return username.strip().lower()
 
 
+# The auth modes whose IMAP username is NOT a real account: in token mode it is a
+# free display label and in fixed mode it is one compare target, so an attacker
+# rotating the username per attempt would mint a fresh per-account failure budget
+# every time and the lockout would never engage (#183).
+CLIENT_KEYED_MODES = ("token", "fixed")
+
+
+def throttle_account(auth_mode: str, username: str, peer_host: Optional[str] = None) -> str:
+    """The throttle key for one login attempt (#183).
+
+    Directory-backed modes (native/ldap/system) keep the per-account key: there
+    the username IS the account being attacked, and the edge historically
+    presented one masqueraded source IP for everyone (#105). In token/fixed mode
+    the key is instead the connection's SOURCE address -- on 993 the PROXY-
+    protocol-recovered real client IP -- so a username-rotating attacker burns
+    ONE budget, not one per attempt. When no peer is known (loopback unit
+    wiring, unix sockets) all such attempts share one bucket, which degrades
+    toward a global throttle rather than toward no throttle at all. The `ip:`
+    prefix makes the key self-describing (a throttle serves ONE portal and ONE
+    auth mode, so client keys and account keys never share an instance).
+    """
+    if auth_mode in CLIENT_KEYED_MODES:
+        return f"ip:{peer_host}" if peer_host else "ip:*"
+    return throttle_key(username)
+
+
 @dataclass
 class _AcctState:
     failures: int = 0

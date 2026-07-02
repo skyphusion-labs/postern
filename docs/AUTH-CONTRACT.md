@@ -161,7 +161,9 @@ LDAP_GROUP_ATTR=memberOf                # default
 ```
 
 No `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` / `LDAP_SEARCH_*`: those configured the
-retired search+bind path and are GONE from the Go relay. The `cn=postern-mail-ro`
+retired search+bind path and are GONE from BOTH doors (removed from the Go relay;
+the Python proxy refuses to start if any of them is set, so an old EnvironmentFile
+fails loud rather than silently changing auth -- #182). The `cn=postern-mail-ro`
 service account is **not created** (Option A eliminates it); the staged
 `POSTERN_LDAP_BIND_PASSWORD` secret is not needed.
 
@@ -180,13 +182,15 @@ deploy** (a `conrad`-send through the door is the final acceptance test). If a
 future directory change stops returning `memberOf` on a self-read, the gate fails
 closed (denies), and it would need another path before mail logins work again.
 
-**Per-door difference (verified against the #77 IMAP code).** The `mail`-attribute
-resolution is the **SMTP relay's** need: the relay uses `mail` as the authenticated
-From and enforces `From == mail`, so it MUST read it. The **IMAP proxy does NOT read
+**Per-door difference.** The `mail`-attribute resolution is the **SMTP relay's**
+need: the relay uses `mail` as the authenticated From and enforces `From == mail`,
+so it MUST read it (`LDAP_MAIL_ATTR` is relay-only). The **IMAP proxy does NOT read
 `mail`** for identity: a successful BIND is its pass criterion and the store is read
-with `POSTERN_API_TOKEN`, not the directory identity. The `mail-users` gate still
-applies to the proxy; under direct-bind it is the same `memberOf` self-read check
-(`LDAP_REQUIRE_GROUP` / `LDAP_GROUP_ATTR`), not a search filter.
+with `POSTERN_API_TOKEN`, not the directory identity. The `mail-users` gate applies
+to BOTH doors identically (#182): under direct-bind it is the same fail-closed
+`memberOf` self-read check (`LDAP_REQUIRE_GROUP` / `LDAP_GROUP_ATTR`), not a search
+filter -- implemented in `relay/auth_ldap.go` (selfRead) and
+`imap/posternimap/auth.py` (LDAPBinder._group_gate), byte-symmetric semantics.
 
 **TLS is mandatory on BOTH doors for direct-LDAP.** The relay and the IMAP proxy
 each refuse a plaintext `ldap://192.0.2.10:389` bind unless `LDAP_STARTTLS=true` (or
@@ -216,13 +220,13 @@ verbatim; do not rename per component.
 | `POSTERN_API_URL` | Python proxy | the Postern store origin the proxy reads. |
 | `LDAP_URL` | both | `ldap://192.0.2.10:389` (+ `192.0.2.11` failover); `ldaps://directory.example.internal:636` when TLS is provisioned. |
 | `LDAP_STARTTLS` | both | upgrade an `ldap://` conn before binding (needs section 6). |
-| `LDAP_TLS_CA` | Go (today); Python (follow-on) | PEM CA bundle to trust the directory cert; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots). The crew-ownable alternative to provisioning 636 + a chained cert (section 6): pin the outpost's existing self-signed CA, no IdP mutation. Strict verification against a pinned root, never an insecure-skip. |
-| `LDAP_TLS_SERVER_NAME` | Go (today); Python (follow-on) | name verified against the cert SANs; set when `LDAP_URL` dials an IP (e.g. `192.0.2.10`) but the cert names a host. Defaults to the `LDAP_URL` host. Required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). |
-| `LDAP_TLS_PIN_SHA256` | Go (today); Python (follow-on) | exact-leaf SHA-256 pin (hex, colons optional, any case), SAN-independent. THE mechanism for Authentik's default outpost cert (bare-`*` SAN, unverifiable by CA-pin). A NON-secret public value (plain env, not a swarm secret). Mutually exclusive with `LDAP_TLS_CA`. Under the hood: `InsecureSkipVerify` + an exact-leaf check = stricter than a CA, not a bypass. |
+| `LDAP_TLS_CA` | both (#182/#153) | PEM CA bundle to trust the directory cert; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots). The crew-ownable alternative to provisioning 636 + a chained cert (section 6): pin the outpost's existing self-signed CA, no IdP mutation. Strict verification against a pinned root, never an insecure-skip. |
+| `LDAP_TLS_SERVER_NAME` | both (#182/#153) | name verified against the cert SANs; set when `LDAP_URL` dials an IP (e.g. `192.0.2.10`) but the cert names a host. Go: defaults to the `LDAP_URL` host; required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). Python: an extra accepted cert name in CA mode (ldap3 otherwise checks the dialed host). |
+| `LDAP_TLS_PIN_SHA256` | both (#182/#153) | exact-leaf SHA-256 pin (hex, colons optional, any case), SAN-independent. THE mechanism for Authentik's default outpost cert (bare-`*` SAN, unverifiable by CA-pin). A NON-secret public value (plain env, not a swarm secret). Mutually exclusive with `LDAP_TLS_CA`. Under the hood: verification IS the exact-leaf hash check, run BEFORE any credential flows (Go: `InsecureSkipVerify` + `VerifyPeerCertificate`; Python: `CERT_NONE` channel + a pre-bind leaf-hash check) = stricter than a CA, not a bypass. Neither TLS knob set = the channel is encrypted but UNAUTHENTICATED; both doors keep working (back-compat) and the Python door logs a loud startup warning. |
 | `LDAP_BIND_DN_TEMPLATE` | both | **direct-bind** DN template (REQUIRED): **`cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io`** (single `%s` = the short login). |
 | `LDAP_REQUIRE_GROUP` | both | the group DN the bound user must carry in `LDAP_GROUP_ATTR` on self-read = the **`mail-users` authz gate**: **`cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io`**. Empty = no gate. Fail-closed. |
 | `LDAP_GROUP_ATTR` | both | the attribute listing the user's groups for the gate. Default **`memberOf`**. |
-| `LDAP_MAIL_ATTR` | both | the self-read identity attribute. Default **`mail`** (the relay enforces `From == mail`). |
+| `LDAP_MAIL_ATTR` | Go only | the self-read identity attribute. Default **`mail`** (the relay enforces `From == mail`). The IMAP proxy does not read `mail` (see the per-door difference, 5b) and ignores this knob. |
 | `LDAP_TIMEOUT` | both | integer **seconds**, default **`10`**; bounds the directory connect AND every bind/search. `0` disables (no timeout). Symmetric across both doors: Go relay sets the `net.Dialer` timeout + conn read deadline (`relay/auth_ldap.go`); Python proxy sets `connect_timeout` + `receive_timeout` (`imap/posternimap/auth.py`). |
 
 Crew-secrets storage labels are per-function and may differ from the env knob; the
@@ -276,8 +280,10 @@ CodeQL `InsecureSkipVerify` finding at that call site is a JUSTIFIED suppression
 **Threat model.** The door dials the directory host's own `:389` from a container ON the directory host
 (same box, same VLAN), so this verification is belt-and-suspenders hardening, not
 load-bearing against a realistic MITM. The fingerprint-pin is cheap and strictly
-stronger than the IMAP proxy's `CERT_NONE` (#153), so it is the go-live posture (and
-that door can adopt the same pin as a follow-on).
+stronger than an unauthenticated `CERT_NONE` channel, so it is the go-live posture.
+The IMAP door carries the SAME `LDAP_TLS_CA` / `LDAP_TLS_PIN_SHA256` knobs
+(#153/#182); wiring the pin into its stack env is the deploy step that closes its
+`CERT_NONE` gap.
 
 **Re-pin runbook (the pinning tradeoff).** A leaf pin breaks if Authentik
 REGENERATES its default cert (expiry, rotation, reinstall): the new leaf has a new
