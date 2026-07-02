@@ -71,7 +71,7 @@ func (s *Session) Data(r io.Reader) error {
 	// POST to core /ingest. Legacy deployments without /ingest configured fall
 	// back to posting an EmailPayload to the worker /send endpoint.
 	if s.client.usesIngest() {
-		p := buildParsedInbound(s.rcpts, s.from, env)
+		p := buildParsedInbound(s.rcpts, s.from, len(raw), env)
 		if err := s.client.PostIngest(p); err != nil {
 			log.Printf("ingest failed to=%s from=%s subject=%q: %v", p.To, p.From, p.Subject, err)
 			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "ingest to core failed"}
