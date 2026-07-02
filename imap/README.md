@@ -51,7 +51,7 @@ ways via a pluggable `AuthProvider`; the IMAP proxy mirrors the same backends so
 | `token` (default) | a free label (use the mailbox address) | **the Postern API token** | nothing | -- |
 | `fixed` | a configured username | a configured password | the API token (`POSTERN_API_TOKEN`) | -- |
 | `native` | the mailbox address | the user's SMTP secret | a per-function service token + the transport token | `AUTH_BACKEND=native` |
-| `ldap` | the directory login | the directory password | a per-function service token + (optional) LDAP service-account creds | `AUTH_BACKEND=ldap` |
+| `ldap` | the directory login | the directory password | a per-function service token (direct-bind: NO directory secret) | `AUTH_BACKEND=ldap` |
 | `system` | a local Unix user | the Unix password | a per-function service token | `AUTH_BACKEND=system` |
 
 - **`token` mode** stores no secret in the proxy and validates the token *live*
@@ -95,10 +95,12 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_SMTP_AUTH_URL` | no | `${POSTERN_API_URL}/api/smtp-auth` | the `native` auth endpoint |
 | `LDAP_URL` | in `ldap` | -- | `ldaps://host:636` (preferred) or `ldap://host:389` |
 | `LDAP_STARTTLS` | no | `false` | upgrade an `ldap://` connection before binding |
-| `LDAP_BIND_DN_TEMPLATE` | `ldap` (simple bind) | -- | e.g. `uid=%s,ou=people,dc=ex,dc=com` |
-| `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | `ldap` (search+bind) | -- | service-account DN + password |
-| `LDAP_SEARCH_BASE` / `LDAP_SEARCH_FILTER` | `ldap` (search+bind) | -- | e.g. `ou=people,dc=ex,dc=com` / `(uid=%s)` |
-| `LDAP_MAIL_ATTR` | no | `mail` | directory attribute carrying the mail address |
+| `LDAP_BIND_DN_TEMPLATE` | in `ldap` | -- | direct-bind DN template, e.g. `cn=%s,ou=users,dc=ex,dc=com`. Direct-bind + self-read is the ONLY bind mode (#182, byte-symmetric with the relay); the search+bind vars (`LDAP_BIND_DN`, `LDAP_BIND_PASSWORD`, `LDAP_SEARCH_*`) are retired and refuse startup |
+| `LDAP_REQUIRE_GROUP` | no | -- | group DN the bound user must carry in `LDAP_GROUP_ATTR` on a self-read of their own entry (the mail-users authz gate; FAIL-CLOSED). Empty = no gate |
+| `LDAP_GROUP_ATTR` | no | `memberOf` | the attribute listing the user's groups for the gate |
+| `LDAP_TLS_CA` | no | -- | PEM CA path: full verification with this as the ONLY trust anchor (#153). Mutually exclusive with the pin |
+| `LDAP_TLS_SERVER_NAME` | no | -- | extra accepted certificate name when `LDAP_URL` dials an IP (CA mode) |
+| `LDAP_TLS_PIN_SHA256` | no | -- | exact-leaf SHA-256 pin (hex, colons optional; non-secret), checked BEFORE any credential flows (#153). Neither trust knob set = the directory channel is encrypted but UNAUTHENTICATED and the proxy logs a loud startup warning |
 | `LDAP_TIMEOUT` | no | `10` | seconds bounding LDAP connect + bind/search (0 = none); matches the Go relay knob 1:1 |
 | `AUTH_SYSTEM_PAM_SERVICE` | no | `postern` | PAM service name for `system` mode |
 | `AUTH_SYSTEM_DOMAIN` | no | -- | optional display suffix for `system` logins |
@@ -108,7 +110,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_TLS_KEY` | no | -- | PEM key path |
 | `POSTERN_API_TIMEOUT` | no | `15` | per-request timeout to the API, seconds |
 | `AUTH_THROTTLE_ENABLED` | no | `true` | master switch for the auth brute-force throttle (#105) |
-| `AUTH_THROTTLE_MAX_FAILURES` | no | `5` | per-account consecutive failures before lockout |
+| `AUTH_THROTTLE_MAX_FAILURES` | no | `5` | consecutive failures per key before lockout. Key = the account in `native`/`ldap`/`system`; in `token`/`fixed` the key is the client SOURCE IP (the username there is attacker-chosen free text, #183) |
 | `AUTH_THROTTLE_LOCKOUT_SECONDS` | no | `60` | base lockout; doubles per failure past the threshold |
 | `AUTH_THROTTLE_MAX_LOCKOUT_SECONDS` | no | `900` | per-account backoff cap |
 | `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` | no | `100` | aggregate failures/window before a global cooldown (0 = off) |
