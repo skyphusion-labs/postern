@@ -27,6 +27,18 @@ type ParsedInbound struct {
 	HTML        string          `json:"html,omitempty"` // core derives body_text from text, else stripped html
 	Attachments []InboundAttach `json:"attachments,omitempty"`
 	Auth        *InboundAuth    `json:"auth,omitempty"` // SMTP transport may omit
+
+	// Envelope fidelity v2 (CONTRACT section 10.4, #189). All optional and
+	// wire-compatible: an old relay omits them and core treats each as absent.
+	// These carry RAW DECODED header strings straight from enmime GetHeader --
+	// NEVER parsed or re-formatted into address lists, because a display name may
+	// contain a comma. To (above) keeps its v1 meaning: THE delivered-to envelope
+	// recipient, which owns the envelope-semantics role in core.
+	ToHeader string `json:"toHeader,omitempty"` // raw decoded To header; core stores it as to_addr
+	CC       string `json:"cc,omitempty"`       // raw decoded Cc header
+	Sender   string `json:"sender,omitempty"`   // raw decoded Sender header
+	ReplyTo  string `json:"replyTo,omitempty"`  // raw decoded Reply-To header
+	RawSize  int    `json:"rawSize,omitempty"`  // RFC822 wire byte size as received
 }
 
 // InboundAttach carries one attachment. content is base64 of the raw bytes
@@ -54,7 +66,11 @@ type InboundAuth struct {
 //   - From prefers the header From, falling back to the envelope MAIL FROM.
 //   - the relay does not invent auth verdicts: it leaves Auth nil so core
 //     applies its allowlist-only trust logic for header-stripped intake.
-func buildParsedInbound(rcpts []string, mailFrom string, env *enmime.Envelope) ParsedInbound {
+//   - rawSize is the RFC822 wire byte size as received (len of the raw DATA
+//     stream), carried so core can serve RFC822.SIZE honestly (CONTRACT 10.4).
+//   - the envelope-fidelity headers (To/Cc/Sender/Reply-To) are carried RAW and
+//     decoded via GetHeader, never parsed into address lists.
+func buildParsedInbound(rcpts []string, mailFrom string, rawSize int, env *enmime.Envelope) ParsedInbound {
 	to := ""
 	if len(rcpts) > 0 {
 		to = rcpts[0]
@@ -75,16 +91,23 @@ func buildParsedInbound(rcpts []string, mailFrom string, env *enmime.Envelope) P
 		References: parseReferences(env.GetHeader("References")),
 		Text:       env.Text,
 		HTML:       env.HTML,
+		// Envelope fidelity v2 (CONTRACT 10.4): raw decoded headers, never parsed.
+		// omitempty drops any header that was absent, so core sees them as absent.
+		ToHeader: env.GetHeader("To"),
+		CC:       env.GetHeader("Cc"),
+		Sender:   env.GetHeader("Sender"),
+		ReplyTo:  env.GetHeader("Reply-To"),
+		RawSize:  rawSize,
 	}
 
-	for _, a := range env.Attachments {
-		if a == nil || len(a.Content) == 0 {
-			continue
-		}
+	// Carry every non-body MIME part (attachments + inlines + other parts) via the
+	// shared collector so this intake seam and the submission seam cannot drift on
+	// what survives (#184). Fidelity of bytes is the contract.
+	for _, part := range collectMIMEParts(env) {
 		p.Attachments = append(p.Attachments, InboundAttach{
-			Filename: a.FileName,
-			MimeType: a.ContentType,
-			Content:  base64.StdEncoding.EncodeToString(a.Content),
+			Filename: part.FileName,
+			MimeType: part.ContentType,
+			Content:  base64.StdEncoding.EncodeToString(part.Content),
 		})
 	}
 
