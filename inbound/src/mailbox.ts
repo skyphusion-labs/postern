@@ -205,12 +205,15 @@ function toAddress(v: string | EmailAddress | undefined): EmailAddress | undefin
 }
 
 // The first bare address from a raw address-list header (Reply-To / From), for
-// routing a reply (#189). Strips a display name (<addr>) and takes the first entry
-// of a comma-list; the result flows through validateRecipients like any address.
+// routing a reply (#189). A display name may legally contain a comma
+// ("Doe, Jane" <jane@x>), so match an angle address against the WHOLE string
+// first (section 10.1: never naively split), and only a bare, angle-less header
+// falls back to the first comma-token. The result flows through
+// validateRecipients like any address.
 function firstAddress(raw: string): string {
-  const first = (raw.split(",")[0] ?? "").trim();
-  const angle = first.match(/<([^>]+)>/);
-  return (angle ? angle[1] : first).trim();
+  const angle = raw.match(/<([^>]+)>/);
+  if (angle) return angle[1].trim();
+  return (raw.split(",")[0] ?? "").trim();
 }
 
 // A Message-ID we generate for outbound mail so it dedups, threads, and stores

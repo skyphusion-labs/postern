@@ -156,6 +156,30 @@ describe("reply routing to stored Reply-To (#189)", () => {
     await reply(env, { messageId: "plain@example.com", text: "hi back" }, ctx);
     expect(sent[0].to).toEqual(["alice@example.com"]);
   });
+
+  it("extracts the angle address when a Reply-To display name contains a comma", async () => {
+    const { env, ctx, sent, settle } = makeFakeEnv();
+    await ingest(
+      env,
+      { messageId: "comma@example.com", from: "bounce@example.com", to: "conrad@skyphusion.org", text: "hi", replyTo: '"Doe, Jane" <jane@example.com>' },
+      ctx,
+    );
+    await settle();
+    await reply(env, { messageId: "comma@example.com", text: "re" }, ctx);
+    expect(sent[0].to).toEqual(["jane@example.com"]);
+  });
+
+  it("takes the first address of an angle-less multi-value Reply-To", async () => {
+    const { env, ctx, sent, settle } = makeFakeEnv();
+    await ingest(
+      env,
+      { messageId: "multi-rt@example.com", from: "bounce@example.com", to: "conrad@skyphusion.org", text: "hi", replyTo: "a@example.com, b@example.com" },
+      ctx,
+    );
+    await settle();
+    await reply(env, { messageId: "multi-rt@example.com", text: "re" }, ctx);
+    expect(sent[0].to).toEqual(["a@example.com"]);
+  });
 });
 
 describe("search direction (#128)", () => {
