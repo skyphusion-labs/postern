@@ -332,6 +332,17 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN` (or `RELAY_TOKEN`) | `both` | read + send + credential-admin (the egalitarian single-key default) |
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From) |
+
+Each static slot above holds a **comma-separated SET of tokens** (#154): entries are
+trimmed, empty entries (stray commas, whitespace) are ignored, and a bearer matching
+ANY member resolves to that slot's scope. A single bare value (no comma) is a
+one-element set -- the pre-#154 format, unchanged -- so existing deployments need no
+change. The point is per-CONSUMER tokens within one function: the IMAP door, the
+Postern MCP, and the webmail can each hold their OWN `read` member, so rotating or
+revoking one never strands the others. Matching stays constant-time per member with
+no early exit (which member matched does not leak via timing; per-token length may
+leak, the bytes must not). A comma is therefore not a valid character inside a token
+value.
 | `POSTERN_SEND_IDENTITIES` (registry, #28) | `send` + bound From | `POST /api/send`/`reply` as the token's OWN identity |
 
 Unknown token -> `401`; known token outside its scope -> `403`. Credential-admin
