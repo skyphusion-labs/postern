@@ -83,19 +83,25 @@ interface Env {
   /** @deprecated Back-compat fallback for POSTERN_API_TOKEN; remove next release. */
   RELAY_TOKEN?: string;
   /**
-   * Optional per-function READ-scoped mailbox token (#85). When set, a caller
-   * presenting it reaches ONLY the read door (GET /api/messages|search|threads
-   * and attachment bytes); it cannot send or touch admin routes. Independent of
-   * POSTERN_API_TOKEN and separately rotatable. wrangler secret put
+   * Optional per-function READ-scoped mailbox token slot (#85). Holds a
+   * comma-separated SET of tokens (#154): entries trimmed, empties dropped; a
+   * caller presenting ANY member reaches ONLY the read door (GET
+   * /api/messages|search|threads and attachment bytes) and cannot send or touch
+   * admin routes. A single bare value (no comma) is a one-element set, the
+   * original format, unchanged. Give each read consumer (IMAP door, MCP,
+   * webmail) its own member so one can be rotated or revoked without stranding
+   * the others. Independent of POSTERN_API_TOKEN. wrangler secret put
    * POSTERN_API_TOKEN_READ. Leave unset to keep the single-token (`both`) posture.
    */
   POSTERN_API_TOKEN_READ?: string;
   /**
-   * Optional per-function SEND-scoped mailbox token (#85). When set, a caller
-   * presenting it reaches ONLY the write door (POST /api/send|reply); it cannot
-   * read the store or touch admin routes. Independent of POSTERN_API_TOKEN and
-   * separately rotatable. wrangler secret put POSTERN_API_TOKEN_SEND. Leave unset
-   * to keep the single-token (`both`) posture.
+   * Optional per-function SEND-scoped mailbox token slot (#85). Holds a
+   * comma-separated SET of tokens (#154, same format as the READ slot): a caller
+   * presenting ANY member reaches ONLY the write door (POST /api/send|reply, un-
+   * bound From) and cannot read the store or touch admin routes. For send-as-an-
+   * identity, prefer the per-identity registry (POSTERN_SEND_IDENTITIES).
+   * Independent of POSTERN_API_TOKEN. wrangler secret put POSTERN_API_TOKEN_SEND.
+   * Leave unset to keep the single-token (`both`) posture.
    */
   POSTERN_API_TOKEN_SEND?: string;
   /**
