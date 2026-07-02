@@ -6,6 +6,11 @@
   "compatibility_date": "2025-05-05",
   "observability": { "enabled": true },
 
+  // Reached via Email Routing + the token-gated custom route; no workers.dev
+  // door needed. Secure-by-default for a fresh operator install (defense-in-
+  // depth; fleet-chezmoi#46).
+  "workers_dev": false,
+
   // D1 database for message storage. The store (D1 + R2 + Vectorize) is the
   // heart of Postern, so this binding is required.
   //   Create once:  wrangler d1 create postern
