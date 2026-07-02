@@ -188,3 +188,40 @@ func TestNewLDAPAuth_TLSConfReachesDialer(t *testing.T) {
 		t.Errorf("dialer tls ServerName = %q, want directory.example.internal", gotTLS.ServerName)
 	}
 }
+
+// The default (unpinned) StartTLS upgrade must still state the TLS 1.2 floor
+// explicitly (#186): stock system-roots verification is kept, but the protocol
+// floor is ours, matching the pinned paths from buildLDAPTLSConfig.
+func TestAuthenticate_DefaultStartTLSHasTLS12Floor(t *testing.T) {
+	fake := &fakeLDAP{
+		bindFn: func(dn, pw string) error { return nil },
+		searchFn: func(*ldap.SearchRequest) (*ldap.SearchResult, error) {
+			return entryResult("cn=alice,ou=users,dc=x", "mail", "alice@example.com"), nil
+		},
+	}
+	a := &ldapAuth{
+		cfg: LDAPCfg{
+			URL:            "ldap://192.0.2.10:389",
+			StartTLS:       true,
+			BindDNTemplate: "cn=%s,ou=users,dc=x",
+			MailAttr:       "mail",
+		},
+		dial: func(string) (ldapConn, error) { return fake, nil },
+	}
+	if _, err := a.Authenticate("alice", "pw"); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if !fake.startTLS {
+		t.Fatal("StartTLS was not invoked")
+	}
+	if fake.startTLSConf == nil {
+		t.Fatal("StartTLS received a nil config")
+	}
+	if fake.startTLSConf.MinVersion != tls.VersionTLS12 {
+		t.Errorf("default StartTLS MinVersion = %x, want TLS 1.2 (%x)",
+			fake.startTLSConf.MinVersion, tls.VersionTLS12)
+	}
+	if fake.startTLSConf.RootCAs != nil || fake.startTLSConf.InsecureSkipVerify {
+		t.Error("default StartTLS config must keep stock verification (system roots, no skip)")
+	}
+}

@@ -222,12 +222,15 @@ func (a *ldapAuth) Authenticate(username, secret string) (string, error) {
 	defer conn.Close()
 
 	if a.cfg.StartTLS && strings.HasPrefix(strings.ToLower(a.cfg.URL), "ldap://") {
-		// a.tlsConf is nil unless an LDAP_TLS_* knob is set, so the default stays the
-		// empty config (system roots). go-ldap passes this straight to tls.Client, so
-		// when a CA is pinned the config carries RootCAs + ServerName.
+		// a.tlsConf is nil unless an LDAP_TLS_* knob is set, so the default keeps
+		// system-roots verification -- but the protocol floor is still OURS to state
+		// (#186): the pinned paths set MinVersion TLS 1.2 in buildLDAPTLSConfig, and
+		// the unpinned default must not negotiate lower than they would. go-ldap
+		// passes this straight to tls.Client, so when a CA is pinned the config
+		// carries RootCAs + ServerName.
 		tc := a.tlsConf
 		if tc == nil {
-			tc = &tls.Config{}
+			tc = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
 		if err := conn.StartTLS(tc); err != nil {
 			return "", fmt.Errorf("ldap starttls: %w", err)
