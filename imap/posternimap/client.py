@@ -36,6 +36,38 @@ class PosternAuthError(PosternError):
     """401 from the Postern API: the bearer token is missing or wrong."""
 
 
+def _delivered_to(d: dict[str, Any], to_addr: str) -> list[str]:
+    """The envelope-semantics delivered-recipient set (CONTRACT 10.3).
+
+    The v2 API returns `deliveredTo` on every message-shaped response (v1 rows fall
+    back to [to_addr] server-side). We mirror that fallback here so an older API that
+    omits the field, or an old row, still yields the single envelope recipient rather
+    than an empty set. Only string entries are kept; a bare `to_addr` seeds the set
+    when nothing else is available.
+    """
+    raw = d.get("deliveredTo")
+    if isinstance(raw, list):
+        vals = [x for x in raw if isinstance(x, str) and x]
+        if vals:
+            return vals
+    return [to_addr] if to_addr else []
+
+
+def _wire_size(d: dict[str, Any]) -> Optional[int]:
+    """The raw RFC822 wire byte size (CONTRACT 10.3), or None for old/outbound rows.
+
+    Null stays null (we do not know the size); a present value is coerced to int so a
+    JSON number or numeric string both land as an int for RFC822.SIZE.
+    """
+    v = d.get("wireSize")
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class MessageSummary:
     """A list-view row (no body), mirroring the API StoredMessageSummary."""
@@ -57,22 +89,42 @@ class MessageSummary:
     trusted: bool
     received_at: str
     attachment_count: int
+    # Envelope fidelity v2 (CONTRACT section 10.3). All nullable: an old row (pre-0006)
+    # carries None/[] here and renders exactly as v1. cc/bcc/sender/reply_to are the RAW
+    # RFC 5322 header strings (display names and all, never parsed or re-split -- a
+    # display name may contain a comma). delivered_to is the normalized set of bare
+    # lower-cased delivered recipients (semantics, what views filter on), defaulting to
+    # [to_addr] for a v1 row exactly like the API's fallback. wire_size is the raw
+    # RFC822 byte size at intake (None for old rows and for outbound).
+    cc: Optional[str] = None
+    bcc: Optional[str] = None
+    sender: Optional[str] = None
+    reply_to: Optional[str] = None
+    delivered_to: list[str] = field(default_factory=list)
+    wire_size: Optional[int] = None
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "MessageSummary":
+        to_addr = d.get("to", "")
         return cls(
             uid=int(d["uid"]),
             message_id=d["messageId"],
             direction=d.get("direction", "inbound"),
             thread_id=d.get("threadId", d["messageId"]),
             from_addr=d.get("from", ""),
-            to_addr=d.get("to", ""),
+            to_addr=to_addr,
             subject=d.get("subject", ""),
             date=d.get("date", ""),
             in_reply_to=d.get("inReplyTo"),
             trusted=bool(d.get("trusted", False)),
             received_at=d.get("receivedAt", ""),
             attachment_count=int(d.get("attachmentCount", 0)),
+            cc=d.get("cc"),
+            bcc=d.get("bcc"),
+            sender=d.get("sender"),
+            reply_to=d.get("replyTo"),
+            delivered_to=_delivered_to(d, to_addr),
+            wire_size=_wire_size(d),
         )
 
 
@@ -99,15 +151,23 @@ class Message:
     trusted: bool
     received_at: str
     attachments: list[Attachment] = field(default_factory=list)
+    # Envelope fidelity v2 (CONTRACT section 10.3); see MessageSummary for semantics.
+    cc: Optional[str] = None
+    bcc: Optional[str] = None
+    sender: Optional[str] = None
+    reply_to: Optional[str] = None
+    delivered_to: list[str] = field(default_factory=list)
+    wire_size: Optional[int] = None
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "Message":
+        to_addr = d.get("to", "")
         return cls(
             message_id=d["messageId"],
             direction=d.get("direction", "inbound"),
             thread_id=d.get("threadId", d["messageId"]),
             from_addr=d.get("from", ""),
-            to_addr=d.get("to", ""),
+            to_addr=to_addr,
             subject=d.get("subject", ""),
             date=d.get("date", ""),
             in_reply_to=d.get("inReplyTo"),
@@ -118,6 +178,12 @@ class Message:
                 Attachment(filename=a.get("filename"), mime=a.get("mime"), size=int(a.get("size", 0)))
                 for a in d.get("attachments", [])
             ],
+            cc=d.get("cc"),
+            bcc=d.get("bcc"),
+            sender=d.get("sender"),
+            reply_to=d.get("replyTo"),
+            delivered_to=_delivered_to(d, to_addr),
+            wire_size=_wire_size(d),
         )
 
 

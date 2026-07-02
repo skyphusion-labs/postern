@@ -95,16 +95,36 @@ def _apply_envelope_headers(
     date_iso: str,
     message_id: Optional[str],
     in_reply_to: Optional[str],
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+    sender: Optional[str] = None,
+    reply_to: Optional[str] = None,
 ) -> None:
     """Set the stored envelope headers on `em`. Shared by render_rfc822 (the full
     message) and envelope_headers (the body-free scan), so a header is encoded
     IDENTICALLY both ways: EmailMessage's modern policy RFC 2047-encodes any
     non-ASCII field as ASCII encoded-words on serialization (what real MUAs expect
-    on the wire), which is exactly the IMAP ENVELOPE wire form."""
+    on the wire), which is exactly the IMAP ENVELOPE wire form.
+
+    Cc/Bcc/Sender/Reply-To are the envelope v2 fidelity fields (CONTRACT 10.3): the
+    RAW RFC 5322 header strings as they arrived (display names and all). We set them
+    EXACTLY as we set To -- hand the raw string to EmailMessage, which folds/encodes
+    it on serialization -- and never parse or re-split the address list (a display
+    name may contain a comma). When a field is absent/None the header is simply not
+    set, so the IMAP server renders it NIL: byte-identical to the v1 render for old
+    rows, which carry NULL in these columns."""
     if from_addr:
         em["From"] = _hdr(from_addr)
     if to_addr:
         em["To"] = _hdr(to_addr)
+    if cc:
+        em["Cc"] = _hdr(cc)
+    if bcc:
+        em["Bcc"] = _hdr(bcc)
+    if sender:
+        em["Sender"] = _hdr(sender)
+    if reply_to:
+        em["Reply-To"] = _hdr(reply_to)
     em["Subject"] = _hdr(subject or "")
     date = _fmt_date(date_iso)
     if date:
@@ -127,6 +147,10 @@ def render_rfc822(msg: Message) -> bytes:
         date_iso=msg.date,
         message_id=msg.message_id,
         in_reply_to=msg.in_reply_to,
+        cc=msg.cc,
+        bcc=msg.bcc,
+        sender=msg.sender,
+        reply_to=msg.reply_to,
     )
 
     body = msg.body_text or ""
@@ -142,13 +166,15 @@ def envelope_headers(summary: MessageSummary) -> dict[str, str]:
     """The IMAP ENVELOPE / scan-relevant headers for a summary, body-free.
 
     Returns a lowercase-keyed map of the headers an IMAP client needs to render
-    a row (From/To/Subject/Date/Message-ID/In-Reply-To) formatted IDENTICALLY to
-    render_rfc822 above, so a header served from the list summary is byte-for-byte
-    what a hydrated FETCH would return (#102: serve ENVELOPE from the list response,
-    never a per-message body fetch). Only headers the summary actually carries are
-    included; Cc/Bcc/Sender/Reply-To are absent from the store, so the IMAP server
-    correctly renders them NIL whether or not we hydrate. Subject is always present
-    (render_rfc822 always sets it), matching the rendered form for an empty subject.
+    a row (From/To/Cc/Sender/Reply-To/Subject/Date/Message-ID/In-Reply-To) formatted
+    IDENTICALLY to render_rfc822 above, so a header served from the list summary is
+    byte-for-byte what a hydrated FETCH would return (#102: serve ENVELOPE from the
+    list response, never a per-message body fetch). Only headers the summary actually
+    carries are included: the envelope v2 fidelity fields (Cc/Bcc/Sender/Reply-To)
+    appear when the store holds them and are simply omitted when NULL, so the IMAP
+    server renders those NIL for old rows -- byte-identical to the pre-v2 render.
+    Subject is always present (render_rfc822 always sets it), matching the rendered
+    form for an empty subject.
     """
     try:
         em = EmailMessage()
@@ -160,6 +186,10 @@ def envelope_headers(summary: MessageSummary) -> dict[str, str]:
             date_iso=summary.date,
             message_id=summary.message_id,
             in_reply_to=summary.in_reply_to,
+            cc=summary.cc,
+            bcc=summary.bcc,
+            sender=summary.sender,
+            reply_to=summary.reply_to,
         )
         parsed = email.message_from_bytes(em.as_bytes())
         return {k.lower(): _to_wire(v) for k, v in parsed.items()}
@@ -172,6 +202,14 @@ def envelope_headers(summary: MessageSummary) -> dict[str, str]:
             h["from"] = _to_wire(_hdr(summary.from_addr))
         if summary.to_addr:
             h["to"] = _to_wire(_hdr(summary.to_addr))
+        if summary.cc:
+            h["cc"] = _to_wire(_hdr(summary.cc))
+        if summary.bcc:
+            h["bcc"] = _to_wire(_hdr(summary.bcc))
+        if summary.sender:
+            h["sender"] = _to_wire(_hdr(summary.sender))
+        if summary.reply_to:
+            h["reply-to"] = _to_wire(_hdr(summary.reply_to))
         h["subject"] = _to_wire(_hdr(summary.subject or ""))
         date = _fmt_date(summary.date)
         if date:

@@ -13,13 +13,16 @@ summary cannot supply (opening a message, RFC822.SIZE, BODYSTRUCTURE). That
 collapses a "FETCH 1:* ENVELOPE" over a large mailbox from one GET per message to
 zero. Hydration is memoized, so opening a message costs exactly one GET.
 
-Header serving rule (see getHeaders): the rendered message only ever carries
-From/To/Subject/Date/Message-ID/In-Reply-To (from the store) plus the MIME headers
-render_rfc822 adds for the body. Cc/Bcc/Sender/Reply-To never exist, so the IMAP
-server renders them NIL whether or not we hydrate; the ENVELOPE scan is therefore
-fully serviceable from the summary. A full-header fetch (RFC822.HEADER) before the
-message is opened returns the envelope headers body-free; the body-derived MIME
-headers appear once the message is hydrated (opened), which is when they matter.
+Header serving rule (see getHeaders): the rendered message carries
+From/To/Subject/Date/Message-ID/In-Reply-To plus the envelope v2 fidelity headers
+Cc/Bcc/Sender/Reply-To WHEN the store holds them (CONTRACT 10.3), all from the
+summary, plus the MIME headers render_rfc822 adds for the body. A fidelity field is
+set only when present, so a row without it (an old pre-v2 row carrying NULL) has the
+header absent and the IMAP server renders it NIL -- byte-identical to the old render;
+the ENVELOPE scan is therefore fully serviceable from the summary. A full-header
+fetch (RFC822.HEADER) before the message is opened returns the envelope headers
+body-free; the body-derived MIME headers appear once the message is hydrated
+(opened), which is when they matter.
 
 Read-only: there are no mutable flags in v1, so getFlags reflects the stored
 trust/direction as informational keywords plus \\Seen (inbound mail in the store
@@ -44,8 +47,10 @@ from .measure import Meter
 from .rfc822 import _to_wire, envelope_headers, render_rfc822
 
 # Header names the summary can answer authoritatively WITHOUT a body fetch: the
-# ones the store carries, plus the four the store never has (Cc/Bcc/Sender/Reply-To
-# are always absent == NIL, so "we have no body fetch to add them" is the truth).
+# core headers the store carries plus the envelope v2 fidelity fields (Cc/Bcc/
+# Sender/Reply-To, CONTRACT 10.3). envelope_headers emits each fidelity field only
+# when the store holds it and omits it when NULL, so an absent one is served as NIL
+# (old-row parity) with no body fetch either way.
 _ENVELOPE_NAMES = frozenset(
     {"from", "to", "subject", "date", "message-id", "in-reply-to", "cc", "bcc", "sender", "reply-to"}
 )
@@ -217,6 +222,14 @@ class PosternIMAPMessage:
         return BytesIO(text.encode("utf-8", "replace"))
 
     def getSize(self) -> int:
+        # RFC822.SIZE. Envelope v2 (CONTRACT 10.3) carries the raw RFC822 wire byte
+        # size on the summary; when we have it, that is the spec-true value and we
+        # serve it with NO body fetch. The RFC-compliance doctrine is that we never
+        # fudge a size we actually know. Only pre-v2 rows (and outbound, which has no
+        # wire size) carry None here, and for those we fall back to the rendered
+        # projection exactly as before.
+        if self._summary.wire_size is not None:
+            return self._summary.wire_size
         self._hydrate()
         return len(self._rendered)
 

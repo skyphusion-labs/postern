@@ -137,6 +137,68 @@ class MailboxTest(unittest.TestCase):
         self.assertIn("Outbound", flags)
 
 
+    # --- #189 envelope fidelity v2: ENVELOPE Cc/Reply-To + RFC822.SIZE ---
+
+    def test_envelope_renders_cc_and_reply_to_from_summary(self):
+        # #189: a FETCH ENVELOPE renders Cc/Reply-To from the stored raw header
+        # strings, body-free (zero hydrate), and a comma-bearing display name stays
+        # ONE mailbox -- never naively split on the comma.
+        from twisted.mail.imap4 import MessageSet, getEnvelope
+
+        cc = '"Doe, John" <john@x.com>, jane@y.com'
+        mb, transport = self._custom_mailbox(
+            [make_message("e1", subject="env", cc=cc, replyTo="list@example.com")]
+        )
+        (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
+        env = getEnvelope(msg)
+        # RFC 3501 ENVELOPE order: [date, subject, from, sender, reply-to, to, cc,
+        # bcc, in-reply-to, message-id].
+        reply_to, cc_field, bcc_field = env[4], env[6], env[7]
+        self.assertEqual(transport.body_fetches, 0)  # served from the summary
+        self.assertEqual([list(m[2:]) for m in reply_to], [["list", "example.com"]])
+        # Two cc addresses; the quoted "Doe, John" display name kept its comma.
+        self.assertEqual(len(cc_field), 2)
+        self.assertEqual(cc_field[0][0], "Doe, John")
+        self.assertEqual(list(cc_field[0][2:]), ["john", "x.com"])
+        self.assertEqual(list(cc_field[1][2:]), ["jane", "y.com"])
+        self.assertIsNone(bcc_field)  # no Bcc stored -> ENVELOPE NIL
+
+    def test_envelope_nil_for_old_row_without_fidelity_fields(self):
+        # An old row carries no Cc/Bcc/Sender/Reply-To: ENVELOPE renders them NIL
+        # (Twisted maps an absent header to None), and Sender/Reply-To fall back to
+        # the From address exactly as the pre-v2 render did.
+        from twisted.mail.imap4 import MessageSet, getEnvelope
+
+        mb, transport = self._custom_mailbox([make_message("o1", subject="old")])
+        (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
+        env = getEnvelope(msg)
+        self.assertEqual(transport.body_fetches, 0)
+        self.assertIsNone(env[6])  # cc NIL
+        self.assertIsNone(env[7])  # bcc NIL
+
+    def test_size_prefers_wire_size_with_no_body_fetch(self):
+        # RFC822.SIZE serves the stored wire size (#189, CONTRACT 10.3) with NO body
+        # fetch when present -- the spec-true value, never a projection.
+        from twisted.mail.imap4 import MessageSet
+
+        mb, transport = self._custom_mailbox(
+            [make_message("w1", subject="sized", wireSize=4242)]
+        )
+        (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
+        self.assertEqual(msg.getSize(), 4242)
+        self.assertEqual(transport.body_fetches, 0)
+
+    def test_size_falls_back_to_projection_when_wire_size_null(self):
+        # An old row has no wire size: SIZE falls back to the rendered projection
+        # (one hydrate), exactly as before v2.
+        from twisted.mail.imap4 import MessageSet
+
+        mb, transport = self._custom_mailbox([make_message("o1", subject="old")])
+        (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
+        self.assertGreater(msg.getSize(), 0)
+        self.assertEqual(transport.body_fetches, 1)
+
+
     # --- #102 Stage 1: lazy ENVELOPE, windowing, live refresh ---
 
     def test_envelope_scan_does_zero_body_fetches(self):

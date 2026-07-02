@@ -158,5 +158,58 @@ class EnvelopeUnicodeTest(unittest.TestCase):
         self.assertEqual(envelope_headers(_summary(subject=""))["subject"], "")
 
 
+class EnvelopeV2Test(unittest.TestCase):
+    """Envelope fidelity v2 (#189, CONTRACT 10.3): the IMAP projection renders
+    Cc/Bcc/Sender/Reply-To from the stored RAW RFC 5322 header strings when present,
+    and leaves them ABSENT (== ENVELOPE NIL) for old rows that carry NULL."""
+
+    # A Cc with a quoted display name that CONTAINS a comma: the raw string must be
+    # carried verbatim, never naively split on commas into two mailboxes.
+    COMMA_CC = '"Doe, John" <john@x.com>, jane@y.com'
+
+    def test_render_sets_cc_and_reply_to_from_raw_strings(self):
+        m = _msg(cc=self.COMMA_CC, reply_to="Support List <list@example.com>")
+        parsed = email.message_from_bytes(render_rfc822(m))
+        self.assertEqual(parsed["Cc"], self.COMMA_CC)
+        self.assertEqual(parsed["Reply-To"], "Support List <list@example.com>")
+        # The comma-bearing display name stays ONE mailbox (comma inside it), plus
+        # the second address: two recipients parsed, not three.
+        from email.utils import getaddresses
+
+        self.assertEqual(
+            getaddresses([parsed["Cc"]]),
+            [("Doe, John", "john@x.com"), ("", "jane@y.com")],
+        )
+
+    def test_envelope_headers_carry_cc_and_reply_to(self):
+        h = envelope_headers(_summary(cc=self.COMMA_CC, reply_to="list@example.com"))
+        self.assertEqual(h["cc"], self.COMMA_CC)
+        self.assertEqual(h["reply-to"], "list@example.com")
+
+    def test_sender_and_bcc_render_when_present(self):
+        m = _msg(sender="secretary@example.com", bcc="hidden@example.com")
+        parsed = email.message_from_bytes(render_rfc822(m))
+        self.assertEqual(parsed["Sender"], "secretary@example.com")
+        self.assertEqual(parsed["Bcc"], "hidden@example.com")
+
+    def test_null_fidelity_fields_are_absent_old_row_parity(self):
+        # An old row carries None in every fidelity column: the headers must be
+        # ABSENT (the IMAP server then renders ENVELOPE NIL), byte-identical to the
+        # pre-v2 render. This holds in the full render AND the body-free scan.
+        parsed = email.message_from_bytes(render_rfc822(_msg()))
+        for name in ("Cc", "Bcc", "Sender", "Reply-To"):
+            self.assertIsNone(parsed[name])
+        h = envelope_headers(_summary())
+        for k in ("cc", "bcc", "sender", "reply-to"):
+            self.assertNotIn(k, h)
+
+    def test_render_and_scan_agree_on_cc_bytes(self):
+        # The hydrated render and the body-free scan must produce the SAME Cc value,
+        # so a summary-served ENVELOPE is byte-for-byte a hydrated FETCH.
+        rendered = email.message_from_bytes(render_rfc822(_msg(cc=self.COMMA_CC)))["Cc"]
+        scanned = envelope_headers(_summary(cc=self.COMMA_CC))["cc"]
+        self.assertEqual(rendered, scanned)
+
+
 if __name__ == "__main__":
     unittest.main()
