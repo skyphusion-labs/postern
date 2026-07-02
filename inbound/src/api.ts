@@ -24,6 +24,7 @@ import {
   normalizeUsername,
 } from "./smtpcreds";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
+import { readBodyCapped, PayloadTooLargeError } from "./body";
 
 // Failure codes that represent a transient upstream condition (the transport /
 // provider) rather than a bad request; mapped to 502 so callers can retry.
@@ -396,13 +397,22 @@ async function resolveToken(request: Request, env: Env): Promise<TokenResolution
   return null;
 }
 
+// The body cap is enforced while READING the stream (#196, audit F6): the
+// declared Content-Length is fast-rejected, and a chunked / header-less body
+// is counted chunk by chunk and aborted the moment the cap is crossed, so the
+// guard holds regardless of framing (see ./body).
 async function readJson<T>(request: Request): Promise<T> {
-  const declaredLen = Number(request.headers.get("content-length") ?? "");
-  if (Number.isFinite(declaredLen) && declaredLen > MAX_BODY_BYTES) {
-    throw new MailboxError("E_PAYLOAD_TOO_LARGE", "request body too large", 413);
+  let text: string;
+  try {
+    text = await readBodyCapped(request, MAX_BODY_BYTES);
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      throw new MailboxError("E_PAYLOAD_TOO_LARGE", "request body too large", 413);
+    }
+    throw err;
   }
   try {
-    return (await request.json()) as T;
+    return JSON.parse(text) as T;
   } catch {
     throw new MailboxError("E_VALIDATION_ERROR", "invalid JSON body");
   }
