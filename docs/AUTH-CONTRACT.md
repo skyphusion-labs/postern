@@ -340,6 +340,20 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From) |
 | `POSTERN_SEND_IDENTITIES` (registry, #28) | `send` + bound From | `POST /api/send`/`reply` as the token's OWN identity |
 
+The three STATIC slots (`POSTERN_API_TOKEN`/`RELAY_TOKEN`, `POSTERN_API_TOKEN_READ`,
+`POSTERN_API_TOKEN_SEND`) each hold a **comma-separated SET of tokens** (#154):
+entries are trimmed, empty entries (stray commas, whitespace) are ignored, and a
+bearer matching ANY member resolves to that slot's scope. A single bare value (no
+comma) is a one-element set -- the pre-#154 format, unchanged -- so existing
+deployments need no change. The point is per-CONSUMER tokens within one function:
+the IMAP door, the Postern MCP, and the webmail can each hold their OWN `read`
+member, so rotating or revoking one never strands the others. Matching stays
+constant-time per member with no early exit (which member matched does not leak via
+timing; per-token length may leak, the bytes must not). A comma is therefore not a
+valid character inside a token value. This format does NOT apply to
+`POSTERN_SEND_IDENTITIES`: the registry is a JSON map with its own shape (below),
+not a token list.
+
 Unknown token -> `401`; known token outside its scope -> `403`. Credential-admin
 (`/api/admin/smtp-credentials`) is reachable ONLY by a `both` token. Provisioning
 the two scoped secrets is OPTIONAL and non-breaking: with only `POSTERN_API_TOKEN`

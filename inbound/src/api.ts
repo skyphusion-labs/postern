@@ -347,13 +347,18 @@ function scopeSatisfies(have: Scope, need: RouteScope): boolean {
 //
 // Two stages, in order:
 //   1. The static, named scope tokens (both / read / send), compared constant-time.
-//      The loop does not break on a match, so the check does not leak WHICH token
-//      matched via timing; the LENGTH may leak (tokens are high-entropy), the bytes
-//      must not. Precedence is fixed (both, then read, then send): distinct values
-//      are expected, so at most one matches, but on an accidental value collision the
-//      more-permissive `both` wins, to avoid locking out the primary key. A static
-//      match carries NO bound identity (back-compat: From falls back to req.from /
-//      DEFAULT_FROM, validated against ALLOWED_FROM_DOMAIN).
+//      Each slot holds a SET of tokens (#154): a comma-separated list, entries
+//      trimmed, empties dropped, so multiple consumers of the same function each
+//      hold their OWN independently-rotatable value. A single bare value (no
+//      comma) is a one-element set, exactly the pre-#154 behavior. The loops do
+//      not break on a match, so the check does not leak WHICH slot or WHICH set
+//      member matched via timing; per-token LENGTH may leak (tokens are
+//      high-entropy), the bytes must not. Precedence is fixed (both, then read,
+//      then send): distinct values are expected, so at most one matches, but on an
+//      accidental value collision the more-permissive `both` wins, to avoid
+//      locking out the primary key. A static match carries NO bound identity
+//      (back-compat: From falls back to req.from / DEFAULT_FROM, validated
+//      against ALLOWED_FROM_DOMAIN).
 //   2. Only if no static token matched, the per-identity send registry (#28): hash
 //      the presented Bearer and look it up. A hit grants `send` scope with an
 //      AUTHORITATIVE bound From; a miss is an unknown token (the caller returns 401).
@@ -362,15 +367,21 @@ async function resolveToken(request: Request, env: Env): Promise<TokenResolution
   const got = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (got.length === 0) return null;
 
-  const candidates: Array<[Scope, string]> = [
-    ["both", env.POSTERN_API_TOKEN || env.RELAY_TOKEN || ""],
-    ["read", env.POSTERN_API_TOKEN_READ || ""],
-    ["send", env.POSTERN_API_TOKEN_SEND || ""],
+  const candidates: Array<[Scope, string[]]> = [
+    ["both", tokenSet(env.POSTERN_API_TOKEN || env.RELAY_TOKEN)],
+    ["read", tokenSet(env.POSTERN_API_TOKEN_READ)],
+    ["send", tokenSet(env.POSTERN_API_TOKEN_SEND)],
   ];
 
   let matched: Scope | null = null;
-  for (const [scope, token] of candidates) {
-    const eq = token.length > 0 && timingSafeEqual(got, token);
+  for (const [scope, tokens] of candidates) {
+    // Compare against EVERY set member unconditionally (no early exit, never ===)
+    // and OR the results, so which member matched does not leak via timing.
+    let eq = false;
+    for (const token of tokens) {
+      const memberEq = timingSafeEqual(got, token);
+      eq = eq || memberEq;
+    }
     if (eq && matched === null) matched = scope;
   }
   if (matched !== null) return { scope: matched };
@@ -420,6 +431,18 @@ function json(payload: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+// Parse a static token slot into its configured SET (#154): comma-separated,
+// each entry trimmed, empties dropped (stray commas / whitespace are ignored).
+// A single bare value (no comma) is a one-element set, so pre-#154 configs
+// behave identically. A comma is therefore not a valid character inside a token
+// value. The empty string is never a member, so an absent slot matches nothing.
+function tokenSet(slot: string | undefined): string[] {
+  return (slot ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
 }
 
 // Constant-time compare so the auth check does not leak the token byte by byte
