@@ -36,8 +36,10 @@ CREATE TABLE IF NOT EXISTS messages (
   -- header fidelity: the raw RFC 5322 headers as they arrived (display names and
   -- all), so IMAP ENVELOPE and clients render the truth. bcc_addr is outbound-only
   -- (an inbound Bcc is the sender secret, not on our wire). wire_size = raw RFC822
-  -- byte size at intake, so RFC822.SIZE is spec-true. All nullable: old rows keep
-  -- NULL and render as today (reads COALESCE delivered_to -> to_addr).
+  -- byte size at intake: stored fidelity for API consumers; the IMAP door keeps
+  -- serving the PROJECTED size while BODY[] is a projection (SIZE and the literal
+  -- must agree -- CONTRACT 10.3). All nullable: old rows keep NULL and render as
+  -- today (reads COALESCE delivered_to -> to_addr).
   delivered_to  TEXT,
   cc_addr       TEXT,
   bcc_addr      TEXT,
