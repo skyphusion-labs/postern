@@ -12,13 +12,14 @@ import (
 // bind succeeds, searchFn answers searches. Either may be nil (no-op success /
 // empty result).
 type fakeLDAP struct {
-	bindFn    func(dn, password string) error
-	searchFn  func(*ldap.SearchRequest) (*ldap.SearchResult, error)
-	startTLS  bool
-	bindCalls []string
+	bindFn       func(dn, password string) error
+	searchFn     func(*ldap.SearchRequest) (*ldap.SearchResult, error)
+	startTLS     bool
+	startTLSConf *tls.Config // the config the door handed to the StartTLS upgrade
+	bindCalls    []string
 }
 
-func (f *fakeLDAP) StartTLS(*tls.Config) error { f.startTLS = true; return nil }
+func (f *fakeLDAP) StartTLS(tc *tls.Config) error { f.startTLS = true; f.startTLSConf = tc; return nil }
 func (f *fakeLDAP) Bind(dn, password string) error {
 	f.bindCalls = append(f.bindCalls, dn)
 	if f.bindFn != nil {

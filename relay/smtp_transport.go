@@ -99,7 +99,7 @@ func (t *SMTPTransport) send(from string, rcpts []string, raw []byte) error {
 
 	if t.cfg.StartTLS {
 		if ok, _ := c.Extension("STARTTLS"); ok {
-			if err := c.StartTLS(&tls.Config{ServerName: t.cfg.Host}); err != nil {
+			if err := c.StartTLS(outboundTLSConfig(t.cfg.Host)); err != nil {
 				return fmt.Errorf("starttls: %w", err)
 			}
 		} else {
@@ -133,6 +133,15 @@ func (t *SMTPTransport) send(from string, rcpts []string, raw []byte) error {
 		return fmt.Errorf("close DATA: %w", err)
 	}
 	return c.Quit()
+}
+
+// outboundTLSConfig is the tls.Config for the upstream BYO-SMTP StartTLS hop.
+// The TLS 1.2 floor is stated EXPLICITLY (#186): every other TLS surface in the
+// codebase pins MinVersion (the 587 submission listener, the pinned LDAP paths,
+// the imap door), and this hop carries SMTP AUTH PLAIN credentials, so it must
+// never lean on whatever the stdlib default happens to be.
+func outboundTLSConfig(host string) *tls.Config {
+	return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
 }
 
 // renderMIME produces the RFC 5322 message bytes for an OutboundMessage.
