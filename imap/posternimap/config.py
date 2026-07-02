@@ -88,15 +88,34 @@ class Config:
     smtp_auth_url: Optional[str] = None
     transport_token: Optional[str] = None  # POSTERN_TRANSPORT_TOKEN
 
-    # --- ldap mode (mirrors relay/auth_ldap.go env knobs) ---
+    # --- ldap mode (mirrors relay/auth_ldap.go env knobs, byte-symmetric #182) ---
+    # Direct-bind + self-read is the model of record (docs/AUTH-CONTRACT.md 5b):
+    # the door binds AS the templated user DN (auth success == bind success) and,
+    # when a group gate is configured, self-reads that user's OWN entry for the
+    # authz check. The search+bind path (privileged service account) is RETIRED on
+    # both doors; its env vars (LDAP_BIND_DN / LDAP_BIND_PASSWORD / LDAP_SEARCH_*)
+    # are a loud startup error, never silently ignored. LDAP_MAIL_ATTR is relay-only
+    # (the IMAP door reads the store with its service token, not the directory mail).
     ldap_url: Optional[str] = None  # ldaps://host:636 (preferred) or ldap://host:389
     ldap_starttls: bool = False  # upgrade an ldap:// connection before binding
-    ldap_bind_dn_template: Optional[str] = None  # simple bind, e.g. uid=%s,ou=people,dc=ex,dc=com
-    ldap_bind_dn: Optional[str] = None  # service-account DN for search+bind
-    ldap_bind_password: Optional[str] = None  # service-account password
-    ldap_search_base: Optional[str] = None  # e.g. ou=people,dc=ex,dc=com
-    ldap_search_filter: Optional[str] = None  # e.g. (uid=%s)
-    ldap_mail_attr: str = "mail"  # attribute carrying the mail address (informational here)
+    ldap_bind_dn_template: Optional[str] = None  # direct-bind DN template, e.g. cn=%s,ou=users,dc=ex,dc=com
+    # LDAP_REQUIRE_GROUP: a group DN the bound user must carry in LDAP_GROUP_ATTR on
+    # a base-scope self-read of their own entry (the mail-users authz gate). Empty =
+    # no gate (today's behavior). When set the gate is FAIL-CLOSED: a failed or
+    # empty self-read, or an entry without the group, DENIES the login.
+    ldap_require_group: Optional[str] = None
+    ldap_group_attr: str = "memberOf"  # LDAP_GROUP_ATTR, the attribute listing the user's groups
+    # --- TLS-to-directory trust (#153; same knobs + semantics as the Go relay) ---
+    # LDAP_TLS_CA: PEM CA bundle path; when set it is the ONLY trust anchor (full
+    # verification against a pinned root, never added to the system roots).
+    # LDAP_TLS_PIN_SHA256: exact-leaf SHA-256 pin (hex, colons optional, any case),
+    # SAN-independent -- THE mechanism for Authentik's default outpost cert.
+    # Mutually exclusive with LDAP_TLS_CA. Neither set = the channel is encrypted
+    # but UNAUTHENTICATED (CERT_NONE, today's behavior) and the proxy logs a loud
+    # startup warning.
+    ldap_tls_ca: Optional[str] = None
+    ldap_tls_server_name: Optional[str] = None  # LDAP_TLS_SERVER_NAME, extra accepted cert name (CA mode)
+    ldap_tls_pin_sha256: Optional[str] = None
     # LDAP_TIMEOUT (integer seconds, default 10): bounds BOTH the directory connect
     # and the bind/search operations, so a dead or slow directory cannot hang a
     # login. Shared cross-language contract name: must match the Go relay 1:1
@@ -215,11 +234,11 @@ class Config:
         ldap_url = (e.get("LDAP_URL") or "").strip() or None
         ldap_starttls = _bool(e, "LDAP_STARTTLS", False)
         ldap_bind_dn_template = (e.get("LDAP_BIND_DN_TEMPLATE") or "").strip() or None
-        ldap_bind_dn = (e.get("LDAP_BIND_DN") or "").strip() or None
-        ldap_bind_password = e.get("LDAP_BIND_PASSWORD") or None
-        ldap_search_base = (e.get("LDAP_SEARCH_BASE") or "").strip() or None
-        ldap_search_filter = (e.get("LDAP_SEARCH_FILTER") or "").strip() or None
-        ldap_mail_attr = (e.get("LDAP_MAIL_ATTR") or "mail").strip() or "mail"
+        ldap_require_group = (e.get("LDAP_REQUIRE_GROUP") or "").strip() or None
+        ldap_group_attr = (e.get("LDAP_GROUP_ATTR") or "memberOf").strip() or "memberOf"
+        ldap_tls_ca = (e.get("LDAP_TLS_CA") or "").strip() or None
+        ldap_tls_server_name = (e.get("LDAP_TLS_SERVER_NAME") or "").strip() or None
+        ldap_tls_pin_sha256 = (e.get("LDAP_TLS_PIN_SHA256") or "").strip() or None
         ldap_timeout = _int(e, "LDAP_TIMEOUT", 10)
         if ldap_timeout < 0:
             raise ConfigError("LDAP_TIMEOUT must be >= 0 (0 disables the timeout)")
@@ -231,13 +250,39 @@ class Config:
                 raise ConfigError(
                     "ldap auth requires TLS: use an ldaps:// LDAP_URL or set LDAP_STARTTLS=true"
                 )
-            has_simple = bool(ldap_bind_dn_template)
-            has_search = bool(ldap_bind_dn and ldap_search_base and ldap_search_filter)
-            if not has_simple and not has_search:
-                raise ConfigError(
-                    "ldap auth needs LDAP_BIND_DN_TEMPLATE (simple bind) or "
-                    "LDAP_BIND_DN + LDAP_SEARCH_BASE + LDAP_SEARCH_FILTER (search+bind)"
+            # Direct-bind is the only bind mode (parity with the Go relay, #182).
+            # The retired search+bind vars fail LOUD so an operator carrying an old
+            # EnvironmentFile learns at startup, not from silently-changed auth.
+            retired = [
+                k
+                for k in (
+                    "LDAP_BIND_DN",
+                    "LDAP_BIND_PASSWORD",
+                    "LDAP_SEARCH_BASE",
+                    "LDAP_SEARCH_FILTER",
                 )
+                if (e.get(k) or "").strip()
+            ]
+            if retired:
+                raise ConfigError(
+                    "the LDAP search+bind path is retired (#182, docs/AUTH-CONTRACT.md 5b): unset "
+                    + ", ".join(retired)
+                    + " and use LDAP_BIND_DN_TEMPLATE (direct-bind + self-read)"
+                )
+            if not ldap_bind_dn_template:
+                raise ConfigError(
+                    "ldap auth needs LDAP_BIND_DN_TEMPLATE for direct-bind "
+                    "(e.g. cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io)"
+                )
+            if ldap_tls_ca and ldap_tls_pin_sha256:
+                raise ConfigError(
+                    "ldap tls: set LDAP_TLS_CA or LDAP_TLS_PIN_SHA256, not both "
+                    "(they are different trust models)"
+                )
+            if ldap_tls_pin_sha256:
+                # Validate the pin shape at startup (never start with a malformed
+                # pin that would reject every cert); the value itself is non-secret.
+                normalize_pin_sha256(ldap_tls_pin_sha256)
 
         pam_service = (e.get("AUTH_SYSTEM_PAM_SERVICE") or "postern").strip() or "postern"
         system_domain = (e.get("AUTH_SYSTEM_DOMAIN") or "").strip() or None
@@ -314,11 +359,11 @@ class Config:
             ldap_url=ldap_url,
             ldap_starttls=ldap_starttls,
             ldap_bind_dn_template=ldap_bind_dn_template,
-            ldap_bind_dn=ldap_bind_dn,
-            ldap_bind_password=ldap_bind_password,
-            ldap_search_base=ldap_search_base,
-            ldap_search_filter=ldap_search_filter,
-            ldap_mail_attr=ldap_mail_attr,
+            ldap_require_group=ldap_require_group,
+            ldap_group_attr=ldap_group_attr,
+            ldap_tls_ca=ldap_tls_ca,
+            ldap_tls_server_name=ldap_tls_server_name,
+            ldap_tls_pin_sha256=ldap_tls_pin_sha256,
             ldap_timeout=ldap_timeout,
             pam_service=pam_service,
             system_domain=system_domain,
@@ -334,6 +379,27 @@ class Config:
             throttle_global_window_seconds=throttle_global_window_seconds,
             proxy_protocol=proxy_protocol,
         )
+
+
+def normalize_pin_sha256(s: str) -> bytes:
+    """Parse an LDAP_TLS_PIN_SHA256 value into its 32 raw bytes (#153).
+
+    Accepts the common fingerprint spellings -- colon-separated or bare hex, any
+    case, surrounding whitespace -- so an operator can paste `openssl x509
+    -fingerprint -sha256` output directly. A SHA-256 is 32 bytes / 64 hex chars;
+    anything else is a loud ConfigError (we never start with a malformed pin that
+    would reject every cert). Mirrors relay/auth_ldap.go normalizePinSHA256.
+    """
+    clean = "".join(c for c in s if c not in ": \t\r\n").lower()
+    try:
+        raw = bytes.fromhex(clean)
+    except ValueError as exc:
+        raise ConfigError("LDAP_TLS_PIN_SHA256 is not valid hex") from exc
+    if len(raw) != 32:
+        raise ConfigError(
+            f"LDAP_TLS_PIN_SHA256 must be a 32-byte SHA-256 (64 hex chars), got {len(raw)} bytes"
+        )
+    return raw
 
 
 def _int(e: Mapping[str, str], name: str, default: int) -> int:

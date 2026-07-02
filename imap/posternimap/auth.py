@@ -40,6 +40,7 @@ dependency (ldap3 / python-pam) and no network.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import urllib.request
@@ -47,7 +48,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .client import PosternAuthError, PosternClient, PosternError, _UrllibTransport
-from .config import SERVICE_TOKEN_MODES, Config, ConfigError
+from .config import SERVICE_TOKEN_MODES, Config, ConfigError, normalize_pin_sha256
 
 # An authenticator validates a (username, password) login for the service-token
 # modes. True = authenticated, False = bad credential. It MAY raise
@@ -208,13 +209,19 @@ class NativeVerifier:
         return bool(data.get("ok"))
 
 
-# --- ldap: bind username/password against the directory over TLS (#77) --------
+# --- ldap: direct-bind + self-read against the directory over TLS (#77/#182) --
 #
-# Mirrors relay/auth_ldap.go: simple bind (LDAP_BIND_DN_TEMPLATE) or search+bind
-# (service account searches for the user DN, then the user's password is bound to
-# verify it). TLS is mandatory; a bind carries the password in the clear. ldap3
-# is a pure-Python client (no libldap/C build step), so it is the dependency-light
-# choice and is imported lazily so token/fixed/native need it never.
+# Byte-symmetric with relay/auth_ldap.go (the model of record, docs/AUTH-CONTRACT.md
+# section 5b): the door binds DIRECTLY as the templated user DN (auth success ==
+# bind success) and, when LDAP_REQUIRE_GROUP is set, self-reads the bound user's
+# OWN entry (base scope, their own DN) for LDAP_GROUP_ATTR and enforces the group
+# gate FAIL-CLOSED. The search+bind path (privileged service account) is RETIRED
+# on both doors. TLS is mandatory (a bind carries the password in the clear) and
+# its trust is pinned via LDAP_TLS_CA (full verification against a pinned root) or
+# LDAP_TLS_PIN_SHA256 (exact leaf, SAN-independent, checked BEFORE the bind sends
+# a credential) -- #153. ldap3 is a pure-Python client (no libldap/C build step),
+# so it is the dependency-light choice and is imported lazily so token/fixed/
+# native need it never.
 
 
 class LDAPBinder:
@@ -223,7 +230,22 @@ class LDAPBinder:
     def __init__(self, cfg: Config) -> None:
         if not cfg.ldap_url:
             raise ConfigError("ldap auth needs LDAP_URL")
+        if not cfg.ldap_bind_dn_template:
+            raise ConfigError(
+                "ldap auth needs LDAP_BIND_DN_TEMPLATE for direct-bind "
+                "(the search+bind path is retired, #182)"
+            )
+        if cfg.ldap_tls_ca and cfg.ldap_tls_pin_sha256:
+            raise ConfigError(
+                "ldap tls: set LDAP_TLS_CA or LDAP_TLS_PIN_SHA256, not both "
+                "(they are different trust models)"
+            )
         self._cfg = cfg
+        # Parsed once at construction: a malformed pin is a startup error, never a
+        # per-login surprise (mirrors newLDAPAuth).
+        self._pin: Optional[bytes] = (
+            normalize_pin_sha256(cfg.ldap_tls_pin_sha256) if cfg.ldap_tls_pin_sha256 else None
+        )
 
     def __call__(self, username: str, password: str) -> bool:
         # An empty password must never bind: many directories treat it as an
@@ -234,7 +256,6 @@ class LDAPBinder:
         try:
             import ldap3
             from ldap3.core.exceptions import LDAPException
-            from ldap3.utils.conv import escape_filter_chars
             from ldap3.utils.dn import escape_rdn
         except ImportError as exc:  # pragma: no cover - exercised only without the extra
             raise AuthBackendError(
@@ -245,60 +266,120 @@ class LDAPBinder:
         use_ssl = cfg.ldap_url.lower().startswith("ldaps://")  # type: ignore[union-attr]
         try:
             # LDAP_TIMEOUT bounds connect (here) AND every bind/search (receive_timeout
-            # on each Connection below), mirroring the Go relay's DialWithDialer +
+            # on the Connection below), mirroring the Go relay's DialWithDialer +
             # SetTimeout. 0 -> None == no timeout (matches Go's zero-duration default).
             timeout = cfg.ldap_timeout or None
             server = ldap3.Server(
-                cfg.ldap_url, use_ssl=use_ssl, get_info=ldap3.NONE, connect_timeout=timeout
+                cfg.ldap_url,
+                use_ssl=use_ssl,
+                get_info=ldap3.NONE,
+                connect_timeout=timeout,
+                tls=self._build_tls(ldap3),
             )
-            if cfg.ldap_bind_dn_template:
-                return self._simple_bind(ldap3, server, escape_rdn, username, password, timeout)
-            return self._search_bind(
-                ldap3, server, escape_filter_chars, username, password, timeout
-            )
+            dn = cfg.ldap_bind_dn_template % escape_rdn(username)
+            conn = ldap3.Connection(server, user=dn, password=password, receive_timeout=timeout)
+            self._secure_channel(conn)
+            if not conn.bind():
+                return False
+            if not cfg.ldap_require_group:
+                return True
+            return self._group_gate(ldap3, conn, dn)
         except LDAPException as exc:
             raise AuthBackendError(f"ldap error: {exc}") from exc
 
-    def _open(self, ldap3: Any, conn: Any) -> None:
-        """StartTLS upgrade for an ldap:// connection before any credential flows."""
+    def _build_tls(self, ldap3: Any) -> Any:
+        """The ldap3 Tls used for BOTH ldaps:// and the ldap:// StartTLS upgrade.
+
+        Mirrors relay buildLDAPTLSConfig: CA-pin -> full verification with the PEM
+        as the ONLY trust anchor (plus LDAP_TLS_SERVER_NAME as an accepted cert
+        name when the URL dials an IP); fingerprint-pin -> channel-only here
+        (CERT_NONE) with the exact-leaf check enforced in _secure_channel BEFORE
+        any credential flows; neither -> the prior unauthenticated channel
+        (CERT_NONE), warned loudly at startup (#153). Every path floors the
+        protocol at TLS 1.2, matching the relay's MinVersion doctrine (#186).
+        """
+        import ssl
+
+        floor = [ssl.OP_NO_SSLv3, ssl.OP_NO_TLSv1, ssl.OP_NO_TLSv1_1]
+        cfg = self._cfg
+        if cfg.ldap_tls_ca:
+            kwargs: dict[str, Any] = {
+                "validate": ssl.CERT_REQUIRED,
+                "ca_certs_file": cfg.ldap_tls_ca,
+                "ssl_options": floor,
+            }
+            if cfg.ldap_tls_server_name:
+                kwargs["valid_names"] = [cfg.ldap_tls_server_name]
+            return ldap3.Tls(**kwargs)
+        # Pin mode and the unauthenticated default both run the channel at
+        # CERT_NONE; under the pin, _secure_channel authenticates the peer by its
+        # exact leaf hash instead (stricter than a CA, mirroring the Go door's
+        # InsecureSkipVerify + VerifyPeerCertificate pattern).
+        return ldap3.Tls(validate=ssl.CERT_NONE, ssl_options=floor)
+
+    def _secure_channel(self, conn: Any) -> None:
+        """Establish and AUTHENTICATE the TLS channel before any credential flows.
+
+        StartTLS upgrade for an ldap:// connection (as before); an explicit open
+        for ldaps:// when a pin must be checked (TLS is established at open); then
+        the exact-leaf SHA-256 pin check (#153): the DER certificate the peer
+        presented must hash to LDAP_TLS_PIN_SHA256 or the login is refused as a
+        backend fault BEFORE the bind would send the password. Constant-time
+        compare, mirroring the relay's VerifyPeerCertificate callback.
+        """
         cfg = self._cfg
         if cfg.ldap_starttls and cfg.ldap_url and cfg.ldap_url.lower().startswith("ldap://"):
             conn.open()
             if not conn.start_tls():
                 raise AuthBackendError("ldap starttls failed")
+        elif self._pin is not None:
+            conn.open()
+        if self._pin is None:
+            return
+        sock = getattr(conn, "socket", None)
+        getpeercert = getattr(sock, "getpeercert", None)
+        der = getpeercert(True) if getpeercert is not None else None
+        if not der:
+            raise AuthBackendError(
+                "ldap tls: peer presented no certificate to check against LDAP_TLS_PIN_SHA256"
+            )
+        if not hmac.compare_digest(hashlib.sha256(der).digest(), self._pin):
+            raise AuthBackendError(
+                "ldap tls: leaf certificate SHA-256 does not match LDAP_TLS_PIN_SHA256"
+            )
 
-    def _simple_bind(
-        self, ldap3: Any, server: Any, escape_rdn: Any, username: str, password: str,
-        timeout: Any = None,
-    ) -> bool:
-        dn = self._cfg.ldap_bind_dn_template % escape_rdn(username)
-        conn = ldap3.Connection(server, user=dn, password=password, receive_timeout=timeout)
-        self._open(ldap3, conn)
-        return bool(conn.bind())
+    def _group_gate(self, ldap3: Any, conn: Any, dn: str) -> bool:
+        """The FAIL-CLOSED mail-users authz gate (LDAP_REQUIRE_GROUP, #182).
 
-    def _search_bind(
-        self, ldap3: Any, server: Any, escape_filter_chars: Any, username: str, password: str,
-        timeout: Any = None,
-    ) -> bool:
+        Self-reads the bound user's OWN entry (base scope, their own DN -- a
+        non-superuser bind is permitted to read its own entry, so no privileged
+        account is needed) for LDAP_GROUP_ATTR and requires LDAP_REQUIRE_GROUP
+        among its values. A failed/empty/ambiguous self-read or an entry without
+        the group DENIES the login (never authenticate an account we cannot
+        positively authorize); an LDAP fault raises through the caller's
+        LDAPException handler as a backend fault (logged loud, never counted as
+        a bad password). Mirrors relay selfRead.
+        """
         cfg = self._cfg
-        svc = ldap3.Connection(
-            server, user=cfg.ldap_bind_dn, password=cfg.ldap_bind_password,
-            receive_timeout=timeout,
+        ok = conn.search(
+            dn,
+            "(objectClass=*)",
+            search_scope=ldap3.BASE,
+            attributes=[cfg.ldap_group_attr],
         )
-        self._open(ldap3, svc)
-        if not svc.bind():
-            raise AuthBackendError("ldap service-account bind failed")
-        flt = cfg.ldap_search_filter % escape_filter_chars(username)
-        svc.search(cfg.ldap_search_base, flt, attributes=[cfg.ldap_mail_attr])
-        entries = svc.entries
-        if len(entries) != 1:
-            # 0 = no such user; >1 = ambiguous. Either way, do not authenticate.
+        entries = conn.entries
+        if not ok or len(entries) != 1:
             return False
-        user_dn = entries[0].entry_dn
-        # Bind the user's own password to verify it.
-        user_conn = ldap3.Connection(server, user=user_dn, password=password, receive_timeout=timeout)
-        self._open(ldap3, user_conn)
-        return bool(user_conn.bind())
+        values = entries[0].entry_attributes_as_dict.get(cfg.ldap_group_attr) or []
+        want = _normalize_dn(cfg.ldap_require_group or "")
+        return any(_normalize_dn(v) == want for v in values)
+
+
+def _normalize_dn(dn: str) -> str:
+    """Lower-case a DN and trim whitespace around each RDN so two spellings of the
+    same DN compare equal (mirrors relay normalizeDN: a membership check, not full
+    RFC 4514 normalization, sufficient for the fixed mail-users gate DN)."""
+    return ",".join(part.strip() for part in dn.split(",")).lower()
 
 
 # --- system: authenticate against local Unix accounts via PAM (#77) -----------
@@ -373,13 +454,24 @@ def build_portal(
     from zope.interface import implementer
 
     from .account import PosternAccount
-    from .throttle import build_throttle, throttle_key
+    from .throttle import build_throttle, throttle_account
 
     if cfg.auth_mode in SERVICE_TOKEN_MODES:
         if authenticate is None:
             authenticate = build_authenticator(cfg)
     elif verify is None:
         verify = TokenVerifier(cfg)
+
+    if cfg.auth_mode == "ldap" and not cfg.ldap_tls_ca and not cfg.ldap_tls_pin_sha256:
+        # #153: the directory channel is encrypted but UNAUTHENTICATED (CERT_NONE)
+        # until a trust anchor is configured. Keep today's behavior (opt-in-by-
+        # config-present) but never keep it silently.
+        log.msg(
+            "WARNING: LDAP TLS is UNAUTHENTICATED (certificate not validated): an "
+            "active MITM between this proxy and the directory could capture bind "
+            "passwords. Set LDAP_TLS_CA (pinned root) or LDAP_TLS_PIN_SHA256 "
+            "(exact leaf) to authenticate the channel (#153)."
+        )
 
     if throttle is None:
         throttle = build_throttle(cfg)
@@ -391,7 +483,11 @@ def build_portal(
         def requestAvatarId(self, creds):
             username = creds.username.decode() if isinstance(creds.username, bytes) else creds.username
             password = creds.password.decode() if isinstance(creds.password, bytes) else creds.password
-            account = throttle_key(username)
+            # #183: in token/fixed mode the username is attacker-chosen free text,
+            # so the key is the connection's source address (the PROXY-recovered
+            # client IP, attached by PosternIMAP4Server.authenticateLogin), not the
+            # username. Directory modes keep the per-account key.
+            account = throttle_account(cfg.auth_mode, username, getattr(creds, "peer_host", None))
             # Locked out (per-account or global cooldown): return the SAME generic
             # failure as a wrong password and do NOT touch the backend (invariant 2:
             # a throttled response is byte-identical to a normal auth failure).

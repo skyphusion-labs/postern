@@ -6,6 +6,7 @@ import {
   type EmailRequest,
   type SendResult,
 } from "./email";
+import { readBodyCapped, PayloadTooLargeError } from "./body";
 
 export type { EmailRequest, SendResult, EmailAddress } from "./email";
 
@@ -57,16 +58,24 @@ export default {
       return json({ ok: false, error: "unauthorized" }, 401);
     }
 
-    // Reject oversized bodies before reading them into memory. The relay caps
-    // SMTP messages, but a direct public caller is otherwise unbounded.
-    const declaredLen = Number(request.headers.get("content-length") ?? "");
-    if (Number.isFinite(declaredLen) && declaredLen > MAX_BODY_BYTES) {
-      return json({ ok: false, error: "E_PAYLOAD_TOO_LARGE", message: "request body too large" }, 413);
+    // Reject oversized bodies before buffering them into memory: the declared
+    // Content-Length is fast-rejected, and a chunked / header-less body is
+    // counted chunk by chunk while reading, aborted the moment the cap is
+    // crossed (#196, audit F6; see ./body). The relay caps SMTP messages, but
+    // a direct public caller is otherwise unbounded.
+    let bodyText: string;
+    try {
+      bodyText = await readBodyCapped(request, MAX_BODY_BYTES);
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) {
+        return json({ ok: false, error: "E_PAYLOAD_TOO_LARGE", message: "request body too large" }, 413);
+      }
+      throw err;
     }
 
     let body: EmailRequest;
     try {
-      body = (await request.json()) as EmailRequest;
+      body = JSON.parse(bodyText) as EmailRequest;
     } catch {
       return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
     }

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import sys
 
+from twisted.cred import credentials
+from twisted.cred.error import UnauthorizedLogin
 from twisted.internet import protocol
 from twisted.mail import imap4
 from twisted.python import log
@@ -43,6 +45,25 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     handler the override simply stops applying and the response degrades to BAD (the
     APPEND still fails -- no silent data loss either way).
     """
+
+    def authenticateLogin(self, user, passwd):
+        """Defer LOGIN to the portal, tagging the credentials with the connection's
+        peer address (#183).
+
+        The #105 throttle keys token/fixed attempts on the SOURCE address instead
+        of the attacker-chosen username (auth.build_portal / throttle_account), so
+        the checker needs to know who is connecting. Behind the L4 load balancer
+        the PROXY wrapper (proxywrap.py) has already swapped the transport's peer
+        for the recovered real client IP, so getPeer() is the true source. The
+        stock behavior is otherwise unchanged (portal.login with IUsernamePassword).
+        """
+        if not self.portal:
+            raise UnauthorizedLogin()
+        creds = credentials.UsernamePassword(user, passwd)
+        peer = self.transport.getPeer() if self.transport is not None else None
+        # UNIXAddress has no host attribute; None falls back to the shared bucket.
+        setattr(creds, "peer_host", getattr(peer, "host", None))
+        return self.portal.login(creds, None, imap4.IAccount)
 
     def _IMAP4Server__ebAppend(self, failure, tag):  # overrides IMAP4Server.__ebAppend
         if failure.check(imap4.MailboxException):

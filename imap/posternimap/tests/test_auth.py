@@ -1,8 +1,10 @@
-"""Tests for the auth mapping (resolve_token), pure (no Twisted).
+"""Tests for the auth mapping (resolve_token) and the #183 throttle keying.
 
 Covers the #32 token/fixed modes and the #77 service-token modes
 (native/ldap/system). Every backend call is an INJECTED callable so these run
-with no live network and no optional dependency (ldap3 / python-pam).
+with no live network and no optional dependency (ldap3 / python-pam). The
+resolve_token tests are pure (no Twisted); the portal-level #183 test imports
+Twisted (the portal IS Twisted cred plumbing).
 """
 
 from __future__ import annotations
@@ -189,6 +191,92 @@ class NativeVerifierTest(unittest.TestCase):
         v, _ = self._verifier((200, b'{"ok":true}'))
         self.assertFalse(v("", "secret"))
         self.assertFalse(v("joan", ""))
+
+
+class ThrottleAccountKeyTest(unittest.TestCase):
+    """#183: the throttle key per auth mode (pure function, no Twisted)."""
+
+    def test_token_and_fixed_key_on_source(self):
+        from posternimap.throttle import throttle_account
+
+        for mode in ("token", "fixed"):
+            with self.subTest(mode=mode):
+                # The attacker-chosen username plays NO role in the key.
+                a = throttle_account(mode, "alice@x", "203.0.113.9")
+                b = throttle_account(mode, "bob@x", "203.0.113.9")
+                self.assertEqual(a, b)
+                # Distinct sources get distinct buckets.
+                self.assertNotEqual(a, throttle_account(mode, "alice@x", "198.51.100.7"))
+
+    def test_unknown_peer_shares_one_bucket(self):
+        from posternimap.throttle import throttle_account
+
+        # No peer (unit wiring, unix sockets): one shared bucket, never a fresh
+        # budget per username.
+        self.assertEqual(
+            throttle_account("token", "alice@x", None),
+            throttle_account("token", "bob@x", None),
+        )
+
+    def test_directory_modes_key_on_account(self):
+        from posternimap.throttle import throttle_account
+
+        for mode in ("native", "ldap", "system"):
+            with self.subTest(mode=mode):
+                self.assertEqual(throttle_account(mode, "  Joan ", "203.0.113.9"), "joan")
+
+class ThrottleKeyingPortalTest(unittest.TestCase):
+    """#183 end-to-end through the portal checker: rotating the username in token
+    mode must NOT mint a fresh failure budget; the source IP is the budget."""
+
+    def _portal(self, throttle):
+        from posternimap.auth import build_portal
+
+        cfg = _cfg()  # token mode
+        calls = []
+
+        def verify(token):
+            calls.append(token)
+            return False  # every token is rejected -> a genuine bad credential
+
+        return build_portal(cfg, verify=verify, throttle=throttle), calls
+
+    def _throttle(self):
+        from posternimap.throttle import AuthThrottle
+
+        return AuthThrottle(
+            enabled=True,
+            max_failures=3,
+            lockout_seconds=60,
+            max_lockout_seconds=900,
+            global_max_failures=0,  # isolate the per-bucket layer
+            global_window_seconds=60,
+        )
+
+    def _login(self, portal, username, peer_host):
+        from twisted.cred import credentials
+        from twisted.mail import imap4
+
+        creds = credentials.UsernamePassword(username.encode(), b"bad-token")
+        setattr(creds, "peer_host", peer_host)
+        d = portal.login(creds, None, imap4.IAccount)
+        failures = []
+        d.addErrback(failures.append)  # consume; every attempt here fails
+        return failures
+
+    def test_username_rotation_does_not_evade_lockout(self):
+        portal, calls = self._portal(self._throttle())
+        # Three failures from one source, each under a FRESH username.
+        for i in range(3):
+            self._login(portal, f"user{i}@x", "203.0.113.9")
+        self.assertEqual(len(calls), 3)
+        # Fourth attempt from the same source: locked out BEFORE the backend is
+        # consulted, even though the username has never been seen.
+        self._login(portal, "user99@x", "203.0.113.9")
+        self.assertEqual(len(calls), 3)  # backend NOT called
+        # A different source still reaches the backend (its own budget).
+        self._login(portal, "user99@x", "198.51.100.7")
+        self.assertEqual(len(calls), 4)
 
 
 if __name__ == "__main__":

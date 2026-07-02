@@ -152,30 +152,62 @@ class LdapModeConfigTest(unittest.TestCase):
         e.update(over)
         return e
 
-    def test_ldap_simple_bind_ok(self):
+    def test_ldap_direct_bind_ok(self):
         cfg = Config.from_env(self._base())
         self.assertEqual(cfg.auth_mode, "ldap")
         self.assertEqual(cfg.ldap_url, "ldaps://dir.example:636")
         self.assertEqual(cfg.ldap_bind_dn_template, "uid=%s,ou=people,dc=example,dc=com")
-        self.assertEqual(cfg.ldap_mail_attr, "mail")  # default
+        self.assertIsNone(cfg.ldap_require_group)  # no gate by default
+        self.assertEqual(cfg.ldap_group_attr, "memberOf")  # default
         self.assertEqual(cfg.service_token, "svc-token")
 
-    def test_ldap_search_bind_ok(self):
-        e = self._base()
-        del e["LDAP_BIND_DN_TEMPLATE"]
-        e.update(
-            {
-                "LDAP_BIND_DN": "cn=svc,dc=example,dc=com",
-                "LDAP_BIND_PASSWORD": "svcpw",
-                "LDAP_SEARCH_BASE": "ou=people,dc=example,dc=com",
-                "LDAP_SEARCH_FILTER": "(uid=%s)",
-                "LDAP_MAIL_ATTR": "mailLocalAddress",
-            }
+    def test_ldap_search_bind_is_retired(self):
+        # #182: the retired search+bind vars fail LOUD at startup, never get
+        # silently ignored (an operator carrying an old EnvironmentFile must know).
+        for var, value in (
+            ("LDAP_BIND_DN", "cn=svc,dc=example,dc=com"),
+            ("LDAP_BIND_PASSWORD", "svcpw"),
+            ("LDAP_SEARCH_BASE", "ou=people,dc=example,dc=com"),
+            ("LDAP_SEARCH_FILTER", "(uid=%s)"),
+        ):
+            with self.subTest(var=var):
+                with self.assertRaises(ConfigError):
+                    Config.from_env(self._base(**{var: value}))
+
+    def test_ldap_group_gate_knobs(self):
+        cfg = Config.from_env(
+            self._base(
+                LDAP_REQUIRE_GROUP="cn=mail-users,ou=groups,dc=example,dc=com",
+                LDAP_GROUP_ATTR="groupMembership",
+            )
         )
-        cfg = Config.from_env(e)
-        self.assertEqual(cfg.ldap_bind_dn, "cn=svc,dc=example,dc=com")
-        self.assertEqual(cfg.ldap_search_filter, "(uid=%s)")
-        self.assertEqual(cfg.ldap_mail_attr, "mailLocalAddress")
+        self.assertEqual(cfg.ldap_require_group, "cn=mail-users,ou=groups,dc=example,dc=com")
+        self.assertEqual(cfg.ldap_group_attr, "groupMembership")
+
+    def test_ldap_tls_knobs(self):
+        cfg = Config.from_env(
+            self._base(LDAP_TLS_CA="/etc/ca.pem", LDAP_TLS_SERVER_NAME="dir.internal")
+        )
+        self.assertEqual(cfg.ldap_tls_ca, "/etc/ca.pem")
+        self.assertEqual(cfg.ldap_tls_server_name, "dir.internal")
+        self.assertIsNone(cfg.ldap_tls_pin_sha256)
+
+    def test_ldap_tls_ca_and_pin_mutually_exclusive(self):
+        with self.assertRaises(ConfigError):
+            Config.from_env(
+                self._base(LDAP_TLS_CA="/etc/ca.pem", LDAP_TLS_PIN_SHA256="ab" * 32)
+            )
+
+    def test_ldap_tls_pin_validated_at_startup(self):
+        # A malformed pin must refuse to start (it would reject every cert).
+        for bad in ("not-hex", "abcd", "ab" * 31):
+            with self.subTest(pin=bad):
+                with self.assertRaises(ConfigError):
+                    Config.from_env(self._base(LDAP_TLS_PIN_SHA256=bad))
+        # The openssl fingerprint spelling (colons, upper case) is accepted.
+        colons = ":".join(["AB"] * 32)
+        cfg = Config.from_env(self._base(LDAP_TLS_PIN_SHA256=colons))
+        self.assertEqual(cfg.ldap_tls_pin_sha256, colons)
 
     def test_ldap_needs_url(self):
         e = self._base()
@@ -191,7 +223,8 @@ class LdapModeConfigTest(unittest.TestCase):
         cfg = Config.from_env(self._base(LDAP_URL="ldap://dir.example:389", LDAP_STARTTLS="true"))
         self.assertTrue(cfg.ldap_starttls)
 
-    def test_ldap_needs_a_bind_strategy(self):
+    def test_ldap_needs_the_bind_dn_template(self):
+        # Direct-bind is the only bind mode (#182); no template = no ldap mode.
         e = self._base()
         del e["LDAP_BIND_DN_TEMPLATE"]
         with self.assertRaises(ConfigError):
