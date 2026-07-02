@@ -222,14 +222,15 @@ class PosternIMAPMessage:
         return BytesIO(text.encode("utf-8", "replace"))
 
     def getSize(self) -> int:
-        # RFC822.SIZE. Envelope v2 (CONTRACT 10.3) carries the raw RFC822 wire byte
-        # size on the summary; when we have it, that is the spec-true value and we
-        # serve it with NO body fetch. The RFC-compliance doctrine is that we never
-        # fudge a size we actually know. Only pre-v2 rows (and outbound, which has no
-        # wire size) carry None here, and for those we fall back to the rendered
-        # projection exactly as before.
-        if self._summary.wire_size is not None:
-            return self._summary.wire_size
+        # RFC822.SIZE. RFC 3501 requires SIZE to byte-match the BODY[] literal the
+        # server would return, and this door serves a rendered PROJECTION as BODY[]
+        # (raw wire bytes are deliberately NOT stored, CONTRACT 10.7). So SIZE MUST be
+        # the projected length -- hydrate and measure -- and must NOT use the stored
+        # wire_size, which would disagree with the literal and break the exact clients
+        # (size-validating ones) it looks like it would help. wire_size is stored
+        # fidelity for API consumers only (kept on the models), until a future
+        # byte-exact FETCH milestone gives BODY[] real wire bytes. Do NOT "optimize"
+        # this to prefer wire_size (#189/#207).
         self._hydrate()
         return len(self._rendered)
 

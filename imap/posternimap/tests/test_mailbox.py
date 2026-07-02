@@ -176,27 +176,24 @@ class MailboxTest(unittest.TestCase):
         self.assertIsNone(env[6])  # cc NIL
         self.assertIsNone(env[7])  # bcc NIL
 
-    def test_size_prefers_wire_size_with_no_body_fetch(self):
-        # RFC822.SIZE serves the stored wire size (#189, CONTRACT 10.3) with NO body
-        # fetch when present -- the spec-true value, never a projection.
+    def test_size_is_projected_length_even_when_wire_size_present(self):
+        # RFC 3501: SIZE must byte-match the BODY[] literal, and this door serves the
+        # rendered projection as BODY[] (raw wire bytes are NOT stored, CONTRACT 10.7).
+        # So SIZE is the projected length REGARDLESS of a stored wire_size -- the two
+        # must stay consistent, because a SIZE/literal mismatch is exactly what breaks
+        # size-validating clients. wire_size here is API-only fidelity (#189/#207).
         from twisted.mail.imap4 import MessageSet
+        from posternimap.client import Message
+        from posternimap.rfc822 import render_rfc822
 
-        mb, transport = self._custom_mailbox(
-            [make_message("w1", subject="sized", wireSize=4242)]
-        )
+        raw = make_message("w1", subject="sized", body="a body to measure", wireSize=999999)
+        mb, _ = self._custom_mailbox([raw])
         (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
-        self.assertEqual(msg.getSize(), 4242)
-        self.assertEqual(transport.body_fetches, 0)
-
-    def test_size_falls_back_to_projection_when_wire_size_null(self):
-        # An old row has no wire size: SIZE falls back to the rendered projection
-        # (one hydrate), exactly as before v2.
-        from twisted.mail.imap4 import MessageSet
-
-        mb, transport = self._custom_mailbox([make_message("o1", subject="old")])
-        (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
-        self.assertGreater(msg.getSize(), 0)
-        self.assertEqual(transport.body_fetches, 1)
+        size = msg.getSize()
+        # Equals the rendered RFC822 length (the BODY[] literal), NOT the divergent
+        # stored wire_size the ENVELOPE-fidelity path carries.
+        self.assertEqual(size, len(render_rfc822(Message.from_json(raw))))
+        self.assertNotEqual(size, 999999)
 
 
     # --- #102 Stage 1: lazy ENVELOPE, windowing, live refresh ---
