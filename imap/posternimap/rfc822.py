@@ -40,6 +40,17 @@ def _fmt_date(iso: str) -> str:
             return iso
 
 
+def _angle(value: str) -> str:
+    """Wrap a message identifier in RFC 5322 angle brackets exactly once. The
+    store strips <> from messageId but keeps In-Reply-To verbatim (WITH its
+    brackets), so unconditional wrapping emitted "<<...>>" on the wire and broke
+    client-side threading (#179 transcript). Idempotent for either form."""
+    v = value.strip()
+    if v.startswith("<") and v.endswith(">"):
+        return v
+    return f"<{v}>"
+
+
 def _hdr(value: str) -> str:
     """Strip CR/LF from a header value. EmailMessage rejects embedded newlines
     (raising ValueError), so a malicious stored Subject/From could otherwise
@@ -99,9 +110,9 @@ def _apply_envelope_headers(
     if date:
         em["Date"] = date
     if message_id:
-        em["Message-ID"] = _hdr(f"<{message_id}>")
+        em["Message-ID"] = _hdr(_angle(message_id))
     if in_reply_to:
-        em["In-Reply-To"] = _hdr(f"<{in_reply_to}>")
+        em["In-Reply-To"] = _hdr(_angle(in_reply_to))
 
 
 def render_rfc822(msg: Message) -> bytes:
@@ -166,7 +177,7 @@ def envelope_headers(summary: MessageSummary) -> dict[str, str]:
         if date:
             h["date"] = _to_wire(date)
         if summary.message_id:
-            h["message-id"] = _to_wire(_hdr(f"<{summary.message_id}>"))
+            h["message-id"] = _to_wire(_hdr(_angle(summary.message_id)))
         if summary.in_reply_to:
-            h["in-reply-to"] = _to_wire(_hdr(f"<{summary.in_reply_to}>"))
+            h["in-reply-to"] = _to_wire(_hdr(_angle(summary.in_reply_to)))
         return h
