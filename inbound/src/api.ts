@@ -13,6 +13,7 @@
 // most privileged and are reachable ONLY by a `both` token.
 
 import * as store from "./store";
+import { ingest, type ParsedInbound } from "./ingest";
 import { send, reply, MailboxError, type SendRequest, type ReplyRequest } from "./mailbox";
 import { serveWebmail } from "./webmail";
 import {
@@ -56,6 +57,20 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   // never needs the mailbox API token to validate a login.
   if (request.method === "POST" && path === "/api/smtp-auth") {
     return handleSmtpAuth(request, env);
+  }
+
+  // The out-of-Worker inbound driver (CONTRACT section 2, #22/#29): POST /ingest
+  // accepts a ParsedInbound JSON body from a transport that does NOT run inside CF
+  // Email Routing (postern-relay's SMTP intake). It sits OUTSIDE /api/, gated by
+  // the TRANSPORT token (an infra seam, not the mailbox API token), so it is
+  // handled before the API-token gate below -- mirroring /api/smtp-auth. No
+  // forward() here: forwarding is in-Worker only (it needs the live
+  // ForwardableEmailMessage; section 2). A non-POST is a clean 405.
+  if (path === "/ingest") {
+    if (request.method !== "POST") {
+      return json({ ok: false, error: "method_not_allowed", message: "POST only" }, 405);
+    }
+    return handleIngest(request, env, ctx);
   }
 
   // Everything under /api (and the back-compat /send alias) requires a token.
@@ -300,6 +315,116 @@ async function handleReindex(request: Request, env: Env): Promise<Response> {
   const dryRun = body.dryRun === true;
   const result = await store.reindexPage(env, { cursor, limit, dryRun });
   return json({ ok: true, ...result });
+}
+
+// POST /ingest: the out-of-Worker inbound driver (CONTRACT section 2). Transport-
+// token gated and FAIL-CLOSED -- transportAuthorized returns false when
+// POSTERN_TRANSPORT_TOKEN is unbound, so an unset secret refuses (never opens).
+// Reads the body through the M7 streaming cap (413 on over-cap), parses the
+// ParsedInbound JSON (from + to required; attachment content is base64 over JSON,
+// decoded to ArrayBuffer here), and hands to ingest(). The M8 fidelity fields
+// (toHeader/cc/sender/replyTo/rawSize) flow through ingest()'s mapping untouched.
+async function handleIngest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  if (!transportAuthorized(request, env)) {
+    return json({ ok: false, error: "unauthorized" }, 401);
+  }
+  try {
+    const body = await readJson<unknown>(request);
+    const parsed = parseIngestBody(body);
+    const result = await ingest(env, parsed, ctx);
+    return json({
+      ok: true,
+      messageId: result.messageId,
+      stored: result.stored,
+      merged: result.merged,
+      threadId: result.threadId,
+    });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+// Validate + normalize an /ingest JSON body into a ParsedInbound. from + to are
+// required (E_FIELD_MISSING); attachment `content` is standard base64 over JSON
+// and is decoded to an ArrayBuffer (malformed base64 = E_VALIDATION_ERROR). auth
+// is optional -- an absent/partial verdict set defaults to none, i.e. ingest()'s
+// allowlist-only trust path (an SMTP transport gets no implicit pass).
+function parseIngestBody(raw: unknown): ParsedInbound {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new MailboxError("E_VALIDATION_ERROR", "request body must be a JSON object");
+  }
+  const b = raw as Record<string, unknown>;
+  const from = typeof b.from === "string" ? b.from.trim() : "";
+  const to = typeof b.to === "string" ? b.to.trim() : "";
+  if (!from || !to) {
+    throw new MailboxError("E_FIELD_MISSING", "from and to are required");
+  }
+
+  const parsed: ParsedInbound = { from, to };
+  if (typeof b.messageId === "string") parsed.messageId = b.messageId;
+  if (typeof b.subject === "string") parsed.subject = b.subject;
+  if (typeof b.date === "string") parsed.date = b.date;
+  if (typeof b.inReplyTo === "string") parsed.inReplyTo = b.inReplyTo;
+  if (Array.isArray(b.references)) {
+    parsed.references = b.references.filter((r): r is string => typeof r === "string");
+  }
+  if (typeof b.text === "string") parsed.text = b.text;
+  if (typeof b.html === "string") parsed.html = b.html;
+  // M8 envelope fidelity v2 (section 10.4): raw decoded header strings + wire size.
+  if (typeof b.toHeader === "string") parsed.toHeader = b.toHeader;
+  if (typeof b.cc === "string") parsed.cc = b.cc;
+  if (typeof b.sender === "string") parsed.sender = b.sender;
+  if (typeof b.replyTo === "string") parsed.replyTo = b.replyTo;
+  if (typeof b.rawSize === "number" && Number.isFinite(b.rawSize)) parsed.rawSize = b.rawSize;
+
+  if (b.auth && typeof b.auth === "object" && !Array.isArray(b.auth)) {
+    const a = b.auth as Record<string, unknown>;
+    parsed.auth = {
+      spf: typeof a.spf === "string" ? a.spf : undefined,
+      dkim: typeof a.dkim === "string" ? a.dkim : undefined,
+      dmarc: typeof a.dmarc === "string" ? a.dmarc : undefined,
+    };
+  }
+
+  if (b.attachments !== undefined) {
+    if (!Array.isArray(b.attachments)) {
+      throw new MailboxError("E_VALIDATION_ERROR", "attachments must be an array");
+    }
+    const out: NonNullable<ParsedInbound["attachments"]> = [];
+    for (let i = 0; i < b.attachments.length; i++) {
+      const item = b.attachments[i];
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new MailboxError("E_VALIDATION_ERROR", `attachment ${i} must be an object`);
+      }
+      const at = item as Record<string, unknown>;
+      if (typeof at.content !== "string" || at.content === "") {
+        throw new MailboxError("E_FIELD_MISSING", `attachment ${i} content (base64) is required`);
+      }
+      let content: ArrayBuffer;
+      try {
+        content = base64ToArrayBuffer(at.content);
+      } catch {
+        throw new MailboxError("E_VALIDATION_ERROR", `attachment ${i} content is not valid base64`);
+      }
+      out.push({
+        filename: typeof at.filename === "string" ? at.filename : undefined,
+        mimeType: typeof at.mimeType === "string" ? at.mimeType : undefined,
+        content,
+      });
+    }
+    if (out.length) parsed.attachments = out;
+  }
+
+  return parsed;
+}
+
+// Decode standard base64 (matching the relay's StdEncoding) to an ArrayBuffer.
+// atob throws on invalid input, which the caller maps to a clean E_VALIDATION_ERROR.
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
 }
 
 // Constant-time Bearer compare against the TRANSPORT token (POSTERN_TRANSPORT_TOKEN),
