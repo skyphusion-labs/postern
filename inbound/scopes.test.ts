@@ -141,4 +141,78 @@ describe("per-function token scopes (#85)", () => {
       expect((await handleApi(req("GET", "/api/messages", { token: "read-token" }), env, ctx)).status).toBe(401);
     });
   });
+
+  describe("token SETS in a slot (#154)", () => {
+    // Each static slot holds a comma-separated SET of tokens: per-consumer values
+    // within one function, so one member can rotate without stranding the rest.
+    // Deliberately messy config: interior whitespace and a trailing comma must be
+    // tolerated (trimmed / dropped), never become matchable values.
+    function setEnv() {
+      return makeFakeEnv({
+        POSTERN_API_TOKEN: "both-token",
+        POSTERN_API_TOKEN_READ: "imap-read-token, mcp-read-token ,webmail-read-token,",
+        POSTERN_API_TOKEN_SEND: "relay-send-token,cli-send-token",
+      });
+    }
+
+    it("every member of the read set resolves to read", async () => {
+      const { env, ctx } = setEnv();
+      for (const token of ["imap-read-token", "mcp-read-token", "webmail-read-token"]) {
+        expect((await handleApi(req("GET", "/api/messages", { token }), env, ctx)).status).toBe(200);
+      }
+    });
+
+    it("a read-set member is still 403 on send and admin (scope semantics unchanged)", async () => {
+      const { env, ctx, sent } = setEnv();
+      expect((await handleApi(req("POST", "/api/send", { token: "mcp-read-token", body: SEND_BODY }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("POST", "/api/admin/reindex", { token: "mcp-read-token", body: {} }), env, ctx)).status).toBe(403);
+      expect(sent).toHaveLength(0);
+    });
+
+    it("every member of the send set reaches the write door and none the read door", async () => {
+      const { env, ctx, settle, sent } = setEnv();
+      for (const token of ["relay-send-token", "cli-send-token"]) {
+        expect((await handleApi(req("POST", "/api/send", { token, body: SEND_BODY }), env, ctx)).status).toBe(200);
+        expect((await handleApi(req("GET", "/api/messages", { token }), env, ctx)).status).toBe(403);
+      }
+      await settle();
+      expect(sent).toHaveLength(2);
+    });
+
+    it("a value in NO set is 401: unknown, member-prefix, and the raw list string itself", async () => {
+      const { env, ctx } = setEnv();
+      expect((await handleApi(req("GET", "/api/messages", { token: "nope" }), env, ctx)).status).toBe(401);
+      // A prefix of a member must not match (per-member compare, not substring).
+      expect((await handleApi(req("GET", "/api/messages", { token: "imap-read" }), env, ctx)).status).toBe(401);
+      // The whole configured list is NOT itself a token.
+      expect((await handleApi(req("GET", "/api/messages", { token: "imap-read-token, mcp-read-token ,webmail-read-token," }), env, ctx)).status).toBe(401);
+    });
+
+    it("config whitespace is trimmed but presented whitespace is not", async () => {
+      const { env, ctx } = setEnv();
+      // " mcp-read-token " is configured with padding yet matches bare (config trimmed)...
+      expect((await handleApi(req("GET", "/api/messages", { token: "mcp-read-token" }), env, ctx)).status).toBe(200);
+      // ...while a padded PRESENTED bearer is a different byte string: 401.
+      expect((await handleApi(req("GET", "/api/messages", { token: " mcp-read-token " }), env, ctx)).status).toBe(401);
+    });
+
+    it("a slot of only commas/whitespace configures NOTHING (empty string never matches)", async () => {
+      const { env, ctx } = makeFakeEnv({
+        POSTERN_API_TOKEN: "both-token",
+        POSTERN_API_TOKEN_READ: " , ,",
+      });
+      expect((await handleApi(req("GET", "/api/messages", { token: "," }), env, ctx)).status).toBe(401);
+      expect((await handleApi(req("GET", "/api/messages", { token: " " }), env, ctx)).status).toBe(401);
+      // The both token is unaffected.
+      expect((await handleApi(req("GET", "/api/messages", { token: "both-token" }), env, ctx)).status).toBe(200);
+    });
+
+    it("single bare value (no comma) keeps working exactly as before (back-compat)", async () => {
+      // The scopedEnv suite above IS the single-value coverage; this pins the
+      // equivalence explicitly on one env.
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("GET", "/api/messages", { token: "read-token" }), env, ctx)).status).toBe(200);
+      expect((await handleApi(req("GET", "/api/messages", { token: "read-token,other" }), env, ctx)).status).toBe(401);
+    });
+  });
 });

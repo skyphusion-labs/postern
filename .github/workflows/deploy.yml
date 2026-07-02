@@ -39,6 +39,17 @@ name: deploy
 # wrangler tracks applied migrations in a d1_migrations table and only runs new
 # ones, so this is idempotent. (Baselining an EXISTING pre-wrangler DB requires
 # seeding d1_migrations once with the already-applied migration names.)
+#
+# Auto-apply is GATED (#112): before the apply, every PENDING migration is
+# classified by .github/scripts/d1-migration-gate.mjs. Additive shapes (CREATE
+# table/index/trigger, ALTER ... ADD COLUMN, INSERT ... VALUES seeds) apply with
+# zero friction, as before. Destructive or unrecognized shapes (DROP, RENAME TO,
+# DELETE/UPDATE data migrations, INSERT ... SELECT copy-rebuilds, FTS5 rebuilds)
+# FAIL the deploy before anything touches the live store, unless the migration
+# file carries an explicit reviewed "-- postern:allow-destructive" marker. The
+# sanctioned path for a genuinely destructive migration is the manual offline
+# runbook (backup -> quiesce -> apply -> verify) followed by baseline-seeding
+# d1_migrations, so the pipeline sees it as already applied and no-ops.
 
 on:
   push:
@@ -90,7 +101,9 @@ jobs:
       # at their own instance via the POSTERN_INBOUND_WRANGLER secret (the full
       # real config); absent it, the committed template ships. We apply D1
       # migrations before deploying so schema and code ship together (idempotent;
-      # the DB binding name `DB` resolves the database in either config).
+      # the DB binding name `DB` resolves the database in either config), gated
+      # so only recognizably additive migrations auto-apply (#112; see the header
+      # comment and .github/scripts/d1-migration-gate.mjs).
       - name: Deploy inbound (migrate + deploy)
         working-directory: inbound
         env:
@@ -104,8 +117,13 @@ jobs:
             CFG=wrangler.jsonc
             echo "No operator config secret set; using committed template"
           fi
+          echo "Listing pending D1 migrations"
+          npx wrangler d1 migrations list DB --remote -c "$CFG" > migrations.pending.txt
+          cat migrations.pending.txt
+          echo "Gating auto-apply: additive migrations only (#112)"
+          node ../.github/scripts/d1-migration-gate.mjs migrations < migrations.pending.txt
           echo "Applying D1 migrations (only un-applied ones run)"
           npx wrangler d1 migrations apply DB --remote -c "$CFG"
           echo "Deploying inbound worker"
           npx wrangler deploy -c "$CFG"
-          rm -f wrangler.ci.json
+          rm -f wrangler.ci.json migrations.pending.txt
