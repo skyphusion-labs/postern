@@ -22,6 +22,16 @@ export interface StoredMessage {
   auth: { spf: string; dkim: string; dmarc: string };
   trusted: boolean;
   receivedAt: string; // ISO
+  // --- M8 envelope fidelity v2 (#189). All nullable: absent = a pre-v2 row that
+  //     renders exactly as before. Header-fidelity fields are the raw RFC 5322
+  //     headers as they arrived (display names and all); deliveredTo is the
+  //     normalized envelope-recipient set the mailbox views filter on. ---
+  cc: string | null; // raw Cc header
+  bcc: string | null; // raw Bcc header, outbound only (inbound Bcc is not on our wire)
+  sender: string | null; // raw Sender header
+  replyTo: string | null; // raw Reply-To header
+  deliveredTo: string[]; // bare lower-cased delivered recipients; pre-v2 fallback [to_addr]
+  wireSize: number | null; // raw RFC822 byte size at intake
   attachments: AttachmentMeta[];
 }
 
@@ -54,6 +64,14 @@ export interface StoredMessageSummary {
   inReplyTo: string | null;
   trusted: boolean;
   receivedAt: string;
+  // M8 (#189): same envelope-fidelity fields as StoredMessage, so a list/search
+  // summary can render Cc/Reply-To and answer "mail for X" on the delivered set.
+  cc: string | null;
+  bcc: string | null;
+  sender: string | null;
+  replyTo: string | null;
+  deliveredTo: string[];
+  wireSize: number | null;
   attachmentCount: number;
 }
 
@@ -70,6 +88,8 @@ export interface ListQuery {
 export interface SearchQuery {
   q: string;
   mode?: "fts" | "semantic" | "hybrid"; // semantic/hybrid land in M4
+  // Restrict to one direction (#128); undefined = both. Validated at the API edge.
+  direction?: "inbound" | "outbound";
   limit?: number;
   cursor?: string;
 }
@@ -111,11 +131,29 @@ export interface StoreInput {
   attachments?: { filename?: string; mimeType?: string; content: ArrayBuffer }[];
   /** Opt-in Vectorize indexing for this recipient (inbound RAG). */
   vectorize?: boolean;
+  // --- M8 envelope fidelity v2 (#189) ---
+  /** Bare lower-cased recipients this message was DELIVERED to. Inbound: the one
+   *  envelope recipient per delivery (merged into the existing row on a dedup hit,
+   *  #178). Outbound: the full to+cc+bcc set, complete at insert. When omitted the
+   *  store derives it from `to` (back-compat), so delivered_to is never null. */
+  deliveredTo?: string[];
+  /** Raw header-fidelity strings (as they arrived / were sent); null = absent. */
+  cc?: string | null;
+  bcc?: string | null;
+  sender?: string | null;
+  replyTo?: string | null;
+  /** Raw RFC822 wire byte size at intake; null/omitted for outbound. */
+  wireSize?: number | null;
 }
 
 export interface PutResult {
   messageId: string;
-  stored: boolean; // false on a dedup hit
+  // stored: a NEW row was inserted (first delivery). merged: an existing row's
+  // delivered_to gained a new envelope recipient (#178). Both false = a true
+  // dedup no-op (a retry/loop of an already-recorded delivery). Attachments, FTS,
+  // and Vectorize run ONLY when stored is true.
+  stored: boolean;
+  merged: boolean;
   threadId: string;
 }
 
@@ -153,19 +191,45 @@ function stripAngle(s: string): string {
 }
 
 /**
- * Insert a message (either direction) and resolve its thread. INSERT OR IGNORE
- * keeps message_id UNIQUE dedup; the FTS5 triggers stay in sync automatically.
- * Attachments (R2) and opt-in Vectorize run via ctx.waitUntil (best-effort).
+ * Insert a message (either direction) and resolve its thread. message_id stays the
+ * UNIQUE identity: a same-Message-ID redelivery to a NEW recipient MERGES into the
+ * existing row's delivered_to (#178) instead of forking identity or dropping the
+ * copy; a redelivery to an already-recorded recipient is a true no-op. The FTS5
+ * triggers stay in sync automatically. Attachments (R2) and opt-in Vectorize run
+ * via ctx.waitUntil (best-effort) ONLY on a first insert (PutResult.stored).
  */
 export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): Promise<PutResult> {
   const receivedAt = new Date().toISOString();
   const threadId = await resolveThreadId(env.DB, input.messageId, input.inReplyTo, input.references);
 
-  const result = await env.DB.prepare(
-    `INSERT OR IGNORE INTO messages
+  // Envelope semantics (#178): the deduped, bare lower-cased set this delivery is
+  // FOR, wrapped ",a,b," so membership is one delimiter-safe LIKE. Derived from
+  // `to` when a caller omits deliveredTo, so the column is never null.
+  const deliveredList = normalizeDelivered(input.deliveredTo, input.to);
+  const deliveredSet = `,${deliveredList.join(",")},`;
+  // The single recipient the merge appends on a dedup hit. Inbound delivers one
+  // envelope recipient per invocation, so this is that address; outbound writes
+  // its full set complete at insert and never conflicts (we mint unique ids).
+  const mergeRcpt = deliveredList[0];
+
+  // ONE atomic upsert, safe under CF's concurrent per-recipient invocations of the
+  // SAME Message-ID (#178). On conflict we MERGE the new recipient into the row's
+  // delivered_to rather than fork the message identity (which would duplicate body
+  // storage, search hits, and embeddings). The DO UPDATE ... WHERE makes an
+  // already-present recipient a true no-op (RETURNING then emits no row). We
+  // distinguish the three outcomes from this single statement via RETURNING
+  // is_fresh = (delivered_to == the value we tried to INSERT): 1 only on a real
+  // insert, since a merge rebuilds delivered_to from the EXISTING row and differs.
+  const res = await env.DB.prepare(
+    `INSERT INTO messages
        (message_id, from_addr, to_addr, subject, date, in_reply_to,
-        body_text, body_html, spf, dkim, dmarc, trusted, received_at, direction, thread_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        body_text, body_html, spf, dkim, dmarc, trusted, received_at, direction, thread_id,
+        delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(message_id) DO UPDATE SET
+       delivered_to = COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') || ? || ','
+       WHERE COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') NOT LIKE '%,' || ? || ',%'
+     RETURNING thread_id, (delivered_to = ?) AS is_fresh`,
   )
     .bind(
       input.messageId,
@@ -183,17 +247,37 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
       receivedAt,
       input.direction,
       threadId,
+      deliveredSet,
+      input.cc ?? null,
+      input.bcc ?? null,
+      input.sender ?? null,
+      input.replyTo ?? null,
+      input.wireSize ?? null,
+      mergeRcpt,
+      mergeRcpt,
+      deliveredSet,
     )
-    .run();
+    .all<{ thread_id: string | null; is_fresh: number }>();
 
-  if (result.meta.changes === 0) {
-    // Dedup hit: return the existing row's thread so callers stay consistent.
+  const returned = (res.results ?? [])[0];
+  if (!returned) {
+    // DO UPDATE WHERE was false: this exact recipient is already on the row (a
+    // retry / delivery loop). True dedup, no-op; resolve the thread for a
+    // consistent return.
     const existing = await env.DB.prepare("SELECT thread_id FROM messages WHERE message_id = ? LIMIT 1")
       .bind(input.messageId)
       .first<{ thread_id: string | null }>();
-    return { messageId: input.messageId, stored: false, threadId: existing?.thread_id ?? threadId };
+    return { messageId: input.messageId, stored: false, merged: false, threadId: existing?.thread_id ?? threadId };
   }
 
+  const rowThreadId = returned.thread_id ?? threadId;
+  if (returned.is_fresh !== 1) {
+    // Conflict + a NEW recipient appended: a merge, not a new message. The one-time
+    // side effects already ran on the first insert; a merge touches one column.
+    return { messageId: input.messageId, stored: false, merged: true, threadId: rowThreadId };
+  }
+
+  // A brand-new row: run the one-time side effects.
   const attachments = input.attachments ?? [];
   if (attachments.length > 0) {
     ctx.waitUntil(storeAttachments(env, input.messageId, attachments, receivedAt));
@@ -203,7 +287,7 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
     ctx.waitUntil(indexVectors(env, input));
   }
 
-  return { messageId: input.messageId, stored: true, threadId };
+  return { messageId: input.messageId, stored: true, merged: false, threadId: rowThreadId };
 }
 
 async function storeAttachments(
@@ -347,6 +431,37 @@ export function parseRecipients(toAddr: string): string[] {
     .filter(Boolean);
 }
 
+/** Build the deduped, bare, lower-cased delivered-recipient list for delivered_to
+ *  (#178). Prefer an explicit deliveredTo; else derive from the to_addr string (a
+ *  back-compat caller). Never empty (to_addr is always present), so delivered_to
+ *  is never null and the merge / is_fresh discriminator in put() always applies. */
+export function normalizeDelivered(deliveredTo: string[] | undefined, toAddr: string): string[] {
+  const raw = deliveredTo && deliveredTo.length > 0 ? deliveredTo : parseRecipients(toAddr);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const a of raw) {
+    const bare = a.trim().toLowerCase();
+    if (bare && !seen.has(bare)) {
+      seen.add(bare);
+      out.push(bare);
+    }
+  }
+  if (out.length === 0) {
+    const fallback = toAddr.trim().toLowerCase();
+    if (fallback) out.push(fallback);
+  }
+  return out;
+}
+
+/** Parse a stored delivered_to (",a,b,") into its member list. NULL/empty falls
+ *  back to [toAddr] (a pre-0006 row's single envelope address), so old rows carry
+ *  a sensible deliveredTo without a backfill. */
+function parseDeliveredTo(deliveredTo: string | null, toAddr: string): string[] {
+  if (!deliveredTo) return [toAddr];
+  const members = deliveredTo.split(",").map((s) => s.trim()).filter(Boolean);
+  return members.length > 0 ? members : [toAddr];
+}
+
 // --- Reads (CONTRACT section 1 / section 4) ---
 
 interface MessageRow {
@@ -365,6 +480,12 @@ interface MessageRow {
   dmarc: string;
   trusted: number;
   received_at: string;
+  delivered_to: string | null;
+  cc_addr: string | null;
+  bcc_addr: string | null;
+  sender_addr: string | null;
+  reply_to_addr: string | null;
+  wire_size: number | null;
 }
 
 function rowToMessage(row: MessageRow, attachments: AttachmentMeta[]): StoredMessage {
@@ -382,6 +503,12 @@ function rowToMessage(row: MessageRow, attachments: AttachmentMeta[]): StoredMes
     auth: { spf: row.spf, dkim: row.dkim, dmarc: row.dmarc },
     trusted: row.trusted === 1,
     receivedAt: row.received_at,
+    cc: row.cc_addr ?? null,
+    bcc: row.bcc_addr ?? null,
+    sender: row.sender_addr ?? null,
+    replyTo: row.reply_to_addr ?? null,
+    deliveredTo: parseDeliveredTo(row.delivered_to, row.to_addr),
+    wireSize: row.wire_size ?? null,
     attachments,
   };
 }
@@ -428,7 +555,8 @@ export async function getAttachment(
 export async function get(env: Env, messageId: string): Promise<StoredMessage | null> {
   const row = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
-            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at
+            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at,
+            delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size
        FROM messages WHERE message_id = ? LIMIT 1`,
   )
     .bind(messageId)
@@ -441,7 +569,8 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
 export async function thread(env: Env, threadId: string): Promise<StoredMessage[]> {
   const res = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
-            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at
+            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at,
+            delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size
        FROM messages WHERE thread_id = ? ORDER BY date, id`,
   )
     .bind(threadId)
@@ -471,6 +600,12 @@ interface SummaryRow {
   in_reply_to: string | null;
   trusted: number;
   received_at: string;
+  delivered_to: string | null;
+  cc_addr: string | null;
+  bcc_addr: string | null;
+  sender_addr: string | null;
+  reply_to_addr: string | null;
+  wire_size: number | null;
   attachment_count: number;
 }
 
@@ -487,6 +622,12 @@ function rowToSummary(row: SummaryRow): StoredMessageSummary {
     inReplyTo: row.in_reply_to,
     trusted: row.trusted === 1,
     receivedAt: row.received_at,
+    cc: row.cc_addr ?? null,
+    bcc: row.bcc_addr ?? null,
+    sender: row.sender_addr ?? null,
+    replyTo: row.reply_to_addr ?? null,
+    deliveredTo: parseDeliveredTo(row.delivered_to, row.to_addr),
+    wireSize: row.wire_size ?? null,
     attachmentCount: row.attachment_count,
   };
 }
@@ -546,8 +687,13 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   }
 
   if (q.to) {
-    where.push("lower(m.to_addr) LIKE ?");
-    binds.push(`%${q.to.toLowerCase()}%`);
+    // Envelope-membership filter (#178/#189): "mail for X" matches the delivered
+    // set, falling back to a pre-v2 row's to_addr via COALESCE, so a message to
+    // support@ AND security@ shows in BOTH views. Bind the bare lower-cased
+    // address; the leading/trailing commas make it a delimiter-safe membership
+    // test (no substring false-positives, no string surgery).
+    where.push("COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'");
+    binds.push(q.to.trim().toLowerCase());
   }
   if (q.from) {
     where.push("lower(m.from_addr) LIKE ?");
@@ -573,6 +719,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at,
+            m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m ${whereSql}
       ORDER BY m.date DESC, m.id DESC
@@ -626,6 +773,13 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const binds: unknown[] = [ftsExpr];
   const where: string[] = ["m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"];
 
+  // Optional direction restriction (#128). Bound after the FTS expr, before the
+  // cursor tuple, so the keyset order the fake interprets stays consistent.
+  if (q.direction === "inbound" || q.direction === "outbound") {
+    where.push("m.direction = ?");
+    binds.push(q.direction);
+  }
+
   const cur = decodeCursor(q.cursor);
   if (cur) {
     where.push("(m.date < ? OR (m.date = ? AND m.id < ?))");
@@ -635,6 +789,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at,
+            m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE ${where.join(" AND ")}
       ORDER BY m.date DESC, m.id DESC
@@ -703,6 +858,7 @@ async function summariesByIds(env: Env, ids: string[]): Promise<Map<string, Stor
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at,
+            m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE m.message_id IN (${placeholders})`;
   const res = await env.DB.prepare(sql).bind(...ids).all<SummaryRow>();
@@ -723,7 +879,11 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   const items: SearchHit[] = [];
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
-    if (message) items.push({ message, score: r.score });
+    if (!message) continue;
+    // Direction restriction (#128): the vector index is not direction-keyed, so
+    // filter the hydrated summaries (cheap: at most `limit` of them).
+    if (q.direction && message.direction !== q.direction) continue;
+    items.push({ message, score: r.score });
   }
   // Score-ranked: single page, no date cursor.
   return { items, cursor: null };
@@ -733,8 +893,8 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const limit = clampLimit(q.limit);
   // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
   const [ftsPage, semPage] = await Promise.all([
-    ftsSearch(env, { q: q.q, mode: "fts", limit }),
-    semanticSearch(env, { q: q.q, mode: "semantic", limit }),
+    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction }),
+    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();

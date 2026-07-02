@@ -28,11 +28,28 @@ export interface ParsedInbound {
   attachments?: { filename?: string; mimeType?: string; content: ArrayBuffer }[];
   /** SPF/DKIM/DMARC verdicts; an SMTP transport may omit them. */
   auth?: { spf?: string; dkim?: string; dmarc?: string };
+  // --- M8 envelope fidelity v2 (#189). All optional and wire-compatible: an older
+  //     transport omits them and the store falls back to `to` / NULLs. `to` KEEPS
+  //     its v1 meaning (THE delivered-to envelope recipient), so every existing
+  //     driver stays correct with no change. ---
+  /** Raw decoded To header; stored as to_addr when present (else falls back to `to`). */
+  toHeader?: string;
+  /** Raw decoded Cc header. */
+  cc?: string;
+  /** Raw decoded Sender header. */
+  sender?: string;
+  /** Raw decoded Reply-To header. */
+  replyTo?: string;
+  /** RFC822 wire byte size as received. */
+  rawSize?: number;
 }
 
 export interface IngestResult {
   messageId: string;
   stored: boolean;
+  /** A delivery of an already-stored Message-ID whose new envelope recipient was
+   *  merged into delivered_to (#178), rather than a new row. */
+  merged: boolean;
   threadId: string;
 }
 
@@ -81,13 +98,18 @@ export async function ingest(
   // backfilled coverage match.
   const vectorize = store.shouldVectorize(store.vectorizeAllowlist(env), "inbound", [toAddr]);
 
+  // Envelope fidelity v2 (#189): to_addr becomes the raw To HEADER (display names
+  // and all) when the transport provides it, falling back to the envelope
+  // recipient; delivered_to owns the envelope role via the bare recipient (toAddr).
+  const toHeader = parsed.toHeader && parsed.toHeader.trim() ? parsed.toHeader : parsed.to;
+
   const result = await store.put(
     env,
     {
       messageId,
       direction: "inbound",
       from: fromAddr,
-      to: parsed.to,
+      to: toHeader,
       subject: parsed.subject ?? "",
       date,
       inReplyTo: parsed.inReplyTo ?? null,
@@ -98,11 +120,20 @@ export async function ingest(
       trusted,
       attachments: parsed.attachments,
       vectorize,
+      // The one bare lower-cased envelope recipient this invocation delivered to;
+      // merged into an existing row's delivered_to on a same-Message-ID dedup (#178).
+      deliveredTo: [toAddr],
+      cc: parsed.cc ?? null,
+      sender: parsed.sender ?? null,
+      replyTo: parsed.replyTo ?? null,
+      // Inbound bcc_addr is structurally NULL (a Bcc that reached us was the
+      // sender's secret and is not in our headers) -- never populate it here.
+      wireSize: parsed.rawSize ?? null,
     },
     ctx,
   );
 
-  return { messageId: result.messageId, stored: result.stored, threadId: result.threadId };
+  return { messageId: result.messageId, stored: result.stored, merged: result.merged, threadId: result.threadId };
 }
 
 // --- Helpers ---

@@ -127,9 +127,19 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const q = (url.searchParams.get("q") ?? "").trim();
       if (!q) return json({ ok: false, error: "E_FIELD_MISSING", message: "q is required" }, 400);
       const modeParam = url.searchParams.get("mode") ?? undefined;
+      // Optional direction filter (#128): validate strictly (inbound|outbound), so
+      // a typo is a clean 400 rather than a silently-ignored filter.
+      const dirParam = url.searchParams.get("direction");
+      if (dirParam !== null && dirParam !== "inbound" && dirParam !== "outbound") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "direction must be inbound or outbound" },
+          400,
+        );
+      }
       const page = await store.search(env, {
         q,
         mode: modeParam as "fts" | "semantic" | "hybrid" | undefined,
+        direction: dirParam === null ? undefined : dirParam,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });

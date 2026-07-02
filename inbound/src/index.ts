@@ -59,7 +59,9 @@ export default {
       });
     }
 
-    // 3. Normalize to the transport contract and hand off to ingest().
+    // 3. Normalize to the transport contract and hand off to ingest(). `to` stays
+    //    the envelope recipient (message.to) that CF delivered this invocation to;
+    //    the M8 fidelity fields carry the raw decoded RFC 5322 headers (#189).
     const normalized: ParsedInbound = {
       messageId: parsed.messageId ?? undefined,
       from: message.from,
@@ -75,6 +77,13 @@ export default {
         dkim: extractDkimResult(authResults),
         dmarc: extractDmarcResult(authResults),
       },
+      // Envelope fidelity v2 (#189): raw decoded headers + the wire byte size CF
+      // reports. Absent headers stay undefined so the store keeps to_addr/NULLs.
+      toHeader: getHeader("to") || undefined,
+      cc: getHeader("cc") || undefined,
+      sender: getHeader("sender") || undefined,
+      replyTo: getHeader("reply-to") || undefined,
+      rawSize: message.rawSize,
     };
 
     await ingest(env, normalized, ctx);

@@ -27,7 +27,23 @@ CREATE TABLE IF NOT EXISTS messages (
   -- copies the mailbox stores back). thread_id groups a conversation, resolved on
   -- every store from in_reply_to / References (see store.ts), else this message_id.
   direction   TEXT NOT NULL DEFAULT 'inbound',
-  thread_id   TEXT
+  thread_id   TEXT,
+  -- M8 envelope fidelity v2 (#189, migration 0006). delivered_to = envelope
+  -- semantics: the normalized set of bare lower-cased recipients this message was
+  -- DELIVERED to, stored ",a@x,b@y," (leading + trailing commas) so membership is
+  -- one delimiter-safe LIKE and the #178 merge append needs no edge-casing; this
+  -- is what mailbox views filter on. cc_addr/bcc_addr/sender_addr/reply_to_addr =
+  -- header fidelity: the raw RFC 5322 headers as they arrived (display names and
+  -- all), so IMAP ENVELOPE and clients render the truth. bcc_addr is outbound-only
+  -- (an inbound Bcc is the sender secret, not on our wire). wire_size = raw RFC822
+  -- byte size at intake, so RFC822.SIZE is spec-true. All nullable: old rows keep
+  -- NULL and render as today (reads COALESCE delivered_to -> to_addr).
+  delivered_to  TEXT,
+  cc_addr       TEXT,
+  bcc_addr      TEXT,
+  sender_addr   TEXT,
+  reply_to_addr TEXT,
+  wire_size     INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_from ON messages(from_addr);

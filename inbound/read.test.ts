@@ -58,7 +58,9 @@ describe("store.list", () => {
     expect((await store.list(env, { direction: "outbound" })).items.map((m) => m.messageId)).toEqual(["out1@example.com"]);
     expect((await store.list(env, { direction: "inbound" })).items.map((m) => m.messageId)).toEqual(["in1@example.com"]);
     expect((await store.list(env, { from: "bob@example.com" })).items.map((m) => m.messageId)).toEqual(["in1@example.com"]);
-    expect((await store.list(env, { to: "bob" })).items.map((m) => m.messageId)).toEqual(["out1@example.com"]);
+    // to= is now envelope-MEMBERSHIP (#178/#189), so it binds a full bare address
+    // and matches the delivered set (out1's delivered_to = [bob@example.com]).
+    expect((await store.list(env, { to: "bob@example.com" })).items.map((m) => m.messageId)).toEqual(["out1@example.com"]);
   });
 
   it("filters by FTS q over subject + body", async () => {
