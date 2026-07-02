@@ -89,14 +89,23 @@ class TLSFloorTest(unittest.TestCase):
         self.assertIsNotNone(self._server_context())
 
     def test_modern_client_negotiates_tls12_or_higher(self):
+        # Build the client from the door's own factory (the TLSChainTest pattern)
+        # so this test constructs no bare, insecure-by-default SSL.Context; both
+        # ends carry the TLS 1.2 floor and the handshake must land on >= 1.2.
+        # The floor itself is proven by the negative test below.
         server = SSL.Connection(self._server_context(), None)
-        client_ctx = SSL.Context(SSL.TLS_METHOD)
-        client = SSL.Connection(client_ctx, None)
+        client = SSL.Connection(self._server_context(), None)
         _drive_handshake(client, server)
         self.assertIn(client.get_protocol_version_name(), ("TLSv1.2", "TLSv1.3"))
 
     def test_client_capped_below_tls12_is_rejected(self):
         server = SSL.Connection(self._server_context(), None)
+        # This client context DELIBERATELY allows pre-TLS-1.2 protocols: the test
+        # exists to prove the production floor (server.py set_min_proto_version
+        # TLS1_2) REJECTS such a client. CodeQL py/insecure-protocol flags this
+        # line (alert 20); the insecure offer IS the test fixture, it is never
+        # used as a server posture. Do not "fix" it to TLS 1.2+, that would
+        # reduce the test to a tautology.
         client_ctx = SSL.Context(SSL.TLS_METHOD)
         # Force the client to offer nothing newer than TLS 1.1; the TLS 1.2 floor
         # must refuse it (a downgraded MUA can never connect).
