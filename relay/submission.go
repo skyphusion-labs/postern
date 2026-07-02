@@ -262,24 +262,16 @@ func (s *submissionSession) buildSendPayload(env *enmime.Envelope) (SendPayload,
 }
 
 // collectAttachments maps the parsed MIME's non-body parts (#70) to the worker
-// SendRequest.attachments shape. Attachments, inline parts (e.g. an Apple Mail
-// inline image), AND other parts (multipart/related extras) are all carried -- the
-// same set the daemon used to reject loudly -- so a real MUA's message survives
-// intact with nothing silently dropped. The worker hands them to the send_email
-// binding, which builds the MIME. Content is base64 (the JSON wire form). Carrying
-// inline parts as attachments preserves their bytes; rendering them inline (cid)
-// rather than as attachments is a tracked follow-up, not a silent drop.
+// SendRequest.attachments shape. The part SELECTION (Attachments + Inlines +
+// OtherParts, empties skipped) lives in the shared collectMIMEParts so this
+// submission seam and the /ingest intake cannot drift; here we only map the
+// carried parts to the worker SendRequest.attachments shape. Content is base64
+// (the JSON wire form).
 func collectAttachments(env *enmime.Envelope) []SendAttachment {
-	parts := make([]*enmime.Part, 0, len(env.Attachments)+len(env.Inlines)+len(env.OtherParts))
-	parts = append(parts, env.Attachments...)
-	parts = append(parts, env.Inlines...)
-	parts = append(parts, env.OtherParts...)
+	parts := collectMIMEParts(env)
 
 	out := make([]SendAttachment, 0, len(parts))
 	for _, part := range parts {
-		if len(part.Content) == 0 {
-			continue // structural part with no bytes; nothing to carry
-		}
 		out = append(out, SendAttachment{
 			Filename: part.FileName,
 			MimeType: part.ContentType,
