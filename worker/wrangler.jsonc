@@ -6,6 +6,11 @@
   "compatibility_date": "2025-05-05",
   "observability": { "enabled": true },
 
+  // No workers.dev route: reached only as an RPC EmailService binding and via
+  // the token-gated route. Disabling workers.dev removes an unneeded second
+  // door (defense-in-depth; fleet-chezmoi#46).
+  "workers_dev": false,
+
   // Cloudflare Email Sending binding. The sending domain (ALLOWED_FROM_DOMAIN
   // below) must be onboarded to Email Sending: SPF/DKIM/bounce records in your
   // Cloudflare DNS, enabled in the sending list. Confirm with
