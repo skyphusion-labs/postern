@@ -2,7 +2,8 @@
 
 Status: authoritative for M1. Sourced from design issue #33; field names map 1:1 to the
 code in `inbound/src/index.ts`, `worker/src/email.ts`, and `inbound/schema.sql` so the
-refactor diff stays traceable.
+refactor diff stays traceable. Section 10 (M8, #189) extends the data model to envelope
+fidelity v2; where it and section 1 disagree, section 10 wins.
 
 Postern is **one mailbox** reachable two ways: by agents (structured API) and by humans
 (IMAP/webmail, which are *clients* of that same API). Underneath it is a **store** plus two
@@ -567,3 +568,174 @@ Both are documented follow-ups, not silent degrades.
 vars); system needs `AUTH_SYSTEM_DOMAIN` and a `-tags pam` build. Unlike the loopback-only intake
 listener, these listeners are AUTH-required, so binding them publicly is correct. See
 `relay/skyphusion-email-relay.env.example` for every variable.
+
+---
+
+## 10. Envelope fidelity v2 (M8, #189)
+
+The v1 model stores a single `to_addr` string, no Cc/Bcc/Sender/Reply-To, and dedups on
+Message-ID alone. That minimalism is the common root of a live symptom family: IMAP ENVELOPE
+returning NIL for Cc/Bcc/Sender/Reply-To, per-recipient copies of multi-recipient mail dropped
+by the dedup (#178), and RFC822.SIZE served as a projection instead of the wire size. v2 closes
+the class. Everything below is ADDITIVE: old rows keep NULL in every new column and render
+exactly as today; no data rewrite, no backfill.
+
+### 10.1 The fidelity / semantics split
+
+Two kinds of address data, kept deliberately separate:
+
+- **Header fidelity columns** carry the RFC 5322 headers as they appeared on the wire
+  (raw decoded header strings, display names and all; NEVER re-formatted, NEVER naively
+  split -- a display name may contain a comma). These exist so ENVELOPE and human clients
+  can render the truth.
+- **Envelope semantics** carry who this message was actually DELIVERED to, as a normalized
+  set of bare lower-cased addresses. This is what mailbox views filter on.
+
+```sql
+-- migration 0006 (additive ALTERs only; flows through the #112 gate, auto-applies)
+ALTER TABLE messages ADD COLUMN delivered_to  TEXT;  -- semantics: ",a@x,b@y," normalized set
+ALTER TABLE messages ADD COLUMN cc_addr       TEXT;  -- fidelity: raw Cc header
+ALTER TABLE messages ADD COLUMN bcc_addr      TEXT;  -- fidelity: outbound only (see 10.4)
+ALTER TABLE messages ADD COLUMN sender_addr   TEXT;  -- fidelity: raw Sender header
+ALTER TABLE messages ADD COLUMN reply_to_addr TEXT;  -- fidelity: raw Reply-To header
+ALTER TABLE messages ADD COLUMN wire_size     INTEGER; -- raw RFC822 byte size at intake
+```
+
+`to_addr` changes MEANING for new inbound rows: it becomes the raw decoded `To` HEADER
+(fidelity), because `delivered_to` now owns the envelope role `to_addr` played in v1.
+Outbound `to_addr` was already the header To list; unchanged. Old inbound rows keep the
+single envelope address they were written with, which every consumer treats as both (the
+`COALESCE` below).
+
+`delivered_to` stores the set with LEADING AND TRAILING commas (`",a@x,b@y,"`) so
+membership is one delimiter-safe predicate (`delivered_to LIKE '%,' || ? || ',%'`) with no
+string surgery, and so the atomic append in 10.2 needs no edge-casing. Addresses in it are
+bare and lower-cased; display names never enter this column.
+
+### 10.2 Dedup v2: merge, not duplicate rows (#178)
+
+CF Email Routing delivers a multi-recipient message once per envelope recipient, each
+invocation carrying the same Message-ID. v1's `message_id UNIQUE` + `INSERT OR IGNORE`
+stored the first and silently dropped the rest.
+
+**`message_id` stays the unique message identity.** Everything keys on it (R2 attachment
+keys, thread resolution, FTS rowids, Vectorize ids, the IMAP `uid`); one row per recipient
+would fork that identity and duplicate body storage, search hits, and embeddings. Instead,
+a dedup hit MERGES: the new envelope recipient is appended to the existing row's
+`delivered_to`. One message, one row, N mailbox views -- which is what the mail actually is.
+
+The merge is ONE atomic upsert, safe under CF's concurrent per-recipient invocations:
+
+```sql
+INSERT INTO messages (message_id, ..., delivered_to) VALUES (?, ..., ',' || ? || ',')
+ON CONFLICT(message_id) DO UPDATE SET
+  delivered_to = CASE
+    WHEN COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || excluded_recipient || ',%'
+      THEN delivered_to                                   -- retry/loop: true dedup, no-op
+    ELSE COALESCE(delivered_to, ',' || to_addr || ',') || excluded_recipient || ','
+  END;
+```
+
+(Illustrative; the real statement binds the bare recipient once. The `COALESCE(...,
+to_addr)` arm seeds `delivered_to` from a v1 row's envelope address on its first merge, so
+pre-0006 rows join the new world lazily and correctly.)
+
+- `store.put()` returns `{ stored: false, merged: true, threadId }` on a merge;
+  `{ stored: false, merged: false }` stays the true-dedup (retry/loop) result. Attachments,
+  FTS, and Vectorize run ONLY on first insert (`stored: true`) -- a merge touches one column.
+- The dedup KEY is effectively `(message_id, envelope recipient)`; the table constraint
+  stays `message_id UNIQUE`, so NO core-table rebuild and no supervised window.
+- Outbound is untouched: we generate our own Message-IDs; `mailbox` writes `delivered_to`
+  complete at insert (10.4).
+
+### 10.3 Read side: views filter on semantics, render fidelity
+
+Every place that answers "mail for X" (the `to=` filter in `ListQuery`, `/api/messages`,
+the IMAP account mapping) switches its predicate to:
+
+```sql
+COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'
+```
+
+Old rows (NULL `delivered_to`) match on their v1 envelope `to_addr` exactly as today; new
+rows match on the delivered set, so a message to `support@` AND `security@` appears in BOTH
+views (the #178 acceptance). The rendered `to` field stays the fidelity column.
+
+`StoredMessage` / `StoredMessageSummary` gain (all nullable; absent = old row = render as
+today):
+
+```ts
+cc: string | null;           // messages.cc_addr        raw header
+bcc: string | null;          // messages.bcc_addr       outbound only
+sender: string | null;       // messages.sender_addr    raw header
+replyTo: string | null;      // messages.reply_to_addr  raw header
+deliveredTo: string[];       // parsed from messages.delivered_to; v1 fallback [to_addr]
+wireSize: number | null;     // messages.wire_size
+```
+
+The IMAP proxy fills ENVELOPE Cc/Bcc/Sender/Reply-To from the fidelity fields (NIL when
+NULL -- today's render, honest for old rows) and serves RFC822.SIZE from `wireSize` when
+present, falling back to the projection only for pre-v2 rows. That makes SIZE spec-true for
+all new mail (the RFC-compliance doctrine: we serve the feature correctly, we do not fudge).
+
+### 10.4 Write side: who populates what
+
+| field | inbound (in-Worker driver) | inbound (relay `/ingest`) | outbound (`mailbox`) |
+|---|---|---|---|
+| `to_addr` | raw To header (postal-mime), fallback envelope rcpt | `toHeader`, fallback `to` | joined To list (as v1) |
+| `delivered_to` | envelope rcpt (`message.to`), merged per delivery | `to`, merged per delivery | full recipient set: to + cc + bcc, complete at insert |
+| `cc_addr` | raw Cc header | `cc` | joined cc |
+| `bcc_addr` | never (sender's secret, not on our wire) | never | joined bcc |
+| `sender_addr` | raw Sender header | `sender` | never (we are the author) |
+| `reply_to_addr` | raw Reply-To header | `replyTo` | replyTo when set |
+| `wire_size` | raw message byte size | `rawSize` | NULL (CF builds the MIME; no wire size to know) |
+
+Inbound `bcc_addr` is structurally NULL: a Bcc that reaches us was the sender's secret and
+is not in our headers. Outbound `bcc_addr` is our own sent copy in our own store, same
+privacy boundary as v1's stored body; the API exposes it only where the full message is
+already exposed. Outbound `delivered_to` includes bcc recipients so "mail involving X"
+views are complete for our own sent mail.
+
+`ParsedInbound` gains optional fields (wire-compatible: an old relay simply omits them):
+
+```ts
+toHeader?: string;   // raw decoded To header; core stores it as to_addr when present
+cc?: string;         // raw decoded Cc header
+sender?: string;     // raw decoded Sender header
+replyTo?: string;    // raw decoded Reply-To header
+rawSize?: number;    // RFC822 wire byte size as received
+```
+
+`to` keeps its v1 meaning (THE delivered-to envelope recipient) so every existing driver
+stays correct without changes.
+
+**Reply routing (RFC 5322 fidelity):** `mailbox.reply()` routes to the stored message's
+`reply_to_addr` when present, else `from` -- v1 always used `from`, which mis-routes replies
+to any list or role mail that sets Reply-To. Still resolved from STORED state, never caller
+input.
+
+### 10.5 Intake keeps every MIME part (#184)
+
+The relay's inbound intake (`buildParsedInbound`) carries only `env.Attachments`; the
+submission path deliberately carries Attachments + Inlines + OtherParts so nothing is
+silently dropped. The intake seam adopts the SAME mapping (one shared collector). An inline
+image or multipart/related part arrives as a stored attachment part -- fidelity of BYTES is
+the contract; inline (cid) RENDERING remains the tracked refinement it already is on the
+submission side. The in-Worker driver already stores postal-mime's full attachment set.
+
+### 10.6 Search direction (#128)
+
+`/api/search` reads the `direction` query param (`inbound` | `outbound`, else
+`E_VALIDATION_ERROR`), passing it into `store.search()` exactly as `/api/messages` already
+does. Additive; the param was previously ignored.
+
+### 10.7 What v2 deliberately does NOT do
+
+- No recipients TABLE. The delimiter-set column + `LIKE` predicate serves every current
+  view; a normalized table buys nothing until a per-recipient STATE (read/flagged per
+  mailbox) exists, and it would fork the message identity today. Revisit only with that
+  feature.
+- No backfill/rewrite of old rows (NULLs render as today; `COALESCE` carries them), no
+  destructive migration, no supervised window: 0006 is ALTER-ADD only.
+- No raw-wire (RFC822 blob) storage. `wire_size` fixes SIZE honestly; storing full raw
+  MIME is an R2-cost decision for a future milestone if byte-exact FETCH ever matters.
