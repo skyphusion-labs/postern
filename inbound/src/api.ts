@@ -105,6 +105,15 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return await handleReindex(request, env);
     }
 
+    // --- admin: reconcile / orphan-vector audit (#134, READ-ONLY) ---
+    // Operator action (both-scoped). Enumerates the EXPECTED vector id set from D1
+    // and diffs it against the live index to report the orphan count + a sampled
+    // cause (a vs b). Vectorize has no list API, so the orphan SET is sampled, not
+    // fully enumerable. NEVER deletes: the prune is a separate, Conrad-supervised step.
+    if (request.method === "POST" && path === "/api/admin/reconcile") {
+      return await handleReconcile(request, env);
+    }
+
     // --- admin: revoke an SMTP submission credential ---
     const credMatch =
       request.method === "DELETE" ? /^\/api\/admin\/smtp-credentials\/(.+)$/.exec(path) : null;
@@ -291,6 +300,27 @@ async function handleReindex(request: Request, env: Env): Promise<Response> {
   return json({ ok: true, ...result });
 }
 
+// POST /api/admin/reconcile: orphan-vector audit (#134). READ-ONLY -- enumerates the
+// EXPECTED vector id set from D1, diffs it against the live Vectorize index, and
+// reports the orphan count + a SAMPLED cause (a deleted-message vs b pre-#116 id
+// scheme). Vectorize has no list API, so the orphan SET is sampled (enumerable:false),
+// not fully listed. Body: { verify?, sampleSize?, includeOrphanIds? }. NEVER deletes.
+async function handleReconcile(request: Request, env: Env): Promise<Response> {
+  let body: { verify?: unknown; sampleSize?: unknown; includeOrphanIds?: unknown } = {};
+  if (request.headers.get("content-length") && request.headers.get("content-length") !== "0") {
+    try {
+      body = (await request.json()) as typeof body;
+    } catch {
+      return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
+    }
+  }
+  const verify = body.verify === false ? false : true;
+  const sampleSize = typeof body.sampleSize === "number" ? body.sampleSize : undefined;
+  const includeOrphanIds = body.includeOrphanIds === true;
+  const result = await store.reconcile(env, { verify, sampleSize, includeOrphanIds });
+  return json({ ok: true, ...result });
+}
+
 // Constant-time Bearer compare against the TRANSPORT token (POSTERN_TRANSPORT_TOKEN),
 // the infra-seam credential, distinct from the mailbox API token.
 function transportAuthorized(request: Request, env: Env): boolean {
@@ -323,6 +353,9 @@ function requiredScope(method: string, path: string): RouteScope | null {
   // covered automatically (unknown paths fall through to null), so it is mapped
   // here explicitly as `admin` -- a read or send token must never reach it (#85).
   if (method === "POST" && path === "/api/admin/reindex") return "admin";
+  // Reconcile is read-only but reports over the whole estate; gate it `admin` like
+  // reindex so only a both-scoped token can run the audit (#134).
+  if (method === "POST" && path === "/api/admin/reconcile") return "admin";
   if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
   if (method === "GET" && path === "/api/search") return "read";
   // Single message and the /attachments/{i} sub-route both live under here.
