@@ -165,6 +165,12 @@ class Config:
     # sizes, and timings. See measure.py + imap/MEASUREMENT.md for the event catalogue.
     measure: bool = False
 
+    # POSTERN_IMAP_WIRE_TRACE: diagnostic lever (#218), default OFF. When true the
+    # server logs each received command line and sent response line (LOGIN/AUTH args
+    # redacted at capture). OFF => zero behavior change. Operator-run in a window to
+    # capture a client's exact protocol sequence; not a steady-state setting.
+    imap_wire_trace: bool = False
+
     # --- auth brute-force throttle (#105) ---
     # RATIFIED cross-door contract: identical AUTH_THROTTLE_* knobs on the SMTP
     # relay (587) and this IMAP door (993), integer seconds. Account-keyed +
@@ -313,6 +319,7 @@ class Config:
                 "POSTERN_IMAP_UIDVALIDITY must be a positive 32-bit integer (1..4294967295)"
             )
         measure = _bool(e, "POSTERN_IMAP_MEASURE", False)
+        imap_wire_trace = _bool(e, "POSTERN_IMAP_WIRE_TRACE", False)
 
         # Auth throttle (#105). Door-agnostic AUTH_THROTTLE_* names, integer seconds,
         # shared verbatim with the relay so one vocabulary configures both doors.
@@ -386,6 +393,7 @@ class Config:
             imap_poll_seconds=imap_poll_seconds,
             imap_uidvalidity=imap_uidvalidity,
             measure=measure,
+            imap_wire_trace=imap_wire_trace,
             throttle_enabled=throttle_enabled,
             throttle_max_failures=throttle_max_failures,
             throttle_lockout_seconds=throttle_lockout_seconds,

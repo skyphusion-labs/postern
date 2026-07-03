@@ -118,6 +118,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_WINDOW` | no | `500` | cap INBOX/Sent to the most-recent N at SELECT (0 = unlimited; All is always unbounded) |
 | `POSTERN_IMAP_POLL_SECONDS` | no | `30` | live-refresh interval while selected: re-poll the store and push EXISTS for new mail (0 = disable) |
 | `POSTERN_IMAP_MEASURE` | no | `false` | emit additive, structured `@measure` read-path diagnostics to the log (journald); behaviour-neutral, off by default (see `MEASUREMENT.md`) |
+| `POSTERN_IMAP_WIRE_TRACE` | no | `false` | log each received command line + sent response line for protocol diagnosis; LOGIN/AUTHENTICATE args redacted at capture; off by default (zero behaviour change) -- diagnostic-window use only, not a steady-state setting |
 
 ## Run it
 

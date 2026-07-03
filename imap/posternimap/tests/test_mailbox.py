@@ -646,11 +646,20 @@ class AccountTest(unittest.TestCase):
 
     def test_selected_mailbox_reports_message_flags_not_special_use(self):
         # The SELECT instance must report message flags, NOT the LIST attributes.
+        # #218: the SELECT FLAGS set is the honest union of every keyword a FETCH can
+        # return -- \\Seen plus the trust + direction keywords -- so a client is never
+        # handed an unannounced keyword. It must NOT contain the RFC 6154 special-use
+        # LIST attributes (e.g. \\Sent), which belong to the list-view instance.
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
         sent = acct.select("Sent")
-        self.assertEqual(set(sent.getFlags()), {"\\Seen"})
+        self.assertEqual(
+            set(sent.getFlags()),
+            {"\\Seen", "Trusted", "Untrusted", "Inbound", "Outbound"},
+        )
+        # regression guard: the special-use LIST attribute must not leak into SELECT.
+        self.assertNotIn("\\Sent", set(sent.getFlags()))
 
     def test_placeholder_folders_are_empty_without_api_calls(self):
         from posternimap.account import PosternAccount
