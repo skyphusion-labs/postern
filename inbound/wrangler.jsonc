@@ -83,6 +83,15 @@
     "OUTBOUND_TRANSPORT": "cf"
   }
 
+  // OPTIONAL (#187): the per-user .mobileconfig generator (GET /api/mobileconfig)
+  // advertises these to iOS Mail. All optional; defaults derive from
+  // ALLOWED_FROM_DOMAIN (imap.<domain> / smtp.<domain>), so most operators set
+  // nothing. Add to "vars" above to override:
+  //   "MOBILECONFIG_IMAP_HOST": "imap.example.com",
+  //   "MOBILECONFIG_SMTP_HOST": "smtp.example.com",
+  //   "MOBILECONFIG_ORG": "Postern",
+  //   "MOBILECONFIG_IDENTIFIER": "com.example.postern"
+
   // To send via bring-your-own SMTP instead of Cloudflare Email Sending, set
   //   "OUTBOUND_TRANSPORT": "relay" and "RELAY_DISPATCH_URL": "https://<relay>/dispatch"
   // above, then put the transport token (NOT the API token):

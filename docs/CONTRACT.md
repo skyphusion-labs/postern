@@ -276,6 +276,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
 | GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=` | search (fts + substr + semantic + hybrid) | M1 / M4 / M9 (#212) |
+| GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
@@ -297,6 +298,19 @@ backfilled vectors are byte-identical to live ones, and the vector id is determi
 to resume or repeat. `dryRun: true` does everything except the embed/upsert, summing the chunk count
 so the exact vector total (and cost) is known before the real run. A thin runner (`inbound/reindex.mjs`)
 loops it until `done`.
+
+`GET /api/mobileconfig` (#187) returns a per-user Apple configuration profile
+(`application/x-apple-aspen-config`) that sets up iOS Mail in one tap: IMAP
+`imap.<domain>:993` (implicit TLS) plus submission `smtp.<domain>:587` (STARTTLS,
+expressed as `OutgoingMailServerUseSSL=true` on port 587, per Apple's schema, which
+has no separate STARTTLS key). It is `read`-scoped: it bakes in NO password (iOS
+prompts on install), so it emits no secret. Params: `user` (required, an address on
+`ALLOWED_FROM_DOMAIN`), optional `username` (login, defaults to the address local part -- the mail doors bind by bare directory username) and
+`name` (display name); all user-supplied fields are XML-escaped. The two
+`PayloadUUID`s are minted per generation while the `PayloadIdentifier`s are stable
+per user, so a reinstall REPLACES the profile instead of duplicating the account on
+the device. Hostnames/labels come from the `MOBILECONFIG_*` env (domain-derived
+defaults).
 
 `POST /send` (today's bare endpoint) stays as a back-compat alias of `/api/send`. All responses
 keep the current `{ ok, ... }` + `E_*` code shape from `INTEGRATION.md`, so existing callers

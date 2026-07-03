@@ -26,6 +26,7 @@ import {
 } from "./smtpcreds";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 import { readBodyCapped, PayloadTooLargeError } from "./body";
+import { handleMobileconfig } from "./mobileconfig";
 
 // Failure codes that represent a transient upstream condition (the transport /
 // provider) rather than a bad request; mapped to 502 so callers can retry.
@@ -129,6 +130,17 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const deleted = await removeCredential(env, username);
       if (!deleted) return json({ ok: false, error: "E_NOT_FOUND", message: "no such credential" }, 404);
       return json({ ok: true, deleted: normalizeUsername(username) });
+    }
+
+    // --- read: per-user Apple .mobileconfig profile (#187, iOS Mail one-tap setup) ---
+    // Read-scoped: the profile bakes in NO password (iOS prompts on install), so it
+    // emits no secret. Non-GET is a clean 405 (a valid token reaches here; an
+    // unauthenticated request is 401 at the token gate above, auth before method).
+    if (path === "/api/mobileconfig") {
+      if (request.method !== "GET") {
+        return json({ ok: false, error: "method_not_allowed", message: "GET only" }, 405);
+      }
+      return handleMobileconfig(request, env);
     }
 
     // --- read: list / filter ---
@@ -461,6 +473,7 @@ function requiredScope(method: string, path: string): RouteScope | null {
   if (method === "POST" && path === "/api/admin/reindex") return "admin";
   if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
   if (method === "GET" && path === "/api/search") return "read";
+  if (method === "GET" && path === "/api/mobileconfig") return "read";
   // Single message and the /attachments/{i} sub-route both live under here.
   if (method === "GET" && path.startsWith("/api/messages/")) return "read";
   if (method === "GET" && path.startsWith("/api/threads/")) return "read";
