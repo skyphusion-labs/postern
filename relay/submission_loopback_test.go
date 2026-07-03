@@ -144,11 +144,20 @@ func writeSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string) {
 	return certPath, keyPath
 }
 
-// bootLoopbackSubmission stands up the real submission daemon (native backend)
+// bootLoopbackSubmission stands up the real submission daemon (native backend) in
+// STARTTLS mode. Thin wrapper over bootLoopbackSubmissionMode.
+func bootLoopbackSubmission(t *testing.T, ws *httptest.Server) string {
+	t.Helper()
+	return bootLoopbackSubmissionMode(t, ws, false)
+}
+
+// bootLoopbackSubmissionMode stands up the real submission daemon (native backend)
 // against the worker stub and returns the listen address. Mirrors startSubmission
 // (cert reloader + TLS config + newSubmissionServer + NewSubmitClient) but on an
-// ephemeral loopback port so the test owns the lifecycle.
-func bootLoopbackSubmission(t *testing.T, ws *httptest.Server) string {
+// ephemeral loopback port so the test owns the lifecycle. When implicit is true it
+// wraps the raw listener in tls.NewListener exactly as startSubmission does for a
+// 465-style door, so the implicit-TLS path is exercised as production runs it.
+func bootLoopbackSubmissionMode(t *testing.T, ws *httptest.Server, implicit bool) string {
 	t.Helper()
 	dir := t.TempDir()
 	certPath, keyPath := writeSelfSignedCert(t, dir)
@@ -186,9 +195,15 @@ func bootLoopbackSubmission(t *testing.T, ws *httptest.Server) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	addr := ln.Addr().String()
+	// Implicit-TLS (465) door: TLS from byte zero, mirroring startSubmission's
+	// tls.NewListener wrap. STARTTLS (587) door: plain TCP, go-smtp upgrades in-band.
+	if implicit {
+		ln = tls.NewListener(ln, tlsCfg)
+	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return ln.Addr().String()
+	return addr
 }
 
 // loginAuth implements AUTH LOGIN for the stdlib net/smtp client (which ships
@@ -237,6 +252,25 @@ func dialSTARTTLS(t *testing.T, addr string) *smtp.Client {
 	}
 	if err := c.StartTLS(&tls.Config{ServerName: "localhost", InsecureSkipVerify: true}); err != nil {
 		t.Fatalf("STARTTLS: %v", err)
+	}
+	return c
+}
+
+// dialImplicitTLS dials the 465-style implicit door: the TLS handshake happens
+// first (byte zero), then the SMTP conversation runs inside it. There is no
+// STARTTLS on this door because the whole connection is already encrypted.
+func dialImplicitTLS(t *testing.T, addr string) *smtp.Client {
+	t.Helper()
+	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: "localhost", InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("implicit-TLS dial: %v", err)
+	}
+	c, err := smtp.NewClient(conn, "localhost")
+	if err != nil {
+		t.Fatalf("smtp client over implicit TLS: %v", err)
+	}
+	if err := c.Hello("localhost"); err != nil {
+		t.Fatalf("EHLO: %v", err)
 	}
 	return c
 }
@@ -372,5 +406,94 @@ func TestSubmissionLoopback_OffDomainFromRejected(t *testing.T) {
 	}
 	if _, hits := stub.lastPayload(); hits != 0 {
 		t.Errorf("/api/send hit %d times for a spoofed From, want 0", hits)
+	}
+}
+
+// TestSubmissionLoopback_ImplicitTLS_AuthThenSend is the aviation-grade e2e proof
+// for the 465 door (#197): TLS is negotiated from byte zero (dialImplicitTLS),
+// AUTH is offered on the already-encrypted connection with no STARTTLS step, and a
+// LOGIN + send bridges to /api/send. Same real go-smtp server, cert reloader, and
+// native AuthProvider as production; only the listener wrap differs from the 587
+// path, which is exactly the property this asserts.
+func TestSubmissionLoopback_ImplicitTLS_AuthThenSend(t *testing.T) {
+	stub := &workerStub{}
+	ws := httptest.NewServer(stub.handler())
+	defer ws.Close()
+	addr := bootLoopbackSubmissionMode(t, ws, true)
+
+	c := dialImplicitTLS(t, addr)
+	defer c.Close()
+
+	// AUTH must be available WITHOUT a STARTTLS upgrade: the connection is already
+	// TLS, so go-smtp (AllowInsecureAuth=false + TLSConfig) advertises it at once.
+	if ok, _ := c.Extension("AUTH"); !ok {
+		t.Fatal("implicit-TLS door did not advertise AUTH on the already-encrypted connection")
+	}
+	if err := c.Auth(loginAuth{loopbackUser, loopbackPass}); err != nil {
+		t.Fatalf("AUTH LOGIN over implicit TLS: %v", err)
+	}
+	if err := c.Mail(loopbackBoundFrom); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	if err := c.Rcpt("bob@example.com"); err != nil {
+		t.Fatalf("RCPT TO: %v", err)
+	}
+	wc, err := c.Data()
+	if err != nil {
+		t.Fatalf("DATA: %v", err)
+	}
+	msg := "From: " + loopbackBoundFrom + "\r\n" +
+		"To: bob@example.com\r\n" +
+		"Subject: implicit hello\r\n" +
+		"\r\n" +
+		"sent through the real 465 door\r\n"
+	if _, err := wc.Write([]byte(msg)); err != nil {
+		t.Fatalf("write DATA: %v", err)
+	}
+	if err := wc.Close(); err != nil {
+		t.Fatalf("close DATA (server rejected the send): %v", err)
+	}
+	_ = c.Quit()
+
+	payload, hits := stub.lastPayload()
+	if hits != 1 {
+		t.Fatalf("/api/send hit %d times, want 1", hits)
+	}
+	if payload.From != loopbackBoundFrom {
+		t.Errorf("bridged From = %q, want %q", payload.From, loopbackBoundFrom)
+	}
+	if len(payload.To) != 1 || payload.To[0] != "bob@example.com" {
+		t.Errorf("bridged To = %v, want [bob@example.com]", payload.To)
+	}
+	if payload.Subject != "implicit hello" {
+		t.Errorf("bridged Subject = %q, want implicit hello", payload.Subject)
+	}
+}
+
+// TestSubmissionLoopback_ImplicitTLS_RejectsCleartext proves the 465 door requires
+// TLS from byte zero: a cleartext SMTP client (one that would send EHLO in the
+// clear) never receives a plaintext SMTP greeting/reply, because its bytes are
+// read as a bogus TLS record and the handshake aborts. We write first (so the test
+// cannot deadlock waiting on a greeting), then assert we do NOT read a 2xx line.
+func TestSubmissionLoopback_ImplicitTLS_RejectsCleartext(t *testing.T) {
+	stub := &workerStub{}
+	ws := httptest.NewServer(stub.handler())
+	defer ws.Close()
+	addr := bootLoopbackSubmissionMode(t, ws, true)
+
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	if _, err := conn.Write([]byte("EHLO localhost\r\n")); err != nil {
+		t.Fatalf("write cleartext EHLO: %v", err)
+	}
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err == nil && n > 0 && strings.HasPrefix(string(buf[:n]), "2") {
+		t.Fatalf("implicit-TLS door returned a plaintext SMTP reply %q; TLS was not required from byte zero", string(buf[:n]))
 	}
 }
