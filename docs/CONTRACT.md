@@ -764,8 +764,15 @@ Semantics (`field` selects the column, default `text`):
 
 - `field=subject` -> `lower(subject) LIKE '%' || q || '%'`
 - `field=body` -> `lower(body_text) LIKE '%' || q || '%'`
-- `field=text` (default) -> subject OR body substring (the RFC `TEXT` intent; Twisted's
-  `search_TEXT` is body-only today, we align on the RFC and document the difference)
+- `field=text` (default) -> the RFC 3501 `TEXT` key (header OR body). We implement the
+  RFC semantics, NOT Twisted's body-only `search_TEXT` stub: declaring
+  `ISearchableMailbox` means the door owns `search()` end to end, so it serves the spec,
+  not the library bug. "Header" here = the header columns the store SERVES in the
+  rendered projection (subject plus the envelope-fidelity address headers: from, to, cc,
+  bcc, sender, reply-to), unioned with `body_text`. Same honesty frame as RFC822.SIZE
+  (#207): `TEXT` searches exactly what `BODY[]` would return, never raw wire bytes we do
+  not store -- a substring the projection does not carry (e.g. a display name we did not
+  persist) is not matched, because it is not served either.
 
 The `direction` filter (`inbound` | `outbound`) applies exactly as for `fts` (10.6).
 
