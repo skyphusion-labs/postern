@@ -47,6 +47,7 @@ When a change touches one of these areas, update the matching doc.
 - `docs/AUTH-CONTRACT.md` -- the auth model across the seams.
 - `docs/SEND-IDENTITIES.md` -- per-identity send (every caller sends as itself).
 - `docs/INTEGRATION.md` -- caller setup (service-binding RPC + REST).
+- `docs/MTA-STS.md` -- inbound TLS policy (MTA-STS + TLSRPT); staged, Conrad-supervised deploy.
 - Production cutover runbook: maintained out-of-tree in the operator private infrastructure repository (not in this product tree).
 - `DEPLOY.md` -- clean-install quickstart from a fresh clone.
 

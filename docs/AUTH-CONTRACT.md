@@ -13,8 +13,10 @@ An external mail client (Thunderbird, Apple Mail, mutt, mobile) configures **one
 username and one password**, and it authenticates **both** doors:
 
 - **Read** door: IMAP, served by the `imap/` proxy (`posternimap`).
-- **Send** door: SMTP submission on 587, served by the Go `relay/` binary in its
-  submission role.
+- **Send** door: SMTP submission on 587 (STARTTLS) and optionally 465 (implicit
+  TLS), served by the Go `relay/` binary in its submission role. The port set is
+  the operator's `SUBMISSION_LISTENERS` choice; edge exposure of any port is an
+  operator decision (hosting-provider port policy varies), not a daemon constraint.
 
 Both doors verify the **same** end-user credential against the **same** directory,
 so a credential can never drift between protocols. The directory is the same
@@ -324,10 +326,10 @@ Presence-check with `${VAR:+SET}` only.
 | Secret (env var) | Function | Held by | Stored | Gate |
 |---|---|---|---|---|
 | `POSTERN_TRANSPORT_TOKEN` | transport seam (`/ingest`, `/dispatch`, native `/api/smtp-auth`) | relay (inbound + native submission) | crew-secrets -> `/etc/...env` 0600 | exists |
-| `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | 587 submission server | crew-secrets -> `/etc/postern-submission.env` 0600 | exists; holds a `send`-scoped value once provisioned (worker `POSTERN_API_TOKEN_SEND`, #85) |
+| `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | submission door (587/465) | crew-secrets -> `/etc/postern-submission.env` 0600 | exists; holds a `send`-scoped value once provisioned (worker `POSTERN_API_TOKEN_SEND`, #85) |
 | `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store (`/api/messages`, `/search`) in `ldap`/`pam` mode | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | exists; holds a `read`-scoped value once provisioned (worker `POSTERN_API_TOKEN_READ`, #85) |
 | ~~`POSTERN_LDAP_BIND_PASSWORD`~~ | **RETIRED** -- direct-bind (Option A, section 5b) uses no service account, so there is no search-bind password to hold. | -- | -- | -- |
-| `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname | 587 submission server | crew-secrets / cert store (staged) | **gated** (exposure) |
+| `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname (587 STARTTLS + 465 implicit share it) | submission door (587/465) | crew-secrets / cert store (staged) | **gated** (exposure) |
 
 **Worker-side scope secrets (#85).** The two consumer env vars above present a
 token VALUE; the inbound worker classifies that value by which of ITS secrets it
@@ -399,7 +401,8 @@ human-vs-agent two-tier default.
 
 ## 8. What is staged / gated for Conrad (do NOT do unattended)
 
-- Provision public **TLS certs** for the mail hostname(s); **open 587/993 in ufw**;
+- Provision public **TLS certs** for the mail hostname(s); **open the submission
+  port(s) (587 and/or 465) + 993 in ufw**;
   add **public DNS A records** for the mail host. (Exposure flip, #75/#76/#77 HARD
   GATE.)
 - ~~Create the scoped `cn=postern-mail-ro` LDAP bind account~~ -- **NOT NEEDED**
