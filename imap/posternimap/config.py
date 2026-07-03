@@ -146,6 +146,15 @@ class Config:
     # reactor stalls under concurrent SELECTs.
     imap_poll_seconds: int = 30
 
+    # POSTERN_IMAP_UIDVALIDITY: the mailbox UIDVALIDITY (RFC 3501), a positive 32-bit
+    # value. Constant across reconnects so a client's cached UID->message map stays
+    # valid; the OPERATOR bumps it when the server-side PROJECTION of existing messages
+    # changes (their BODY[]/RFC822.SIZE flips under the same UID), which invalidates
+    # client body caches per the RFC's message-immutability rule. Defaults to 1 (the
+    # historical constant), so nothing changes until an operator raises it. (#210: the
+    # HTML/8bit projection change is the first event that requires a bump on deploy.)
+    imap_uidvalidity: int = 1
+
     # --- Stage-1 read-path measurement (#102 / GO-LIVE 0.6) ---
     # POSTERN_IMAP_MEASURE: when true, the proxy emits additive, structured
     # `@measure <event> {json}` lines (Twisted log -> journald) for cold-sync cost +
@@ -298,6 +307,11 @@ class Config:
         imap_poll_seconds = _int(e, "POSTERN_IMAP_POLL_SECONDS", 30)
         if imap_poll_seconds < 0:
             raise ConfigError("POSTERN_IMAP_POLL_SECONDS must be >= 0 (0 disables the poll)")
+        imap_uidvalidity = _int(e, "POSTERN_IMAP_UIDVALIDITY", 1)
+        if imap_uidvalidity < 1 or imap_uidvalidity > 0xFFFFFFFF:
+            raise ConfigError(
+                "POSTERN_IMAP_UIDVALIDITY must be a positive 32-bit integer (1..4294967295)"
+            )
         measure = _bool(e, "POSTERN_IMAP_MEASURE", False)
 
         # Auth throttle (#105). Door-agnostic AUTH_THROTTLE_* names, integer seconds,
@@ -370,6 +384,7 @@ class Config:
             api_timeout=_float(e, "POSTERN_API_TIMEOUT", 15.0),
             imap_window=imap_window,
             imap_poll_seconds=imap_poll_seconds,
+            imap_uidvalidity=imap_uidvalidity,
             measure=measure,
             throttle_enabled=throttle_enabled,
             throttle_max_failures=throttle_max_failures,

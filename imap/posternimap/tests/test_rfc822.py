@@ -211,5 +211,117 @@ class EnvelopeV2Test(unittest.TestCase):
         self.assertEqual(rendered, scanned)
 
 
+class BodyEncodingTest(unittest.TestCase):
+    """#210: the IMAP door serves the DECODED body (message.getBodyFile) but under the
+    Content-Transfer-Encoding the render declared. If the render used quoted-printable
+    or base64, the client honours that header and decodes the raw bytes a SECOND time,
+    corrupting them. Every body is therefore rendered with cte=8bit (identity), so the
+    served bytes equal what the header declares and the client decodes exactly once."""
+
+    # The exact failure shape: a tracking URL whose "=abc" / "=def" runs are valid
+    # quoted-printable escapes, plus non-ASCII, plus a long line -- all triggers that
+    # would push EmailMessage to quoted-printable under the old render.
+    NASTY = "Don\u2019t worry \u2014 verify https://x.example/v?token=abc=def&u=1 " + ("word " * 20)
+
+    def _part_cte(self, parsed):
+        return (parsed.get("content-transfer-encoding") or "").lower()
+
+    def test_plain_body_is_8bit_not_quoted_printable(self):
+        parsed = email.message_from_bytes(render_rfc822(_msg(body_text=self.NASTY)))
+        self.assertFalse(parsed.is_multipart())
+        self.assertEqual(self._part_cte(parsed), "8bit")
+
+    def test_render_8bit_is_identity_on_long_lines(self):
+        # #210 rider: 8bit carries the RFC 5322 <=998-octet line expectation and HTML
+        # mail routinely exceeds it. The renderer must NOT let EmailMessage re-pick
+        # quoted-printable/base64 for a very long line -- that would make the served
+        # bytes differ from the declared CTE and re-introduce the double-decode. Hard
+        # invariant: declared CTE == served bytes (identity), whatever the line length.
+        long_line = "x" * 1500 + " token=abc=def"  # a single >998-octet line
+        for field in ("body_text", "body_html"):
+            parsed = email.message_from_bytes(render_rfc822(_msg(**{field: long_line})))
+            cte = (parsed.get("content-transfer-encoding") or "").lower()
+            self.assertEqual(cte, "8bit", "%s re-encoded to %r" % (field, cte))
+            served = parsed.get_payload(decode=True).decode("utf-8")
+            # Identity under 8bit: the served bytes ARE the declared bytes.
+            self.assertIn("token=abc=def", served)
+            self.assertIn("x" * 1500, served)
+
+    def test_served_body_survives_a_client_decode(self):
+        # Simulate the client: read the declared CTE, decode the served (decoded) body.
+        # With 8bit (identity) the second decode is a no-op and the bytes are intact;
+        # under the old quoted-printable header "token=abc=def" corrupted to "token?c?f".
+        import quopri
+        import base64
+
+        parsed = email.message_from_bytes(render_rfc822(_msg(body_text=self.NASTY)))
+        served = parsed.get_payload(decode=True)  # what getBodyFile returns
+        cte = self._part_cte(parsed)
+        if cte == "quoted-printable":
+            client = quopri.decodestring(served)
+        elif cte == "base64":
+            client = base64.b64decode(served)
+        else:
+            client = served
+        self.assertEqual(client.decode("utf-8").rstrip("\n"), self.NASTY.rstrip("\n"))
+        self.assertIn("token=abc=def", client.decode("utf-8"))
+
+
+class HtmlProjectionTest(unittest.TestCase):
+    """#210: a message that carried an HTML part is projected as a single text/html
+    part (8bit) so an HTML client renders the real HTML instead of the lossy
+    stripped-text derivation that landed in body_text. Single-part on purpose: a
+    multipart/alternative would need a body-free Content-Type for the #102 ENVELOPE
+    scan, which the summary cannot supply."""
+
+    HTML = "<html><body><h1>H\u00e9llo</h1><p>token=abc=def " + ("x" * 90) + "</p></body></html>"
+
+    def _cte(self, parsed):
+        return (parsed.get("content-transfer-encoding") or "").lower()
+
+    def test_html_message_is_single_text_html_8bit(self):
+        parsed = email.message_from_bytes(render_rfc822(_msg(body_html=self.HTML)))
+        self.assertFalse(parsed.is_multipart())
+        self.assertEqual(parsed.get_content_type(), "text/html")
+        self.assertEqual(self._cte(parsed), "8bit")
+
+    def test_html_body_is_intact_after_a_client_decode(self):
+        # The served (decoded) body under an 8bit header decodes to the stored HTML
+        # exactly once; "token=abc=def" and the non-ASCII survive (pre-fix the QP
+        # header made the client decode twice and corrupt them).
+        parsed = email.message_from_bytes(render_rfc822(_msg(body_html=self.HTML)))
+        body = parsed.get_payload(decode=True).decode("utf-8")
+        self.assertEqual(body.rstrip("\n"), self.HTML)
+        self.assertIn("token=abc=def", body)
+
+    def test_html_preferred_over_derived_text(self):
+        # body_text is the lossy strip; when HTML exists we must serve the HTML, not it.
+        m = _msg(body_text="stripped soup fallback", body_html=self.HTML)
+        body = email.message_from_bytes(render_rfc822(m)).get_payload(decode=True).decode("utf-8")
+        self.assertIn("<h1>", body)
+        self.assertNotIn("stripped soup fallback", body)
+
+    def test_no_html_stays_text_plain(self):
+        parsed = email.message_from_bytes(render_rfc822(_msg(body_html=None)))
+        self.assertFalse(parsed.is_multipart())
+        self.assertEqual(parsed.get_content_type(), "text/plain")
+        self.assertEqual(self._cte(parsed), "8bit")
+
+    def test_empty_html_stays_text_plain(self):
+        # A whitespace-only HTML body is treated as absent (no empty text/html part).
+        parsed = email.message_from_bytes(render_rfc822(_msg(body_html="   \n  ")))
+        self.assertFalse(parsed.is_multipart())
+        self.assertEqual(parsed.get_content_type(), "text/plain")
+
+    def test_attachment_note_appears_in_html_body(self):
+        m = _msg(
+            body_html=self.HTML,
+            attachments=[Attachment(filename="report.pdf", mime="application/pdf", size=10)],
+        )
+        body = email.message_from_bytes(render_rfc822(m)).get_payload(decode=True).decode("utf-8")
+        self.assertIn("report.pdf", body)
+        self.assertIn("1 attachment(s)", body)
+
+
 if __name__ == "__main__":
     unittest.main()

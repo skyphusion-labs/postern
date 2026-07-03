@@ -141,6 +141,7 @@ class PosternMailbox:
         page_size: int = 200,
         window: int = 0,
         poll_seconds: int = 0,
+        uidvalidity: int = _UID_VALIDITY,
         clock=None,
         meter: Optional[Meter] = None,
     ) -> None:
@@ -155,6 +156,7 @@ class PosternMailbox:
         self._page_size = page_size
         self._window = window
         self._poll_seconds = poll_seconds
+        self._uidvalidity = uidvalidity
         self._summaries: List[MessageSummary] = []
         self._loaded = False
         # Highest UID (== store rowid) currently in the snapshot. UIDNEXT is this
@@ -287,7 +289,7 @@ class PosternMailbox:
     # --- IMailbox: metadata ---
 
     def getUIDValidity(self) -> int:
-        return _UID_VALIDITY
+        return self._uidvalidity
 
     def getUIDNext(self) -> int:
         self._ensure_loaded()
@@ -334,7 +336,7 @@ class PosternMailbox:
             "MESSAGES": len(self._summaries),
             "RECENT": 0,
             "UIDNEXT": self._newest_uid + 1,
-            "UIDVALIDITY": _UID_VALIDITY,
+            "UIDVALIDITY": self._uidvalidity,
             "UNSEEN": 0,
         }
         return {name: data[name] for name in names if name in data}

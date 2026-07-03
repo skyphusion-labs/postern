@@ -89,6 +89,10 @@ interface StoredMessage {
   date: string;                       // messages.date (ISO)
   inReplyTo: string | null;           // messages.in_reply_to
   bodyText: string;                   // messages.body_text
+  bodyHtml: string | null;            // messages.body_html; the raw HTML body when the
+                                      // message carried an HTML part, else null. Stored
+                                      // for rich rendering (webmail iframe, IMAP text/html
+                                      // projection); bodyText stays the FTS + plain fallback.
   auth: { spf: string; dkim: string; dmarc: string }; // messages.spf/dkim/dmarc
   trusted: boolean;                   // messages.trusted (0/1)
   receivedAt: string;                 // messages.received_at (ISO)

@@ -916,5 +916,69 @@ class ServerIdlePushTest(unittest.TestCase):
         mbox.removeListener(proto)  # clean teardown (no loop was running)
 
 
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerHtmlBodyE2ETest(twisted_unittest.TestCase):
+    """#210 over the wire: an HTML mail whose body contains quoted-printable-looking
+    runs ("token=abc=def") + non-ASCII must reach the client UNCORRUPTED. Pre-fix the
+    door declared Content-Transfer-Encoding: quoted-printable but served the decoded
+    body, so the client decoded a second time and mangled it. Post-fix the body is
+    projected as a single text/html part with cte=8bit; this FETCHes the whole RFC822
+    off the real server and asserts the served body decodes back to the stored HTML."""
+
+    HTML = "<html><body><h1>H\u00e9llo</h1><p>verify token=abc=def link " + ("x" * 90) + "</p></body></html>"
+    TEXT = "Verify token=abc=def and don\u2019t worry \u2014 " + ("word " * 15)
+
+    def setUp(self):
+        self.msgs = [
+            make_message("h1", subject="cloudflare marketing", body=self.TEXT, bodyHtml=self.HTML),
+        ]
+        self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=2)
+        self.cfg = Config(
+            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+        )
+        self.factory, self._restore = _patched_factory(self.cfg, self.transport)
+        self.port = reactor.listenTCP(0, self.factory, interface="127.0.0.1")
+        self.addr = self.port.getHost()
+
+    def tearDown(self):
+        cls, attr, orig = self._restore
+        setattr(cls, attr, orig)
+        return self.port.stopListening()
+
+    @defer.inlineCallbacks
+    def _client(self):
+        cc = ClientCreator(reactor, imap4.IMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", self.addr.port)
+        defer.returnValue(proto)
+
+    @defer.inlineCallbacks
+    def test_html_body_fetches_uncorrupted(self):
+        import email as _email
+
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            info = yield proto.select(b"INBOX")
+            self.assertEqual(info["EXISTS"], 1)
+            result = yield proto.fetchMessage("1")
+            raw = result[1]["RFC822"]
+            if isinstance(raw, str):
+                # Twisted may hand the literal back as a byte-preserving latin-1 str;
+                # latin-1 round-trips 0..255 exactly, so this recovers the wire bytes
+                # (a utf-8 re-encode would double-encode multibyte chars).
+                raw = raw.encode("latin-1", "replace")
+            parsed = _email.message_from_bytes(raw)
+            # Projected as a single text/html part (see HtmlProjectionTest).
+            self.assertEqual(parsed.get_content_type(), "text/html")
+            # The client honours the part CTE and decodes ONCE; the "=abc=def" run and
+            # the non-ASCII survive intact (pre-fix the double-decode corrupted them).
+            body = parsed.get_payload(decode=True).decode("utf-8")
+            self.assertIn("token=abc=def", body)
+            self.assertIn("H\u00e9llo", body)
+            self.assertEqual(body.rstrip("\n"), self.HTML)
+        finally:
+            yield proto.logout()
+
+
 if __name__ == "__main__":
     unittest.main()
