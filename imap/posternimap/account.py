@@ -10,12 +10,21 @@ login, #32). It exposes a fixed set of mailboxes over the one underlying store:
   Trash    -> present-but-empty placeholder; \\Trash
   Junk     -> present-but-empty placeholder; \\Junk
   Archive  -> present-but-empty placeholder; \\Archive
+  Notes    -> present-but-empty placeholder; NO special-use (bare flags)
 
 The special-use attributes (RFC 6154) let a real mail client (Thunderbird) map
 its Sent/Drafts/Trash/Junk/Archive folders onto ours automatically, instead of
 erroring or trying to CREATE them. INBOX/Sent/All are direction-filtered views of
-the store; Drafts/Trash/Junk/Archive have no backing state in v1, so they are
+the store; Drafts/Trash/Junk/Archive/Notes have no backing state in v1, so they are
 advertised as existing but empty (selectable, zero messages, no API hit).
+
+Notes has no RFC 6154 special-use attribute (none is defined for it), so it carries
+bare structural flags. It exists purely so iOS Mail finds it in LIST: iOS issues
+`CREATE Notes` during account setup and aborts the ENTIRE sync (no SELECT, no
+population) on the read-only `NO` the fixed set returns; advertising Notes as an
+existing empty folder means iOS never issues the CREATE (#218). CREATE of an
+already-existing name still correctly returns NO (read-only account), but iOS no
+longer needs to try.
 
 The mailbox set is fixed: create/rename/delete are rejected. SUBSCRIBE/LSUB are
 satisfied (every advertised folder is implicitly subscribed). APPEND is accepted
@@ -69,6 +78,9 @@ _MAILBOXES: Dict[str, _Folder] = {
     "Trash": _Folder(None, ["\\Trash"], True),
     "Junk": _Folder(None, ["\\Junk"], True),
     "Archive": _Folder(None, ["\\Archive"], True),
+    # No RFC 6154 special-use exists for Notes; bare flags. Present-but-empty so iOS
+    # Mail finds it in LIST and never issues the setup-aborting `CREATE Notes` (#218).
+    "Notes": _Folder(None, [], True),
 }
 
 
