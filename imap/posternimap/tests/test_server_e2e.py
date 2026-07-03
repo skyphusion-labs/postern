@@ -329,6 +329,25 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
     @defer.inlineCallbacks
+    def test_search_paginates_over_the_wire(self):
+        # #148 no-silent-caps end-to-end: the fake API pages at page_size=2, so a
+        # match set larger than one page must still come back complete. All three
+        # subjects (sent note / meeting tuesday / welcome aboard) contain "e", so
+        # SEARCH TEXT "e" spans two pages -> the full [1, 2, 3] and a cursor call.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            seqs = yield proto.search(imap4.Query(text="e"))
+            self.assertEqual(sorted(int(n) for n in seqs), [1, 2, 3])
+            self.assertTrue(
+                any("cursor=" in u for u in self._substr_calls()),
+                self._substr_calls(),
+            )
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
     def test_search_from_is_not_pushed_to_substr(self):
         # FROM is NOT pushable: the substr endpoint has no field=from, and field=text
         # cannot isolate a single header, so pushing FROM would silently search the

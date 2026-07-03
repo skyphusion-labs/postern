@@ -486,6 +486,52 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(mb.search_substr("text", "anything", uid=False), [])
         self.assertFalse(any("mode=substr" in u for u in self.transport.calls))
 
+    def test_search_substr_paginates_the_full_result_set(self):
+        # #148 no-silent-caps: /api/search pages (page_size=2 in the fake), and a
+        # SEARCH must return EVERY match, not just the first page. field=text "s"
+        # matches all three subjects (first / second / sent reply), so the cursor
+        # loop must fetch BOTH pages and return the full, sorted set.
+        mb = self._mailbox()
+        self.assertEqual(mb.search_substr("text", "s", uid=False), [1, 2, 3])
+        substr_calls = [u for u in self.transport.calls if "mode=substr" in u]
+        # Page 2 was actually fetched (a call carried the cursor)...
+        self.assertTrue(any("cursor=" in u for u in substr_calls), substr_calls)
+        # ...and every page carried the mode + field selector.
+        self.assertTrue(all("field=text" in u for u in substr_calls), substr_calls)
+
+    def test_search_substr_paginates_in_uid_mode(self):
+        # The same multi-page search in UID mode returns the store UIDs (1, 2, 3).
+        mb = self._mailbox()
+        self.assertEqual(mb.search_substr("text", "s", uid=True), [1, 2, 3])
+
+    def test_search_substr_paginated_result_is_still_window_scoped(self):
+        # Pagination and the window interact correctly: all three match, but window=2
+        # keeps only the two highest uids (m2, m3). The dropped m1 is on page 2, so
+        # this proves we PAGE and THEN intersect -- never truncate before the window
+        # filter would have.
+        mb = self._mailbox(window=2)
+        self.assertEqual(mb.search_substr("text", "s", uid=False), [1, 2])
+
+    def test_search_substr_cap_breach_is_logged_not_silent(self):
+        # If the cursor loop reaches its page cap with results still pending, that is
+        # surfaced LOUDLY (never a silent truncation). window=1 -> a 2-page cap; six
+        # matching messages keep a cursor pending past page 2 (fake page_size=2).
+        from twisted.python import log
+        from posternimap.mailbox import PosternMailbox
+
+        msgs = [make_message(f"n{i}", subject="match me") for i in range(6)]
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
+        client = PosternClient("https://x", "t", transport=transport)
+        mb = PosternMailbox(client, page_size=2, window=1)
+        events = []
+        log.addObserver(events.append)
+        try:
+            mb.search_substr("subject", "match me", uid=False)
+        finally:
+            log.removeObserver(events.append)
+        blob = " ".join(str(e) for e in events)
+        self.assertIn("pagination hit", blob)
+
 
 class _FakeListener:
     """Minimal IMailboxListener double capturing newMessages pushes."""

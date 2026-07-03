@@ -136,18 +136,31 @@ class FakeTransport:
         # Mirror the worker's substr field selector (CONTRACT 10.8 / #216): subject
         # matches the subject only, body the body only, text (the default) either.
         field = params.get("field", "text")
+        direction = params.get("direction")
 
         def _hit(m: Dict[str, Any]) -> bool:
             subj = m.get("subject", "").lower()
             body = m.get("bodyText", "").lower()
             if field == "subject":
-                return q in subj
-            if field == "body":
-                return q in body
-            return q in subj or q in body
+                matched = q in subj
+            elif field == "body":
+                matched = q in body
+            else:
+                matched = q in subj or q in body
+            return matched and (not direction or m.get("direction") == direction)
 
-        hits = [{"message": self._summary_of(m)} for m in self.messages if _hit(m)]
-        return 200, json.dumps({"ok": True, "items": hits, "cursor": None}).encode()
+        rows = [m for m in self.messages if _hit(m)]
+        # Page like the real endpoint (its _list sibling does the same): honor the
+        # cursor, and cap each page at page_size (the fake's server-side max) so a
+        # multi-page result set is exercised even when the caller requests a larger
+        # limit.
+        start = int(params.get("cursor", "0"))
+        limit = min(int(params.get("limit", str(self.page_size))), self.page_size)
+        chunk = rows[start : start + limit]
+        nxt = start + limit
+        cursor = str(nxt) if nxt < len(rows) else None
+        hits = [{"message": self._summary_of(m)} for m in chunk]
+        return 200, json.dumps({"ok": True, "items": hits, "cursor": cursor}).encode()
 
 
 class ErrorTransport:
