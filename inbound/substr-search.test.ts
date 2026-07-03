@@ -116,6 +116,26 @@ describe("store.search mode=substr (#212)", () => {
     expect(p2.cursor).toBeNull();
   });
 
+  it("escapes BACKSLASH FIRST so a literal backslash-percent stays literal (order is load-bearing)", async () => {
+    const { env, ctx } = makeFakeEnv();
+    await put(env, ctx, { id: "lit@example.com", subject: "discount \\% today" }); // literal backslash-percent
+    await put(env, ctx, { id: "wild@example.com", subject: "\\bogus run" }); // backslash, NO percent after
+    // q is the two chars backslash-percent. Backslash-first escaping makes BOTH
+    // literal, so only the row with a literal \% matches. A wildcards-first bug
+    // would leave % a live any-run (matching \ + anything) and change the result,
+    // so this test pins the escape ORDER forever against a "simplify the replaces".
+    const res = await store.search(env, { q: "\\%", mode: "substr", field: "subject" });
+    expect(ids(res)).toEqual(["lit@example.com"]);
+  });
+
+  it("escapes a bare literal backslash in q", async () => {
+    const { env, ctx } = makeFakeEnv();
+    await put(env, ctx, { id: "bs@example.com", subject: "path a\\b end" });
+    await put(env, ctx, { id: "no@example.com", subject: "path axb end" });
+    const res = await store.search(env, { q: "a\\b", mode: "substr", field: "subject" });
+    expect(ids(res)).toEqual(["bs@example.com"]);
+  });
+
   it("empty q returns no rows", async () => {
     const { env, ctx } = makeFakeEnv();
     await put(env, ctx, { id: "a@example.com", subject: "anything" });
