@@ -71,7 +71,7 @@ store.put(msg: StoredMessage): Promise<{ stored: boolean; threadId: string }>;
 //   stored=false on a dedup hit (changes === 0).
 store.get(messageId: string): Promise<StoredMessage | null>;
 store.list(q: ListQuery): Promise<Page<StoredMessageSummary>>;
-store.search(q: SearchQuery): Promise<Page<SearchHit>>;   // FTS now; semantic/hybrid in M4
+store.search(q: SearchQuery): Promise<Page<SearchHit>>;   // fts + substr; semantic/hybrid in M4
 store.thread(threadId: string): Promise<StoredMessage[]>; // ordered by date
 ```
 
@@ -135,7 +135,7 @@ interface ListQuery {
   limit?: number;                     // default 50, max 200
   cursor?: string;                    // opaque; encodes (date, id) of the last row
 }
-interface SearchQuery { q: string; mode?: "fts" | "semantic" | "hybrid"; limit?: number; cursor?: string }
+interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; limit?: number; cursor?: string }
 interface Page<T> { items: T[]; cursor: string | null }   // cursor=null means no more
 interface SearchHit { message: StoredMessageSummary; score?: number; snippet?: string }
 ```
@@ -145,7 +145,7 @@ stable under concurrent inserts; `cursor: null` means no more rows. Read endpoin
 `limit + 1` rows to decide whether a next cursor exists. The `q` / search text is **sanitized**
 into a phrase expression before it reaches FTS5 `MATCH` (word tokens, each quoted, OR-joined),
 so caller input cannot inject FTS operators or break the query; an all-punctuation query matches
-nothing. All filter values are bound params. `search` modes: `fts` (M1, date-ordered + cursor-paged), `semantic` and `hybrid` (M4, over the
+nothing. All filter values are bound params. `search` modes: `fts` (M1, date-ordered + cursor-paged), `substr` (M9, exact case-insensitive substring for IMAP SEARCH parity, see 10.8), `semantic` and `hybrid` (M4, over the
 Vectorize index the store populates for BOTH inbound and outbound mail, #116 ws2). `semantic` embeds the query with the same model
 (`@cf/baai/bge-base-en-v1.5`) and queries Vectorize, collapsing chunk-hits to unique messages
 (best chunk score wins) and hydrating from D1; `hybrid` blends the fts and semantic result sets
@@ -275,7 +275,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
-| GET | `/api/search?q=&mode=fts\|semantic\|hybrid` | search (fts + semantic + hybrid) | M1 / M4 (done) |
+| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=` | search (fts + substr + semantic + hybrid) | M1 / M4 / M9 (#212) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
@@ -762,3 +762,55 @@ does. Additive; the param was previously ignored.
   destructive migration, no supervised window: 0006 is ALTER-ADD only.
 - No raw-wire (RFC822 blob) storage. `wire_size` fixes SIZE honestly; storing full raw
   MIME is an R2-cost decision for a future milestone if byte-exact FETCH ever matters.
+
+
+### 10.8 Substring search (#212, M9)
+
+`mode=substr` serves IMAP `SEARCH` parity (#148). IMAP `SEARCH SUBJECT/BODY/TEXT` are
+case-insensitive **substring** matches (RFC 3501); the default `fts` mode is FTS5
+word-token matching and returns a DIFFERENT set (a token query cannot express a
+substring: `foo` does not match `foobar`, and a multi-word query is OR-of-tokens, not
+a contiguous phrase), so pushing IMAP `SEARCH` to `fts` would lose behavior and break
+the RFC-as-source-of-truth rule. `substr` is the exact-substring predicate the IMAP
+door pushes to.
+
+Semantics (`field` selects the column, default `text`):
+
+- `field=subject` -> `lower(subject) LIKE '%' || q || '%'`
+- `field=body` -> `lower(body_text) LIKE '%' || q || '%'`
+- `field=text` (default) -> the RFC 3501 `TEXT` key (header OR body). We implement the
+  RFC semantics, NOT Twisted's body-only `search_TEXT` stub: declaring
+  `ISearchableMailbox` means the door owns `search()` end to end, so it serves the spec,
+  not the library bug. The predicate is a substring match, via `COALESCE(col,'')`, over
+  every header column the store SERVES in the rendered projection UNION `body_text`:
+  `subject`, `from_addr`, `to_addr`, `cc_addr`, `bcc_addr`, `sender_addr`,
+  `reply_to_addr`, `message_id`, `in_reply_to`. Post-M8 these hold the RAW header
+  fidelity (e.g. `from_addr`/`to_addr` carry display names), so a display-name substring
+  IS matched. Same honesty frame as RFC822.SIZE (#207): `TEXT` searches exactly the
+  headers `BODY[]` would render, never raw wire bytes we do not store; headers we never
+  persist (`Received`, `X-*`, etc.) are not searchable, and that self-consistency IS the
+  spec-true posture, not a gap.
+
+The `direction` filter (`inbound` | `outbound`) applies exactly as for `fts` (10.6).
+
+Rules:
+
+- **`LIKE` metacharacters are escaped, BACKSLASH FIRST.** The predicate is
+  `LIKE ? ESCAPE '\'`, so the escape character itself must be escaped before the
+  wildcards, in this order: `\` -> `\\`, THEN `%` -> `\%`, THEN `_` -> `\_`. Doing
+  `%`/`_` first would let a literal backslash in `q` corrupt the following escape.
+  So `50%` and `a\b` match literally. `q` is a bound param (no injection).
+- **ASCII-only case folding.** SQLite `LIKE` folds case for ASCII only, while the IMAP
+  door's in-memory fallback uses full-Unicode `.lower()`. So the door pushes to `substr`
+  ONLY for an ASCII query and FALLS BACK to the manual scan for a query containing
+  non-ASCII, so a non-ASCII `SEARCH` is never served wrong. The split is the door's; the
+  API contract is simply "ASCII case-insensitive substring".
+- **Not indexed.** A leading-`%` `LIKE` cannot use an index: `substr` is a bounded table
+  scan (same `limit` / cursor shape as `fts`). Acceptable at current mailbox sizes;
+  documented here, not hidden.
+- **Scope + errors.** `read` scope; `E_FIELD_MISSING` when `q` is empty;
+  `E_VALIDATION_ERROR` for an unknown `field` or `direction`, matching the existing
+  `/api/search` handler.
+
+`SearchQuery` gains `mode: "substr"` and an optional `field: "subject" | "body" |
+"text"` (default `text`; ignored by the other modes).
