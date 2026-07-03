@@ -614,8 +614,8 @@ class ServerHtmlBodyE2ETest(twisted_unittest.TestCase):
     runs ("token=abc=def") + non-ASCII must reach the client UNCORRUPTED. Pre-fix the
     door declared Content-Transfer-Encoding: quoted-printable but served the decoded
     body, so the client decoded a second time and mangled it. Post-fix the body is
-    projected as multipart/alternative with 8bit parts; this FETCHes the whole RFC822
-    off the real server and asserts both alternatives decode back to the stored bytes."""
+    projected as a single text/html part with cte=8bit; this FETCHes the whole RFC822
+    off the real server and asserts the served body decodes back to the stored HTML."""
 
     HTML = "<html><body><h1>H\u00e9llo</h1><p>verify token=abc=def link " + ("x" * 90) + "</p></body></html>"
     TEXT = "Verify token=abc=def and don\u2019t worry \u2014 " + ("word " * 15)

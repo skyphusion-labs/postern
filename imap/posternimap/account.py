@@ -100,6 +100,7 @@ class PosternAccount:
             list_view=list_view,
             window=self._cfg.imap_window if folder.windowed else 0,
             poll_seconds=self._cfg.imap_poll_seconds,
+            uidvalidity=self._cfg.imap_uidvalidity,
             meter=self._meter,
         )
 

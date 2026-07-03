@@ -359,6 +359,23 @@ class MailboxTest(unittest.TestCase):
         client = PosternClient("https://x", "t", transport=transport)
         return PosternMailbox(client, page_size=2, **kw), transport
 
+    def test_uidvalidity_is_config_driven(self):
+        # #210 rider: UIDVALIDITY must be operator-configurable so a projection change
+        # (the HTML/8bit fix flips existing messages' BODY[]/SIZE under the same UID)
+        # can be signalled to clients (RFC 3501 message immutability). A configured
+        # value flows through BOTH getUIDValidity and STATUS.
+        mb, _ = self._custom_mailbox([make_message("u1", subject="x")], uidvalidity=42)
+        self.assertEqual(mb.getUIDValidity(), 42)
+        self.assertEqual(mb.requestStatus(["UIDVALIDITY"]), {"UIDVALIDITY": 42})
+
+    def test_uidvalidity_defaults_to_historical_constant(self):
+        # Default is the historical constant (1), so nothing changes until an operator
+        # bumps POSTERN_IMAP_UIDVALIDITY.
+        from posternimap.mailbox import _UID_VALIDITY
+
+        mb, _ = self._custom_mailbox([make_message("u1", subject="x")])
+        self.assertEqual(mb.getUIDValidity(), _UID_VALIDITY)
+
     def test_backdated_arrival_orders_by_uid_not_date(self):
         # F9: a NEW message carrying an OLD Date header must take the next-highest
         # UID and appear LAST (arrival order), NOT insert mid-order by date. The

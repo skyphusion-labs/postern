@@ -167,6 +167,14 @@ def render_rfc822(msg: Message) -> bytes:
     # multibyte soup). 8bit is the identity encoding: the served body equals what the
     # header declares, so the client decodes exactly once. IMAP literals are 8-bit
     # clean (RFC 3501 counts octets), so an 8bit body is wire-safe.
+    #
+    # Line-length deviation (deliberate, noted): 8bit carries the RFC 5322/5321
+    # <=998-octet line expectation, and HTML mail routinely has multi-kilobyte lines.
+    # We do NOT re-wrap (that would corrupt HTML); IMAP BODY[] is an octet-counted
+    # literal so transport is safe, and MUAs render long 8bit lines fine. The hard
+    # invariant we DO keep: the declared CTE always matches the served bytes (identity),
+    # so the client never double-decodes -- test_render_8bit_is_identity_on_long_lines
+    # fails if EmailMessage ever silently re-picks quoted-printable for some payload.
     if html:
         # The message carried an HTML part: project it as text/html so an HTML client
         # renders the real message, not the lossy stripped-text (htmlToText) derivation

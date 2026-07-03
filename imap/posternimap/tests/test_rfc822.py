@@ -231,6 +231,22 @@ class BodyEncodingTest(unittest.TestCase):
         self.assertFalse(parsed.is_multipart())
         self.assertEqual(self._part_cte(parsed), "8bit")
 
+    def test_render_8bit_is_identity_on_long_lines(self):
+        # #210 rider: 8bit carries the RFC 5322 <=998-octet line expectation and HTML
+        # mail routinely exceeds it. The renderer must NOT let EmailMessage re-pick
+        # quoted-printable/base64 for a very long line -- that would make the served
+        # bytes differ from the declared CTE and re-introduce the double-decode. Hard
+        # invariant: declared CTE == served bytes (identity), whatever the line length.
+        long_line = "x" * 1500 + " token=abc=def"  # a single >998-octet line
+        for field in ("body_text", "body_html"):
+            parsed = email.message_from_bytes(render_rfc822(_msg(**{field: long_line})))
+            cte = (parsed.get("content-transfer-encoding") or "").lower()
+            self.assertEqual(cte, "8bit", "%s re-encoded to %r" % (field, cte))
+            served = parsed.get_payload(decode=True).decode("utf-8")
+            # Identity under 8bit: the served bytes ARE the declared bytes.
+            self.assertIn("token=abc=def", served)
+            self.assertIn("x" * 1500, served)
+
     def test_served_body_survives_a_client_decode(self):
         # Simulate the client: read the declared CTE, decode the served (decoded) body.
         # With 8bit (identity) the second decode is a no-op and the bytes are intact;
