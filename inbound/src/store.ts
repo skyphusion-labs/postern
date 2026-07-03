@@ -85,9 +85,13 @@ export interface ListQuery {
   cursor?: string; // opaque; encodes (date, id) of the last row
 }
 
+export type SearchField = "subject" | "body" | "text";
+
 export interface SearchQuery {
   q: string;
-  mode?: "fts" | "semantic" | "hybrid"; // semantic/hybrid land in M4
+  mode?: "fts" | "substr" | "semantic" | "hybrid"; // substr = #212; semantic/hybrid = M4
+  // substr only (#212): which column(s) the substring matches; default "text".
+  field?: SearchField;
   // Restrict to one direction (#128); undefined = both. Validated at the API edge.
   direction?: "inbound" | "outbound";
   limit?: number;
@@ -744,6 +748,8 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
  *     embed the query with the same model, find the nearest chunk vectors,
  *     collapse to unique messages (best chunk score wins), hydrate from D1.
  *   - hybrid (M4): run both and merge by message_id on a normalized score.
+ *   - substr (#212): exact case-insensitive substring over subject/body or the
+ *     served header columns (field-selectable), for IMAP SEARCH parity.
  * Returns SearchHit (the #24 summary, no body) so the read shape is uniform.
  *
  * fts is date-ordered and cursor-paged. semantic/hybrid are SCORE-ranked, so a
@@ -756,6 +762,8 @@ export async function search(env: Env, q: SearchQuery): Promise<Page<SearchHit>>
   switch (mode) {
     case "fts":
       return ftsSearch(env, q);
+    case "substr":
+      return substrSearch(env, q);
     case "semantic":
       return semanticSearch(env, q);
     case "hybrid":
@@ -775,6 +783,97 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
 
   // Optional direction restriction (#128). Bound after the FTS expr, before the
   // cursor tuple, so the keyset order the fake interprets stays consistent.
+  if (q.direction === "inbound" || q.direction === "outbound") {
+    where.push("m.direction = ?");
+    binds.push(q.direction);
+  }
+
+  const cur = decodeCursor(q.cursor);
+  if (cur) {
+    where.push("(m.date < ? OR (m.date = ? AND m.id < ?))");
+    binds.push(cur.date, cur.date, cur.id);
+  }
+
+  const sql =
+    `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
+            m.date, m.in_reply_to, m.trusted, m.received_at,
+            m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
+       FROM messages m WHERE ${where.join(" AND ")}
+      ORDER BY m.date DESC, m.id DESC
+      LIMIT ?`;
+  binds.push(limit + 1);
+
+  const res = await env.DB.prepare(sql).bind(...binds).all<SummaryRow>();
+  const rows = res.results ?? [];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const items: SearchHit[] = page.map((row) => ({ message: rowToSummary(row) }));
+  const last = page[page.length - 1];
+  const cursor = hasMore && last ? encodeCursor(last.date, last.id) : null;
+  return { items, cursor };
+}
+
+// --- mode=substr: exact case-insensitive substring for IMAP SEARCH parity (#212) ---
+//
+// IMAP SEARCH SUBJECT/BODY/TEXT are case-insensitive SUBSTRING matches (RFC 3501),
+// which mode=fts (FTS5 word-token OR) cannot express. substr is the exact-substring
+// predicate the imap door (#148) pushes to. See CONTRACT.md 10.8.
+
+// The header columns TEXT covers: every header the store SERVES in the rendered
+// projection, UNION body_text. Post-M8 from_addr/to_addr hold RAW header fidelity
+// (display names included), so a display-name substring matches. Headers we never
+// store (Received, X-*) are not searchable, and that is the spec-true posture.
+const SUBSTR_TEXT_COLUMNS = [
+  "subject",
+  "from_addr",
+  "to_addr",
+  "cc_addr",
+  "bcc_addr",
+  "sender_addr",
+  "reply_to_addr",
+  "message_id",
+  "in_reply_to",
+  "body_text",
+] as const;
+
+function substrColumns(field: SearchField): readonly string[] {
+  switch (field) {
+    case "subject":
+      return ["subject"];
+    case "body":
+      return ["body_text"];
+    case "text":
+    default:
+      return SUBSTR_TEXT_COLUMNS;
+  }
+}
+
+// Escape LIKE metacharacters, BACKSLASH FIRST (CONTRACT 10.8): the ESCAPE char
+// itself must be escaped before the wildcards, or a literal backslash in q would
+// corrupt the following escape. Order: \ -> \\, then % -> \%, then _ -> \_.
+function escapeLikePattern(raw: string): string {
+  const esc = raw.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+  return `%${esc}%`;
+}
+
+async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
+  const limit = clampLimit(q.limit);
+  const raw = q.q ?? "";
+  if (!raw) return { items: [], cursor: null };
+
+  const cols = substrColumns(q.field ?? "text");
+  const pattern = escapeLikePattern(raw);
+
+  // Case-insensitivity is SQLite LIKE's native ASCII folding (CONTRACT 10.8);
+  // COALESCE(col,'') keeps a NULL header column from nulling the OR. One bind of
+  // the same pattern per column, bound BEFORE direction/cursor so the fake's
+  // in-order bind walk stays consistent with the live query.
+  const binds: unknown[] = [];
+  const orClause = cols.map((c) => `COALESCE(m.${c},'') LIKE ? ESCAPE '\\'`).join(" OR ");
+  for (let k = 0; k < cols.length; k++) binds.push(pattern);
+  const where: string[] = [`(${orClause})`];
+
   if (q.direction === "inbound" || q.direction === "outbound") {
     where.push("m.direction = ?");
     binds.push(q.direction);

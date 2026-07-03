@@ -163,9 +163,19 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
+      // Optional field selector (#212, substr): which column(s) the substring
+      // matches. Validated strictly; ignored by the non-substr modes.
+      const fieldParam = url.searchParams.get("field");
+      if (fieldParam !== null && fieldParam !== "subject" && fieldParam !== "body" && fieldParam !== "text") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "field must be subject, body, or text" },
+          400,
+        );
+      }
       const page = await store.search(env, {
         q,
-        mode: modeParam as "fts" | "semantic" | "hybrid" | undefined,
+        mode: modeParam as "fts" | "substr" | "semantic" | "hybrid" | undefined,
+        field: fieldParam === null ? undefined : fieldParam,
         direction: dirParam === null ? undefined : dirParam,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
