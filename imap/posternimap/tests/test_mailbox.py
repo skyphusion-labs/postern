@@ -349,6 +349,31 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(mb._listeners, [])
         self.assertEqual(dead.events, [])
 
+    def test_poll_now_refreshes_and_pushes_exists_with_poll_disabled(self):
+        # #102 NOOP path: poll_now must surface new mail ON DEMAND, working even when
+        # the timed poll is disabled (poll_seconds=0), and push an untagged EXISTS.
+        mb = self._mailbox(poll_seconds=0)
+        mb.getMessageCount()  # force the initial snapshot (3)
+        listener = _FakeListener()
+        mb.addListener(listener)
+        self.assertIsNone(mb._poll)  # poll disabled: no LoopingCall running
+        self.msgs.insert(0, make_message("m4", subject="newest"))
+        self.assertEqual(mb.poll_now(), 1)
+        self.assertEqual(mb.getMessageCount(), 4)
+        self.assertEqual(listener.events, [(4, None)])  # untagged EXISTS pushed
+        # Idempotent: no new mail -> no spurious EXISTS, no renumbering.
+        self.assertEqual(mb.poll_now(), 0)
+        self.assertEqual(listener.events, [(4, None)])
+
+    def test_poll_now_before_load_is_a_safe_noop(self):
+        # Called before the snapshot is loaded (a NOOP in the selected state races the
+        # lazy load): no fetch, no push, no crash.
+        mb = self._mailbox(poll_seconds=0)
+        listener = _FakeListener()
+        mb.addListener(listener)
+        self.assertEqual(mb.poll_now(), 0)
+        self.assertEqual(listener.events, [])
+
 
     # --- #102 fault F9: durable UID == store insertion key (uid-ordering) ---
 

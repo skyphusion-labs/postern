@@ -125,6 +125,44 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         )
         log.err(failure)
 
+    def do_NOOP(self, tag):
+        """Refresh the selected mailbox on NOOP so new mail surfaces on demand (#102).
+
+        RFC 3501 6.1.2: NOOP is a client's explicit poll for status updates, and any
+        command may carry untagged status. Twisted's stock do_NOOP only acks, so a
+        NOOP-polling client (or any client between timed polls, or with the poll off)
+        never saw new mail. We refresh the mailbox first; poll_now pushes an untagged
+        EXISTS before the tagged OK when new mail arrived. Only meaningful in the
+        selected state (mbox set); harmless otherwise. The refresh is the same blocking
+        body-free store read the timed poll uses (this stage's I/O model)."""
+        mbox = getattr(self, "mbox", None)
+        poll_now = getattr(mbox, "poll_now", None)
+        if callable(poll_now):
+            poll_now()
+        imap4.IMAP4Server.do_NOOP(self, tag)
+
+    # Rebind the command table entries so dispatchCommand (which reads the class-level
+    # tuple, not getattr(self, "do_NOOP")) routes to the override above.
+    unauth_NOOP = (do_NOOP,)  # type: ignore[assignment]
+    auth_NOOP = unauth_NOOP  # type: ignore[assignment]
+    select_NOOP = unauth_NOOP  # type: ignore[assignment]
+    logout_NOOP = unauth_NOOP  # type: ignore[assignment]
+
+    def capabilities(self):
+        """Advertise IDLE (RFC 2177) only when a live push path exists (#102).
+
+        IDLE requires the server to push an unsolicited EXISTS when new mail arrives
+        while the client idles. Our push path is the timed poll (POSTERN_IMAP_POLL_
+        SECONDS); with it disabled (0) nothing pushes during IDLE, so advertising IDLE
+        would be non-compliant. We drop IDLE from CAPABILITY in that case (NOOP still
+        surfaces new mail on demand via do_NOOP). With the poll enabled (the default,
+        30s) IDLE is advertised and the poll delivers EXISTS to the idling client."""
+        cap = imap4.IMAP4Server.capabilities(self)
+        cfg = getattr(getattr(self, "factory", None), "_cfg", None)
+        if cfg is None or getattr(cfg, "imap_poll_seconds", 0) <= 0:
+            cap.pop(b"IDLE", None)
+        return cap
+
 
 class PosternIMAPFactory(protocol.Factory):
     """Builds IMAP4Server protocols bound to the proxy's auth portal."""
