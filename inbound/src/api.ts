@@ -27,6 +27,7 @@ import {
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 import { readBodyCapped, PayloadTooLargeError } from "./body";
 import { handleMobileconfig } from "./mobileconfig";
+import { handleMtaSts } from "./mtasts";
 
 // Failure codes that represent a transient upstream condition (the transport /
 // provider) rather than a bad request; mapped to 502 so callers can retry.
@@ -50,6 +51,15 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   // token client-side and it is used only for the token-gated /api calls below.
   if (request.method === "GET" && (path === "/webmail" || path === "/webmail/")) {
     return serveWebmail();
+  }
+
+  // MTA-STS policy (#197, RFC 8461), served on the mta-sts.<domain> host. ANONYMOUS
+  // by design: senders fetch it over HTTPS with NO auth, so it is handled BEFORE the
+  // token gate and must never be token-gated. Dark by default -- returns 404 unless
+  // MTA_STS_MODE is configured (see docs/MTA-STS.md). The route is wired to the
+  // mta-sts host in the supervised deploy window, not in this worker's default routes.
+  if (request.method === "GET" && path === "/.well-known/mta-sts.txt") {
+    return handleMtaSts(request, env);
   }
 
   // SMTP submission auth check (#68). Gated by the TRANSPORT token, NOT the
