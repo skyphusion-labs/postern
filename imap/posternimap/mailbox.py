@@ -325,7 +325,12 @@ class PosternMailbox:
         # distinct instances for the two cases (see the class docstring).
         if self._list_view:
             return self._special_use + ["\\HasNoChildren"]
-        return ["\\Seen"]
+        # SELECT view: announce every flag/keyword a FETCH on this mailbox can
+        # return, so a client is never handed an unadvertised keyword (#218). A
+        # message's getFlags() returns \\Seen plus the trust + direction keywords;
+        # the mailbox FLAGS line must be their union. PERMANENTFLAGS stays empty
+        # (read-only) -- announcing a flag is not a promise it is settable.
+        return ["\\Seen", "Trusted", "Untrusted", "Inbound", "Outbound"]
 
     def getDefaultFlags(self) -> List[str]:
         return ["\\Seen"]

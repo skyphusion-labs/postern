@@ -18,6 +18,7 @@ fronted by stunnel; do not expose a plaintext listener to the internet.
 
 from __future__ import annotations
 
+import re
 import sys
 
 from twisted.cred import credentials
@@ -74,6 +75,25 @@ _SEARCH_STR_ARG2 = frozenset({b"HEADER"})
 _SEARCH_BYTES_ARG1 = frozenset(
     {b"BODY", b"TEXT", b"UID", b"LARGER", b"SMALLER", b"KEYWORD", b"UNKEYWORD"}
 )
+
+# A LOGIN / AUTHENTICATE command line carries the password INLINE (e.g.
+# `a02 LOGIN "user" "secret"`). The #218 wire-trace lever (POSTERN_IMAP_WIRE_TRACE)
+# logs received command lines, so we MUST redact those args BEFORE the line reaches
+# the logger -- at capture, never at read -- or the trace would leak the password.
+_WIRE_TRACE_REDACT = re.compile(rb"^(\s*\S+\s+(?:LOGIN|AUTHENTICATE))\b.*$", re.IGNORECASE)
+
+
+def _redact_wire_trace(line: bytes) -> bytes:
+    """Redact a credential-bearing IMAP command line for the wire trace (#218).
+
+    Keeps only `<tag> LOGIN` / `<tag> AUTHENTICATE` and replaces everything after the
+    command word with ` <REDACTED>`; any non-credential line passes through unchanged.
+    Note: this door advertises no SASL mechanism and known clients (iOS Mail included)
+    send LOGIN as inline quoted strings, which this catches. A LOGIN that used IMAP
+    literals for its arguments would carry the password on a raw literal continuation
+    delivered via rawDataReceived, NOT lineReceived, so it never reaches this trace at
+    all (the trace only hooks lineReceived + sendLine). Redaction happens AT CAPTURE."""
+    return _WIRE_TRACE_REDACT.sub(rb"\1 <REDACTED>", line)
 
 
 class PosternIMAP4Server(imap4.IMAP4Server):
@@ -139,6 +159,43 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         self.sendBadResponse(tag, cmdName + b" failed: Server error")
         log.err(failure)
 
+    def _cbSelectWork(self, mbox, cmdName, tag):
+        """SELECT/EXAMINE with the RFC 3501 6.3.1 SHOULD fields Twisted's stock
+        _cbSelectWork omits: UIDNEXT and PERMANENTFLAGS (#218). Apple Mail drives
+        folder population off the SELECT response and is intolerant of a missing
+        UIDNEXT; the stock response emitted only EXISTS/RECENT/FLAGS/UIDVALIDITY, so
+        we add:
+          * OK [UIDNEXT n]         -- mbox.getUIDNext() (the store already knows it;
+                                      STATUS returns it), so a client can size its sync.
+          * OK [PERMANENTFLAGS ()] -- the door is READ-ONLY, so no flag is persistable;
+                                      the empty list (with \\* absent) is the honest answer.
+        FLAGS reports every keyword a FETCH can actually return (the selected-view
+        getFlags was widened to \\Seen + the Trusted/Untrusted + Inbound/Outbound
+        keywords), so a client is never handed an unannounced keyword. None of this
+        changes message identity or the body projection, so NO UIDVALIDITY bump. Plain
+        override (name-unmangled; _selectWork calls self._cbSelectWork), so a future
+        Twisted rework simply degrades this to the stock (still-valid) response."""
+        if mbox is None:
+            self.sendNegativeResponse(tag, b"No such mailbox")
+            return
+        if "\\noselect" in [flag.lower() for flag in mbox.getFlags()]:
+            self.sendNegativeResponse(tag, b"Mailbox cannot be selected")
+            return
+        flags = [networkString(flag) for flag in mbox.getFlags()]
+        self.sendUntaggedResponse(b"%d EXISTS" % (mbox.getMessageCount(),))
+        self.sendUntaggedResponse(b"%d RECENT" % (mbox.getRecentCount(),))
+        self.sendUntaggedResponse(b"FLAGS (" + b" ".join(flags) + b")")
+        # Read-only door: nothing is persistable, so PERMANENTFLAGS is the empty list
+        # (no \\* -- new keywords cannot be created either).
+        self.sendPositiveResponse(None, b"[PERMANENTFLAGS ()] No permanent flags permitted")
+        self.sendPositiveResponse(None, b"[UIDVALIDITY %d]" % (mbox.getUIDValidity(),))
+        self.sendPositiveResponse(None, b"[UIDNEXT %d]" % (mbox.getUIDNext(),))
+        s = mbox.isWriteable() and b"READ-WRITE" or b"READ-ONLY"
+        mbox.addListener(self)
+        self.sendPositiveResponse(tag, b"[" + s + b"] " + cmdName + b" successful")
+        self.state = "select"
+        self.mbox = mbox
+
     def _IMAP4Server__ebStatus(self, failure, tag, box):  # overrides IMAP4Server.__ebStatus
         """Fix the STATUS error path: bytes-safe response + upstream-error -> NO (#143).
 
@@ -191,6 +248,27 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     select_NOOP = unauth_NOOP  # type: ignore[assignment]
     logout_NOOP = unauth_NOOP  # type: ignore[assignment]
 
+    def _wire_trace_enabled(self) -> bool:
+        cfg = getattr(getattr(self, "factory", None), "_cfg", None)
+        return bool(getattr(cfg, "imap_wire_trace", False))
+
+    def lineReceived(self, line):
+        """#218 diagnostic lever (POSTERN_IMAP_WIRE_TRACE, default OFF): trace the
+        RECEIVED command line, REDACTED at capture (the raw line may carry the LOGIN
+        password). We log the redacted copy but hand the ORIGINAL line to the stock
+        parser, so auth is unaffected. OFF => a pure passthrough (zero behavior
+        change), so the un-instrumented read path is byte-for-byte preserved."""
+        if self._wire_trace_enabled():
+            log.msg("wire C: " + _redact_wire_trace(line).decode("latin-1", "replace"))
+        return imap4.IMAP4Server.lineReceived(self, line)
+
+    def sendLine(self, line):
+        """Trace the SENT response line under the same gate (server->client lines carry
+        no credential). OFF => pure passthrough."""
+        if self._wire_trace_enabled():
+            log.msg("wire S: " + line.decode("latin-1", "replace"))
+        return imap4.IMAP4Server.sendLine(self, line)
+
     def capabilities(self):
         """Advertise IDLE (RFC 2177) only when a live push path exists (#102).
 
@@ -204,6 +282,8 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         cfg = getattr(getattr(self, "factory", None), "_cfg", None)
         if cfg is None or getattr(cfg, "imap_poll_seconds", 0) <= 0:
             cap.pop(b"IDLE", None)
+        # RFC 2971: advertise ID so a client knows the server implements it (#218).
+        cap[b"ID"] = None
         return cap
 
     @staticmethod
@@ -386,6 +466,29 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         b"LIST",
     )
     select_LIST = auth_LIST  # type: ignore[assignment]
+
+    def _arg_idparams(self, line, final=False):
+        """Consume the ID command argument (RFC 2971): NIL or a parenthesized
+        field/value list. We do not interpret it -- the whole remainder is taken as one
+        opaque token so dispatch is satisfied -- and reply with our own server ID."""
+        return (line.strip(), b"")
+
+    def do_ID(self, tag, params):
+        """RFC 2971 ID. iOS Mail issues ID as its first command after LOGIN; Twisted's
+        stock IMAP4Server has no ID handler, so dispatchCommand answered
+        `BAD Unsupported command`, which Apple Mail treats as fatal and aborts the sync
+        before populating the folder (#218). We answer compliantly: an untagged server
+        ID (a fixed, non-sensitive name -- no version, to avoid build fingerprinting)
+        then a tagged OK. The client's params are accepted and ignored (RFC 2971 permits
+        this). Valid in any state, so unauth/auth/select tuples are registered below."""
+        self.sendUntaggedResponse(b'ID ("name" "postern-imap")')
+        self.sendPositiveResponse(tag, b"ID completed")
+
+    # dispatchCommand routes `<state>_ID` from the class tuple; ID is valid in any
+    # state (RFC 2971), so bind unauth/auth/select to the same (handler, argparser).
+    unauth_ID = (do_ID, _arg_idparams)
+    auth_ID = unauth_ID
+    select_ID = unauth_ID
 
 
 class PosternIMAPFactory(protocol.Factory):

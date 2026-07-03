@@ -180,6 +180,26 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
     @defer.inlineCallbacks
+    def test_select_announces_permanentflags_and_flag_keywords(self):
+        # #218: through the REAL client, SELECT must carry PERMANENTFLAGS (empty on the
+        # read-only door) and a FLAGS list that announces the custom keywords a FETCH
+        # actually returns, so a strict client (Apple Mail) is never handed an
+        # unadvertised keyword. (UIDNEXT is asserted at the unit layer -- the stock
+        # IMAP4Client.select does not surface it.)
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"INBOX")
+            self.assertIn("PERMANENTFLAGS", info)
+            self.assertEqual(list(info["PERMANENTFLAGS"]), [])  # read-only -> none
+            flags = set(info["FLAGS"])
+            self.assertIn("\\Seen", flags)
+            self.assertTrue({"Trusted", "Untrusted", "Inbound", "Outbound"} & flags, flags)
+            self.assertNotIn("\\Sent", flags)  # special-use LIST attr must not leak
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
     def test_append_to_sent_succeeds(self):
         # Thunderbird APPENDs its own copy of a sent message into Sent after
         # submission; this must succeed (no-op), not error.
@@ -1036,3 +1056,125 @@ class ServerHtmlBodyE2ETest(twisted_unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class IDCommandSelectAndTraceTest(unittest.TestCase):
+    """Unit coverage (#218): the RFC 2971 ID command, the RFC 3501 6.3.1 SELECT
+    completeness fields, and the POSTERN_IMAP_WIRE_TRACE redaction. Pure protocol
+    (StringTransport), no socket/account, so these are deterministic and fast."""
+
+    def _server(self):
+        from twisted.internet.testing import StringTransport
+        from posternimap.server import PosternIMAP4Server
+
+        srv = PosternIMAP4Server()
+        srv.makeConnection(StringTransport())
+        # connectionMade schedules the TimeoutMixin inactivity timer; disable it so no
+        # DelayedCall leaks into the trial reactor (these unit servers never disconnect).
+        srv.setTimeout(None)
+        self.addCleanup(srv.setTimeout, None)
+        return srv
+
+    def test_capability_advertises_id(self):
+        self.assertIn(b"ID", self._server().listCapabilities())
+
+    def test_id_dispatch_replies_for_list_nil_and_empty(self):
+        # RFC 2971 grammar: a parenthesized field list, NIL, and (lenient) empty -- all
+        # answered with our fixed non-sensitive server ID and a tagged OK, via the real
+        # dispatch tuple (not by calling do_ID directly), in the authenticated state.
+        for arg in (b'("name" "iPhone Mail" "version" "21F90")', b"NIL", b""):
+            srv = self._server()
+            srv.state = "auth"
+            srv.transport.clear()
+            srv.dispatchCommand(b"x1", b"ID", arg)
+            out = srv.transport.value()
+            self.assertIn(b'* ID ("name" "postern-imap")', out, arg)
+            self.assertIn(b"x1 OK ID completed", out, arg)
+
+    def test_id_valid_in_unauth_auth_and_select_states(self):
+        for state in ("unauth", "auth", "select"):
+            srv = self._server()
+            srv.state = state
+            srv.transport.clear()
+            srv.dispatchCommand(b"x2", b"ID", b"NIL")
+            self.assertIn(b"x2 OK ID completed", srv.transport.value(), state)
+
+    def test_select_response_emits_uidnext_permanentflags_and_flag_keywords(self):
+        # Drive the SELECT callback with a fake mailbox and assert the wire bytes carry
+        # the RFC 3501 6.3.1 SHOULD fields the stock Twisted response omitted.
+        class _FakeSelMbox:
+            def getFlags(self):
+                return ["\\Seen", "Trusted", "Untrusted", "Inbound", "Outbound"]
+
+            def getMessageCount(self):
+                return 42
+
+            def getRecentCount(self):
+                return 0
+
+            def getUIDValidity(self):
+                return 20260704
+
+            def getUIDNext(self):
+                return 99
+
+            def isWriteable(self):
+                return False
+
+            def addListener(self, _):
+                return None
+
+        srv = self._server()
+        srv.transport.clear()
+        srv._cbSelectWork(_FakeSelMbox(), b"SELECT", b"t1")
+        out = srv.transport.value()
+        self.assertIn(b"42 EXISTS", out)
+        self.assertIn(b"FLAGS (\\Seen Trusted Untrusted Inbound Outbound)", out)
+        self.assertIn(b"[PERMANENTFLAGS ()]", out)      # read-only -> empty, no \*
+        self.assertIn(b"[UIDVALIDITY 20260704]", out)
+        self.assertIn(b"[UIDNEXT 99]", out)             # the field Apple Mail needs
+        self.assertIn(b"t1 OK [READ-ONLY] SELECT successful", out)
+
+    def test_wire_trace_redacts_login_and_authenticate(self):
+        from posternimap.server import _redact_wire_trace
+
+        for line, secret in [
+            (b'a1 LOGIN "joan" "hunter2pw"', b"hunter2pw"),
+            (b'a1 login "joan" "hunter2pw"', b"hunter2pw"),
+            (b"a1 AUTHENTICATE PLAIN dGVzdHNlY3JldA==", b"dGVzdHNlY3JldA=="),
+        ]:
+            red = _redact_wire_trace(line)
+            self.assertNotIn(secret, red)
+            self.assertIn(b"<REDACTED>", red)
+        # non-credential lines pass through byte-for-byte
+        for line in (b"a2 SELECT INBOX", b"a3 UID SEARCH SINCE 1-Jun-2026", b"* OK ready"):
+            self.assertEqual(_redact_wire_trace(line), line)
+
+    def test_wire_trace_never_logs_a_login_password_verbatim(self):
+        # End-to-end at the hook: with the trace ON, a LOGIN line fed through
+        # lineReceived must never put the password in the log -- redaction is at capture.
+        from twisted.python import log as tlog
+
+        events = []
+        tlog.addObserver(events.append)
+        try:
+            srv = self._server()
+
+            class _Cfg:
+                imap_wire_trace = True
+
+            class _F:
+                _cfg = _Cfg()
+
+            srv.factory = _F()
+            try:
+                srv.lineReceived(b'z9 LOGIN "joan" "topsecretpw123"')
+            except Exception:
+                pass  # downstream LOGIN parsing may error; we only assert the trace
+        finally:
+            tlog.removeObserver(events.append)
+        blob = " ".join(repr(e.get("message", e)) for e in events)
+        self.assertNotIn("topsecretpw123", blob)
+        self.assertIn("wire C:", blob)
+        self.assertIn("<REDACTED>", blob)
