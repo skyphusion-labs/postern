@@ -92,49 +92,63 @@ Reports land in the postern mailbox itself (dogfood): route
 is the visibility that gates the testing -> enforce flip: no new failure classes
 across a full max_age window before enforce.
 
-## 4. Serving the policy (CF-native)
+## 4. Serving the policy (CF-native): an env-gated route on the inbound Worker
 
-The policy host must answer `GET /.well-known/mta-sts.txt` over HTTPS with a
-valid cert for `mta-sts.skyphusion.org`. The CF-native, IaC-first answer is a
-tiny dedicated Worker on a route, so the mail-core inbound Worker's surface and
-CSP are untouched:
+DECISION (review of PR #213): serve the policy from the EXISTING inbound Worker
+as an env-gated static route, NOT a dedicated Worker. Rationale:
 
-wrangler.toml (dedicated worker, illustrative):
+- M10 is consolidating Workers (#190 folds `worker/` into `inbound/`); a new
+  deploy lane cuts against that direction.
+- The attack-surface/CSP argument does not apply here: the route is a static text
+  response with no query/body parsing and no shared response headers, so it adds
+  zero input surface, and CSP is per-response.
+- As an inbound-Worker feature it becomes a real product capability a forker gets
+  for free, driven by env, rather than an illustrative second Worker to discover.
 
-    name = "postern-mta-sts"
-    main = "src/index.ts"
-    compatibility_date = "2025-01-01"
+The Worker answers `GET /.well-known/mta-sts.txt` on the `mta-sts.<domain>` host
+ONLY when the policy env is set; unset = the route is not served (404), so the
+feature is dark by default.
+
+Env (operator-configured):
+
+- `MTA_STS_MODE`    -- `testing` | `enforce` | `none` (unset = route disabled).
+- `MTA_STS_MX`      -- comma-separated policy `mx:` value(s); for us `*.mx.cloudflare.net`.
+- `MTA_STS_MAX_AGE` -- cache lifetime in seconds (e.g. `86400` testing, `604800` enforce).
+
+wrangler route (added to the inbound Worker):
+
     routes = [
-      { pattern = "mta-sts.skyphusion.org/.well-known/mta-sts.txt", zone_name = "skyphusion.org" }
+      # ... existing inbound routes ...
+      { pattern = "mta-sts.skyphusion.org/.well-known/mta-sts.txt", zone_name = "skyphusion.org" },
     ]
 
-src/index.ts:
+Handler shape (inbound Worker); the body is assembled from env so the policy is
+operator config, not a code constant:
 
-    const POLICY = [
-      "version: STSv1",
-      "mode: testing",
-      "mx: *.mx.cloudflare.net",
-      "max_age: 86400",
-      "",
-    ].join("\n");
+    if (url.hostname === "mta-sts.skyphusion.org"
+        && url.pathname === "/.well-known/mta-sts.txt") {
+      if (!env.MTA_STS_MODE) return new Response("not found", { status: 404 });
+      const body = [
+        "version: STSv1",
+        `mode: ${env.MTA_STS_MODE}`,
+        ...env.MTA_STS_MX.split(",").map((mx) => `mx: ${mx.trim()}`),
+        `max_age: ${env.MTA_STS_MAX_AGE}`,
+        "",
+      ].join("\n");
+      return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
 
-    export default {
-      async fetch(req: Request): Promise<Response> {
-        const url = new URL(req.url);
-        if (url.pathname !== "/.well-known/mta-sts.txt") {
-          return new Response("not found", { status: 404 });
-        }
-        return new Response(POLICY, {
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        });
-      },
-    };
+Changing the policy (e.g. testing -> enforce) is an env change on the Worker plus
+a matching `_mta-sts` id bump, applied together in the supervised window.
 
-The policy string is the single source of truth for the mode/max_age; changing
-it is a code change + a matching `_mta-sts` id bump, reviewed as one PR. (An
-equivalent option is a static route on the inbound Worker under the
-`mta-sts.` host; a dedicated worker is preferred to keep the mail-API worker's
-attack surface and CSP unchanged. Left to review.)
+The implementation (env-gated route + tests) is a small follow-up postern PR;
+once it is deployed, the CR window only has to add the DNS records (including the
+proxied `mta-sts` host record that makes the route resolvable) -- no new Worker
+to stand up.
+
+NOTED ALTERNATIVE (not chosen): a dedicated `postern-mta-sts` Worker on the same
+route. Rejected here for the consolidation + zero-surface reasons above; kept on
+record in case the inbound Worker is ever split for unrelated isolation reasons.
 
 ## 5. Deploy ordering (critical)
 
@@ -142,9 +156,11 @@ The policy host MUST be live and serving a valid policy over HTTPS BEFORE the
 `_mta-sts` TXT is published, and the TXT MUST be published BEFORE flipping the
 policy to `enforce`. Ordering, per the CR:
 
-1. Deploy `postern-mta-sts` Worker + route; verify
-   `curl https://mta-sts.skyphusion.org/.well-known/mta-sts.txt` returns the
-   `mode: testing` policy with a valid cert.
+1. Enable the inbound-Worker MTA-STS route (set `MTA_STS_MODE=testing`,
+   `MTA_STS_MX=*.mx.cloudflare.net`, `MTA_STS_MAX_AGE=86400`; deployed by the
+   follow-up postern PR that adds the route + the proxied `mta-sts` host record).
+   Verify `curl https://mta-sts.skyphusion.org/.well-known/mta-sts.txt` returns
+   the `mode: testing` policy with a valid cert.
 2. Publish the TLSRPT TXT (`_smtp._tls`) and route `tls-reports@` to the mailbox.
 3. Publish the `_mta-sts` TXT with the initial id (mode still testing).
 4. Bake for >= one `max_age` window; confirm TLSRPT shows no new failure class.
