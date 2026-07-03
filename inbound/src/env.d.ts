@@ -139,4 +139,12 @@ interface Env {
   MOBILECONFIG_ORG?: string;
   /** Reverse-DNS PayloadIdentifier prefix. Default: reversed ALLOWED_FROM_DOMAIN + ".postern". */
   MOBILECONFIG_IDENTIFIER?: string;
+
+  // --- MTA-STS policy route (#197, RFC 8461; env-gated, dark by default) ---
+  /** MTA-STS mode: "testing" | "enforce" | "none". UNSET => GET /.well-known/mta-sts.txt returns 404 (feature off). */
+  MTA_STS_MODE?: string;
+  /** Comma-separated MTA-STS `mx:` pattern(s). For CF Email Routing: "*.mx.cloudflare.net". Required when mode is testing/enforce. */
+  MTA_STS_MX?: string;
+  /** MTA-STS policy cache lifetime in seconds (e.g. 86400 testing, 604800 enforce). Required when MTA_STS_MODE is set. */
+  MTA_STS_MAX_AGE?: string;
 }
