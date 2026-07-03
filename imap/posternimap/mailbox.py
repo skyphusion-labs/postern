@@ -71,6 +71,16 @@ if TYPE_CHECKING:  # annotation only; the runtime import stays lazy (see _maybe_
 # module docstring's never-reuse note.)
 _UID_VALIDITY = 1
 
+# Per-page size and the cursor-loop bound for the server-side SEARCH pushdown (#148).
+# We request the worker's max page (200) to minimize round-trips, and cap the loop so
+# a pathological non-terminating cursor cannot spin forever. In-folder hits that
+# survive the snapshot intersection are bounded by the window and the store returns
+# newest-first (recent = in-window matches sort early), so a few window-widths of
+# pages covers a real folder; the cap breach is logged LOUDLY (never a silent
+# truncation). With no window (0 = unbounded snapshot) a large fixed cap applies.
+_SEARCH_PAGE_LIMIT = 200
+_SEARCH_MAX_PAGES_UNBOUNDED = 1000
+
 
 class ReadOnlyError(imap4.MailboxException):
     """Raised for any write operation; the proxy is a read-only view in v1."""
@@ -395,6 +405,79 @@ class PosternMailbox:
                 if num is None or num < 1 or num > n:
                     continue
                 yield self._wrap(num)
+
+    def search_substr(self, field: str, term: str, uid: bool) -> List[int]:
+        """Server-side IMAP SEARCH pushdown for one SUBJECT/BODY/TEXT key (#148).
+
+        The stock path (PosternMailbox is deliberately NOT ISearchableMailbox, so
+        do_SEARCH falls back to Twisted's __cbManualSearch) re-scans the whole
+        snapshot in Python. For a plain single-term SUBJECT/BODY/TEXT search the
+        server (PosternIMAP4Server.do_SEARCH) instead calls this: we delegate the
+        substring match to the API (mode=substr, field=..., #212/#216) and then
+        intersect the GLOBAL hits with THIS folder's current snapshot BY UID. A hit
+        whose uid is not in the snapshot (a different folder, or older than the
+        window cap) is dropped, so the result is folder- and window-scoped exactly
+        like the manual fallback would be -- identical substring semantics, just
+        matched in the store instead of in the proxy.
+
+        Returns snapshot sequence numbers, or the UIDs when `uid` is set (UID
+        SEARCH), ascending (RFC 3501 does not require order; ascending is
+        conventional and matches the uid-ascending snapshot). Body-free: the API
+        returns summaries, so no message body is hydrated.
+        """
+        self._ensure_loaded()
+        if not self._summaries:
+            return []
+        # uid -> 1-based sequence number over the uid-ascending snapshot (the same
+        # mapping _iter_fetch builds for UID FETCH).
+        by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
+        out: List[int] = []
+        cursor: Optional[str] = None
+        pages = 0
+        max_pages = self._search_max_pages()
+        # RFC 3501 SEARCH returns EVERY match; the API pages, so we MUST follow the
+        # cursor to exhaustion rather than keep only the first page (a silent cap).
+        while True:
+            page = self._client.search_page(
+                term,
+                mode="substr",
+                field=field,
+                direction=self._direction,
+                cursor=cursor,
+                limit=_SEARCH_PAGE_LIMIT,
+            )
+            for h in page.items:
+                seq = by_uid.get(h.uid)
+                if seq is None:
+                    continue  # outside this folder's snapshot / window: drop it
+                out.append(h.uid if uid else seq)
+            cursor = page.cursor
+            pages += 1
+            if not cursor:
+                break
+            if pages >= max_pages:
+                # Never silently truncate a SEARCH. If the cursor loop hits its bound
+                # with pages still pending, say so LOUDLY so an operator sees it.
+                from twisted.python import log
+
+                log.msg(
+                    "postern-imap: SEARCH pagination hit the %d-page cap "
+                    "(field=%s, direction=%s); the reply may be incomplete -- narrow "
+                    "the query or raise POSTERN_IMAP_WINDOW."
+                    % (max_pages, field, self._direction)
+                )
+                break
+        out.sort()
+        return out
+
+    def _search_max_pages(self) -> int:
+        """Bound the SEARCH cursor loop (see the module constants). A window caps the
+        useful hits, so a few window-widths of pages suffices; without a window a large
+        fixed cap guards against a non-terminating cursor."""
+        if self._window and self._window > 0:
+            # ceil(window / page) + 1, without importing math.
+            return max(2, (self._window + _SEARCH_PAGE_LIMIT - 1) // _SEARCH_PAGE_LIMIT + 1)
+        return _SEARCH_MAX_PAGES_UNBOUNDED
 
     # --- IMailbox: write (all rejected: read-only proxy) ---
 

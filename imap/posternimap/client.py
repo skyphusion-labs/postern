@@ -285,14 +285,57 @@ class PosternClient:
         body = self._get(f"/api/threads/{urllib.parse.quote(thread_id, safe='')}", {})
         return [Message.from_json(m) for m in body.get("messages", [])]
 
-    def search(self, q: str, *, mode: Optional[str] = None, limit: Optional[int] = None) -> list[MessageSummary]:
+    def search_page(
+        self,
+        q: str,
+        *,
+        mode: Optional[str] = None,
+        field: Optional[str] = None,
+        direction: Optional[str] = None,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Page:
+        """One page of /api/search: the hits plus the next cursor (None when the
+        result set is exhausted). A caller that needs the COMPLETE set (IMAP SEARCH
+        must return every match, never a silent first-page cap) loops this cursor.
+
+        `field` is the substr column selector (#212/#216); `direction` scopes the
+        search to one folder's mail server-side (inbound|outbound), so a folder search
+        pages only over its own matches. Both are ignored by the non-substr modes; the
+        worker validates them strictly.
+        """
         params: dict[str, str] = {"q": q}
         if mode:
             params["mode"] = mode
+        if field:
+            params["field"] = field
+        if direction:
+            params["direction"] = direction
+        if cursor:
+            params["cursor"] = cursor
         if limit is not None:
             params["limit"] = str(limit)
         body = self._get("/api/search", params)
-        return [MessageSummary.from_json(h["message"]) for h in body.get("items", []) if h.get("message")]
+        return Page(
+            items=[
+                MessageSummary.from_json(h["message"])
+                for h in body.get("items", [])
+                if h.get("message")
+            ],
+            cursor=body.get("cursor"),
+        )
+
+    def search(
+        self,
+        q: str,
+        *,
+        mode: Optional[str] = None,
+        field: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[MessageSummary]:
+        """First page of /api/search as a plain list (back-compat convenience). For the
+        complete, paginated result set use search_page and loop its cursor."""
+        return self.search_page(q, mode=mode, field=field, limit=limit).items
 
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""

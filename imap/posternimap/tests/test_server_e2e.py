@@ -275,6 +275,165 @@ class ServerE2ETest(twisted_unittest.TestCase):
         finally:
             yield proto.logout()
 
+    def _substr_calls(self):
+        return [u for u in self.transport.calls if "mode=substr" in u]
+
+    @defer.inlineCallbacks
+    def test_search_subject_pushed_over_the_wire(self):
+        # #148: SEARCH SUBJECT "meeting" is a single pushable key. The server pushes
+        # it to the substr endpoint (field=subject) and returns the matching sequence
+        # number. In All (m1,m2,m3 uid-ascending) m2's subject is "meeting tuesday"
+        # -> seq 2.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            seqs = yield proto.search(imap4.Query(subject="meeting"))
+            self.assertEqual(sorted(int(n) for n in seqs), [2])
+            pushed = self._substr_calls()
+            self.assertTrue(pushed, "expected a mode=substr push")
+            self.assertTrue(any("field=subject" in u for u in pushed), pushed)
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_search_body_and_text_pushed_over_the_wire(self):
+        # BODY and TEXT are pushable too. BODY "lunch" -> m2 (body "lunch?") = seq 2;
+        # TEXT "welcome" -> m1 (subject "welcome aboard") = seq 1.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            body_seqs = yield proto.search(imap4.Query(body="lunch"))
+            self.assertEqual(sorted(int(n) for n in body_seqs), [2])
+            text_seqs = yield proto.search(imap4.Query(text="welcome"))
+            self.assertEqual(sorted(int(n) for n in text_seqs), [1])
+            self.assertTrue(any("field=body" in u for u in self.transport.calls))
+            self.assertTrue(any("field=text" in u for u in self.transport.calls))
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_uid_search_subject_pushed_returns_uids(self):
+        # #148: UID SEARCH SUBJECT "meeting" routes through do_UID -> the same
+        # select_SEARCH override with uid=1, so it pushes and returns the store UID
+        # (m2 -> uid 2), not the sequence number.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            uids = yield proto.search(imap4.Query(subject="meeting"), uid=True)
+            self.assertEqual(sorted(int(n) for n in uids), [2])
+            self.assertTrue(self._substr_calls(), "expected a mode=substr push")
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_search_paginates_over_the_wire(self):
+        # #148 no-silent-caps end-to-end: the fake API pages at page_size=2, so a
+        # match set larger than one page must still come back complete. All three
+        # subjects (sent note / meeting tuesday / welcome aboard) contain "e", so
+        # SEARCH TEXT "e" spans two pages -> the full [1, 2, 3] and a cursor call.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            seqs = yield proto.search(imap4.Query(text="e"))
+            self.assertEqual(sorted(int(n) for n in seqs), [1, 2, 3])
+            self.assertTrue(
+                any("cursor=" in u for u in self._substr_calls()),
+                self._substr_calls(),
+            )
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_search_from_is_not_pushed_to_substr(self):
+        # FROM is NOT pushable: the substr endpoint has no field=from, and field=text
+        # cannot isolate a single header, so pushing FROM would silently search the
+        # wrong thing. The server must therefore keep FROM on Twisted's stock manual
+        # search and NEVER issue a mode=substr request. That stock manual path itself
+        # currently raises on a bytes query token (a PRE-EXISTING Twisted bytes/str
+        # bug in search_FROM et al -- it predates and is independent of this
+        # pushdown, and is tracked as a separate follow-up), so we tolerate that
+        # failure and assert the property that matters here: no mis-push to substr.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            try:
+                yield proto.search(imap4.Query(**{"from": "m1@example.com"}))
+            except imap4.IMAP4Exception:
+                pass  # stock manual-search bytes/str bug, not our push path
+            # The stock errback (__ebSearch) log.err()s that pre-existing TypeError;
+            # trial flags any logged error as a failure, so consume the expected one.
+            self.flushLoggedErrors(TypeError)
+            self.assertEqual(self._substr_calls(), [])
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_search_compound_is_not_pushed_to_substr(self):
+        # A compound query (SUBJECT ... BODY ...) is not a single key, so it is not
+        # pushable and must not be mis-routed to the substr endpoint (which takes one
+        # field only). It stays on the stock manual path (which currently raises on
+        # bytes tokens, per the separate pre-existing Twisted bug); we tolerate that
+        # and assert only the no-mis-push property.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            try:
+                yield proto.search(imap4.Query(subject="meeting", body="lunch"))
+            except imap4.IMAP4Exception:
+                pass  # stock manual-search bytes/str bug, not our push path
+            # The stock errback (__ebSearch) log.err()s that pre-existing TypeError;
+            # trial flags any logged error as a failure, so consume the expected one.
+            self.flushLoggedErrors(TypeError)
+            self.assertEqual(self._substr_calls(), [])
+        finally:
+            yield proto.logout()
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class SearchPushdownPredicateTest(unittest.TestCase):
+    """Unit coverage for PosternIMAP4Server._pushable_substr_search (#148): which
+    parsed SEARCH queries push to the substr endpoint and which fall back. Pure (no
+    server/socket), so it is unaffected by the stock manual-search bytes bug."""
+
+    def _p(self, charset, query):
+        from posternimap.server import PosternIMAP4Server
+
+        return PosternIMAP4Server._pushable_substr_search(charset, query)
+
+    def test_single_subject_body_text_are_pushable(self):
+        # Flat (SEARCH SUBJECT "x") and the parenthesized form Twisted's own client
+        # emits (SEARCH (SUBJECT "x")) both normalize to one pushable key.
+        self.assertEqual(self._p(None, [b"SUBJECT", b"lunch"]), ("subject", "lunch"))
+        self.assertEqual(self._p(None, [[b"SUBJECT", b"lunch"]]), ("subject", "lunch"))
+        self.assertEqual(self._p(None, [[b"BODY", b"hi"]]), ("body", "hi"))
+        self.assertEqual(self._p(None, [[b"TEXT", b"x"]]), ("text", "x"))
+        # Key match is case-insensitive.
+        self.assertEqual(self._p(None, [[b"subject", b"x"]]), ("subject", "x"))
+
+    def test_from_to_compound_set_flag_are_not_pushable(self):
+        for q in (
+            [[b"FROM", b"a@b"]],
+            [[b"TO", b"a@b"]],
+            [[b"SUBJECT", b"a", b"BODY", b"b"]],  # compound
+            [b"ALL"],
+            [b"1:3"],  # message set
+            [[b"SEEN"]],  # flag
+            [],  # empty
+        ):
+            self.assertIsNone(self._p(None, q), q)
+
+    def test_charset_or_non_ascii_is_not_pushable(self):
+        # A declared CHARSET or a non-ASCII term must fall back (the substr endpoint
+        # takes a plain ASCII term with no charset).
+        self.assertIsNone(self._p(b"UTF-8", [[b"SUBJECT", b"x"]]))
+        self.assertIsNone(self._p(None, [[b"SUBJECT", "caf\u00e9".encode("utf-8")]]))
+
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class ServerErrorPathE2ETest(twisted_unittest.TestCase):
