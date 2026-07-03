@@ -130,4 +130,21 @@ interface Env {
    * mailbox API token (CONTRACT section 5). wrangler secret put POSTERN_TRANSPORT_TOKEN.
    */
   POSTERN_TRANSPORT_TOKEN?: string;
+  // --- Per-user .mobileconfig generator (#187, iOS Mail one-tap setup) ---
+  /** IMAP hostname advertised in the generated Apple profile. Default: imap.<ALLOWED_FROM_DOMAIN>. */
+  MOBILECONFIG_IMAP_HOST?: string;
+  /** SMTP submission hostname advertised in the generated Apple profile. Default: smtp.<ALLOWED_FROM_DOMAIN>. */
+  MOBILECONFIG_SMTP_HOST?: string;
+  /** Organization label (PayloadOrganization). Default: DEFAULT_FROM_NAME, else "Postern". */
+  MOBILECONFIG_ORG?: string;
+  /** Reverse-DNS PayloadIdentifier prefix. Default: reversed ALLOWED_FROM_DOMAIN + ".postern". */
+  MOBILECONFIG_IDENTIFIER?: string;
+
+  // --- MTA-STS policy route (#197, RFC 8461; env-gated, dark by default) ---
+  /** MTA-STS mode: "testing" | "enforce" | "none". UNSET => GET /.well-known/mta-sts.txt returns 404 (feature off). */
+  MTA_STS_MODE?: string;
+  /** Comma-separated MTA-STS `mx:` pattern(s). For CF Email Routing: "*.mx.cloudflare.net". Required when mode is testing/enforce. */
+  MTA_STS_MX?: string;
+  /** MTA-STS policy cache lifetime in seconds (e.g. 86400 testing, 604800 enforce). Required when MTA_STS_MODE is set. */
+  MTA_STS_MAX_AGE?: string;
 }
