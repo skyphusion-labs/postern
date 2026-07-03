@@ -433,6 +433,59 @@ class MailboxTest(unittest.TestCase):
         # UIDNEXT is one past the highest rowid.
         self.assertEqual(mb.getUIDNext(), 31)
 
+    # --- #148: server-side SEARCH pushdown (search_substr) ---
+
+    def test_search_substr_pushes_and_maps_to_seq(self):
+        # A SUBJECT substring search delegates to the substr endpoint and maps the
+        # global hit back to this folder's sequence number. m2 ("second") is seq 2
+        # in the uid-ascending snapshot (m1, m2, m3).
+        mb = self._mailbox()
+        seqs = mb.search_substr("subject", "second", uid=False)
+        self.assertEqual(seqs, [2])
+        # The pushed request carried mode=substr AND the field selector.
+        self.assertTrue(
+            any("mode=substr" in u and "field=subject" in u for u in self.transport.calls),
+            self.transport.calls,
+        )
+
+    def test_search_substr_uid_mode_returns_uids(self):
+        # UID SEARCH: the same match returns the store UID (m2 -> uid 2), not the seq.
+        mb = self._mailbox()
+        self.assertEqual(mb.search_substr("subject", "second", uid=True), [2])
+
+    def test_search_substr_body_and_text_fields(self):
+        mb = self._mailbox()
+        # BODY over m2's body ("body two"); TEXT over m1's subject ("first").
+        self.assertEqual(mb.search_substr("body", "body two", uid=False), [2])
+        self.assertEqual(mb.search_substr("text", "first", uid=False), [1])
+
+    def test_search_substr_drops_hits_outside_window(self):
+        # window=2 shows only m2, m3 (highest uids); m1 is below the window. m1's
+        # subject "first" matches globally but is dropped (not in the snapshot); m2
+        # is in the window and maps to seq 1 of the windowed snapshot.
+        mb = self._mailbox(window=2)
+        self.assertEqual(mb.search_substr("subject", "first", uid=False), [])
+        self.assertEqual(mb.search_substr("subject", "second", uid=False), [1])
+        # UID mode over the window still yields the global UID (m2 -> uid 2).
+        self.assertEqual(mb.search_substr("subject", "second", uid=True), [2])
+
+    def test_search_substr_drops_hits_from_other_folder(self):
+        # The /api/search endpoint is GLOBAL, so an outbound-only folder must drop a
+        # hit that belongs to an inbound message. m1 (inbound) matches the query but
+        # is not in the outbound snapshot; m3 ("sent reply") is.
+        mb = self._mailbox(direction="outbound")
+        self.assertEqual(mb.search_substr("text", "first", uid=False), [])
+        self.assertEqual(mb.search_substr("subject", "sent reply", uid=False), [1])
+
+    def test_search_substr_empty_folder_never_calls_api(self):
+        # A placeholder (empty) folder returns no hits WITHOUT touching the API: the
+        # snapshot is empty, so there is nothing to intersect against.
+        from posternimap.mailbox import PosternMailbox
+
+        mb = PosternMailbox(self.client, empty=True)
+        self.assertEqual(mb.search_substr("text", "anything", uid=False), [])
+        self.assertFalse(any("mode=substr" in u for u in self.transport.calls))
+
 
 class _FakeListener:
     """Minimal IMailboxListener double capturing newMessages pushes."""

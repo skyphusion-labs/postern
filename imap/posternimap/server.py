@@ -23,6 +23,7 @@ import sys
 from twisted.cred import credentials
 from twisted.cred.error import UnauthorizedLogin
 from twisted.internet import protocol
+from twisted.internet.defer import maybeDeferred
 from twisted.mail import imap4
 from twisted.python import log
 from twisted.python.compat import networkString
@@ -31,6 +32,13 @@ from .auth import build_portal
 from .config import Config
 from .mailbox import MailboxLoadError
 from .proxywrap import wrap_listener_factory
+
+# The three SEARCH keys whose single-term form we can push to the store's substr
+# endpoint (#148). Maps the RFC 3501 search key to the /api/search field selector
+# (CONTRACT 10.8 / #216 mode=substr). FROM/TO are deliberately absent: the endpoint
+# has no field=from/to and field=text cannot isolate a single header, so those stay
+# on the stock manual-search fallback.
+_SUBSTR_SEARCH_FIELD = {b"SUBJECT": "subject", b"BODY": "body", b"TEXT": "text"}
 
 
 class PosternIMAP4Server(imap4.IMAP4Server):
@@ -162,6 +170,85 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         if cfg is None or getattr(cfg, "imap_poll_seconds", 0) <= 0:
             cap.pop(b"IDLE", None)
         return cap
+
+    @staticmethod
+    def _pushable_substr_search(charset, query):
+        """Return (field, term) when the whole SEARCH is one pushable substring key,
+        else None (the caller then takes the stock manual-search fallback) -- #148.
+
+        We push ONLY when the entire parsed query is exactly one of SUBJECT / BODY /
+        TEXT with a single plain-ASCII string argument and no CHARSET was given.
+        EVERYTHING else -- FROM/TO (the substr endpoint cannot isolate a single
+        header), compound / OR / NOT queries, message-set / date / flag keys, and any
+        charset or non-ASCII term -- returns None and stays on Twisted's faithful
+        manual path (the mailbox is intentionally not ISearchableMailbox).
+
+        Twisted's own client wraps the whole query in parens, so
+        `SEARCH (SUBJECT "x")` parses to [[b"SUBJECT", b"x"]] while
+        `SEARCH SUBJECT "x"` parses to [b"SUBJECT", b"x"]; both are the same single
+        key, so we unwrap one nested level before the [KEY, arg] shape test.
+        """
+        if charset is not None:
+            return None
+        q = query
+        if len(q) == 1 and isinstance(q[0], list):
+            q = q[0]  # unwrap the parenthesized single-key form
+        if len(q) != 2:
+            return None
+        key, arg = q
+        if not isinstance(key, bytes) or not isinstance(arg, bytes):
+            return None
+        field = _SUBSTR_SEARCH_FIELD.get(key.upper())
+        if field is None:
+            return None
+        try:
+            term = arg.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        return field, term
+
+    def do_SEARCH(self, tag, charset, query, uid=0):
+        """Push a single SUBJECT/BODY/TEXT substring SEARCH to the store (#148).
+
+        For a pushable query (see _pushable_substr_search) we ask the mailbox to run
+        the match server-side (mode=substr) and map the hits back to this folder's
+        snapshot, then reply exactly as Twisted's __cbSearch does (an untagged SEARCH
+        with the ids, then a tagged OK). For anything else we defer to the stock
+        do_SEARCH, whose manual-search fallback (__cbManualSearch) keeps full RFC 3501
+        fidelity -- so declining to push is always the safe, faithful default. The
+        error path reuses the library's __ebSearch (tagged BAD + log), matching the
+        stock manual path's behavior on an upstream failure.
+        """
+        pushable = self._pushable_substr_search(charset, query)
+        if pushable is None:
+            imap4.IMAP4Server.do_SEARCH(self, tag, charset, query, uid=uid)
+            return
+        field, term = pushable
+        maybeDeferred(self.mbox.search_substr, field, term, bool(uid)).addCallback(
+            self._cb_push_search, tag
+        ).addErrback(self._IMAP4Server__ebSearch, tag)
+
+    def _cb_push_search(self, ids, tag):
+        """Emit the pushed-search result, replicating IMAP4Server.__cbSearch (which is
+        name-mangled and so not callable directly): an untagged SEARCH with the ids
+        (already the UIDs when this was a UID SEARCH -- the mailbox emitted them),
+        then the tagged OK. `ids` is a list of ints from mailbox.search_substr."""
+        idbytes = networkString(" ".join(str(i) for i in ids))
+        self.sendUntaggedResponse(b"SEARCH " + idbytes)
+        self.sendPositiveResponse(tag, b"SEARCH completed")
+
+    # Rebind the SELECTED-state SEARCH dispatch tuple so dispatchCommand routes to the
+    # override above. dispatchCommand reads the class tuple by state name
+    # (select_SEARCH), not getattr(self, "do_SEARCH"), and UID SEARCH re-dispatches
+    # through the SAME tuple with uid=1 (do_UID), so this one rebind catches both
+    # SEARCH and UID SEARCH. The parse callables (charset + search keys) are the stock
+    # ones, unchanged. SEARCH is only valid in the selected state, so there is no
+    # auth_/unauth_ SEARCH tuple to rebind.
+    select_SEARCH = (  # type: ignore[assignment]
+        do_SEARCH,
+        imap4.IMAP4Server.opt_charset,
+        imap4.IMAP4Server.arg_searchkeys,
+    )
 
 
 class PosternIMAPFactory(protocol.Factory):

@@ -394,6 +394,41 @@ class PosternMailbox:
                     continue
                 yield self._wrap(num)
 
+    def search_substr(self, field: str, term: str, uid: bool) -> List[int]:
+        """Server-side IMAP SEARCH pushdown for one SUBJECT/BODY/TEXT key (#148).
+
+        The stock path (PosternMailbox is deliberately NOT ISearchableMailbox, so
+        do_SEARCH falls back to Twisted's __cbManualSearch) re-scans the whole
+        snapshot in Python. For a plain single-term SUBJECT/BODY/TEXT search the
+        server (PosternIMAP4Server.do_SEARCH) instead calls this: we delegate the
+        substring match to the API (mode=substr, field=..., #212/#216) and then
+        intersect the GLOBAL hits with THIS folder's current snapshot BY UID. A hit
+        whose uid is not in the snapshot (a different folder, or older than the
+        window cap) is dropped, so the result is folder- and window-scoped exactly
+        like the manual fallback would be -- identical substring semantics, just
+        matched in the store instead of in the proxy.
+
+        Returns snapshot sequence numbers, or the UIDs when `uid` is set (UID
+        SEARCH), ascending (RFC 3501 does not require order; ascending is
+        conventional and matches the uid-ascending snapshot). Body-free: the API
+        returns summaries, so no message body is hydrated.
+        """
+        self._ensure_loaded()
+        if not self._summaries:
+            return []
+        # uid -> 1-based sequence number over the uid-ascending snapshot (the same
+        # mapping _iter_fetch builds for UID FETCH).
+        by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
+        hits = self._client.search(term, mode="substr", field=field)
+        out: List[int] = []
+        for h in hits:
+            seq = by_uid.get(h.uid)
+            if seq is None:
+                continue  # outside this folder's snapshot / window: drop it
+            out.append(h.uid if uid else seq)
+        out.sort()
+        return out
+
     # --- IMailbox: write (all rejected: read-only proxy) ---
 
     def store(self, messages, flags, mode, uid):

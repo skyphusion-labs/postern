@@ -279,10 +279,22 @@ class PosternClient:
         body = self._get(f"/api/threads/{urllib.parse.quote(thread_id, safe='')}", {})
         return [Message.from_json(m) for m in body.get("messages", [])]
 
-    def search(self, q: str, *, mode: Optional[str] = None, limit: Optional[int] = None) -> list[MessageSummary]:
+    def search(
+        self,
+        q: str,
+        *,
+        mode: Optional[str] = None,
+        field: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[MessageSummary]:
         params: dict[str, str] = {"q": q}
         if mode:
             params["mode"] = mode
+        if field:
+            # substr only (#212/#216): which column(s) the substring matches
+            # (subject|body|text). Ignored by the non-substr modes; the worker
+            # validates it strictly.
+            params["field"] = field
         if limit is not None:
             params["limit"] = str(limit)
         body = self._get("/api/search", params)

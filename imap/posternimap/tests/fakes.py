@@ -133,11 +133,20 @@ class FakeTransport:
 
     def _search(self, params):
         q = params.get("q", "").lower()
-        hits = [
-            {"message": self._summary_of(m)}
-            for m in self.messages
-            if q in m.get("subject", "").lower() or q in m.get("bodyText", "").lower()
-        ]
+        # Mirror the worker's substr field selector (CONTRACT 10.8 / #216): subject
+        # matches the subject only, body the body only, text (the default) either.
+        field = params.get("field", "text")
+
+        def _hit(m: Dict[str, Any]) -> bool:
+            subj = m.get("subject", "").lower()
+            body = m.get("bodyText", "").lower()
+            if field == "subject":
+                return q in subj
+            if field == "body":
+                return q in body
+            return q in subj or q in body
+
+        hits = [{"message": self._summary_of(m)} for m in self.messages if _hit(m)]
         return 200, json.dumps({"ok": True, "items": hits, "cursor": None}).encode()
 
 
