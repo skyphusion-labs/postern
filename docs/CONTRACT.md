@@ -767,20 +767,25 @@ Semantics (`field` selects the column, default `text`):
 - `field=text` (default) -> the RFC 3501 `TEXT` key (header OR body). We implement the
   RFC semantics, NOT Twisted's body-only `search_TEXT` stub: declaring
   `ISearchableMailbox` means the door owns `search()` end to end, so it serves the spec,
-  not the library bug. "Header" here = the header columns the store SERVES in the
-  rendered projection (subject plus the envelope-fidelity address headers: from, to, cc,
-  bcc, sender, reply-to), unioned with `body_text`. Same honesty frame as RFC822.SIZE
-  (#207): `TEXT` searches exactly what `BODY[]` would return, never raw wire bytes we do
-  not store -- a substring the projection does not carry (e.g. a display name we did not
-  persist) is not matched, because it is not served either.
+  not the library bug. The predicate is a substring match, via `COALESCE(col,'')`, over
+  every header column the store SERVES in the rendered projection UNION `body_text`:
+  `subject`, `from_addr`, `to_addr`, `cc_addr`, `bcc_addr`, `sender_addr`,
+  `reply_to_addr`, `message_id`, `in_reply_to`. Post-M8 these hold the RAW header
+  fidelity (e.g. `from_addr`/`to_addr` carry display names), so a display-name substring
+  IS matched. Same honesty frame as RFC822.SIZE (#207): `TEXT` searches exactly the
+  headers `BODY[]` would render, never raw wire bytes we do not store; headers we never
+  persist (`Received`, `X-*`, etc.) are not searchable, and that self-consistency IS the
+  spec-true posture, not a gap.
 
 The `direction` filter (`inbound` | `outbound`) applies exactly as for `fts` (10.6).
 
 Rules:
 
-- **`LIKE` metacharacters are escaped.** `%` and `_` in `q` are escaped and the query
-  uses `LIKE ? ESCAPE '\'`, so `50%` matches the literal string, never "any suffix".
-  `q` is a bound param (no injection), like every other filter.
+- **`LIKE` metacharacters are escaped, BACKSLASH FIRST.** The predicate is
+  `LIKE ? ESCAPE '\'`, so the escape character itself must be escaped before the
+  wildcards, in this order: `\` -> `\\`, THEN `%` -> `\%`, THEN `_` -> `\_`. Doing
+  `%`/`_` first would let a literal backslash in `q` corrupt the following escape.
+  So `50%` and `a\b` match literally. `q` is a bound param (no injection).
 - **ASCII-only case folding.** SQLite `LIKE` folds case for ASCII only, while the IMAP
   door's in-memory fallback uses full-Unicode `.lower()`. So the door pushes to `substr`
   ONLY for an ASCII query and FALLS BACK to the manual scan for a query containing
