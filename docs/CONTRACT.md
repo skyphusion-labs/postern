@@ -305,7 +305,7 @@ loops it until `done`.
 expressed as `OutgoingMailServerUseSSL=true` on port 587, per Apple's schema, which
 has no separate STARTTLS key). It is `read`-scoped: it bakes in NO password (iOS
 prompts on install), so it emits no secret. Params: `user` (required, an address on
-`ALLOWED_FROM_DOMAIN`), optional `username` (login, defaults to the address) and
+`ALLOWED_FROM_DOMAIN`), optional `username` (login, defaults to the address local part -- the mail doors bind by bare directory username) and
 `name` (display name); all user-supplied fields are XML-escaped. The two
 `PayloadUUID`s are minted per generation while the `PayloadIdentifier`s are stable
 per user, so a reinstall REPLACES the profile instead of duplicating the account on

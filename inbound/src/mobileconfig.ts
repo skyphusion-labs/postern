@@ -188,9 +188,12 @@ export function handleMobileconfig(request: Request, env: Env): Response {
     );
   }
 
-  // Login username defaults to the address (Postern's LDAP door accepts the full
-  // address); a caller may override it. Display name defaults to the address.
-  const username = ((p.get("username") ?? "").trim() || email).slice(0, MAX_FIELD);
+  // Login username defaults to the address LOCAL PART: the mail doors bind by bare
+  // directory (Authentik) username, so the FULL address templates to a nonexistent
+  // bind DN (relay/auth_ldap.go directBind) -- the exact #180 login trap this route
+  // exists to kill. A caller whose directory username differs from the local part
+  // passes ?username= to override. Display name defaults to the address.
+  const username = ((p.get("username") ?? "").trim() || email.split("@")[0]).slice(0, MAX_FIELD);
   const displayName = ((p.get("name") ?? "").trim() || email).slice(0, MAX_FIELD);
 
   const imapHost = (env.MOBILECONFIG_IMAP_HOST || `imap.${allowedDomain}`).trim();

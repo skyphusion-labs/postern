@@ -149,6 +149,16 @@ describe("GET /api/mobileconfig route (#187)", () => {
     expect(body).toContain("send.example.net");
   });
 
+  it("defaults the login username to the address local part (the #180 trap)", async () => {
+    const { env, ctx } = makeFakeEnv();
+    const res = await handleApi(req("GET", "/api/mobileconfig?user=conrad@skyphusion.org", { token: "test-token" }), env, ctx);
+    const body = await res.text();
+    // NOT the full address: the mail doors bind by bare directory username.
+    expect(body).toMatch(/<key>IncomingMailServerUsername<\/key>\s*<string>conrad<\/string>/);
+    expect(body).toMatch(/<key>OutgoingMailServerUsername<\/key>\s*<string>conrad<\/string>/);
+    expect(body).toMatch(/<key>EmailAddress<\/key>\s*<string>conrad@skyphusion\.org<\/string>/);
+  });
+
   it("401s without a token", async () => {
     const { env, ctx } = makeFakeEnv();
     expect((await handleApi(req("GET", "/api/mobileconfig?user=alice@skyphusion.org"), env, ctx)).status).toBe(401);
