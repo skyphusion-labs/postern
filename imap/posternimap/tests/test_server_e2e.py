@@ -348,49 +348,103 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
     @defer.inlineCallbacks
-    def test_search_from_is_not_pushed_to_substr(self):
-        # FROM is NOT pushable: the substr endpoint has no field=from, and field=text
-        # cannot isolate a single header, so pushing FROM would silently search the
-        # wrong thing. The server must therefore keep FROM on Twisted's stock manual
-        # search and NEVER issue a mode=substr request. That stock manual path itself
-        # currently raises on a bytes query token (a PRE-EXISTING Twisted bytes/str
-        # bug in search_FROM et al -- it predates and is independent of this
-        # pushdown, and is tracked as a separate follow-up), so we tolerate that
-        # failure and assert the property that matters here: no mis-push to substr.
+    def test_search_from_over_the_wire(self):
+        # #222 at the wire: FROM is NOT pushable (the substr endpoint has no
+        # field=from, and field=text cannot isolate a single header), so it stays on
+        # Twisted's stock manual search and must NEVER mis-push to mode=substr. That
+        # manual path used to raise on the wire BYTES token (upstream str/bytes bug),
+        # returning BAD. do_SEARCH now decodes the string VALUE arg to str on the
+        # fallback, so FROM returns CORRECT results with no BAD and no logged error:
+        # in All (m1=1, m2=2, m3=3) only m1's From is m1@example.com -> seq 1.
         proto = yield self._client()
         try:
             yield proto.login(b"agent", b"tok")
             yield proto.select(b"All")
-            try:
-                yield proto.search(imap4.Query(**{"from": "m1@example.com"}))
-            except imap4.IMAP4Exception:
-                pass  # stock manual-search bytes/str bug, not our push path
-            # The stock errback (__ebSearch) log.err()s that pre-existing TypeError;
-            # trial flags any logged error as a failure, so consume the expected one.
-            self.flushLoggedErrors(TypeError)
+            seqs = yield proto.search(imap4.Query(**{"from": "m1@example.com"}))
+            self.assertEqual(sorted(int(n) for n in seqs), [1])
+            # Correct results AND no mis-push to the substr endpoint.
             self.assertEqual(self._substr_calls(), [])
         finally:
             yield proto.logout()
 
     @defer.inlineCallbacks
-    def test_search_compound_is_not_pushed_to_substr(self):
+    def test_search_compound_over_the_wire(self):
         # A compound query (SUBJECT ... BODY ...) is not a single key, so it is not
-        # pushable and must not be mis-routed to the substr endpoint (which takes one
-        # field only). It stays on the stock manual path (which currently raises on
-        # bytes tokens, per the separate pre-existing Twisted bug); we tolerate that
-        # and assert only the no-mis-push property.
+        # pushable and must never be mis-routed to the substr endpoint (which takes
+        # one field only). It stays on the stock manual path, which the decoded
+        # fallback un-breaks: SUBJECT's arg is decoded to str (str header match) while
+        # BODY's arg stays wire bytes (text.strFile over the BytesIO body). Only m2
+        # has subject "meeting" AND body "lunch" -> seq 2, with no substr push.
         proto = yield self._client()
         try:
             yield proto.login(b"agent", b"tok")
             yield proto.select(b"All")
-            try:
-                yield proto.search(imap4.Query(subject="meeting", body="lunch"))
-            except imap4.IMAP4Exception:
-                pass  # stock manual-search bytes/str bug, not our push path
-            # The stock errback (__ebSearch) log.err()s that pre-existing TypeError;
-            # trial flags any logged error as a failure, so consume the expected one.
-            self.flushLoggedErrors(TypeError)
+            seqs = yield proto.search(imap4.Query(subject="meeting", body="lunch"))
+            self.assertEqual(sorted(int(n) for n in seqs), [2])
             self.assertEqual(self._substr_calls(), [])
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_uid_search_since_over_the_wire(self):
+        # #218 wire-convicted (Strummer's replay): iOS Mail / Evolution populate a
+        # folder via UID SEARCH SINCE <date>. The date arg reached Twisted's parseTime
+        # as wire BYTES and crashed ("cannot use a string pattern on a bytes-like
+        # object"), returning BAD -- so the folder existed but never filled. The
+        # decoded fallback fixes it: all three All messages are dated 2026-06-18, so
+        # SINCE 1-Jun-2026 returns their store UIDs, and the date is really parsed
+        # (SINCE 1-Jul-2026 returns nothing, not everything, and still never BADs).
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            uids = yield proto.search(imap4.Query(since="1-Jun-2026"), uid=True)
+            self.assertEqual(sorted(int(n) for n in uids), [1, 2, 3])
+            none = yield proto.search(imap4.Query(since="1-Jul-2026"), uid=True)
+            self.assertEqual(list(none), [])
+            # A pure date search must not touch the substr push path.
+            self.assertEqual(self._substr_calls(), [])
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_uid_search_undeleted_since_compound_over_the_wire(self):
+        # #218 secondary shape, also wire-convicted: UID SEARCH UNDELETED SINCE
+        # <date> (the compound iOS/Evolution issue). UNDELETED takes no arg; SINCE's
+        # date arg is decoded on the fallback. None of the messages are \Deleted and
+        # all are dated 2026-06-18, so UNDELETED SINCE 1-Jun-2026 returns every UID.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"All")
+            uids = yield proto.search(
+                imap4.Query(undeleted=True, since="1-Jun-2026"), uid=True
+            )
+            self.assertEqual(sorted(int(n) for n in uids), [1, 2, 3])
+            self.assertEqual(self._substr_calls(), [])
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_list_empty_pattern_returns_delimiter_reply(self):
+        # #218 / RFC 3501 6.3.8: LIST "" "" is a delimiter probe, not a wildcard.
+        # iOS Mail / Evolution issue it to learn the hierarchy delimiter before they
+        # build any folder path; the stock server returned the whole folder set, so
+        # they never learned it. We must answer with exactly the \Noselect root row
+        # carrying delimiter "/" and an empty root name -- NOT the folder list.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            result = yield proto.list("", "")
+            self.assertEqual(len(result), 1, result)
+            flags, delim, name = result[0]
+            self.assertIn("\\Noselect", set(flags))
+            self.assertEqual(delim, "/")
+            self.assertEqual(name, "")
+            # A real wildcard LIST still returns the full set (override is scoped to
+            # the empty pattern only).
+            full = yield proto.list("", "*")
+            self.assertIn("INBOX", {m[2] for m in full})
         finally:
             yield proto.logout()
 

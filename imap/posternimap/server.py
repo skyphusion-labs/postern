@@ -40,6 +40,41 @@ from .proxywrap import wrap_listener_factory
 # on the stock manual-search fallback.
 _SUBSTR_SEARCH_FIELD = {b"SUBJECT": "subject", b"BODY": "body", b"TEXT": "text"}
 
+# SEARCH keys whose VALUE argument(s) Twisted's manual-search matchers compare
+# against str data -- str headers from getHeaders(), or parseTime() on a date
+# string -- so the wire BYTES arg must be decoded to str before the stock manual
+# path runs, or the matcher raises "cannot use a string pattern on a bytes-like
+# object" and the command returns BAD (#218/#222). Grounded in the RFC 3501 6.4.4
+# search-key grammar.
+#   * _SEARCH_STR_ARG1: keys with ONE string/date value arg (a header substring,
+#     or a DD-Mon-YYYY date).
+#   * _SEARCH_STR_ARG2: HEADER takes TWO string args (field-name, then value).
+# Everything NOT listed here deliberately keeps its wire bytes:
+#   * BODY/TEXT match via text.strFile against getBodyFile() (a BytesIO), so their
+#     arg MUST stay bytes;
+#   * UID and a bare message-set token feed parseIdList(), which splits on b"," --
+#     bytes;
+#   * the KEY tokens themselves stay bytes so _singleSearchStep's membership test
+#     against _requiresLastMessageInfo ({b"OR", b"UID", b"NOT"}) still matches and
+#     OR/NOT/UID keep their lastIDs argument.
+# So a blind "decode every token" is WRONG -- it breaks BODY/TEXT, message-set, and
+# OR/NOT/UID dispatch. This selective, arity-aware decode is the compliant
+# workaround for the upstream Twisted str/bytes bug (the upstream report stays open,
+# tracked on #222; our decode is the fix that lets real clients populate folders).
+_SEARCH_STR_ARG1 = frozenset(
+    {
+        b"FROM", b"TO", b"CC", b"BCC", b"SUBJECT",
+        b"BEFORE", b"ON", b"SINCE", b"SENTBEFORE", b"SENTON", b"SENTSINCE",
+    }
+)
+_SEARCH_STR_ARG2 = frozenset({b"HEADER"})
+# Keys that take a value arg we must NOT decode (kept as wire bytes). Listed so the
+# walker consumes the arg positionally and never re-reads a value as a key -- e.g.
+# BODY "SINCE" must not treat the body term "SINCE" as a date key.
+_SEARCH_BYTES_ARG1 = frozenset(
+    {b"BODY", b"TEXT", b"UID", b"LARGER", b"SMALLER", b"KEYWORD", b"UNKEYWORD"}
+)
+
 
 class PosternIMAP4Server(imap4.IMAP4Server):
     """IMAP4Server that returns a tagged NO (not BAD) for a refused APPEND.
@@ -207,6 +242,66 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             return None
         return field, term
 
+    @staticmethod
+    def _to_search_str(tok):
+        """Decode one wire-bytes SEARCH argument to str for Twisted's manual
+        matchers. UTF-8 first (what real clients send for header substrings; date
+        args are ASCII), latin-1 as the never-fails fallback so a pathological
+        term degrades to a harmless non-match instead of crashing the connection.
+        A non-bytes token (already str, or a nested list) passes through unchanged."""
+        if not isinstance(tok, bytes):
+            return tok
+        try:
+            return tok.decode("utf-8")
+        except UnicodeDecodeError:
+            return tok.decode("latin-1")
+
+    @classmethod
+    def _decode_manual_search(cls, query):
+        """Selectively decode a parsed SEARCH query's string/date VALUE args from
+        wire bytes to str so Twisted's manual-search matchers get the type they
+        compare against, fixing #218/#222 for string AND date keys in one move.
+
+        The walk is arity-aware per RFC 3501 6.4.4: a key that takes a str/date
+        value has that value decoded (HEADER decodes two); a key that takes a bytes
+        value (BODY/TEXT/UID/message-set) keeps it as wire bytes; key tokens and
+        bare message-set tokens stay bytes; parenthesized sub-lists recurse.
+        Consuming EVERY arg-bearing key positionally means a value that happens to
+        spell a key name (e.g. SUBJECT "SINCE") is never re-interpreted as a key.
+        NOT/OR need no special case: their following terms are simply the next keys
+        the walk visits, and each decodes its own args. This is a projection-free,
+        read-only transform of the parsed query list (a fresh list is returned; the
+        input is not mutated)."""
+        out = []
+        i = 0
+        n = len(query)
+        while i < n:
+            tok = query[i]
+            if isinstance(tok, list):
+                out.append(cls._decode_manual_search(tok))
+                i += 1
+                continue
+            out.append(tok)  # key token / bare message-set / flag stays as-is (bytes)
+            key = tok.upper() if isinstance(tok, bytes) else tok
+            if key in _SEARCH_STR_ARG2:  # HEADER: two str args (field-name, value)
+                for j in (1, 2):
+                    if i + j < n:
+                        out.append(cls._to_search_str(query[i + j]))
+                i += 3
+                continue
+            if key in _SEARCH_STR_ARG1:  # one str/date arg -> decode to str
+                if i + 1 < n:
+                    out.append(cls._to_search_str(query[i + 1]))
+                i += 2
+                continue
+            if key in _SEARCH_BYTES_ARG1:  # one arg, kept as wire bytes
+                if i + 1 < n:
+                    out.append(query[i + 1])
+                i += 2
+                continue
+            i += 1
+        return out
+
     def do_SEARCH(self, tag, charset, query, uid=0):
         """Push a single SUBJECT/BODY/TEXT substring SEARCH to the store (#148).
 
@@ -221,7 +316,16 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         """
         pushable = self._pushable_substr_search(charset, query)
         if pushable is None:
-            imap4.IMAP4Server.do_SEARCH(self, tag, charset, query, uid=uid)
+            # Manual-search fallback. Decode the string/date VALUE args from wire
+            # bytes to str first, so Twisted's stock matchers (which the upstream
+            # str/bytes bug breaks on bytes) evaluate string AND date keys
+            # correctly -- #218/#222. The pushdown predicate above already ran on
+            # the ORIGINAL bytes query, so #148 pushdown behavior is unchanged;
+            # only this non-pushable path is decoded (and only its str/date args --
+            # see _decode_manual_search).
+            imap4.IMAP4Server.do_SEARCH(
+                self, tag, charset, self._decode_manual_search(query), uid=uid
+            )
             return
         field, term = pushable
         maybeDeferred(self.mbox.search_substr, field, term, bool(uid)).addCallback(
@@ -249,6 +353,39 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         imap4.IMAP4Server.opt_charset,
         imap4.IMAP4Server.arg_searchkeys,
     )
+
+    def _listWork(self, tag, ref, mbox, sub, cmdName):
+        """Answer LIST "" "" with the RFC 3501 6.3.8 delimiter/root reply (#218).
+
+        An empty mailbox pattern is NOT a wildcard: 6.3.8 makes it a special probe
+        for the hierarchy delimiter and the reference's root name. iOS Mail and
+        Evolution issue LIST "" "" to learn the delimiter before they build any
+        folder path; Twisted's stock _listWork treats "" as a pattern and returns
+        the whole folder set, so those clients never learn the delimiter (and the
+        wire-convicted symptom is folders that exist but never populate). We answer
+        with the single \\Noselect root row: delimiter "/" (getHierarchicalDelimiter),
+        and our flat namespace has no reference root so the root name is "". Only
+        LIST carries this special case -- LSUB (6.3.9) has no empty-pattern rule --
+        so we gate on cmdName; every other LIST (and all LSUB) takes the stock path
+        byte-for-byte unchanged."""
+        if cmdName == b"LIST" and imap4._parseMbox(mbox) == "":
+            self.sendUntaggedResponse(b'LIST (\\Noselect) "/" ""')
+            self.sendPositiveResponse(tag, cmdName + b" completed")
+            return
+        imap4.IMAP4Server._listWork(self, tag, ref, mbox, sub, cmdName)
+
+    # Route LIST through the override (dispatchCommand reads the class tuple, not
+    # getattr(self, "_listWork")). We rebind ONLY the LIST tuples; the LSUB tuples
+    # still hold the parent _listWork, and the cmdName gate makes a non-empty LIST
+    # identical to the stock behavior.
+    auth_LIST = (  # type: ignore[assignment]
+        _listWork,
+        imap4.IMAP4Server.arg_astring,
+        imap4.IMAP4Server.arg_astring,
+        0,
+        b"LIST",
+    )
+    select_LIST = auth_LIST  # type: ignore[assignment]
 
 
 class PosternIMAPFactory(protocol.Factory):
