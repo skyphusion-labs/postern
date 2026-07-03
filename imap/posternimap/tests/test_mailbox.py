@@ -625,7 +625,10 @@ class AccountTest(unittest.TestCase):
 
         acct = PosternAccount(self.cfg, "agent", "tok")
         names = {name for name, _ in acct.listMailboxes("", "*")}
-        self.assertEqual(names, {"INBOX", "Sent", "All", "Drafts", "Trash", "Junk", "Archive"})
+        self.assertEqual(
+            names,
+            {"INBOX", "Sent", "All", "Drafts", "Trash", "Junk", "Archive", "Notes"},
+        )
 
     def test_list_advertises_rfc6154_special_use_attributes(self):
         from posternimap.account import PosternAccount
@@ -643,6 +646,9 @@ class AccountTest(unittest.TestCase):
         self.assertNotIn("\\Sent", flags["INBOX"])
         for name in flags:
             self.assertIn("\\HasNoChildren", flags[name])
+        # Notes has no RFC 6154 special-use attribute (none is defined): bare flags
+        # (structural only), so iOS finds it in LIST and never CREATEs it (#218).
+        self.assertEqual(flags["Notes"], {"\\HasNoChildren"})
 
     def test_selected_mailbox_reports_message_flags_not_special_use(self):
         # The SELECT instance must report message flags, NOT the LIST attributes.
@@ -665,7 +671,7 @@ class AccountTest(unittest.TestCase):
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
-        for name in ("Drafts", "Trash", "Junk", "Archive"):
+        for name in ("Drafts", "Trash", "Junk", "Archive", "Notes"):
             box = acct.select(name)
             self.assertEqual(box.getMessageCount(), 0, name)
         # An empty placeholder must not have touched the Postern API at all.
@@ -677,8 +683,26 @@ class AccountTest(unittest.TestCase):
         acct = PosternAccount(self.cfg, "agent", "tok")
         self.assertIsNone(acct.subscribe("Sent"))
         self.assertIsNone(acct.unsubscribe("Sent"))
-        for name in ("INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive", "All"):
+        for name in ("INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive", "All", "Notes"):
             self.assertTrue(acct.isSubscribed(name))
+
+    def test_notes_placeholder_folder_prevents_ios_create(self):
+        # #218 round 3 (live-convicted): iOS Mail issues `CREATE Notes` during setup
+        # and aborts the whole sync on the read-only NO. Notes is advertised as an
+        # existing present-but-empty placeholder so iOS finds it in LIST and never
+        # CREATEs it: it appears in LIST/LSUB with bare structural flags (no RFC 6154
+        # special-use), is selectable + empty, and costs zero API calls.
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        listed = dict(acct.listMailboxes("", "*"))
+        self.assertIn("Notes", listed)
+        self.assertEqual(set(listed["Notes"].getFlags()), {"\\HasNoChildren"})
+        self.assertTrue(acct.isSubscribed("Notes"))
+        box = acct.select("Notes")
+        self.assertIsNotNone(box)
+        self.assertEqual(box.getMessageCount(), 0)
+        self.assertEqual(self.transport.calls, [])  # no API hit for the placeholder
 
     def test_select_inbox_case_insensitive(self):
         from posternimap.account import PosternAccount
