@@ -151,6 +151,11 @@ class Message:
     trusted: bool
     received_at: str
     attachments: list[Attachment] = field(default_factory=list)
+    # The raw HTML body when the message carried an HTML part (CONTRACT: StoredMessage
+    # .bodyHtml, served by GET /api/messages/{id}). None for a text-only message or an
+    # old row. The renderer projects this as the text/html alternative so an HTML mail
+    # renders as HTML in a client, not as the lossy stripped-text derivation (#210).
+    body_html: Optional[str] = None
     # Envelope fidelity v2 (CONTRACT section 10.3); see MessageSummary for semantics.
     cc: Optional[str] = None
     bcc: Optional[str] = None
@@ -172,6 +177,7 @@ class Message:
             date=d.get("date", ""),
             in_reply_to=d.get("inReplyTo"),
             body_text=d.get("bodyText", ""),
+            body_html=d.get("bodyHtml"),
             trusted=bool(d.get("trusted", False)),
             received_at=d.get("receivedAt", ""),
             attachments=[
