@@ -177,13 +177,20 @@ class PosternIMAPMessage:
             env = envelope_headers(self._summary)
             return {n: env[n] for n in names_lower if n in env}
 
-        # The whole-header request (negate=True, no names): ENVELOPE and the
-        # pre-open RFC822.HEADER both land here. Serve the envelope headers
-        # body-free so an ENVELOPE scan never hydrates; the body-derived MIME
-        # headers appear once the message is opened (see class docstring).
+        # The whole-header request (negate=True, no names) is read two ways. Twisted's
+        # getEnvelope does per-key lookups (headers.get("subject"), .get("cc"), ...) and
+        # never touches a MIME header, so an ENVELOPE / folder scan must stay a
+        # zero-body-fetch pass (#102). The whole-message serializers (RFC822,
+        # RFC822.HEADER, BODY[]) instead ITERATE the map via .items(). _EnvelopeHeaders
+        # serves per-key access from the body-free summary and hydrates only on
+        # iteration, so a cold whole-message fetch still carries Content-Type /
+        # Content-Transfer-Encoding (e.g. text/html) that the envelope subset omits --
+        # without which the client defaulted to text/plain and rendered HTML as markup
+        # (#210). Once the message is already loaded, serve the full parsed headers.
         if negate and not names_lower:
-            env = envelope_headers(self._summary)
-            return dict(env)
+            if self._loaded:
+                return self._headers_from_parsed(True, set())
+            return _EnvelopeHeaders(envelope_headers(self._summary), self._full_headers)
 
         # Anything else (a specific non-envelope header like Content-Type, or a
         # negate-with-exclusions request) needs the rendered message.
@@ -208,6 +215,12 @@ class PosternIMAPMessage:
                 # gets one safe ASCII line and never crashes the connection (#161).
                 result[key.lower()] = _to_wire(value)
         return result
+
+    def _full_headers(self) -> dict:
+        # Hydrate and return every rendered header (the whole-message serializers need
+        # the body-derived MIME headers, not just the envelope subset).
+        self._hydrate()
+        return self._headers_from_parsed(True, set())
 
     def getBodyFile(self) -> BytesIO:
         self._hydrate()
@@ -240,8 +253,41 @@ class PosternIMAPMessage:
         return self._parsed.is_multipart()
 
     def getSubPart(self, part: int):
-        # v1 messages are single-part text; no subparts to address.
-        raise IndexError("postern-imap messages are single-part in v1")
+        # The projection is single-part (text/plain or text/html, #210); there are no
+        # addressable subparts. Twisted's subparts() iterator stops on IndexError.
+        raise IndexError("postern-imap messages are single-part")
+
+
+class _EnvelopeHeaders(dict):
+    """Header map for the whole-header request on a message not yet hydrated (#210).
+
+    Seeded with the body-free ENVELOPE headers. A per-key lookup -- what Twisted's
+    getEnvelope does (headers.get("subject"), .get("cc"), ...) -- reads straight from
+    that seed, so an ENVELOPE / folder scan stays a zero-body-fetch pass (#102);
+    getEnvelope never reads a MIME header and never iterates.
+
+    Iterating the map -- what the RFC822 / RFC822.HEADER / whole-message serializers do
+    via .items()/.keys() -- hydrates the message and yields the FULL rendered headers,
+    so a cold BODY[]/RFC822 fetch carries Content-Type / Content-Transfer-Encoding /
+    MIME-Version (e.g. text/html for an HTML mail), which the envelope subset omits.
+    Without this a cold whole-message fetch dropped the Content-Type and the client
+    defaulted to text/plain, rendering an HTML body as literal markup."""
+
+    def __init__(self, envelope: dict, full) -> None:
+        super().__init__(envelope)
+        self._full = full
+
+    def items(self):
+        return self._full().items()
+
+    def keys(self):
+        return self._full().keys()
+
+    def values(self):
+        return self._full().values()
+
+    def __iter__(self):
+        return iter(self._full())
 
 
 def _parse_dt(src: str):

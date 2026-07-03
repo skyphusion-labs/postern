@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import email
 import re
+from html import escape as _html_escape
 from typing import Optional
 from email.message import EmailMessage
 from email.utils import format_datetime, parsedate_to_datetime
@@ -153,12 +154,50 @@ def render_rfc822(msg: Message) -> bytes:
         reply_to=msg.reply_to,
     )
 
-    body = msg.body_text or ""
+    html = (msg.body_html or "").strip()
+    names = ""
     if msg.attachments:
         names = ", ".join(a.filename or "(unnamed)" for a in msg.attachments)
-        note = f"\n\n[{len(msg.attachments)} attachment(s): {names}; fetch via the Postern API]"
-        body = body + note
-    em.set_content(body)
+
+    # cte="8bit" is load-bearing (#210). EmailMessage otherwise picks
+    # quoted-printable/base64 for any non-ASCII, long-line, or "="-bearing body
+    # (every HTML/marketing mail), but the IMAP door serves the DECODED payload
+    # (message.getBodyFile) under that declared encoding, so a client honours the
+    # header and decodes the raw bytes a SECOND time, corrupting them ("=ab" run,
+    # multibyte soup). 8bit is the identity encoding: the served body equals what the
+    # header declares, so the client decodes exactly once. IMAP literals are 8-bit
+    # clean (RFC 3501 counts octets), so an 8bit body is wire-safe.
+    #
+    # Line-length deviation (deliberate, noted): 8bit carries the RFC 5322/5321
+    # <=998-octet line expectation, and HTML mail routinely has multi-kilobyte lines.
+    # We do NOT re-wrap (that would corrupt HTML); IMAP BODY[] is an octet-counted
+    # literal so transport is safe, and MUAs render long 8bit lines fine. The hard
+    # invariant we DO keep: the declared CTE always matches the served bytes (identity),
+    # so the client never double-decodes -- test_render_8bit_is_identity_on_long_lines
+    # fails if EmailMessage ever silently re-picks quoted-printable for some payload.
+    if html:
+        # The message carried an HTML part: project it as text/html so an HTML client
+        # renders the real message, not the lossy stripped-text (htmlToText) derivation
+        # that landed in body_text. We keep the door SINGLE-PART on purpose: a
+        # multipart/alternative would need the top Content-Type (with boundary) served
+        # in the body-free header path that ENVELOPE scans use (#102), and the summary
+        # carries no "has HTML" signal to compute it without a body fetch. Serving the
+        # HTML alone is a faithful, valid single-representation projection; a
+        # text/plain fallback via multipart/alternative is a future enhancement gated
+        # on a summary hasHtml flag.
+        if msg.attachments:
+            html = html + (
+                f"<p>[{len(msg.attachments)} attachment(s): "
+                f"{_html_escape(names)}; fetch via the Postern API]</p>"
+            )
+        em.set_content(html, subtype="html", cte="8bit")
+    else:
+        text = msg.body_text or ""
+        if msg.attachments:
+            text = text + (
+                f"\n\n[{len(msg.attachments)} attachment(s): {names}; fetch via the Postern API]"
+            )
+        em.set_content(text, cte="8bit")
     return em.as_bytes()
 
 

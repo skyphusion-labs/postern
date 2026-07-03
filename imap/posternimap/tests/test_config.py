@@ -44,6 +44,25 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_IMAP_AUTH_MODE": "weird"})
 
+    def test_uidvalidity_defaults_to_one(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x"})
+        self.assertEqual(cfg.imap_uidvalidity, 1)
+
+    def test_uidvalidity_parses_env(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_IMAP_UIDVALIDITY": "7"})
+        self.assertEqual(cfg.imap_uidvalidity, 7)
+
+    def test_uidvalidity_rejects_zero_and_negative(self):
+        for bad in ("0", "-1"):
+            with self.assertRaises(ConfigError):
+                Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_IMAP_UIDVALIDITY": bad})
+
+    def test_uidvalidity_rejects_above_32bit(self):
+        with self.assertRaises(ConfigError):
+            Config.from_env(
+                {"POSTERN_API_URL": "https://x", "POSTERN_IMAP_UIDVALIDITY": str(0x100000000)}
+            )
+
     def test_partial_tls_errors(self):
         with self.assertRaises(ConfigError):
             Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_IMAP_TLS_CERT": "/c.pem"})
