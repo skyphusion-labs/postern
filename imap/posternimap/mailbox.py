@@ -447,6 +447,31 @@ class PosternMailbox:
             self._stop_poll()
         return None
 
+    def poll_now(self) -> int:
+        """Refresh from the store now and push an untagged EXISTS if new mail arrived.
+
+        Called on NOOP / CHECK (see server.PosternIMAP4Server.do_NOOP): RFC 3501 6.1.2
+        makes NOOP a client's explicit poll for status, so new mail must surface on it
+        immediately, without waiting for the timed poll and EVEN when the timed poll is
+        disabled (POSTERN_IMAP_POLL_SECONDS=0). Same append-only, body-free refresh the
+        timed poll uses; a no-op before the snapshot is loaded or on an empty mailbox.
+        New arrivals grow EXISTS at the high end; existing sequence numbers and UIDs are
+        untouched (RFC 3501: no renumbering)."""
+        if not self._loaded or self._empty:
+            return 0
+        try:
+            added = self._refresh()
+        except Exception:
+            from twisted.python import log
+
+            log.err(None, "postern-imap: NOOP refresh failed")
+            return 0
+        if added:
+            count = len(self._summaries)
+            for listener in list(self._listeners):
+                listener.newMessages(count, None)
+        return added
+
     def _maybe_start_poll(self) -> None:
         if (
             self._poll is not None
