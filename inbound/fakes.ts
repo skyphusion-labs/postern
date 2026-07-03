@@ -254,6 +254,26 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/FROM messages m/i.test(sql)) {
           let i = 0;
           let work = rows.slice();
+          // substr search (#212): COALESCE(m.col,'') LIKE ? ESCAPE '\' OR ... .
+          // Detect by the ESCAPE clause (the list from= filter is a bare LIKE ?,
+          // never ESCAPE), pull the OR'd columns in order, consume one identical
+          // pattern bind per column, then filter by case-insensitive substring
+          // (LIKE folds ASCII case). Unescape the pattern to the raw needle.
+          const likeCols = [...sql.matchAll(/COALESCE\(m\.(\w+),''\) LIKE \? ESCAPE/gi)].map((mm) => mm[1]);
+          if (likeCols.length) {
+            const pat = String(bound[i]);
+            i += likeCols.length;
+            const needle = pat
+              .replace(/^%/, "")
+              .replace(/%$/, "")
+              .replace(/\\%/g, "%")
+              .replace(/\\_/g, "_")
+              .replace(/\\\\/g, "\\")
+              .toLowerCase();
+            work = work.filter((r) =>
+              likeCols.some((c) => String((r as Record<string, unknown>)[c] ?? "").toLowerCase().includes(needle)),
+            );
+          }
           if (/messages_fts MATCH \?/i.test(sql)) {
             const expr = String(bound[i++]); // phrase OR expression: "a" OR "b"
             const terms = (expr.match(/"([^"]+)"/g) ?? []).map((t) => t.replace(/"/g, "").toLowerCase());
