@@ -608,5 +608,154 @@ class ProxyOverTLSChainTest(unittest.TestCase):
         self.assertEqual(proto.getPeer().host, "198.51.100.7")
 
 
+if HAVE_TWISTED:
+    class _RecordingIMAP4Client(imap4.IMAP4Client):
+        """Captures unsolicited EXISTS (the IMailboxListener.newMessages callback the
+        client fires when the server pushes an untagged EXISTS)."""
+
+        def __init__(self, *a, **k):
+            imap4.IMAP4Client.__init__(self, *a, **k)
+            self.exists_events = []
+
+        def newMessages(self, exists, recent):
+            if exists is not None:
+                self.exists_events.append(int(exists))
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerNoopRefreshE2ETest(twisted_unittest.TestCase):
+    """#102 over the wire: a NOOP must surface mail that arrived mid-session as an
+    untagged EXISTS, EVEN with the timed poll disabled (poll_seconds=0). Proves the
+    do_NOOP override drives mailbox.poll_now()."""
+
+    def setUp(self):
+        self.msgs = [
+            make_message("m2", subject="meeting tuesday", body="lunch?"),
+            make_message("m1", subject="welcome aboard", body="hello"),
+        ]
+        self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=2)
+        # poll_seconds=0: no LoopingCall (keeps trial's reactor clean); NOOP must still
+        # surface new mail via the synchronous poll_now.
+        self.cfg = Config(
+            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+        )
+        self.factory, self._restore = _patched_factory(self.cfg, self.transport)
+        self.port = reactor.listenTCP(0, self.factory, interface="127.0.0.1")
+        self.addr = self.port.getHost()
+
+    def tearDown(self):
+        cls, attr, orig = self._restore
+        setattr(cls, attr, orig)
+        return self.port.stopListening()
+
+    @defer.inlineCallbacks
+    def _client(self):
+        cc = ClientCreator(reactor, _RecordingIMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", self.addr.port)
+        defer.returnValue(proto)
+
+    @defer.inlineCallbacks
+    def test_noop_surfaces_new_mail_mid_session(self):
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            info = yield proto.select(b"INBOX")
+            self.assertEqual(info["EXISTS"], 2)
+            # New inbound mail arrives at the newest end AFTER the snapshot loaded.
+            self.transport.messages.insert(0, make_message("m3", subject="fresh", body="new"))
+            # noop() returns the untagged status the server pushed during NOOP; the
+            # refresh must have surfaced the new arrival as an untagged EXISTS = 3.
+            lines = yield proto.noop()
+            exists = [ln for ln in lines if len(ln) == 2 and ln[1] == b"EXISTS"]
+            self.assertTrue(exists, "no untagged EXISTS on NOOP: %r" % (lines,))
+            self.assertEqual(int(exists[-1][0]), 3)
+        finally:
+            yield proto.logout()
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerIdleCapabilityE2ETest(twisted_unittest.TestCase):
+    """#102 RFC 2177: advertise IDLE only when a live push path (the timed poll) exists.
+    With the poll off, advertising IDLE while never pushing would be non-compliant.
+    CAPABILITY needs no SELECT, so no LoopingCall is started (reactor stays clean)."""
+
+    def _spin(self, poll_seconds):
+        transport = FakeTransport([make_message("m1", subject="x", body="y")],
+                                  expected_token="tok", page_size=2)
+        cfg = Config(api_url="https://x", auth_mode="token", api_timeout=5.0,
+                     imap_poll_seconds=poll_seconds)
+        factory, self._restore = _patched_factory(cfg, transport)
+        self._port = reactor.listenTCP(0, factory, interface="127.0.0.1")
+        return self._port.getHost()
+
+    def tearDown(self):
+        cls, attr, orig = self._restore
+        setattr(cls, attr, orig)
+        return self._port.stopListening()
+
+    @defer.inlineCallbacks
+    def _caps(self, addr):
+        cc = ClientCreator(reactor, imap4.IMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", addr.port)
+        try:
+            caps = yield proto.getCapabilities()
+        finally:
+            yield proto.transport.loseConnection()
+        defer.returnValue(caps)
+
+    @defer.inlineCallbacks
+    def test_idle_advertised_when_poll_enabled(self):
+        caps = yield self._caps(self._spin(30))
+        self.assertIn(b"IDLE", caps)
+
+    @defer.inlineCallbacks
+    def test_idle_not_advertised_when_poll_disabled(self):
+        caps = yield self._caps(self._spin(0))
+        self.assertNotIn(b"IDLE", caps)
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerIdlePushTest(unittest.TestCase):
+    """#102 RFC 2177: while a client IDLEs, the timed poll's new-mail push must reach it
+    as an untagged EXISTS. do_IDLE keeps the connection selected (still a registered
+    mailbox listener), so a poll tick that finds new mail forwards an EXISTS straight to
+    the idling client. Deterministic: a StringTransport + a manual poll tick, no reactor,
+    no LoopingCall (mailbox default poll_seconds=0, so addListener starts no loop)."""
+
+    def test_poll_pushes_exists_to_a_client_in_idle(self):
+        from twisted.internet.testing import StringTransport
+        from posternimap.server import PosternIMAP4Server
+        from posternimap.mailbox import PosternMailbox
+        from posternimap.client import PosternClient
+
+        fake = FakeTransport(
+            [make_message("m1", subject="a", body="x")], expected_token="tok", page_size=2
+        )
+        client = PosternClient("https://x", "tok", transport=fake)
+        mbox = PosternMailbox(client, page_size=2, direction="inbound")
+        self.assertEqual(mbox.getMessageCount(), 1)  # load the snapshot
+
+        proto = PosternIMAP4Server()
+        proto.makeConnection(StringTransport())
+        # makeConnection schedules the IMAP idle-timeout on the real reactor; cancel it
+        # so this reactor-less test leaves no DelayedCall for the next trial test.
+        self.addCleanup(proto.setTimeout, None)
+        # What SELECT wires up: the mailbox and the server-as-listener.
+        proto.mbox = mbox
+        mbox.addListener(proto)
+        proto.do_IDLE(b"t1")  # enter IDLE (continuation request)
+        proto.transport.clear()  # drop greeting + continuation; keep only the push
+
+        # New inbound mail arrives; a poll tick surfaces it and pushes to the idler.
+        fake.messages.insert(0, make_message("m2", subject="b", body="y"))
+        mbox._poll_tick()
+
+        wire = proto.transport.value()
+        self.assertIn(b"EXISTS", wire)
+        self.assertIn(b"2", wire)  # the new mailbox size
+
+        mbox.removeListener(proto)  # clean teardown (no loop was running)
+
+
 if __name__ == "__main__":
     unittest.main()
