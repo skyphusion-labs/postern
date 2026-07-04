@@ -180,6 +180,24 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
     @defer.inlineCallbacks
+    def test_empty_folder_uid_search_completes_over_the_wire(self):
+        # #218 round 4 end-to-end: a UID SEARCH over an EMPTY placeholder must complete
+        # cleanly through a real client, exercising the always-emit-untagged path
+        # (__cbManualSearch override) iOS needs. A Twisted client cannot distinguish a
+        # missing untagged reply from an empty one, so the exact bare `* SEARCH` bytes
+        # are asserted at the unit layer (IDCommandSelectAndTraceTest); this is the
+        # end-to-end smoke that the path returns no ids and does not hang or error.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"Drafts")
+            self.assertEqual(info["EXISTS"], 0)
+            res = yield proto.search(imap4.Query(undeleted=True), uid=True)
+            self.assertEqual(list(res), [])
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
     def test_select_announces_permanentflags_and_flag_keywords(self):
         # #218: through the REAL client, SELECT must carry PERMANENTFLAGS (empty on the
         # read-only door) and a FLAGS list that announces the custom keywords a FETCH
@@ -1178,3 +1196,51 @@ class IDCommandSelectAndTraceTest(unittest.TestCase):
         self.assertNotIn("topsecretpw123", blob)
         self.assertIn("wire C:", blob)
         self.assertIn("<REDACTED>", blob)
+
+    def test_manual_search_empty_result_still_sends_bare_untagged(self):
+        # #218 round 4 / RFC 3501 7.2.5: a successful SEARCH over an empty folder MUST
+        # still send the untagged reply -- a BARE `* SEARCH` (no ids, NO trailing
+        # space). Twisted 24.3.0 skipped it entirely on empty; iOS stalled forever.
+        srv = self._server()
+        srv.transport.clear()
+        srv._IMAP4Server__cbManualSearch([], b"t1", None, [b"ALL"], 0)
+        out = srv.transport.value()
+        self.assertIn(b"* SEARCH\r\n", out)        # bare untagged reply present
+        self.assertNotIn(b"* SEARCH \r\n", out)     # NOT the old trailing-space form
+        self.assertIn(b"t1 OK SEARCH completed", out)
+
+    def test_manual_search_nonempty_result_sends_ids(self):
+        # Non-empty behavior unchanged: the untagged reply carries the matching ids.
+        class _Msg:
+            def __init__(self, uid):
+                self._uid = uid
+
+            def getUID(self):
+                return self._uid
+
+        result = [(1, _Msg(11)), (2, _Msg(22))]
+        srv = self._server()
+        srv.transport.clear()
+        srv._IMAP4Server__cbManualSearch(result, b"t2", None, [b"ALL"], 0)
+        out = srv.transport.value()
+        self.assertIn(b"* SEARCH 1 2\r\n", out)     # sequence ids (uid=0), ALL matches
+        self.assertIn(b"t2 OK SEARCH completed", out)
+
+    def test_pushdown_search_empty_result_sends_bare_untagged(self):
+        # The #148 pushdown reply path gets the same normalization: empty -> bare
+        # `* SEARCH`, not the old `b"SEARCH " + b""` trailing-space form.
+        srv = self._server()
+        srv.transport.clear()
+        srv._cb_push_search([], b"t3")
+        out = srv.transport.value()
+        self.assertIn(b"* SEARCH\r\n", out)
+        self.assertNotIn(b"* SEARCH \r\n", out)
+        self.assertIn(b"t3 OK SEARCH completed", out)
+
+    def test_pushdown_search_nonempty_result_sends_ids(self):
+        srv = self._server()
+        srv.transport.clear()
+        srv._cb_push_search([5, 7], b"t4")
+        out = srv.transport.value()
+        self.assertIn(b"* SEARCH 5 7\r\n", out)
+        self.assertIn(b"t4 OK SEARCH completed", out)

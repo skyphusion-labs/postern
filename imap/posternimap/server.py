@@ -18,6 +18,7 @@ fronted by stunnel; do not expose a plaintext listener to the internet.
 
 from __future__ import annotations
 
+import copy
 import re
 import sys
 
@@ -412,14 +413,82 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             self._cb_push_search, tag
         ).addErrback(self._IMAP4Server__ebSearch, tag)
 
+    @staticmethod
+    def _search_untagged(id_tokens):
+        """Build the untagged SEARCH response bytes (#218 round 4). RFC 3501 7.2.5: a
+        successful SEARCH MUST send an untagged SEARCH reply even with NO matches --
+        a bare `* SEARCH` with no ids and NO trailing space. id_tokens is a list of
+        already-formatted id byte strings; empty => bare `SEARCH`."""
+        if id_tokens:
+            return b"SEARCH " + b" ".join(id_tokens)
+        return b"SEARCH"
+
     def _cb_push_search(self, ids, tag):
         """Emit the pushed-search result, replicating IMAP4Server.__cbSearch (which is
         name-mangled and so not callable directly): an untagged SEARCH with the ids
         (already the UIDs when this was a UID SEARCH -- the mailbox emitted them),
-        then the tagged OK. `ids` is a list of ints from mailbox.search_substr."""
-        idbytes = networkString(" ".join(str(i) for i in ids))
-        self.sendUntaggedResponse(b"SEARCH " + idbytes)
+        then the tagged OK. `ids` is a list of ints from mailbox.search_substr. An
+        EMPTY result still emits the mandatory bare `* SEARCH` (RFC 3501 7.2.5), via
+        the shared _search_untagged helper -- not the old `b"SEARCH " + b""`
+        trailing-space form (#218 round 4)."""
+        tokens = [networkString(str(i)) for i in ids]
+        self.sendUntaggedResponse(self._search_untagged(tokens))
         self.sendPositiveResponse(tag, b"SEARCH completed")
+
+    def _IMAP4Server__cbManualSearch(  # overrides IMAP4Server.__cbManualSearch
+        self, result, tag, mbox, query, uid, searchResults=None
+    ):
+        """Always emit the untagged SEARCH reply, even on an empty result set (#218
+        round 4). Twisted 24.3.0's stock __cbManualSearch skips the untagged response
+        when there are no matches (`if searchResults: sendUntaggedResponse(...)`),
+        which violates RFC 3501 7.2.5 (a successful SEARCH MUST send `* SEARCH`, bare
+        when empty). iOS Mail SELECTs the empty Notes placeholder, runs UID SEARCH
+        (e.g. `1:* NOT DELETED`) as part of its per-folder sync, and stalls forever
+        waiting for the untagged reply that never comes -- eternal spinner, no further
+        commands. This is the same str/bytes-era rot as #222; it stayed hidden because
+        every prior search we replayed had matches. Upstream Twisted bug (goes in the
+        parked report alongside #222); this is the compliant workaround.
+
+        A verbatim copy of the stock body with two changes: the final branch always
+        sends via the shared _search_untagged helper (bare `SEARCH` when empty), and
+        the batched-recursion callLater references the EXPLICIT mangled name
+        self._IMAP4Server__cbManualSearch (writing self.__cbManualSearch here would
+        mangle to this subclass and miss the override). Name-mangled like the
+        __ebStatus / __ebAppend overrides; a future Twisted rework of the search
+        callback simply stops this from applying (SEARCH degrades to the stock, still
+        empty-skipping behavior -- re-copy then)."""
+        if searchResults is None:
+            searchResults = []
+        i = 0
+
+        # result is a list of tuples (sequenceId, Message)
+        lastSequenceId = result and result[-1][0]
+        lastMessageId = result and result[-1][1].getUID()
+        for i, (msgId, msg) in list(zip(range(5), result)):
+            # searchFilter and singleSearchStep will mutate the query.  Dang.
+            # Copy it here or else things will go poorly for subsequent messages.
+            if self._searchFilter(
+                copy.deepcopy(query), msgId, msg, lastSequenceId, lastMessageId
+            ):
+                searchResults.append(b"%d" % (msg.getUID() if uid else msgId,))
+
+        if i == 4:
+            from twisted.internet import reactor
+
+            reactor.callLater(
+                0,
+                self._IMAP4Server__cbManualSearch,
+                list(result[5:]),
+                tag,
+                mbox,
+                query,
+                uid,
+                searchResults,
+            )
+        else:
+            # RFC 3501 7.2.5: ALWAYS send the untagged SEARCH, bare when empty.
+            self.sendUntaggedResponse(self._search_untagged(searchResults))
+            self.sendPositiveResponse(tag, b"SEARCH completed")
 
     # Rebind the SELECTED-state SEARCH dispatch tuple so dispatchCommand routes to the
     # override above. dispatchCommand reads the class tuple by state name
