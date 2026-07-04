@@ -96,7 +96,7 @@ class ReadOnlyAccountError(imap4.MailboxException):
     """Raised for mutating account operations (the mailbox set is fixed in v1)."""
 
 
-@implementer(imap4.IAccount)
+@implementer(imap4.IAccount, imap4.INamespacePresenter)
 class PosternAccount:
     def __init__(self, cfg: Config, username: str, token: str) -> None:
         self._cfg = cfg
@@ -174,6 +174,22 @@ class PosternAccount:
     def unsubscribe(self, name):
         # Likewise a no-op success: the set is fixed and always subscribed, but we
         # must not fail the client if it issues UNSUBSCRIBE.
+        return None
+
+    # --- INamespacePresenter: advertise a real personal namespace (#218 round 6) ---
+    # Twisted's do_NAMESPACE returns NIL for every class unless the account provides
+    # INamespacePresenter. A NIL personal namespace under-reports what we actually
+    # have -- one flat personal namespace at prefix "" with "/" as the hierarchy
+    # delimiter -- and a strict client (iOS) uses the personal namespace to place and
+    # verify folders. A known-good server (Dovecot) answers `(("" "/")) NIL NIL`; we
+    # now match it. No shared/other-user namespaces exist on this single-account door.
+    def getPersonalNamespaces(self):
+        return [["", "/"]]
+
+    def getSharedNamespaces(self):
+        return None
+
+    def getUserNamespaces(self):
         return None
 
 

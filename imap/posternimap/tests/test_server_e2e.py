@@ -170,6 +170,22 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
     @defer.inlineCallbacks
+    def test_namespace_advertises_personal_namespace(self):
+        # #218 round 6: NAMESPACE must report our real personal namespace (prefix "",
+        # delimiter "/") -- not the NIL the stock account produced -- matching a
+        # known-good server (Dovecot answers `(("" "/")) NIL NIL`). iOS uses the
+        # personal namespace to place/verify folders.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            ns = yield proto.namespace()
+            self.assertEqual(ns[0], [["", "/"]])  # one personal namespace
+            self.assertEqual(ns[1], [])           # no shared
+            self.assertEqual(ns[2], [])           # no other-user
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
     def test_placeholder_folder_selectable_and_empty(self):
         proto = yield self._client()
         try:
@@ -250,6 +266,15 @@ class ServerE2ETest(twisted_unittest.TestCase):
             pf = set(info["PERMANENTFLAGS"])
             self.assertIn("\\*", pf)       # the "normal read-write mailbox" signal
             self.assertIn("\\Seen", pf)
+            # round-6 FLAGS/PF coherence: the writable Notes folder advertises the
+            # standard system FLAGS (no trust/direction keywords -- it stores nothing),
+            # and FLAGS is a subset of PERMANENTFLAGS (matching a normal writable folder).
+            flags = set(info["FLAGS"])
+            self.assertEqual(
+                flags, {"\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft"}
+            )
+            self.assertNotIn("Trusted", flags)
+            self.assertTrue(flags <= pf, (flags, pf))
             # scoping regression: a sibling placeholder stays read-only + empty PF.
             info2 = yield proto.select(b"Drafts")
             self.assertFalse(info2["READ-WRITE"], info2)

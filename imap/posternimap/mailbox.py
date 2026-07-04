@@ -337,6 +337,17 @@ class PosternMailbox:
         # distinct instances for the two cases (see the class docstring).
         if self._list_view:
             return self._special_use + ["\\HasNoChildren"]
+        if self._writable_signal:
+            # Notes (#218 Experiment A + round-6 FLAGS/PF coherence): a
+            # writable-signalling placeholder that stores NO messages, so it can never
+            # actually return the trust/direction keywords on a FETCH. Advertise the
+            # standard system FLAGS set instead -- coherent with the writable
+            # PERMANENTFLAGS the SELECT sends (\\Answered \\Flagged \\Deleted \\Seen
+            # \\Draft \\*) and exactly what a normal writable folder (Dovecot)
+            # advertises -- so a strict client (iOS Notes) never balks on a FLAGS/PF
+            # mismatch. The incoherent keyword FLAGS was the one remaining anomaly in
+            # the SELECT Notes response after Experiment A served READ-WRITE.
+            return ["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft"]
         # SELECT view: announce every flag/keyword a FETCH on this mailbox can
         # return, so a client is never handed an unadvertised keyword (#218). A
         # message's getFlags() returns \\Seen plus the trust + direction keywords;
