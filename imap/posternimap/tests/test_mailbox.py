@@ -704,6 +704,17 @@ class AccountTest(unittest.TestCase):
         self.assertEqual(box.getMessageCount(), 0)
         self.assertEqual(self.transport.calls, [])  # no API hit for the placeholder
 
+    def test_only_notes_signals_writable_on_select(self):
+        # #218 Experiment A: isWriteable() (the SELECT READ-WRITE signal) is True ONLY
+        # for Notes; every other folder stays False. Writes are still refused at the
+        # store layer regardless -- this is the SELECT signal, not actual writability.
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        self.assertTrue(acct.select("Notes").isWriteable())
+        for name in ("INBOX", "Sent", "All", "Drafts", "Trash", "Junk", "Archive"):
+            self.assertFalse(acct.select(name).isWriteable(), name)
+
     def test_select_inbox_case_insensitive(self):
         from posternimap.account import PosternAccount
 
