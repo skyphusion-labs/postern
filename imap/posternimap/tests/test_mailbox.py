@@ -704,6 +704,19 @@ class AccountTest(unittest.TestCase):
         self.assertEqual(box.getMessageCount(), 0)
         self.assertEqual(self.transport.calls, [])  # no API hit for the placeholder
 
+    def test_account_advertises_personal_namespace(self):
+        # #218 round 6: the account provides INamespacePresenter with one personal
+        # namespace ("" / "/") and no shared/other-user namespaces, so do_NAMESPACE
+        # answers (("" "/")) NIL NIL instead of the stock NIL NIL NIL.
+        from posternimap.account import PosternAccount
+        from twisted.mail import imap4
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        self.assertTrue(imap4.INamespacePresenter.providedBy(acct))
+        self.assertEqual(acct.getPersonalNamespaces(), [["", "/"]])
+        self.assertIsNone(acct.getSharedNamespaces())
+        self.assertIsNone(acct.getUserNamespaces())
+
     def test_only_notes_signals_writable_on_select(self):
         # #218 Experiment A: isWriteable() (the SELECT READ-WRITE signal) is True ONLY
         # for Notes; every other folder stays False. Writes are still refused at the
