@@ -144,6 +144,7 @@ class PosternMailbox:
         uidvalidity: int = _UID_VALIDITY,
         clock=None,
         meter: Optional[Meter] = None,
+        writable_signal: bool = False,
     ) -> None:
         self._client = client
         # A disabled Meter by default: measurement hooks are no-ops unless an enabled
@@ -157,6 +158,11 @@ class PosternMailbox:
         self._window = window
         self._poll_seconds = poll_seconds
         self._uidvalidity = uidvalidity
+        # #218 Experiment A: report SELECT as READ-WRITE for this folder (the
+        # writability SIGNAL iOS Notes needs to provision), while every actual
+        # write (addMessage/store/expunge) stays honestly refused with a tagged
+        # NO. A SIGNAL, not a storage promise -- see server._cbSelectWork.
+        self._writable_signal = writable_signal
         self._summaries: List[MessageSummary] = []
         self._loaded = False
         # Highest UID (== store rowid) currently in the snapshot. UIDNEXT is this
@@ -313,7 +319,13 @@ class PosternMailbox:
         return 0  # everything is presented \\Seen (already processed)
 
     def isWriteable(self) -> bool:
-        return False
+        # #218 Experiment A: True ONLY for the Notes placeholder, so SELECT reports
+        # READ-WRITE (the writability signal Apple Notes-over-IMAP requires to finish
+        # provisioning the account). It does NOT make the store writable: addMessage
+        # (APPEND) still returns AppendRejectedError and store()/expunge() still raise
+        # ReadOnlyError, so every write is refused with a loud tagged NO -- no silent
+        # drop. Every other folder returns False (unchanged READ-ONLY posture).
+        return self._writable_signal
 
     def getHierarchicalDelimiter(self) -> str:
         return "/"

@@ -51,7 +51,7 @@ from .measure import Meter
 class _Folder:
     """Static description of one advertised mailbox."""
 
-    __slots__ = ("direction", "special_use", "empty", "windowed")
+    __slots__ = ("direction", "special_use", "empty", "windowed", "writable_signal")
 
     def __init__(
         self,
@@ -59,6 +59,7 @@ class _Folder:
         special_use: List[str],
         empty: bool,
         windowed: bool = False,
+        writable_signal: bool = False,
     ) -> None:
         self.direction = direction
         self.special_use = special_use
@@ -66,6 +67,10 @@ class _Folder:
         # windowed folders cap to the most-recent POSTERN_IMAP_WINDOW at SELECT; the
         # unbounded All folder is the archival escape hatch (#102 Stage 1).
         self.windowed = windowed
+        # #218 Experiment A: report SELECT READ-WRITE for this folder (Notes only) so
+        # iOS can provision its Notes account; writes are still refused (see mailbox
+        # isWriteable / addMessage). Signal, not a storage promise.
+        self.writable_signal = writable_signal
 
 
 # name (as the client sees it) -> folder description. INBOX/Sent/All are real
@@ -80,7 +85,10 @@ _MAILBOXES: Dict[str, _Folder] = {
     "Archive": _Folder(None, ["\\Archive"], True),
     # No RFC 6154 special-use exists for Notes; bare flags. Present-but-empty so iOS
     # Mail finds it in LIST and never issues the setup-aborting `CREATE Notes` (#218).
-    "Notes": _Folder(None, [], True),
+    # writable_signal=True (#218 Experiment A): SELECT Notes reports READ-WRITE so iOS
+    # completes Notes provisioning (a read-only Notes stalled the whole account setup,
+    # round 5); actual writes stay refused with a tagged NO.
+    "Notes": _Folder(None, [], True, writable_signal=True),
 }
 
 
@@ -114,6 +122,7 @@ class PosternAccount:
             poll_seconds=self._cfg.imap_poll_seconds,
             uidvalidity=self._cfg.imap_uidvalidity,
             meter=self._meter,
+            writable_signal=folder.writable_signal,
         )
 
     # --- IAccount: read ---

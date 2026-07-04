@@ -168,12 +168,27 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         we add:
           * OK [UIDNEXT n]         -- mbox.getUIDNext() (the store already knows it;
                                       STATUS returns it), so a client can size its sync.
-          * OK [PERMANENTFLAGS ()] -- the door is READ-ONLY, so no flag is persistable;
-                                      the empty list (with \\* absent) is the honest answer.
+          * OK [PERMANENTFLAGS ...] -- writability-dependent (see below).
         FLAGS reports every keyword a FETCH can actually return (the selected-view
         getFlags was widened to \\Seen + the Trusted/Untrusted + Inbound/Outbound
-        keywords), so a client is never handed an unannounced keyword. None of this
-        changes message identity or the body projection, so NO UIDVALIDITY bump. Plain
+        keywords), so a client is never handed an unannounced keyword.
+
+        Writability + PERMANENTFLAGS (#218 Experiment A): almost every folder is
+        READ-ONLY, so the mode is READ-ONLY and PERMANENTFLAGS is the empty list. The
+        ONE exception is Notes (mbox.isWriteable() True): round 5 convicted, on the
+        live device trace, that a read-only Notes folder fails Apple's Notes-over-IMAP
+        provisioning -- iOS SELECTs Notes, sees [READ-ONLY]/PERMANENTFLAGS (), gives up
+        WITHOUT ever attempting a write (window-wide APPEND count = 0), never advances
+        to INBOX, and the whole account is left unverified (so maild never syncs Mail).
+        Experiment A answers Notes with READ-WRITE + the RFC-standard writable set + \\*
+        (the normal read-write mailbox signal iOS needs) so provisioning completes. This
+        is a SIGNAL, not a storage promise: an actual STORE/APPEND to Notes is still
+        refused with a loud tagged NO (mailbox.store raises ReadOnlyError, addMessage
+        AppendRejectedError), so nothing is ever silently dropped. EXAMINE stays
+        READ-ONLY for every folder (protocol requires it). The louder, data-lossy
+        alternative (no-op-accept APPEND) is Experiment B, gated on Conrad's explicit
+        word. None of this changes message identity or the body projection, so NO
+        UIDVALIDITY bump (Notes is empty -- nothing cached to invalidate). Plain
         override (name-unmangled; _selectWork calls self._cbSelectWork), so a future
         Twisted rework simply degrades this to the stock (still-valid) response."""
         if mbox is None:
@@ -183,15 +198,29 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             self.sendNegativeResponse(tag, b"Mailbox cannot be selected")
             return
         flags = [networkString(flag) for flag in mbox.getFlags()]
+        # EXAMINE is read-only by protocol regardless of the mailbox; only SELECT of a
+        # writable-signalling mailbox (Notes, #218 Experiment A) reports READ-WRITE.
+        writable = mbox.isWriteable() and cmdName != b"EXAMINE"
         self.sendUntaggedResponse(b"%d EXISTS" % (mbox.getMessageCount(),))
         self.sendUntaggedResponse(b"%d RECENT" % (mbox.getRecentCount(),))
         self.sendUntaggedResponse(b"FLAGS (" + b" ".join(flags) + b")")
-        # Read-only door: nothing is persistable, so PERMANENTFLAGS is the empty list
-        # (no \\* -- new keywords cannot be created either).
-        self.sendPositiveResponse(None, b"[PERMANENTFLAGS ()] No permanent flags permitted")
+        if writable:
+            # #218 Experiment A: advertise the RFC-standard writable-folder set + \\*
+            # (the "normal read-write mailbox" signal iOS Notes looks for) so iOS
+            # completes provisioning. This is a SIGNAL, not a storage promise -- an
+            # actual STORE/APPEND to Notes is still refused with a loud tagged NO
+            # (mailbox.store raises ReadOnlyError, addMessage AppendRejectedError), so
+            # nothing is silently dropped. Scoped to the one writable-signalling folder.
+            self.sendPositiveResponse(
+                None, b"[PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\*)]"
+            )
+        else:
+            # Read-only folder: nothing is persistable, so PERMANENTFLAGS is the empty
+            # list (no \\* -- new keywords cannot be created either).
+            self.sendPositiveResponse(None, b"[PERMANENTFLAGS ()] No permanent flags permitted")
         self.sendPositiveResponse(None, b"[UIDVALIDITY %d]" % (mbox.getUIDValidity(),))
         self.sendPositiveResponse(None, b"[UIDNEXT %d]" % (mbox.getUIDNext(),))
-        s = mbox.isWriteable() and b"READ-WRITE" or b"READ-ONLY"
+        s = writable and b"READ-WRITE" or b"READ-ONLY"
         mbox.addListener(self)
         self.sendPositiveResponse(tag, b"[" + s + b"] " + cmdName + b" successful")
         self.state = "select"

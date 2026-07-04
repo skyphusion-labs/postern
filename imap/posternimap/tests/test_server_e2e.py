@@ -233,6 +233,34 @@ class ServerE2ETest(twisted_unittest.TestCase):
         finally:
             yield proto.logout()
 
+    @defer.inlineCallbacks
+    def test_notes_reports_read_write_signal_but_writes_are_refused(self):
+        # #218 Experiment A: SELECT Notes must report READ-WRITE with a real
+        # PERMANENTFLAGS set (the writability signal Apple Notes needs to finish
+        # provisioning the account), while an actual APPEND to Notes is still refused
+        # with a tagged NO -- a loud failure at authoring time, never a silent drop.
+        # Other placeholders keep their READ-ONLY posture (scoped to Notes only).
+        import io
+
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"Notes")
+            self.assertTrue(info["READ-WRITE"], info)
+            pf = set(info["PERMANENTFLAGS"])
+            self.assertIn("\\*", pf)       # the "normal read-write mailbox" signal
+            self.assertIn("\\Seen", pf)
+            # scoping regression: a sibling placeholder stays read-only + empty PF.
+            info2 = yield proto.select(b"Drafts")
+            self.assertFalse(info2["READ-WRITE"], info2)
+            self.assertEqual(list(info2["PERMANENTFLAGS"]), [])
+            # the READ-WRITE signal does NOT make Notes writable: APPEND is still NO.
+            msg = io.BytesIO(b"From: a@example.com\r\nSubject: note\r\n\r\nbody\r\n")
+            d = proto.append("Notes", msg, ("\\Seen",))
+            yield self.assertFailure(d, imap4.IMAP4Exception)
+        finally:
+            yield proto.logout()
+
 
     @defer.inlineCallbacks
     def test_append_to_placeholder_folder_is_rejected(self):
