@@ -429,7 +429,9 @@ export function parseRecipients(toAddr: string): string[] {
   return toAddr
     .split(",")
     .map((part) => {
-      const angle = part.match(/<([^>]+)>/);
+      // [^<>] (not [^>]) so failed attempts cannot rescan overlapping spans;
+      // with [^>]+ a sender-controlled to_addr full of "<" is quadratic (ReDoS, alert #26).
+      const angle = part.match(/<([^<>]+)>/);
       return (angle ? angle[1] : part).trim().toLowerCase();
     })
     .filter(Boolean);
