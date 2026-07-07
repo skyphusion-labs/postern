@@ -7,6 +7,9 @@ name: imap-image
 # deploy; the Swarm stack pins it by the immutable git short-SHA tag this
 # workflow produces, so `docker service update --image ...:<sha>` is exact.
 #
+# After a green push, dispatches fleet-chezmoi `postern-door-roll` to pin the image on
+# biafra and redeploy `postern-imap` (requires org secret FLEET_DISPATCH_TOKEN).
+#
 # Triggers:
 #   - push to main that touches imap/** (or this workflow): rebuild on real changes,
 #     not on every unrelated main push.
@@ -103,3 +106,14 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  dispatch-roll:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Dispatch postern-imap roll to fleet-chezmoi
+        env:
+          FLEET_DISPATCH_TOKEN: ${{ secrets.FLEET_DISPATCH_TOKEN }}
+        run: bash .github/scripts/dispatch-fleet-postern-door-roll.sh imap skyphusion-labs/postern-imap
