@@ -238,12 +238,12 @@ func writeBodyEntity(w io.Writer, msg OutboundMessage) error {
 		}
 		return mw.Close()
 	case msg.HTML != "":
-		if _, err := io.WriteString(w, "Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quotedprintable\r\n\r\n"); err != nil {
+		if _, err := io.WriteString(w, "Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"); err != nil {
 			return err
 		}
 		return writeQP(w, msg.HTML)
 	default:
-		if _, err := io.WriteString(w, "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quotedprintable\r\n\r\n"); err != nil {
+		if _, err := io.WriteString(w, "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"); err != nil {
 			return err
 		}
 		return writeQP(w, msg.Text)
@@ -406,7 +406,7 @@ func isTokenMediaType(s string) bool {
 func writeQPPart(mw *multipart.Writer, contentType, body string) error {
 	h := textproto.MIMEHeader{}
 	h.Set("Content-Type", contentType)
-	h.Set("Content-Transfer-Encoding", "quotedprintable")
+	h.Set("Content-Transfer-Encoding", "quoted-printable")
 	pw, err := mw.CreatePart(h)
 	if err != nil {
 		return err

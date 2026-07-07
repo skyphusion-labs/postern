@@ -144,6 +144,10 @@ func TestRenderMIME_TextOnly(t *testing.T) {
 	assertContains(t, raw, "To: <dest@example.com>")
 	assertContains(t, raw, "Message-ID: <id@skyphusion.org>")
 	assertContains(t, raw, "Content-Type: text/plain; charset=utf-8")
+	assertContains(t, raw, "Content-Transfer-Encoding: quoted-printable")
+	if strings.Contains(raw, "quotedprintable") {
+		t.Errorf("CTE must be quoted-printable per RFC 2045, not quotedprintable")
+	}
 	assertContains(t, raw, "plain body")
 }
 
@@ -160,6 +164,7 @@ func TestRenderMIME_Multipart(t *testing.T) {
 	assertContains(t, raw, "Content-Type: multipart/alternative;")
 	assertContains(t, raw, "text/plain; charset=utf-8")
 	assertContains(t, raw, "text/html; charset=utf-8")
+	assertContains(t, raw, "Content-Transfer-Encoding: quoted-printable")
 }
 
 func TestRenderMIME_HeaderInjectionBlocked(t *testing.T) {

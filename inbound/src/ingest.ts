@@ -185,14 +185,22 @@ export function isTrusted(from: string, spf: string, dkim: string, allowlistEnv:
 
 // --- Body cleaning ---
 
+/** RFC 5322 quoted previous text, not MCP JSON-RPC log markers (>>> / <<<). */
+function isQuotedReplyLine(line: string): boolean {
+  const t = line.trimStart();
+  if (!t.startsWith(">")) return false;
+  // MCP tools log >>> request / <<< response JSON-RPC lines; keep in stored body.
+  if (/^>{3}\s*\{/.test(t) || /^<{3}\s*\{/.test(t)) return false;
+  return /^>+(\s|$)/.test(t);
+}
+
 export function cleanBody(raw: string): string {
   // Strip sig block (RFC 3676 "-- \n" delimiter)
   const sigIdx = raw.indexOf("\n-- \n");
   const stripped = sigIdx !== -1 ? raw.slice(0, sigIdx) : raw;
-  // Remove quoted-reply lines ("> ...")
   return stripped
     .split("\n")
-    .filter((l) => !l.trimStart().startsWith(">"))
+    .filter((l) => !isQuotedReplyLine(l))
     .join("\n")
     .trim();
 }
