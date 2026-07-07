@@ -211,7 +211,9 @@ function toAddress(v: string | EmailAddress | undefined): EmailAddress | undefin
 // falls back to the first comma-token. The result flows through
 // validateRecipients like any address.
 function firstAddress(raw: string): string {
-  const angle = raw.match(/<([^>]+)>/);
+  // [^<>] (not [^>]) so backtracking cannot rescan overlapping spans; the
+  // Reply-To/From header is sender-controlled (same ReDoS shape as alert #26).
+  const angle = raw.match(/<([^<>]+)>/);
   if (angle) return angle[1].trim();
   return (raw.split(",")[0] ?? "").trim();
 }
