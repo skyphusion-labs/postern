@@ -107,6 +107,22 @@ describe("cleanBody", () => {
     expect(cleanBody(raw)).toBe("Reply.");
   });
 
+  it("preserves MCP JSON-RPC log markers", () => {
+    const raw = [
+      "Report for RunPod:",
+      '>>> {"jsonrpc":"2.0","method":"tools/call"}',
+      '<<< {"jsonrpc":"2.0","result":{}}',
+      "> old ticket quote",
+    ].join("\n");
+    expect(cleanBody(raw)).toBe(
+      [
+        "Report for RunPod:",
+        '>>> {"jsonrpc":"2.0","method":"tools/call"}',
+        '<<< {"jsonrpc":"2.0","result":{}}',
+      ].join("\n"),
+    );
+  });
+
   it("leaves a clean body untouched (modulo trim)", () => {
     expect(cleanBody("  just text  ")).toBe("just text");
   });
