@@ -692,6 +692,45 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
         finally:
             yield proto.transport.loseConnection()
 
+    @defer.inlineCallbacks
+    def test_append_to_sent_succeeds_even_when_the_store_read_fails(self):
+        # #233: the client's post-send Sent copy must NOT fail just because the store is
+        # unreachable. Stock do_APPEND read getMessageCount() (a full Sent load) to emit
+        # EXISTS, so an upstream 5xx turned APPEND into a client error ("Server error
+        # encountered while opening mailbox"). Our override answers OK with zero store I/O,
+        # so APPEND to Sent succeeds even under a hard store failure. ErrorTransport makes
+        # EVERY API call 503; the fact that APPEND still returns OK proves it touches no store.
+        import io
+
+        addr, transport = self._spin(503)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent", b"tok")
+            msg = io.BytesIO(b"From: conrad@skyphusion.org\r\nSubject: External Submission Test\r\n\r\nbody\r\n")
+            # append() fires its Deferred only on a positive tagged response; if the
+            # server had errored this would raise and fail the test.
+            yield proto.append("Sent", msg, ("\\Seen",))
+            # Not a single API call was needed to accept the Sent copy.
+            self.assertEqual(transport.calls, [])
+        finally:
+            yield proto.transport.loseConnection()
+
+    @defer.inlineCallbacks
+    def test_append_to_placeholder_is_rejected_without_a_store_read(self):
+        # A placeholder folder has no backing store; APPEND must be a clean tagged NO
+        # (#109), and it must not depend on the store either.
+        import io
+
+        addr, transport = self._spin(503)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent", b"tok")
+            msg = io.BytesIO(b"From: a@b.com\r\nSubject: draft\r\n\r\nx\r\n")
+            yield self.assertFailure(proto.append("Drafts", msg), imap4.IMAP4Exception)
+            self.assertEqual(transport.calls, [])
+        finally:
+            yield proto.transport.loseConnection()
+
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class ServerEnvelopeUnicodeE2ETest(twisted_unittest.TestCase):

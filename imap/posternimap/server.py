@@ -285,6 +285,59 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     select_NOOP = unauth_NOOP  # type: ignore[assignment]
     logout_NOOP = unauth_NOOP  # type: ignore[assignment]
 
+    def do_APPEND(self, tag, mailbox, flags, date, message):
+        """Answer APPEND WITHOUT touching the store (#233).
+
+        macOS Mail (and Thunderbird) copy the just-sent message into Sent via APPEND
+        right after SMTP submission. The Postern submission path already recorded that
+        outbound message, so we must not double-store -- but we also must not FAIL the
+        client's Sent-copy save. Twisted's stock do_APPEND opens the target mailbox
+        (`account.select`) and then calls `mbox.getMessageCount()` to emit an untagged
+        EXISTS; on the live store the Sent folder is full of outbound copies, so that
+        getMessageCount is a full D1 page-through, and ANY transient failure there turned
+        the client's save into `NO APPEND failed` / `BAD Server error encountered while
+        opening mailbox` (the macOS Mail error in #233). Our APPEND is a declared no-op,
+        so it must not depend on a store read at all.
+
+        We short-circuit on the mailbox classification (account.appendability), with no
+        store I/O:
+          * real view (INBOX/Sent/All) -> tagged OK. EXISTS is optional on APPEND (RFC
+            3501 7.4.1), and the copy is not actually stored, so we omit it; the client
+            re-syncs Sent on its next poll/SELECT.
+          * placeholder (Drafts/Trash/Junk/Archive/Notes) -> tagged NO (no backing store,
+            #109: fail honestly rather than fake-ack and drop the message).
+          * unknown mailbox -> NO [TRYCREATE], matching the stock behavior.
+        The message literal is already fully read by the APPEND arg parser (arg_literal),
+        so there is nothing to drain. Falls back to the stock machinery if the avatar is
+        not a PosternAccount (defensive; keeps a non-standard account working)."""
+        name = imap4._parseMbox(mailbox)
+        classify = getattr(self.account, "appendability", None)
+        if classify is None:
+            imap4.IMAP4Server.do_APPEND(self, tag, mailbox, flags, date, message)
+            return
+        kind = classify(name)
+        if kind == "unknown":
+            self.sendNegativeResponse(tag, b"[TRYCREATE] No such mailbox")
+        elif kind == "placeholder":
+            self.sendNegativeResponse(
+                tag, b"APPEND failed: this folder does not store messages; APPEND is not supported"
+            )
+        else:
+            self.sendPositiveResponse(tag, b"APPEND complete")
+
+    # Route APPEND through the override in both states it is valid (authenticated +
+    # selected). dispatchCommand reads the class tuple, not getattr(self, "do_APPEND");
+    # the parse callables (astring name, optional flag-list, optional datetime, and the
+    # message literal) are the stock ones, so the literal is still consumed identically.
+    auth_APPEND = (  # type: ignore[assignment]
+        do_APPEND,
+        imap4.IMAP4Server.arg_astring,
+        imap4.IMAP4Server.opt_plist,
+        imap4.IMAP4Server.opt_datetime,
+        imap4.IMAP4Server.arg_literal,
+    )
+    select_APPEND = auth_APPEND  # type: ignore[assignment]
+
     def _wire_trace_enabled(self) -> bool:
         cfg = getattr(getattr(self, "factory", None), "_cfg", None)
         return bool(getattr(cfg, "imap_wire_trace", False))
