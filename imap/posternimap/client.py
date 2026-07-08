@@ -8,12 +8,13 @@ and is unit-testable without Twisted.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from .measure import Meter
 
@@ -205,20 +206,72 @@ class Page:
     cursor: Optional[str]
 
 
-# Injectable transport so tests can supply a fake without a live server. Takes a
-# fully-formed urllib Request, returns (status, body_bytes).
-class _UrllibTransport:
+# The default transport: reuse ONE persistent HTTP(S) connection to the worker across
+# requests (keep-alive) instead of opening a fresh TCP+TLS connection per call like
+# urllib.urlopen did. During a session's message backfill that is one handshake instead
+# of one-per-message; on the live door (directory host -> CF edge over HTTPS) each avoided
+# handshake is ~2 RTT + a TLS negotiation, so this is a real per-message win over the
+# network even though it is ~invisible on loopback (#229 follow-up).
+#
+# It keeps the SAME injectable-transport contract as before -- called with a fully-formed
+# urllib.request.Request, returns (status, body_bytes), raises PosternError on a transport
+# failure -- so every test fake (FakeTransport / ErrorTransport) and the NativeVerifier
+# in auth.py are unchanged. A non-2xx HTTP response is returned as (status, bytes), NOT
+# raised (the caller maps status -> error), matching the old urllib behavior.
+#
+# Thread-safety: ONE connection, no lock. Safe under the proxy's current model -- every
+# call runs on the single reactor thread (blocking urllib was already reactor-blocking),
+# and one PosternClient is scoped to one mailbox/session, so its calls are serialized. A
+# future deferToThread change MUST add a lock or a per-thread connection before sharing a
+# transport across threads.
+class _HttpTransport:
     def __init__(self, timeout: float) -> None:
         self._timeout = timeout
+        self._conn: Optional[http.client.HTTPConnection] = None
+        self._key: Optional[Tuple[str, str, Optional[int]]] = None
 
-    def __call__(self, req: urllib.request.Request) -> tuple[int, bytes]:
+    def __call__(self, req: urllib.request.Request) -> Tuple[int, bytes]:
+        # A reused keep-alive connection may have been closed by the worker's idle
+        # timeout since the last call; if the attempt fails at the transport layer, drop
+        # the connection and retry ONCE on a fresh one. Every request we make is
+        # idempotent (GET, or an idempotent seen/auth POST), so a single retry is safe.
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return resp.status, resp.read()
-        except urllib.error.HTTPError as e:
-            return e.code, e.read()
-        except urllib.error.URLError as e:
-            raise PosternError(f"request failed: {e.reason}") from e
+            return self._attempt(req)
+        except (http.client.HTTPException, OSError):
+            self._close()
+            try:
+                return self._attempt(req)
+            except (http.client.HTTPException, OSError) as exc:
+                self._close()
+                raise PosternError(f"request failed: {exc}") from exc
+
+    def _attempt(self, req: urllib.request.Request) -> Tuple[int, bytes]:
+        parts = urllib.parse.urlsplit(req.full_url)
+        host = parts.hostname or ""
+        key = (parts.scheme, host, parts.port)
+        if self._conn is None or self._key != key:
+            self._close()
+            if parts.scheme == "https":
+                self._conn = http.client.HTTPSConnection(host, parts.port or 443, timeout=self._timeout)
+            else:
+                self._conn = http.client.HTTPConnection(host, parts.port or 80, timeout=self._timeout)
+            self._key = key
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        self._conn.request(req.get_method(), path, body=req.data, headers=dict(req.header_items()))
+        resp = self._conn.getresponse()
+        # MUST fully read the body so the connection is left clean for reuse.
+        return resp.status, resp.read()
+
+    def _close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+        self._conn = None
+        self._key = None
 
 
 class PosternClient:
@@ -238,7 +291,7 @@ class PosternClient:
     ) -> None:
         self._base = base_url.rstrip("/")
         self._token = token
-        self._transport = transport or _UrllibTransport(timeout)
+        self._transport = transport or _HttpTransport(timeout)
         # A disabled Meter by default: all measurement hooks are no-ops unless an
         # enabled meter is injected (POSTERN_IMAP_MEASURE, threaded in from the account).
         self._meter = meter or Meter(False)
