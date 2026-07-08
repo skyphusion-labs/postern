@@ -53,6 +53,29 @@ class ClientTest(unittest.TestCase):
         hits = self.client.search("cats")
         self.assertEqual([h.message_id for h in hits], ["m3"])
 
+    def test_summary_seen_defaults_true_but_reads_explicit_value(self):
+        # #seen: an old API that omits `seen` renders as read (back-compat); an explicit
+        # value is honored. The seed dicts have no seen key -> default True.
+        page = self.client.list_messages(limit=10)
+        self.assertTrue(all(m.seen for m in page.items))
+        self.msgs.insert(0, make_message("u0", subject="unread", seen=False))
+        first = self.client.list_messages(limit=1).items[0]
+        self.assertEqual(first.message_id, "u0")
+        self.assertFalse(first.seen)
+
+    def test_set_seen_posts_and_returns_updated_count(self):
+        # POST /api/messages/seen flips the backing dicts and returns the changed count.
+        n = self.client.set_seen(["m1", "m2"], True)
+        self.assertEqual(n, 2)
+        self.assertTrue(all(m.get("seen") for m in self.msgs if m["messageId"] in ("m1", "m2")))
+        last = self.transport.calls[-1]
+        self.assertIn("/api/messages/seen", last)
+
+    def test_set_seen_empty_is_a_noop_without_a_request(self):
+        before = len(self.transport.calls)
+        self.assertEqual(self.client.set_seen([], True), 0)
+        self.assertEqual(len(self.transport.calls), before)
+
     def test_ping_good_token(self):
         self.assertTrue(self.client.ping())
 

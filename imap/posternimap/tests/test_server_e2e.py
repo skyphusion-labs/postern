@@ -215,8 +215,9 @@ class ServerE2ETest(twisted_unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_select_announces_permanentflags_and_flag_keywords(self):
-        # #218: through the REAL client, SELECT must carry PERMANENTFLAGS (empty on the
-        # read-only door) and a FLAGS list that announces the custom keywords a FETCH
+        # #218/#seen: through the REAL client, SELECT INBOX must carry PERMANENTFLAGS
+        # (\Seen) -- the one flag a real view persists, so a client's mark-read sticks --
+        # and READ-WRITE, plus a FLAGS list that announces the custom keywords a FETCH
         # actually returns, so a strict client (Apple Mail) is never handed an
         # unadvertised keyword. (UIDNEXT is asserted at the unit layer -- the stock
         # IMAP4Client.select does not surface it.)
@@ -225,11 +226,34 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.login(b"agent", b"tok")
             info = yield proto.select(b"INBOX")
             self.assertIn("PERMANENTFLAGS", info)
-            self.assertEqual(list(info["PERMANENTFLAGS"]), [])  # read-only -> none
+            self.assertEqual(list(info["PERMANENTFLAGS"]), ["\\Seen"])  # read-state is settable
+            self.assertTrue(info["READ-WRITE"], info)
             flags = set(info["FLAGS"])
             self.assertIn("\\Seen", flags)
             self.assertTrue({"Trusted", "Untrusted", "Inbound", "Outbound"} & flags, flags)
             self.assertNotIn("\\Sent", flags)  # special-use LIST attr must not leak
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_store_seen_round_trips_read_state(self):
+        # #seen end-to-end: an unread INBOX message reported without \Seen; a STORE
+        # +FLAGS (\Seen) over the real wire persists to the API and a fresh STATUS then
+        # reports zero unseen -- so a human's mark-read sticks across the session.
+        m1 = next(m for m in self.msgs if m["messageId"] == "m1")
+        m1["seen"] = False  # oldest inbound message starts unread (INBOX seq 1)
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"INBOX")
+            before = yield proto.status(b"INBOX", "UNSEEN")
+            self.assertEqual(int(before["UNSEEN"]), 1)
+            # STORE +FLAGS (\Seen) on sequence 1 (the unread message).
+            res = yield proto.addFlags(imap4.MessageSet(1, 1), ["\\Seen"], silent=False, uid=False)
+            self.assertIn("\\Seen", res[1]["FLAGS"])
+            self.assertTrue(m1["seen"])  # round-tripped to the (fake) API
+            after = yield proto.status(b"INBOX", "UNSEEN")
+            self.assertEqual(int(after["UNSEEN"]), 0)
         finally:
             yield proto.logout()
 

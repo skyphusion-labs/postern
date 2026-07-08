@@ -133,10 +133,15 @@ class PosternIMAPMessage:
         return self._uid
 
     def getFlags(self) -> Iterable[str]:
-        # Served from the summary (no body): inbound mail has been processed, so
-        # mark it Seen. Trust and direction ride as informational keywords (clients
-        # show them; they do not affect anything server-side).
-        flags = ["\\Seen"]
+        # Served from the summary (no body). \Seen reflects the STORED read state
+        # (#seen): present when the message has been read, ABSENT when it is still
+        # unread, so a client shows unread mail as new. It is flipped by a STORE
+        # +/-FLAGS (\Seen) round-tripped to POST /api/messages/seen (see mailbox.store).
+        # Trust and direction ride as informational keywords (clients show them; they
+        # do not affect anything server-side).
+        flags = []
+        if self._summary.seen:
+            flags.append("\\Seen")
         flags.append("Trusted" if self._summary.trusted else "Untrusted")
         flags.append(self._summary.direction.capitalize())  # Inbound / Outbound
         return flags

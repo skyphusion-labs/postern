@@ -205,19 +205,26 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         self.sendUntaggedResponse(b"%d RECENT" % (mbox.getRecentCount(),))
         self.sendUntaggedResponse(b"FLAGS (" + b" ".join(flags) + b")")
         if writable:
-            # #218 Experiment A: advertise the RFC-standard writable-folder set + \\*
-            # (the "normal read-write mailbox" signal iOS Notes looks for) so iOS
-            # completes provisioning. This is a SIGNAL, not a storage promise -- an
-            # actual STORE/APPEND to Notes is still refused with a loud tagged NO
-            # (mailbox.store raises ReadOnlyError, addMessage AppendRejectedError), so
-            # nothing is silently dropped. Scoped to the one writable-signalling folder.
-            self.sendPositiveResponse(
-                None, b"[PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\*)]"
-            )
+            # The flags this mailbox actually persists, from mbox.getPermanentFlags():
+            #   * a seen-writable real view (INBOX/Sent/All) -> (\\Seen), so a client's
+            #     mark-read sticks (#seen);
+            #   * Notes (#218 Experiment A) -> the RFC-standard writable set + \\*, the
+            #     "normal read-write mailbox" signal iOS needs to finish provisioning.
+            # It is a SIGNAL of what is settable, not a blanket storage promise: APPEND
+            # of a new message and any flag other than \\Seen are still refused with a
+            # loud tagged NO (mailbox.store / addMessage), so nothing is silently dropped.
+            perm = " ".join(mbox.getPermanentFlags()).encode("ascii")
+            self.sendPositiveResponse(None, b"[PERMANENTFLAGS (" + perm + b")]")
         else:
-            # Read-only folder: nothing is persistable, so PERMANENTFLAGS is the empty
-            # list (no \\* -- new keywords cannot be created either).
+            # Read-only folder (EXAMINE, or a view that persists nothing): PERMANENTFLAGS
+            # is the empty list (no \\* -- new keywords cannot be created either).
             self.sendPositiveResponse(None, b"[PERMANENTFLAGS ()] No permanent flags permitted")
+        # #seen: RFC 3501 6.3.1 OK [UNSEEN n] points the client at its first unread
+        # message. Sent only when there IS unread mail and the mailbox tracks it
+        # (getattr-guard: a future/other IMailbox may not implement firstUnseen).
+        first_unseen = getattr(mbox, "firstUnseen", lambda: 0)()
+        if first_unseen:
+            self.sendPositiveResponse(None, b"[UNSEEN %d]" % (first_unseen,))
         self.sendPositiveResponse(None, b"[UIDVALIDITY %d]" % (mbox.getUIDValidity(),))
         self.sendPositiveResponse(None, b"[UIDNEXT %d]" % (mbox.getUIDNext(),))
         s = writable and b"READ-WRITE" or b"READ-ONLY"

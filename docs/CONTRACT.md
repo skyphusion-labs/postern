@@ -96,6 +96,11 @@ interface StoredMessage {
   auth: { spf: string; dkim: string; dmarc: string }; // messages.spf/dkim/dmarc
   trusted: boolean;                   // messages.trusted (0/1)
   receivedAt: string;                 // messages.received_at (ISO)
+  seen: boolean;                      // messages.seen (0/1) -- read state (#seen). Inbound
+                                      // mail is stored unread (false); outbound sent copies
+                                      // read (true). Flipped by POST /api/messages/seen; backs
+                                      // the IMAP \Seen flag + webmail unread view so a human
+                                      // can tell new mail from mail already read.
   attachments: AttachmentMeta[];
 }
 
@@ -283,6 +288,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
+| POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
 | DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
@@ -302,6 +308,14 @@ backfilled vectors are byte-identical to live ones, and the vector id is determi
 to resume or repeat. `dryRun: true` does everything except the embed/upsert, summing the chunk count
 so the exact vector total (and cost) is known before the real run. A thin runner (`inbound/reindex.mjs`)
 loops it until `done`.
+
+`POST /api/messages/seen` (#seen) flips per-message read state: body `{ ids: string[], seen: boolean }`,
+returns `{ ok, updated }` (rows actually changed; unknown ids are skipped, an empty list is a no-op).
+It is **`read`-scoped**, not send/admin: marking mail read is a side effect of READING it, and the IMAP
+read door commonly holds only a read token, so a read token must be able to persist its own read state.
+It backs the IMAP `\Seen` flag (`postern-imap` STOREs it) and the webmail unread view. Inbound mail is
+stored unread and outbound sent copies read (`store.put`); the column DEFAULT is `read` so migration
+0007 backfills existing rows without resurfacing the whole historical mailbox as unread.
 
 `GET /api/mobileconfig` (#187) returns a per-user Apple configuration profile
 (`application/x-apple-aspen-config`) that sets up iOS Mail in one tap: IMAP

@@ -32,7 +32,7 @@ class MailboxTest(unittest.TestCase):
         self.transport = FakeTransport(self.msgs, expected_token="t", page_size=2)
         self.client = PosternClient("https://x", "t", transport=self.transport)
 
-    def _mailbox(self, direction=None, *, window=0, poll_seconds=0, clock=None):
+    def _mailbox(self, direction=None, *, window=0, poll_seconds=0, clock=None, seen_writable=False):
         from posternimap.mailbox import PosternMailbox
 
         return PosternMailbox(
@@ -42,6 +42,7 @@ class MailboxTest(unittest.TestCase):
             window=window,
             poll_seconds=poll_seconds,
             clock=clock,
+            seen_writable=seen_writable,
         )
 
     def test_count_and_ordering_oldest_first(self):
@@ -135,6 +136,113 @@ class MailboxTest(unittest.TestCase):
         flags = list(msg.getFlags())
         self.assertIn("\\Seen", flags)
         self.assertIn("Outbound", flags)
+
+    # --- #seen: read/unread state ---
+
+    def test_flags_omit_seen_when_message_is_unread(self):
+        # A message stored unread (seen=False) reports NO \Seen flag, so a client shows
+        # it as new; a read one carries \Seen. Both served from the summary (no body).
+        from twisted.mail.imap4 import MessageSet
+
+        mb, _ = self._custom_mailbox(
+            [make_message("unread", subject="new", seen=False),
+             make_message("read", subject="old", seen=True)]
+        )
+        got = dict((m._summary.message_id, list(m.getFlags())) for _, m in mb.fetch(MessageSet(1, 2), uid=False))
+        self.assertNotIn("\\Seen", got["unread"])
+        self.assertIn("\\Seen", got["read"])
+
+    def test_unseen_count_and_first_unseen(self):
+        # UNSEEN (STATUS) counts unread; firstUnseen points at the earliest-arrived
+        # unread message by sequence number. Snapshot is uid/arrival-ascending: r1
+        # (seq1, read), u2 (seq2, unread), u3 (seq3, unread) -> 2 unseen, first at 2.
+        mb, _ = self._custom_mailbox(
+            [make_message("u3", subject="c", seen=False),   # newest arrival
+             make_message("u2", subject="b", seen=False),
+             make_message("r1", subject="a", seen=True)]    # oldest arrival
+        )
+        self.assertEqual(mb.getUnseenCount(), 2)
+        self.assertEqual(mb.firstUnseen(), 2)
+        self.assertEqual(mb.requestStatus(["MESSAGES", "UNSEEN", "RECENT"]),
+                         {"MESSAGES": 3, "UNSEEN": 2, "RECENT": 0})
+
+    def test_first_unseen_zero_when_all_read(self):
+        mb, _ = self._custom_mailbox([make_message("r1", seen=True), make_message("r2", seen=True)])
+        self.assertEqual(mb.getUnseenCount(), 0)
+        self.assertEqual(mb.firstUnseen(), 0)
+
+    def test_store_add_seen_persists_and_returns_flags(self):
+        # STORE +FLAGS (\Seen) on an unread message: persists via the API, flips the
+        # local snapshot, and returns the post-update flags map {seq: [...\Seen...]}.
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [make_message("u1", subject="s", seen=False)]
+        mb, transport = self._custom_mailbox(msgs, seen_writable=True)
+        mb.getMessageCount()
+        res = mb.store(MessageSet(1, 1), ["\\Seen"], 1, uid=False)
+        self.assertIn(1, res)
+        self.assertIn("\\Seen", res[1])
+        # Persisted to the API (the fake flipped the backing dict)...
+        self.assertTrue(msgs[0]["seen"])
+        self.assertTrue(any("/api/messages/seen" in u for u in transport.calls))
+        # ...and reflected in the live snapshot: a re-FETCH now shows \Seen.
+        (_, m), = list(mb.fetch(MessageSet(1, 1), uid=False))
+        self.assertIn("\\Seen", list(m.getFlags()))
+        self.assertEqual(mb.getUnseenCount(), 0)
+
+    def test_store_remove_seen_marks_unread(self):
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [make_message("r1", subject="s", seen=True)]
+        mb, transport = self._custom_mailbox(msgs, seen_writable=True)
+        mb.getMessageCount()
+        res = mb.store(MessageSet(1, 1), ["\\Seen"], -1, uid=False)
+        self.assertNotIn("\\Seen", res[1])
+        self.assertFalse(msgs[0]["seen"])
+        self.assertEqual(mb.getUnseenCount(), 1)
+
+    def test_store_seen_idempotent_no_api_call_when_unchanged(self):
+        # STORE +FLAGS (\Seen) on an ALREADY-read message changes nothing: no API call,
+        # snapshot untouched, but the response still reports the current flags.
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [make_message("r1", subject="s", seen=True)]
+        mb, transport = self._custom_mailbox(msgs, seen_writable=True)
+        mb.getMessageCount()
+        transport.calls.clear()
+        res = mb.store(MessageSet(1, 1), ["\\Seen"], 1, uid=False)
+        self.assertIn("\\Seen", res[1])
+        self.assertFalse(any("/api/messages/seen" in u for u in transport.calls))
+
+    def test_store_uid_mode_resolves_seen(self):
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [make_message("m20", subject="b", seen=False, uid=20),
+                make_message("m10", subject="a", seen=False, uid=10)]
+        mb, _ = self._custom_mailbox(msgs, seen_writable=True)
+        mb.getMessageCount()
+        res = mb.store(MessageSet(20, 20), ["\\Seen"], 1, uid=True)
+        # Keyed by sequence number (uid 20 -> seq 2), per RFC 3501 / Twisted __cbStore.
+        self.assertIn(2, res)
+        self.assertTrue(msgs[0]["seen"])
+        self.assertFalse(msgs[1]["seen"])  # uid 10 untouched
+
+    def test_store_rejects_non_seen_flag(self):
+        from twisted.mail.imap4 import MessageSet
+        from posternimap.mailbox import ReadOnlyError
+
+        mb, _ = self._custom_mailbox([make_message("m1", seen=False)], seen_writable=True)
+        mb.getMessageCount()
+        with self.assertRaises(ReadOnlyError):
+            mb.store(MessageSet(1, 1), ["\\Flagged"], 1, uid=False)
+
+    def test_store_refused_on_non_seen_writable_folder(self):
+        from twisted.mail.imap4 import MessageSet
+        from posternimap.mailbox import ReadOnlyError
+
+        mb = self._mailbox()  # seen_writable=False by default
+        with self.assertRaises(ReadOnlyError):
+            mb.store(MessageSet(1, 1), ["\\Seen"], 1, uid=False)
 
 
     # --- #189 envelope fidelity v2: ENVELOPE Cc/Reply-To + RFC822.SIZE ---
@@ -717,16 +825,32 @@ class AccountTest(unittest.TestCase):
         self.assertIsNone(acct.getSharedNamespaces())
         self.assertIsNone(acct.getUserNamespaces())
 
-    def test_only_notes_signals_writable_on_select(self):
-        # #218 Experiment A: isWriteable() (the SELECT READ-WRITE signal) is True ONLY
-        # for Notes; every other folder stays False. Writes are still refused at the
-        # store layer regardless -- this is the SELECT signal, not actual writability.
+    def test_writable_matrix_real_views_and_notes(self):
+        # SELECT reports READ-WRITE for the real backed views (INBOX/Sent/All), which
+        # persist the \Seen flag (#seen), and for Notes (the #218 iOS provisioning
+        # signal). The empty placeholders (Drafts/Trash/Junk/Archive) store nothing, so
+        # they stay READ-ONLY. Writes other than \Seen are still refused at the store
+        # layer regardless -- isWriteable is the SELECT signal, not blanket writability.
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
-        self.assertTrue(acct.select("Notes").isWriteable())
-        for name in ("INBOX", "Sent", "All", "Drafts", "Trash", "Junk", "Archive"):
+        for name in ("INBOX", "Sent", "All", "Notes"):
+            self.assertTrue(acct.select(name).isWriteable(), name)
+        for name in ("Drafts", "Trash", "Junk", "Archive"):
             self.assertFalse(acct.select(name).isWriteable(), name)
+
+    def test_permanent_flags_matrix(self):
+        # PERMANENTFLAGS reflect what each folder actually persists: (\Seen) for the
+        # real seen-writable views, the full writable set + \* for Notes (#218), and
+        # nothing for the read-only placeholders.
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        for name in ("INBOX", "Sent", "All"):
+            self.assertEqual(acct.select(name).getPermanentFlags(), ["\\Seen"], name)
+        self.assertIn("\\*", acct.select("Notes").getPermanentFlags())
+        for name in ("Drafts", "Trash", "Junk", "Archive"):
+            self.assertEqual(acct.select(name).getPermanentFlags(), [], name)
 
     def test_select_inbox_case_insensitive(self):
         from posternimap.account import PosternAccount

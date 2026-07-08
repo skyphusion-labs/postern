@@ -89,6 +89,11 @@ class MessageSummary:
     trusted: bool
     received_at: str
     attachment_count: int
+    # Read state (#seen): False = unread. Drives the IMAP \Seen flag (message.py) and
+    # the UNSEEN counts (mailbox.py). Defaults to True when the API omits it, so an
+    # OLDER worker that predates the seen field renders exactly as before (everything
+    # \Seen); a current worker returns the real per-message value.
+    seen: bool = True
     # Envelope fidelity v2 (CONTRACT section 10.3). All nullable: an old row (pre-0006)
     # carries None/[] here and renders exactly as v1. cc/bcc/sender/reply_to are the RAW
     # RFC 5322 header strings (display names and all, never parsed or re-split -- a
@@ -119,6 +124,7 @@ class MessageSummary:
             trusted=bool(d.get("trusted", False)),
             received_at=d.get("receivedAt", ""),
             attachment_count=int(d.get("attachmentCount", 0)),
+            seen=bool(d.get("seen", True)),
             cc=d.get("cc"),
             bcc=d.get("bcc"),
             sender=d.get("sender"),
@@ -337,6 +343,21 @@ class PosternClient:
         complete, paginated result set use search_page and loop its cursor."""
         return self.search_page(q, mode=mode, field=field, limit=limit).items
 
+    def set_seen(self, message_ids: list[str], seen: bool) -> int:
+        """Mark a set of messages (un)read via POST /api/messages/seen (#seen).
+
+        Backs the IMAP \\Seen flag: the proxy's store() calls this when a client
+        STOREs +/- \\Seen. Returns the number of rows the worker actually changed
+        (idempotent; unknown ids are skipped server-side). An empty id list is a
+        no-op that never hits the network. The endpoint is read-scoped, so a read-only
+        token (the common IMAP credential) can persist read state.
+        """
+        if not message_ids:
+            return 0
+        body = self._post("/api/messages/seen", {"ids": message_ids, "seen": seen})
+        updated = body.get("updated", 0)
+        return int(updated) if isinstance(updated, (int, float)) else 0
+
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""
         try:
@@ -360,6 +381,29 @@ class PosternClient:
         # Measure only the transport round-trip (the blocking-urllib I/O cost). The
         # path is the API endpoint, never a token or message content; on a transport
         # error the timed block still records the latency it took to fail.
+        with self._meter.timed("api_request", path=path) as span:
+            status, raw = self._transport(req)
+            span.set(status=status, bytes=len(raw))
+        if status == 401:
+            raise PosternAuthError("Postern API rejected the token", status=401)
+        if status >= 400:
+            raise PosternError(f"Postern API error (HTTP {status})", status=status)
+        try:
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError) as e:
+            raise PosternError(f"invalid JSON from Postern API: {e}") from e
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # A JSON POST to the write half of the API (currently only the seen flag).
+        # Mirrors _get: Bearer auth, the real UA, measured round-trip, and the same
+        # status -> PosternError mapping so a 401/5xx surfaces identically.
+        url = self._base + path
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Accept", "application/json")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", USER_AGENT)
         with self._meter.timed("api_request", path=path) as span:
             status, raw = self._transport(req)
             span.set(status=status, bytes=len(raw))

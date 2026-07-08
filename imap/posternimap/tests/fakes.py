@@ -71,7 +71,14 @@ class FakeTransport:
         parsed = urllib.parse.urlparse(req.full_url)
         path = parsed.path
         params = dict(urllib.parse.parse_qsl(parsed.query))
-        if path.startswith("/api/messages/"):
+        method = req.get_method()
+
+        # #seen: POST /api/messages/seen { ids, seen } -> { ok, updated }. Routed
+        # before the single-message GET branch (and never counted as a body fetch).
+        if path == "/api/messages/seen" and method == "POST":
+            return self._set_seen(req)
+
+        if method == "GET" and path.startswith("/api/messages/") and path != "/api/messages/seen":
             self.body_fetches += 1
 
         if path == "/api/messages":
@@ -126,6 +133,19 @@ class FakeTransport:
             if m["messageId"] == mid:
                 return 200, json.dumps({"ok": True, "message": m}).encode()
         return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
+
+    def _set_seen(self, req):
+        """Mirror POST /api/messages/seen: flip `seen` on the seeded dicts and report
+        how many rows changed (unknown ids skipped), so store()'s round-trip is real."""
+        payload = json.loads((req.data or b"{}").decode("utf-8"))
+        ids = set(payload.get("ids", []))
+        seen = bool(payload.get("seen"))
+        updated = 0
+        for m in self.messages:
+            if m["messageId"] in ids:
+                m["seen"] = seen
+                updated += 1
+        return 200, json.dumps({"ok": True, "updated": updated}).encode()
 
     def _thread(self, tid):
         msgs = [m for m in self.messages if m.get("threadId") == tid]
