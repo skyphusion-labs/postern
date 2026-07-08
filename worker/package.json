@@ -12,10 +12,10 @@
     "cf-typegen": "wrangler types"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250505.0",
+    "@cloudflare/workers-types": "^5.20260708.1",
     "@vitest/coverage-istanbul": "^4.1.10",
     "typescript": "^5.5.4",
     "vitest": "^4.1.10",
-    "wrangler": "^4.102.0"
+    "wrangler": "^4.108.0"
   }
 }
