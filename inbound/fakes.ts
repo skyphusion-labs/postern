@@ -102,20 +102,6 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           } as Row);
           return { meta: { changes: 1 } };
         }
-        // setSeen(): UPDATE messages SET seen = ? WHERE message_id IN (?, ...). Bind[0]
-        // is the new seen value, the rest are message ids. changes = rows matched.
-        if (/UPDATE messages SET seen = \? WHERE message_id IN/i.test(sql)) {
-          const value = Number(bound[0]);
-          const ids = bound.slice(1).map((b) => String(b));
-          let changes = 0;
-          for (const r of rows) {
-            if (ids.includes(r.message_id)) {
-              r.seen = value;
-              changes++;
-            }
-          }
-          return { meta: { changes } };
-        }
         if (/INSERT INTO attachments/i.test(sql)) {
           const [message_id, filename, mime, size, r2_key, created_at] = bound as [string, string | null, string | null, number, string, string];
           atts.push({ id: attSeq++, message_id, filename, mime, size, r2_key, created_at });
@@ -147,6 +133,16 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         return null as T | null;
       },
       async all<T>() {
+        // setSeen(): UPDATE messages SET seen = ? WHERE message_id IN (?, ...) RETURNING
+        // message_id. Bind[0] is the new seen value, the rest are ids. RETURNING yields
+        // one row per matched message row (mirrors the real query's count semantics).
+        if (/UPDATE messages SET seen = \? WHERE message_id IN/i.test(sql)) {
+          const value = Number(bound[0]);
+          const ids = bound.slice(1).map((b) => String(b));
+          const matched = rows.filter((r) => ids.includes(r.message_id));
+          for (const r of matched) r.seen = value;
+          return { results: matched.map((r) => ({ message_id: r.message_id })) as unknown as T[] };
+        }
         // M8 upsert (#178): INSERT ... ON CONFLICT(message_id) DO UPDATE ...
         // RETURNING thread_id, is_fresh. Faithful to store.put()'s single atomic
         // statement -- fresh insert (is_fresh=1), merge-append (is_fresh=0), or a

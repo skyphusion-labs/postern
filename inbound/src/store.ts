@@ -582,12 +582,16 @@ export async function getAttachment(
 export async function setSeen(env: Env, messageIds: string[], seen: boolean): Promise<number> {
   if (messageIds.length === 0) return 0;
   const placeholders = messageIds.map(() => "?").join(", ");
+  // RETURNING (not meta.changes): the AFTER UPDATE FTS trigger fires per row and its
+  // shadow-table writes inflate meta.changes, so it is not a reliable count of message
+  // rows touched. RETURNING yields exactly one row per matched message row (trigger
+  // rows never appear), so results.length is the true count of existing ids updated.
   const res = await env.DB.prepare(
-    `UPDATE messages SET seen = ? WHERE message_id IN (${placeholders})`,
+    `UPDATE messages SET seen = ? WHERE message_id IN (${placeholders}) RETURNING message_id`,
   )
     .bind(seen ? 1 : 0, ...messageIds)
-    .run();
-  return res.meta?.changes ?? 0;
+    .all<{ message_id: string }>();
+  return (res.results ?? []).length;
 }
 
 /** Full message + attachment metadata, or null if not found. */
