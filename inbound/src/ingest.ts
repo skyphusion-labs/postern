@@ -166,12 +166,24 @@ export function chunkText(text: string, chunk: number, overlap: number): string[
   return out.filter(Boolean);
 }
 
+/**
+ * Extract the bare address from a From value that may carry a display name
+ * (`"Cloudflare" <noreply@notify.cloudflare.com>` -> `noreply@notify.cloudflare.com`),
+ * so allowlist/DMARC-style matching sees the address, not the label. `from` is now the
+ * raw From HEADER (see index.ts), so trust MUST parse it; a bare address passes through
+ * unchanged. `[^<>]+` (not `[^>]+`) keeps the match linear (no ReDoS on a "<"-heavy label).
+ */
+export function bareAddress(from: string): string {
+  const angle = from.match(/<([^<>]+)>/);
+  return (angle ? angle[1] : from).trim().toLowerCase();
+}
+
 export function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string): boolean {
   const domains = allowlistEnv
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
-  const fromLower = from.toLowerCase();
+  const fromLower = bareAddress(from);
   const onAllowlist = domains.some((d) => fromLower === d || fromLower.endsWith("@" + d));
   if (!onAllowlist) return false;
   // Auth verdicts available: require at least SPF pass/neutral OR DKIM pass.

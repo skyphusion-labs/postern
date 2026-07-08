@@ -5,7 +5,7 @@ import { handleApi } from "./api";
 import { send, reply, type SendRequest, type ReplyRequest, type SendResult } from "./mailbox";
 import * as store from "./store";
 import type { StoredMessage, StoredMessageSummary, ListQuery, SearchQuery, Page, SearchHit } from "./store";
-import { toArrayBuffer, extractSpfResult, extractDkimResult, extractDmarcResult } from "./headers";
+import { toArrayBuffer, extractSpfResult, extractDkimResult, extractDmarcResult, chooseFrom } from "./headers";
 
 // The in-Worker inbound transport driver (issue #21): the one surviving email()
 // handler. It forwards, parses the MIME via postal-mime, extracts the CF auth
@@ -62,9 +62,18 @@ export default {
     // 3. Normalize to the transport contract and hand off to ingest(). `to` stays
     //    the envelope recipient (message.to) that CF delivered this invocation to;
     //    the M8 fidelity fields carry the raw decoded RFC 5322 headers (#189).
+    //    `from` is the RFC 5322 From HEADER, NOT message.from (the SMTP envelope
+    //    sender / MAIL FROM). For any sender using VERP/bounce addressing (SparkPost,
+    //    SendGrid, SES, Mailgun, ...) the envelope sender is a dynamic bounce address
+    //    (e.g. msprvs1=...=bounces-...@notify.cloudflare.com), so storing it lost the
+    //    real sender + display name ('"Cloudflare" <noreply@notify.cloudflare.com>')
+    //    that every other mail client shows. We keep the raw header (display name and
+    //    all, like to_addr/cc), falling back to the envelope sender only when a message
+    //    genuinely carries no From header. reply() extracts the bare angle address, and
+    //    ingest()'s trust check parses the address before allowlist-matching.
     const normalized: ParsedInbound = {
       messageId: parsed.messageId ?? undefined,
-      from: message.from,
+      from: chooseFrom(getHeader("from"), message.from),
       to: message.to,
       subject: parsed.subject ?? undefined,
       date: parsed.date ?? undefined,
