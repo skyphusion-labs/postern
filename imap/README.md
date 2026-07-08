@@ -17,11 +17,17 @@ in #12.
 
 ## What it does (v1)
 
-- **Read-only store.** `LOGIN`, `LIST`/`LSUB`, `SELECT`/`EXAMINE`, `STATUS`,
-  `FETCH`, `SEARCH`, `LOGOUT`. You read mail here; you **send** through the
-  structured API (`POST /api/send` / `/api/reply`) or the submission server, not by
-  IMAP. Destructive write ops (`STORE`/`EXPUNGE`/mailbox create/rename/delete) are
-  refused cleanly rather than silently dropping data.
+- **Read-only store, with ONE exception: the `\Seen` (read/unread) flag.** `LOGIN`,
+  `LIST`/`LSUB`, `SELECT`/`EXAMINE`, `STATUS`, `FETCH`, `SEARCH`, `LOGOUT`. You read
+  mail here; you **send** through the structured API (`POST /api/send` / `/api/reply`)
+  or the submission server, not by IMAP. Read state IS persisted: a `STORE +/-FLAGS
+  (\Seen)` round-trips to `POST /api/messages/seen`, so marking a message read/unread
+  sticks across clients and sessions and a human can tell new mail from mail they have
+  already read. Inbound mail arrives **unread**; the mailbox's own sent copies are
+  stored **read**. The real views (INBOX/Sent/All) therefore SELECT as `READ-WRITE`
+  with `PERMANENTFLAGS (\Seen)`. Every OTHER write -- any flag but `\Seen`, plus
+  `EXPUNGE`/mailbox create/rename/delete -- is still refused cleanly (tagged `NO`)
+  rather than silently dropping data.
 - **`APPEND` is accepted as a no-op.** A mail client copies its own sent message
   into `Sent` after submission; the Postern submission path already records the
   outbound message in the store, so the proxy acknowledges the `APPEND` (it never
@@ -200,7 +206,9 @@ injectable transport, so no network is touched.
 
 ## Known limitations (v1, by design)
 
-- **Read-only.** Sending is the structured API's job.
+- **Read-only, except the `\Seen` flag.** Read/unread state is persisted (a `STORE`
+  of `\Seen` round-trips to `POST /api/messages/seen`); every other write is refused.
+  Sending is the structured API's job.
 - **APPEND is accepted only where it is safe.** INBOX/Sent/All accept a client's
   APPEND as a no-op (the store is the source of truth; a post-send Sent copy is
   already persisted). The placeholder folders (Drafts/Trash/Junk/Archive) have no
@@ -220,7 +228,10 @@ injectable transport, so no network is touched.
 - **Live refresh / IDLE.** While a mailbox is selected the proxy polls the store
   (`POSTERN_IMAP_POLL_SECONDS`, summary-only, recent end only) and pushes an
   untagged `EXISTS` when new mail arrives, so MUAs and `IDLE` see new mail
-  mid-session. `\Recent` is still not tracked (everything reads `\Seen`).
+  mid-session. `\Recent` is still not tracked, but `\Seen` (read/unread) IS now
+  persisted server-side (see "Read-only store" above), so new mail shows as unread
+  and stays that way until read -- `\Recent` is no longer load-bearing for "what is
+  new".
 - **Windowing.** INBOX/Sent show the most-recent `POSTERN_IMAP_WINDOW` messages at
   `SELECT` (the `All` folder is unbounded for archival access). IMAP cannot grow a
   folder downward mid-session, so older mail is reached via `All` or a larger

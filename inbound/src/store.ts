@@ -22,6 +22,11 @@ export interface StoredMessage {
   auth: { spf: string; dkim: string; dmarc: string };
   trusted: boolean;
   receivedAt: string; // ISO
+  /** Read state (#seen): has this message been read? Inbound mail arrives unseen
+   *  (false); the mailbox's own outbound sent copies are stored seen (true). Flipped
+   *  by POST /api/messages/seen (the IMAP \Seen flag / a webmail "mark read"). The
+   *  human doors surface it as unread; agents can ignore it. */
+  seen: boolean;
   // --- M8 envelope fidelity v2 (#189). All nullable: absent = a pre-v2 row that
   //     renders exactly as before. Header-fidelity fields are the raw RFC 5322
   //     headers as they arrived (display names and all); deliveredTo is the
@@ -64,6 +69,9 @@ export interface StoredMessageSummary {
   inReplyTo: string | null;
   trusted: boolean;
   receivedAt: string;
+  /** Read state (#seen): false = unread. Mirrors StoredMessage.seen so a list/search
+   *  summary drives the unread view without a per-message body fetch. */
+  seen: boolean;
   // M8 (#189): same envelope-fidelity fields as StoredMessage, so a list/search
   // summary can render Cc/Reply-To and answer "mail for X" on the delivered set.
   cc: string | null;
@@ -228,8 +236,8 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
     `INSERT INTO messages
        (message_id, from_addr, to_addr, subject, date, in_reply_to,
         body_text, body_html, spf, dkim, dmarc, trusted, received_at, direction, thread_id,
-        delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size, seen)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(message_id) DO UPDATE SET
        delivered_to = COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') || ? || ','
        WHERE COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') NOT LIKE '%,' || ? || ',%'
@@ -257,6 +265,11 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
       input.sender ?? null,
       input.replyTo ?? null,
       input.wireSize ?? null,
+      // Inbound mail arrives UNREAD; the mailbox's own sent copies are stored read
+      // (a human never wants their own Sent items flagged unread). Flipped later via
+      // setSeen() (the IMAP \Seen flag). The ON CONFLICT merge below never touches
+      // seen, so a redelivery to a new recipient keeps the row's current read state.
+      input.direction === "outbound" ? 1 : 0,
       mergeRcpt,
       mergeRcpt,
       deliveredSet,
@@ -486,6 +499,7 @@ interface MessageRow {
   dmarc: string;
   trusted: number;
   received_at: string;
+  seen: number;
   delivered_to: string | null;
   cc_addr: string | null;
   bcc_addr: string | null;
@@ -509,6 +523,7 @@ function rowToMessage(row: MessageRow, attachments: AttachmentMeta[]): StoredMes
     auth: { spf: row.spf, dkim: row.dkim, dmarc: row.dmarc },
     trusted: row.trusted === 1,
     receivedAt: row.received_at,
+    seen: row.seen === 1,
     cc: row.cc_addr ?? null,
     bcc: row.bcc_addr ?? null,
     sender: row.sender_addr ?? null,
@@ -557,11 +572,33 @@ export async function getAttachment(
   return { body: obj.body, filename: row.filename, mime: row.mime, size: row.size };
 }
 
+/**
+ * Set the read state (#seen) on a set of messages by message_id, returning how many
+ * rows changed. The single writer for the seen flag: the IMAP \Seen store, a webmail
+ * "mark (un)read", or any API client. Idempotent -- setting a row to its current state
+ * is a no-op (SQLite reports 0 changes). Unknown ids are silently skipped (they simply
+ * match no row). An empty id list is a no-op that never touches D1.
+ */
+export async function setSeen(env: Env, messageIds: string[], seen: boolean): Promise<number> {
+  if (messageIds.length === 0) return 0;
+  const placeholders = messageIds.map(() => "?").join(", ");
+  // RETURNING (not meta.changes): the AFTER UPDATE FTS trigger fires per row and its
+  // shadow-table writes inflate meta.changes, so it is not a reliable count of message
+  // rows touched. RETURNING yields exactly one row per matched message row (trigger
+  // rows never appear), so results.length is the true count of existing ids updated.
+  const res = await env.DB.prepare(
+    `UPDATE messages SET seen = ? WHERE message_id IN (${placeholders}) RETURNING message_id`,
+  )
+    .bind(seen ? 1 : 0, ...messageIds)
+    .all<{ message_id: string }>();
+  return (res.results ?? []).length;
+}
+
 /** Full message + attachment metadata, or null if not found. */
 export async function get(env: Env, messageId: string): Promise<StoredMessage | null> {
   const row = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
-            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at,
+            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
             delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size
        FROM messages WHERE message_id = ? LIMIT 1`,
   )
@@ -575,7 +612,7 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
 export async function thread(env: Env, threadId: string): Promise<StoredMessage[]> {
   const res = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
-            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at,
+            in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
             delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size
        FROM messages WHERE thread_id = ? ORDER BY date, id`,
   )
@@ -606,6 +643,7 @@ interface SummaryRow {
   in_reply_to: string | null;
   trusted: number;
   received_at: string;
+  seen: number;
   delivered_to: string | null;
   cc_addr: string | null;
   bcc_addr: string | null;
@@ -628,6 +666,7 @@ function rowToSummary(row: SummaryRow): StoredMessageSummary {
     inReplyTo: row.in_reply_to,
     trusted: row.trusted === 1,
     receivedAt: row.received_at,
+    seen: row.seen === 1,
     cc: row.cc_addr ?? null,
     bcc: row.bcc_addr ?? null,
     sender: row.sender_addr ?? null,
@@ -724,7 +763,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at,
+            m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m ${whereSql}
@@ -798,7 +837,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
 
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at,
+            m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE ${where.join(" AND ")}
@@ -889,7 +928,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
 
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at,
+            m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE ${where.join(" AND ")}
@@ -958,7 +997,7 @@ async function summariesByIds(env: Env, ids: string[]): Promise<Map<string, Stor
   const placeholders = ids.map(() => "?").join(", ");
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at,
+            m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE m.message_id IN (${placeholders})`;

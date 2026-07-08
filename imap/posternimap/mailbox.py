@@ -145,6 +145,7 @@ class PosternMailbox:
         clock=None,
         meter: Optional[Meter] = None,
         writable_signal: bool = False,
+        seen_writable: bool = False,
     ) -> None:
         self._client = client
         # A disabled Meter by default: measurement hooks are no-ops unless an enabled
@@ -163,6 +164,13 @@ class PosternMailbox:
         # write (addMessage/store/expunge) stays honestly refused with a tagged
         # NO. A SIGNAL, not a storage promise -- see server._cbSelectWork.
         self._writable_signal = writable_signal
+        # #seen: this folder persists the \Seen flag (a STORE round-trips to POST
+        # /api/messages/seen). True for the real backed views (INBOX/Sent/All), so a
+        # SELECT reports READ-WRITE + PERMANENTFLAGS (\Seen) and a client's mark-read
+        # sticks across sessions. Distinct from writable_signal (the Notes-only #218
+        # signal): a seen-writable folder ONLY accepts \Seen, still refusing APPEND of
+        # a new message and every other flag.
+        self._seen_writable = seen_writable
         self._summaries: List[MessageSummary] = []
         self._loaded = False
         # Highest UID (== store rowid) currently in the snapshot. UIDNEXT is this
@@ -316,16 +324,50 @@ class PosternMailbox:
         return 0  # we do not track \\Recent in a read-only view
 
     def getUnseenCount(self) -> int:
-        return 0  # everything is presented \\Seen (already processed)
+        # #seen: how many messages in the snapshot are unread (\Seen absent). Drives a
+        # client's unread badge (via STATUS UNSEEN, requestStatus below). Body-free.
+        if self._empty:
+            return 0
+        self._ensure_loaded()
+        return sum(1 for s in self._summaries if not s.seen)
+
+    def firstUnseen(self) -> int:
+        """The 1-based sequence number of the first unread message, or 0 if none.
+
+        The SELECT response's OK [UNSEEN n] hint (RFC 3501 6.3.1): it points a client
+        at where its unread mail begins. Snapshot is uid-ascending == arrival order,
+        so the first unseen in sequence order is the earliest-arrived unread message."""
+        if self._empty:
+            return 0
+        self._ensure_loaded()
+        for i, s in enumerate(self._summaries):
+            if not s.seen:
+                return i + 1
+        return 0
+
+    def getPermanentFlags(self) -> List[str]:
+        """The flags a client may PERSIST in this mailbox (SELECT PERMANENTFLAGS).
+
+        Notes (#218 writable_signal): the standard writable set + \\* (the provisioning
+        signal iOS needs). A seen-writable real folder: only \\Seen, since read state is
+        the one flag this door persists (#seen). Everything else: empty (read-only)."""
+        if self._writable_signal:
+            return ["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft", "\\*"]
+        if self._seen_writable:
+            return ["\\Seen"]
+        return []
 
     def isWriteable(self) -> bool:
-        # #218 Experiment A: True ONLY for the Notes placeholder, so SELECT reports
-        # READ-WRITE (the writability signal Apple Notes-over-IMAP requires to finish
-        # provisioning the account). It does NOT make the store writable: addMessage
-        # (APPEND) still returns AppendRejectedError and store()/expunge() still raise
-        # ReadOnlyError, so every write is refused with a loud tagged NO -- no silent
-        # drop. Every other folder returns False (unchanged READ-ONLY posture).
-        return self._writable_signal
+        # SELECT reports READ-WRITE when the mailbox accepts SOME persistable write:
+        #   * seen_writable (#seen): the real views (INBOX/Sent/All) persist \Seen, so a
+        #     client's mark-read sticks -- the whole point of the read/unread feature.
+        #   * writable_signal (#218 Experiment A): the Notes placeholder signals
+        #     READ-WRITE so iOS can provision its Notes account.
+        # It does NOT make the store fully writable: addMessage (APPEND of a NEW message)
+        # still returns AppendRejectedError on placeholders, store() refuses every flag
+        # but \Seen, and expunge()/destroy() still raise -- each a loud tagged NO, never
+        # a silent drop. EXAMINE stays READ-ONLY for every folder (server enforces).
+        return self._writable_signal or self._seen_writable
 
     def getHierarchicalDelimiter(self) -> str:
         return "/"
@@ -365,7 +407,8 @@ class PosternMailbox:
             "RECENT": 0,
             "UIDNEXT": self._newest_uid + 1,
             "UIDVALIDITY": self._uidvalidity,
-            "UNSEEN": 0,
+            # #seen: real unread count so a client's STATUS-driven badge is correct.
+            "UNSEEN": sum(1 for s in self._summaries if not s.seen),
         }
         return {name: data[name] for name in names if name in data}
 
@@ -510,7 +553,74 @@ class PosternMailbox:
     # --- IMailbox: write (all rejected: read-only proxy) ---
 
     def store(self, messages, flags, mode, uid):
-        raise ReadOnlyError("postern-imap is read-only; flags are not stored")
+        """Persist the \\Seen flag (#seen); refuse every other flag mutation.
+
+        Read/unread is the ONE piece of per-message state this door owns. A STORE of
+        \\Seen is round-tripped to POST /api/messages/seen so the state is durable and
+        shared across every client and session -- the whole point: a human can tell new
+        mail from mail they have already read. Every OTHER flag stays read-only (the
+        trust/direction keywords are derived; \\Answered/\\Flagged/\\Deleted/\\Draft have
+        no backing store), so a STORE that touches one is refused with a tagged NO
+        rather than silently accepted and dropped.
+
+        Returns the RFC 3501 {seq: [flags]} map (post-update flags) the server sends
+        back as an untagged FETCH FLAGS, unless the client asked for .SILENT. `mode` is
+        Twisted's normalized store mode: 0 replace (FLAGS), 1 add (+FLAGS), -1 remove
+        (-FLAGS). When `uid` is set the message set is in UIDs (mapped back to seqs).
+        """
+        self._ensure_loaded()
+        if self._empty:
+            raise ReadOnlyError("this folder stores no messages; flags are not settable")
+        if not self._seen_writable:
+            # A read-only folder (e.g. a bare view not marked seen-writable): unchanged
+            # posture, refuse the STORE with a tagged NO.
+            raise ReadOnlyError("postern-imap is read-only; flags are not stored")
+
+        norm = {str(f).lower() for f in (flags or [])}
+        if norm - {"\\seen"}:
+            # We can only persist \Seen; refuse a STORE that sets any other flag rather
+            # than accept-and-drop it (PERMANENTFLAGS advertises only \Seen, so a
+            # conformant client never gets here).
+            raise ReadOnlyError("postern-imap only persists the \\Seen flag; other flags are read-only")
+        wants_seen = "\\seen" in norm
+
+        # Resolve the target sequence numbers over the current snapshot.
+        if uid:
+            by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
+            messages.last = self._summaries[-1].uid if self._summaries else 0
+            seqs = [by_uid[num] for num in messages if num is not None and num in by_uid]
+        else:
+            n = len(self._summaries)
+            messages.last = n
+            seqs = [num for num in messages if num is not None and 1 <= num <= n]
+        if not seqs:
+            return {}
+
+        # Target read state per message from the STORE mode; collect only the ACTUAL
+        # changes (idempotent: STORE +FLAGS \Seen on an already-read message is a no-op).
+        targets = {}
+        for seq in seqs:
+            current = self._summaries[seq - 1].seen
+            if mode == 0:            # FLAGS (replace)
+                targets[seq] = wants_seen
+            elif mode == 1:          # +FLAGS (add)
+                targets[seq] = True if wants_seen else current
+            else:                    # -FLAGS (remove)
+                targets[seq] = False if wants_seen else current
+        to_read = [self._summaries[s - 1].message_id for s, t in targets.items() if t and not self._summaries[s - 1].seen]
+        to_unread = [self._summaries[s - 1].message_id for s, t in targets.items() if not t and self._summaries[s - 1].seen]
+
+        # Persist server-side (one call per direction), then reflect locally so the
+        # returned flags and any later FETCH in this session stay consistent.
+        if to_read:
+            self._client.set_seen(to_read, True)
+        if to_unread:
+            self._client.set_seen(to_unread, False)
+        for seq, target in targets.items():
+            self._summaries[seq - 1].seen = target
+
+        # {seq: post-update flags}; getFlags is summary-served, so this fires no body GET.
+        return {seq: list(self._wrap(seq)[1].getFlags()) for seq in seqs}
 
     def addMessage(self, message, flags=(), date=None):
         # do_APPEND calls this WITHOUT maybeDeferred, so we must return a Deferred

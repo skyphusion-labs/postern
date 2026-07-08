@@ -51,7 +51,7 @@ from .measure import Meter
 class _Folder:
     """Static description of one advertised mailbox."""
 
-    __slots__ = ("direction", "special_use", "empty", "windowed", "writable_signal")
+    __slots__ = ("direction", "special_use", "empty", "windowed", "writable_signal", "seen_writable")
 
     def __init__(
         self,
@@ -60,6 +60,7 @@ class _Folder:
         empty: bool,
         windowed: bool = False,
         writable_signal: bool = False,
+        seen_writable: bool = False,
     ) -> None:
         self.direction = direction
         self.special_use = special_use
@@ -71,14 +72,19 @@ class _Folder:
         # iOS can provision its Notes account; writes are still refused (see mailbox
         # isWriteable / addMessage). Signal, not a storage promise.
         self.writable_signal = writable_signal
+        # #seen: this folder persists the \Seen flag (INBOX/Sent/All, the real backed
+        # views). SELECT reports READ-WRITE + PERMANENTFLAGS (\Seen) so a client's
+        # mark-read sticks; only \Seen is settable (see mailbox.store). Placeholders
+        # (empty) never set this -- they store nothing.
+        self.seen_writable = seen_writable
 
 
 # name (as the client sees it) -> folder description. INBOX/Sent/All are real
 # direction views; the rest are RFC 6154 special-use placeholders (empty in v1).
 _MAILBOXES: Dict[str, _Folder] = {
-    "INBOX": _Folder("inbound", [], False, windowed=True),
-    "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True),
-    "All": _Folder(None, ["\\All"], False),
+    "INBOX": _Folder("inbound", [], False, windowed=True, seen_writable=True),
+    "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True, seen_writable=True),
+    "All": _Folder(None, ["\\All"], False, seen_writable=True),
     "Drafts": _Folder(None, ["\\Drafts"], True),
     "Trash": _Folder(None, ["\\Trash"], True),
     "Junk": _Folder(None, ["\\Junk"], True),
@@ -123,6 +129,7 @@ class PosternAccount:
             uidvalidity=self._cfg.imap_uidvalidity,
             meter=self._meter,
             writable_signal=folder.writable_signal,
+            seen_writable=folder.seen_writable,
         )
 
     # --- IAccount: read ---
@@ -144,8 +151,9 @@ class PosternAccount:
         folder = _MAILBOXES.get(_canonical(name))
         if folder is None:
             return None  # unknown mailbox -> client gets "no such mailbox"
-        # rw is ignored: always read-only. Twisted reads isWriteable() for the
-        # advertised mode, so the client is told it is read-only correctly.
+        # rw is ignored: the server reads isWriteable() for the advertised mode. A real
+        # view (INBOX/Sent/All) is READ-WRITE for the \Seen flag only (#seen); Notes
+        # signals READ-WRITE for iOS provisioning (#218); the rest stay READ-ONLY.
         return self._mailbox(folder, list_view=False)
 
     def isSubscribed(self, name: str) -> bool:

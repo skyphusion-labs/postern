@@ -23,6 +23,15 @@ CREATE TABLE IF NOT EXISTS messages (
   dmarc       TEXT,
   trusted     INTEGER DEFAULT 0,
   received_at TEXT,
+  -- Read state (#seen, migration 0007). 0 = unread, 1 = read. store.put() sets this
+  -- EXPLICITLY on every insert: inbound mail lands unread (0), the mailbox's own
+  -- outbound sent copies land read (1). Flipped later by setSeen() (POST
+  -- /api/messages/seen), which backs the IMAP \Seen flag and the webmail unread view
+  -- so a human can tell new mail from mail they have read. The column DEFAULT is 1
+  -- (read) so that any row inserted WITHOUT specifying seen -- and, in migration 0007,
+  -- every pre-existing row -- is treated as already-read rather than dumping the whole
+  -- historical mailbox back as unread; new inbound is unread only because put() says so.
+  seen        INTEGER NOT NULL DEFAULT 1,
   -- M2 (#27): two-way + threaded. direction = 'inbound' (received) | 'outbound' (sent
   -- copies the mailbox stores back). thread_id groups a conversation, resolved on
   -- every store from in_reply_to / References (see store.ts), else this message_id.
