@@ -29,6 +29,10 @@ imap/*.egg-info/
 imap/_trial_temp/
 _trial_temp/
 
+# Python client
+clients/python/.venv/
+clients/python/*.egg-info/
+
 # Build artifacts (untracked dist/build dirs seen in clones)
 imap/build/
 imap/dist/
