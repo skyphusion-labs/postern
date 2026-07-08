@@ -64,6 +64,13 @@ describe("per-function token scopes (#85)", () => {
       expect(sent).toHaveLength(0);
     });
 
+    it("can mark messages (un)read (POST /api/messages/seen is read-scoped, #seen)", async () => {
+      const { env, ctx } = scopedEnv();
+      const res = await handleApi(req("POST", "/api/messages/seen", { token: "read-token", body: { ids: [], seen: true } }), env, ctx);
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
+    });
+
     it("cannot touch credential-admin routes (-> 403)", async () => {
       const { env, ctx } = scopedEnv();
       expect((await handleApi(req("POST", "/api/admin/smtp-credentials", { token: "read-token", body: ADMIN_BODY }), env, ctx)).status).toBe(403);
@@ -91,6 +98,11 @@ describe("per-function token scopes (#85)", () => {
       expect((await handleApi(req("GET", "/api/search?q=hello", { token: "send-token" }), env, ctx)).status).toBe(403);
       expect((await handleApi(req("GET", "/api/messages/anything@example.com", { token: "send-token" }), env, ctx)).status).toBe(403);
       expect((await handleApi(req("GET", "/api/threads/t1", { token: "send-token" }), env, ctx)).status).toBe(403);
+    });
+
+    it("cannot mark messages read (POST /api/messages/seen is read-scoped -> 403, #seen)", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("POST", "/api/messages/seen", { token: "send-token", body: { ids: [], seen: true } }), env, ctx)).status).toBe(403);
     });
 
     it("cannot touch credential-admin routes (-> 403)", async () => {

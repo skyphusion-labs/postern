@@ -116,6 +116,25 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return json({ ok: true, ...result });
     }
 
+    // --- read-state: mark messages (un)read (#seen) ---
+    // POST /api/messages/seen { ids: string[], seen: boolean } -> { updated }. This
+    // backs the IMAP \Seen flag (the read door STOREs it) and a webmail "mark read",
+    // so a human can tell new mail from mail already read. It is a `read`-scoped route
+    // (see requiredScope): marking read is a side effect of READING the mailbox, so a
+    // read-only token -- what the IMAP proxy commonly holds -- can manage its own read
+    // state without being handed send/admin power. Idempotent; unknown ids are skipped.
+    if (request.method === "POST" && path === "/api/messages/seen") {
+      const body = await readJson<{ ids?: unknown; seen?: unknown }>(request);
+      if (!Array.isArray(body.ids) || !body.ids.every((x) => typeof x === "string")) {
+        return json({ ok: false, error: "E_VALIDATION_ERROR", message: "ids must be an array of message ids" }, 400);
+      }
+      if (typeof body.seen !== "boolean") {
+        return json({ ok: false, error: "E_FIELD_MISSING", message: "seen (boolean) is required" }, 400);
+      }
+      const updated = await store.setSeen(env, body.ids as string[], body.seen);
+      return json({ ok: true, updated });
+    }
+
     // --- admin: provision / rotate an SMTP submission credential (#68) ---
     // Operator action, gated by a `both`-scoped mailbox token (this block is past
     // the scope check above). Mints or rotates a per-user submission credential and
@@ -485,6 +504,9 @@ type RouteScope = "read" | "send" | "admin";
 function requiredScope(method: string, path: string): RouteScope | null {
   if (method === "POST" && (path === "/api/send" || path === "/send")) return "send";
   if (method === "POST" && path === "/api/reply") return "send";
+  // Marking (un)read is a side effect of READING, so it is read-scoped -- the IMAP
+  // proxy (often holding only a read token) must be able to persist \Seen (#seen).
+  if (method === "POST" && path === "/api/messages/seen") return "read";
   if (method === "POST" && path === "/api/admin/smtp-credentials") return "admin";
   if (method === "DELETE" && /^\/api\/admin\/smtp-credentials\/(.+)$/.test(path)) return "admin";
   // Reindex/backfill is the most privileged: a new /api/admin/* path is NOT

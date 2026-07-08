@@ -1,0 +1,18 @@
+-- #seen: per-message read state, so IMAP clients (and the webmail) can show which
+-- mail is NEW/unread instead of presenting everything as already read. Apply once to
+-- an existing skyphusion-mail DB. ADDITIVE ONLY (ALTER ADD COLUMN): the #112 deploy
+-- gate is deny-by-default and blocks any UPDATE/backfill, so there is deliberately NO
+-- `UPDATE ... SET` here. schema.sql carries the same column for a fresh DB.
+--
+-- The read/unread flag. 0 = unread, 1 = read. store.put() sets it EXPLICITLY on every
+-- new insert (inbound -> 0 unread, outbound sent copy -> 1 read); setSeen() (POST
+-- /api/messages/seen) flips it for the IMAP \Seen flag and the webmail unread view.
+--
+-- DEFAULT 1 (read), NOT 0, is load-bearing: ALTER ADD COLUMN backfills every EXISTING
+-- row with the column default, and doing that WITHOUT a separate UPDATE is the only
+-- gate-clean way to backfill. Defaulting existing mail to READ means upgrading a live
+-- store does not suddenly resurface the entire historical mailbox as unread; only mail
+-- that arrives AFTER this migration is unread, because put() marks new inbound unread.
+-- ALTER ADD COLUMN is not IF NOT EXISTS; re-running errors harmlessly if already
+-- applied -- skip in that case.
+ALTER TABLE messages ADD COLUMN seen INTEGER NOT NULL DEFAULT 1;

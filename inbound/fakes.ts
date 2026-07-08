@@ -19,6 +19,7 @@ interface Row {
   dmarc: string;
   trusted: number;
   received_at: string;
+  seen: number;
   direction: string;
   thread_id: string | null;
   delivered_to: string | null;
@@ -97,9 +98,23 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           }
           rows.push({
             id: seq++, message_id, from_addr, to_addr, subject, date, in_reply_to,
-            body_text, body_html, spf, dkim, dmarc, trusted, received_at, direction, thread_id,
-          });
+            body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen: 1, direction, thread_id,
+          } as Row);
           return { meta: { changes: 1 } };
+        }
+        // setSeen(): UPDATE messages SET seen = ? WHERE message_id IN (?, ...). Bind[0]
+        // is the new seen value, the rest are message ids. changes = rows matched.
+        if (/UPDATE messages SET seen = \? WHERE message_id IN/i.test(sql)) {
+          const value = Number(bound[0]);
+          const ids = bound.slice(1).map((b) => String(b));
+          let changes = 0;
+          for (const r of rows) {
+            if (ids.includes(r.message_id)) {
+              r.seen = value;
+              changes++;
+            }
+          }
+          return { meta: { changes } };
         }
         if (/INSERT INTO attachments/i.test(sql)) {
           const [message_id, filename, mime, size, r2_key, created_at] = bound as [string, string | null, string | null, number, string, string];
@@ -136,14 +151,14 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         // RETURNING thread_id, is_fresh. Faithful to store.put()'s single atomic
         // statement -- fresh insert (is_fresh=1), merge-append (is_fresh=0), or a
         // true-dedup no-op (recipient already a member -> WHERE false -> no row).
-        // Bind order: 15 insert values, then delivered_set(15), cc(16), bcc(17),
-        // sender(18), reply_to(19), wire_size(20), merge_rcpt(21), where-rcpt(22),
-        // is_fresh cmp = delivered_set(23).
+        // Bind order: 15 insert cols, then delivered_set(15), cc(16), bcc(17),
+        // sender(18), reply_to(19), wire_size(20), seen(21), merge_rcpt(22),
+        // where-rcpt(23), is_fresh cmp = delivered_set(24).
         if (/INSERT INTO messages/i.test(sql) && /ON CONFLICT/i.test(sql)) {
           const b = bound as unknown[];
           const message_id = b[0] as string;
           const delivered_set = b[15] as string;
-          const merge_rcpt = b[21] as string;
+          const merge_rcpt = b[22] as string;
           const existing = rows.find((r) => r.message_id === message_id);
           if (!existing) {
             rows.push({
@@ -169,6 +184,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
               sender_addr: b[18] as string | null,
               reply_to_addr: b[19] as string | null,
               wire_size: b[20] as number | null,
+              seen: b[21] as number,
             });
             return { results: [{ thread_id: b[14] as string | null, is_fresh: 1 }] as unknown as T[] };
           }
@@ -237,6 +253,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             in_reply_to: r.in_reply_to,
             trusted: r.trusted,
             received_at: r.received_at,
+            seen: r.seen,
             delivered_to: r.delivered_to,
             cc_addr: r.cc_addr,
             bcc_addr: r.bcc_addr,
@@ -324,6 +341,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             in_reply_to: r.in_reply_to,
             trusted: r.trusted,
             received_at: r.received_at,
+            seen: r.seen,
             delivered_to: r.delivered_to,
             cc_addr: r.cc_addr,
             bcc_addr: r.bcc_addr,
