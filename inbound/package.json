@@ -11,7 +11,7 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "postal-mime": "^2.3.4"
+    "postal-mime": "^2.7.5"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250505.0",
