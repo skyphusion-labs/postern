@@ -159,6 +159,21 @@ class PosternAccount:
     def isSubscribed(self, name: str) -> bool:
         return _canonical(name) in _MAILBOXES
 
+    def appendability(self, name: str) -> str:
+        """Classify a mailbox for APPEND (#233), so the server can answer without a
+        store read. Returns:
+          * "real"        -- INBOX/Sent/All: accept a client's post-send Sent copy as a
+                             no-op success (the outbound message is already in the store
+                             via the submission path; re-storing would double-count).
+          * "placeholder" -- Drafts/Trash/Junk/Archive/Notes: reject cleanly (tagged NO),
+                             they have no backing store, so a fake-ack would drop data (#109).
+          * "unknown"     -- no such mailbox -> the server answers NO [TRYCREATE].
+        """
+        folder = _MAILBOXES.get(_canonical(name))
+        if folder is None:
+            return "unknown"
+        return "placeholder" if folder.empty else "real"
+
     # --- IAccount: write (mostly rejected; fixed read-only set) ---
 
     def addMailbox(self, name, mbox=None):

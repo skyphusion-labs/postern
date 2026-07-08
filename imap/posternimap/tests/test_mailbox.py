@@ -852,6 +852,18 @@ class AccountTest(unittest.TestCase):
         for name in ("Drafts", "Trash", "Junk", "Archive"):
             self.assertEqual(acct.select(name).getPermanentFlags(), [], name)
 
+    def test_appendability_classifies_folders(self):
+        # #233: the server uses this to answer APPEND with no store read. Real backed
+        # views accept the Sent-copy no-op; placeholders reject; unknown -> TRYCREATE.
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        for name in ("INBOX", "inbox", "Sent", "All"):
+            self.assertEqual(acct.appendability(name), "real", name)
+        for name in ("Drafts", "Trash", "Junk", "Archive", "Notes"):
+            self.assertEqual(acct.appendability(name), "placeholder", name)
+        self.assertEqual(acct.appendability("Nonexistent"), "unknown")
+
     def test_select_inbox_case_insensitive(self):
         from posternimap.account import PosternAccount
 
