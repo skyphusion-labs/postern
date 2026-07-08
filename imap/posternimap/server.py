@@ -110,6 +110,20 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     APPEND still fails -- no silent data loss either way).
     """
 
+    def connectionMade(self):
+        # Disable Nagle on the accepted socket. The RFC822/BODY[] response is written as
+        # several segments (the {size} literal line, the body, the trailing ")"); with
+        # Nagle on, the small trailing segment waits for the client's ACK, which the
+        # client's delayed-ACK timer holds ~40ms -- a ~40ms stall on EVERY message open
+        # (measured: FETCH RFC822 ~50ms vs FETCH ENVELOPE ~0.8ms on loopback). A mail
+        # client opening or backfilling many messages pays it per message (#229).
+        imap4.IMAP4Server.connectionMade(self)
+        try:
+            self.transport.setTcpNoDelay(True)
+        except (AttributeError, RuntimeError):
+            # PROXY-wrapped / TLS transports may not expose setTcpNoDelay; harmless.
+            pass
+
     def authenticateLogin(self, user, passwd):
         """Defer LOGIN to the portal, tagging the credentials with the connection's
         peer address (#183).
