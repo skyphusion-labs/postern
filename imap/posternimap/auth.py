@@ -47,7 +47,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from .client import PosternAuthError, PosternClient, PosternError, _UrllibTransport
+from .client import PosternAuthError, PosternClient, PosternError, _HttpTransport
 from .config import SERVICE_TOKEN_MODES, Config, ConfigError, normalize_pin_sha256
 
 # An authenticator validates a (username, password) login for the service-token
@@ -178,7 +178,7 @@ class NativeVerifier:
             raise ConfigError("native auth needs POSTERN_SMTP_AUTH_URL and POSTERN_TRANSPORT_TOKEN")
         self._url = cfg.smtp_auth_url
         self._token = cfg.transport_token
-        self._transport = transport or _UrllibTransport(cfg.api_timeout)
+        self._transport = transport or _HttpTransport(cfg.api_timeout)
 
     def __call__(self, username: str, password: str) -> bool:
         if not username or not password:
