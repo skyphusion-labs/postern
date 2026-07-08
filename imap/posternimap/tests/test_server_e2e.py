@@ -1210,6 +1210,31 @@ class IDCommandSelectAndTraceTest(unittest.TestCase):
         self.addCleanup(srv.setTimeout, None)
         return srv
 
+    def test_connection_disables_nagle(self):
+        # #229 perf: TCP_NODELAY must be set on the accepted socket. Without it, the
+        # multi-segment RFC822/BODY[] write stalls ~40ms per message on Nagle +
+        # delayed-ACK (measured: FETCH RFC822 ~50ms -> ~7ms with NODELAY on loopback).
+        from twisted.internet.testing import StringTransport
+        from posternimap.server import PosternIMAP4Server
+
+        calls = []
+
+        class _RecordingTransport(StringTransport):
+            def setTcpNoDelay(self, enabled):
+                calls.append(enabled)
+
+        srv = PosternIMAP4Server()
+        srv.makeConnection(_RecordingTransport())  # calls connectionMade
+        srv.setTimeout(None)
+        self.addCleanup(srv.setTimeout, None)
+        self.assertEqual(calls, [True])
+
+    def test_connection_survives_transport_without_nodelay(self):
+        # A PROXY-wrapped / TLS transport may not expose setTcpNoDelay; connectionMade
+        # must not raise (the guard swallows AttributeError). _server() uses a plain
+        # StringTransport (no setTcpNoDelay), so simply building one proves it.
+        self._server()
+
     def test_capability_advertises_id(self):
         self.assertIn(b"ID", self._server().listCapabilities())
 
