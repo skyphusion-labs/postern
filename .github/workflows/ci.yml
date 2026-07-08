@@ -141,3 +141,18 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  ci:
+    name: ci
+    needs: [worker, inbound, relay, imap, clients-python, mcp]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all component jobs
+        run: |
+          test "${{ needs.worker.result }}" = "success"
+          test "${{ needs.inbound.result }}" = "success"
+          test "${{ needs.relay.result }}" = "success"
+          test "${{ needs.imap.result }}" = "success"
+          test "${{ needs.clients-python.result }}" = "success"
+          test "${{ needs.mcp.result }}" = "success"
