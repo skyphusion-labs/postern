@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 // out of index.ts so this suite need not import the worker entrypoint); the
 // storage-side pure helpers live in ingest.ts.
 import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer } from "./src/headers";
-import { isTrusted, cleanBody, htmlToText, chunkText, sha256hex } from "./src/ingest";
+import { isTrusted, bareAddress, cleanBody, htmlToText, chunkText, sha256hex } from "./src/ingest";
 
 // These cover the pure ingestion helpers: auth-verdict parsing, the allowlist
 // trust decision (the security-sensitive bit), body cleaning, chunking (the
@@ -88,6 +88,26 @@ describe("isTrusted", () => {
 
   it("returns false for an empty allowlist", () => {
     expect(isTrusted("anyone@skyphusion.org", "pass", "pass", "")).toBe(false);
+  });
+
+  it("parses the bare address from a display-name From before matching", () => {
+    // `from` is now the raw From header (#from-fidelity), so trust must extract the
+    // angle address. A display-name-bearing allowlisted sender is trusted...
+    expect(isTrusted('"Cloudflare" <alerts@skyphusion.org>', "pass", "none", allow)).toBe(true);
+    // ...and an off-allowlist sender is not, even wrapped in a friendly name.
+    expect(isTrusted('"Skyphusion Support" <x@evil.example>', "pass", "pass", allow)).toBe(false);
+  });
+});
+
+describe("bareAddress", () => {
+  it("extracts the angle address from a display-name From", () => {
+    expect(bareAddress('"Cloudflare" <noreply@notify.cloudflare.com>')).toBe("noreply@notify.cloudflare.com");
+  });
+  it("passes a bare address through (lower-cased)", () => {
+    expect(bareAddress("Alice@Example.COM")).toBe("alice@example.com");
+  });
+  it("keeps a comma-bearing display name from splitting the address", () => {
+    expect(bareAddress('"Doe, Jane" <jane@example.com>')).toBe("jane@example.com");
   });
 });
 

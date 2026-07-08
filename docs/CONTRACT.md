@@ -83,7 +83,13 @@ interface StoredMessage {
   messageId: string;                  // messages.message_id
   direction: "inbound" | "outbound";  // messages.direction
   threadId: string;                   // messages.thread_id
-  from: string;                       // messages.from_addr
+  from: string;                       // messages.from_addr -- the raw RFC 5322 From HEADER
+                                      // (display name preserved, e.g. '"Cloudflare"
+                                      // <noreply@notify.cloudflare.com>'), like to_addr holds
+                                      // the raw To header. NOT the SMTP envelope sender (MAIL
+                                      // FROM), which for VERP/bounce senders is a dynamic
+                                      // bounce address; the envelope sender is not stored.
+                                      // reply() extracts the bare angle address to route.
   to: string;                         // messages.to_addr
   subject: string;                    // messages.subject
   date: string;                       // messages.date (ISO)

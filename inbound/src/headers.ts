@@ -16,6 +16,20 @@ export function toArrayBuffer(content: unknown): ArrayBuffer | null {
   return out;
 }
 
+// Choose the sender to STORE for an inbound message (#from-fidelity): the RFC 5322
+// `From:` header (raw, display name preserved) when the message has one, else the SMTP
+// envelope sender (MAIL FROM) as a fallback for a header-less message. The envelope
+// sender is a dynamic VERP/bounce address for many ESPs (SparkPost/SendGrid/SES/
+// Mailgun/Cloudflare notify), so it must NEVER win when a real From header exists --
+// otherwise clients show `msprvs1=...=bounces-...@...` instead of `"Cloudflare"
+// <noreply@...>`. reply() extracts the bare angle address from the result, and ingest's
+// trust check parses the address before allowlist-matching, so a display-name header is
+// safe downstream.
+export function chooseFrom(headerFrom: string | null | undefined, envelopeFrom: string): string {
+  const header = (headerFrom ?? "").trim();
+  return header || envelopeFrom;
+}
+
 // --- Auth verdict helpers (parse the CF/MTA headers into a verdict) ---
 
 export function extractSpfResult(header: string): string {
