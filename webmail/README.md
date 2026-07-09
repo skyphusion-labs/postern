@@ -157,7 +157,5 @@ and security headers; opening the standalone file directly does not.
 
 ## Deferred (follow-ups)
 
-- **Compose / reply / send.** Read-only by design for v1; sending is the
-  structured API's job. A compose surface (calling `POST /api/send` / `/api/reply`)
-  is the natural next step.
+- **Compose / reply / send.** Shipped in #277 when a send token is configured at connect.
 - **Keyset pagination polish** (search mode selector shipped in #282).
