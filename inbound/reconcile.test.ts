@@ -234,4 +234,25 @@ describe("reconcile orphan-vector audit (#134)", () => {
     expect(r.missingExpected).toBe(0);
     expect(r.orphanCount).toBe(0);
   });
+
+  it("populates vector_ledger on embed and reconcile prefers it (#279)", async () => {
+    const { env, ctx, settle, vectorLedger } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    await seed(env, ctx, settle, { id: "ledger@x", direction: "inbound", to: "conrad@skyphusion.org", text: "deploy release invoice", date: "2026-11-01T00:00:00.000Z" });
+    expect(vectorLedger.length).toBe(1);
+    expect(vectorLedger[0].message_id).toBe("ledger@x");
+    const r = await store.reconcile(env, {});
+    expect(r.expectedSource).toBe("ledger");
+    expect(r.ledgerVectors).toBe(1);
+    expect(r.computedVectors).toBe(1);
+    expect(r.ledgerDrift).toBe(0);
+    expect(r.orphanCount).toBe(0);
+  });
+
+  it("falls back to computed expected ids when vector_ledger is empty", async () => {
+    const { env } = makeFakeEnv({ VECTORIZE_FOR: "" });
+    const r = await store.reconcile(env, {});
+    expect(r.expectedSource).toBe("computed");
+    expect(r.ledgerVectors).toBe(0);
+    expect(r.ledgerDrift).toBe(0);
+  });
 });

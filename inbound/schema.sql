@@ -100,3 +100,13 @@ CREATE TABLE IF NOT EXISTS smtp_credentials (
   created_at  TEXT,
   updated_at  TEXT
 );
+
+-- Vectorize id ledger (#279): one row per chunk-vector upserted. Reconcile reads
+-- this set for O(ledger) expected ids instead of re-deriving from every message.
+CREATE TABLE IF NOT EXISTS vector_ledger (
+  vector_id   TEXT PRIMARY KEY,
+  message_id  TEXT NOT NULL,
+  chunk       INTEGER NOT NULL,
+  indexed_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vector_ledger_message ON vector_ledger(message_id);

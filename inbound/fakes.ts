@@ -40,6 +40,13 @@ interface AttRow {
   created_at: string;
 }
 
+interface LedgerRow {
+  vector_id: string;
+  message_id: string;
+  chunk: number;
+  indexed_at: string;
+}
+
 export interface FakeEnvResult {
   env: Env;
   ctx: ExecutionContext;
@@ -48,6 +55,7 @@ export interface FakeEnvResult {
   atts: AttRow[];
   r2: { key: string; bytes: ArrayBuffer }[];
   vectors: unknown[];
+  vectorLedger: LedgerRow[];
   sent: SentMessage[];
 }
 
@@ -76,6 +84,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
   const atts: AttRow[] = [];
   const r2: { key: string; bytes: ArrayBuffer }[] = [];
   const vectors: unknown[] = [];
+  const vectorLedger: LedgerRow[] = [];
   const sent: SentMessage[] = [];
   let seq = 1;
   let attSeq = 1;
@@ -105,6 +114,27 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/INSERT INTO attachments/i.test(sql)) {
           const [message_id, filename, mime, size, r2_key, created_at] = bound as [string, string | null, string | null, number, string, string];
           atts.push({ id: attSeq++, message_id, filename, mime, size, r2_key, created_at });
+          return { meta: { changes: 1 } };
+        }
+        if (/DELETE FROM vector_ledger WHERE message_id/i.test(sql)) {
+          const message_id = String(bound[0]);
+          let changes = 0;
+          for (let i = vectorLedger.length - 1; i >= 0; i--) {
+            if (vectorLedger[i].message_id === message_id) {
+              vectorLedger.splice(i, 1);
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
+        if (/INSERT INTO vector_ledger/i.test(sql)) {
+          const [vector_id, message_id, chunk] = bound as [string, string, number];
+          vectorLedger.push({
+            vector_id,
+            message_id,
+            chunk,
+            indexed_at: new Date().toISOString(),
+          });
           return { meta: { changes: 1 } };
         }
         return { meta: { changes: 0 } };
@@ -196,6 +226,18 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/FROM attachments WHERE message_id/i.test(sql)) {
           const id = bound[0] as string;
           return { results: atts.filter((a) => a.message_id === id) as unknown as T[] };
+        }
+        if (/FROM vector_ledger/i.test(sql)) {
+          let work = vectorLedger.slice().sort((a, b) => a.vector_id.localeCompare(b.vector_id));
+          let i = 0;
+          if (/vector_id > \?/i.test(sql)) {
+            const after = String(bound[i++]);
+            work = work.filter((r) => r.vector_id > after);
+          }
+          const limit = /LIMIT \?/i.test(sql) ? Number(bound[i++]) : work.length;
+          return {
+            results: work.slice(0, limit).map((r) => ({ vector_id: r.vector_id })) as unknown as T[],
+          };
         }
         // reindex page (#116 ws4): SELECT ... body_text FROM messages [WHERE keyset]
         // ORDER BY date DESC, id DESC LIMIT ?. Walks the same keyset the live list
@@ -434,7 +476,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
     },
   } as unknown as ExecutionContext;
 
-  return { env, ctx, settle: () => Promise.all(pending), rows, atts, r2, vectors, sent };
+  return { env, ctx, settle: () => Promise.all(pending), rows, atts, r2, vectors, vectorLedger, sent };
 }
 
 
