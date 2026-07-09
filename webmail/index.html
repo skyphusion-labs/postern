@@ -54,9 +54,10 @@
   #app { flex: 1; display: none; min-height: 0; }
   #app.on { display: flex; }
   .sidebar { width: 360px; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
-  .toolbar { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
-  .toolbar input { flex: 1; }
+  .toolbar { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .toolbar input { flex: 1; min-width: 120px; }
   .toolbar select { width: auto; }
+  .toolbar .mode { min-width: 6.5rem; }
   .list { overflow-y: auto; flex: 1; }
   .row-item {
     padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
@@ -139,6 +140,11 @@
   <div class="sidebar">
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search (press Enter)">
+      <select id="searchMode" class="mode" title="Search mode (applies when searching)">
+        <option value="hybrid">Hybrid</option>
+        <option value="fts">Keyword</option>
+        <option value="semantic">Semantic</option>
+      </select>
       <select id="folder" title="Folder">
         <option value="">All</option>
         <option value="inbound">Inbox</option>
@@ -177,9 +183,14 @@
 
   // --- session state ---------------------------------------------------------
   var SS = window.sessionStorage;
+  var SEARCH_MODES = ["fts", "semantic", "hybrid"];
+  function normalizeSearchMode(v) {
+    return SEARCH_MODES.indexOf(v) >= 0 ? v : "hybrid";
+  }
   var state = {
     origin: SS.getItem("postern_origin") || "",
     token: SS.getItem("postern_token") || "",
+    searchMode: normalizeSearchMode(SS.getItem("postern_search_mode") || "hybrid"),
     folder: "", q: "", cursor: null, items: [], selected: null
   };
 
@@ -422,6 +433,7 @@
     $("app").className = "on";
     $("logout").style.display = "";
     $("who").textContent = state.origin;
+    $("searchMode").value = state.searchMode;
   }
 
   function connect() {
@@ -459,11 +471,12 @@
     loadMore();
   }
 
-  function loadMore() {
+  function loadMore(fallbackFts) {
     var loading = el("div", { class: "loading", text: "Loading..." });
     $("list").appendChild(loading);
+    var mode = fallbackFts ? "fts" : state.searchMode;
     var req = state.q
-      ? api("/api/search", { q: state.q, mode: "hybrid", limit: 50, cursor: state.cursor })
+      ? api("/api/search", { q: state.q, mode: mode, limit: 50, cursor: state.cursor })
       : api("/api/messages", { direction: state.folder, limit: 50, cursor: state.cursor });
     req.then(function (body) {
       $("list").removeChild(loading);
@@ -472,6 +485,9 @@
       state.items = state.items.concat(rows);
       state.cursor = body.cursor || null;
       rows.forEach(appendRow);
+      if (fallbackFts) {
+        $("list").appendChild(el("div", { class: "loading", text: "Semantic search unavailable; showing keyword results." }));
+      }
       if (state.cursor) {
         var more = el("div", { class: "more" }, [el("button", { class: "link", text: "Load more" })]);
         more.firstChild.addEventListener("click", function () { $("list").removeChild(more); loadMore(); });
@@ -482,6 +498,18 @@
     }).catch(function (e) {
       try { $("list").removeChild(loading); } catch (_) {}
       if (e.code === 401) { logout(); return; }
+      if (state.q && !fallbackFts && state.searchMode !== "fts") {
+        var msg = String(e.message || "");
+        if (/semantic|hybrid|vector|embed|ai/i.test(msg)) {
+          state.searchMode = "fts";
+          SS.setItem("postern_search_mode", "fts");
+          $("searchMode").value = "fts";
+          state.cursor = null; state.items = [];
+          clear($("list"));
+          loadMore(true);
+          return;
+        }
+      }
       $("list").appendChild(el("div", { class: "err", text: "Error: " + e.message }));
     });
   }
@@ -598,6 +626,11 @@
   $("logout").addEventListener("click", logout);
   $("search").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { state.q = e.target.value.trim(); resetAndLoad(); }
+  });
+  $("searchMode").addEventListener("change", function (e) {
+    state.searchMode = normalizeSearchMode(e.target.value);
+    SS.setItem("postern_search_mode", state.searchMode);
+    if (state.q) resetAndLoad();
   });
   $("folder").addEventListener("change", function (e) {
     state.folder = e.target.value; state.q = ""; $("search").value = ""; resetAndLoad();
