@@ -1,11 +1,11 @@
 name: npm-mcp
 
-# Publish postern-mcp to the public npm registry.
-# Tag push: git tag postern-mcp-v1.1.0 && git push origin postern-mcp-v1.1.0
+# Publish @skyphusion/postern-mcp to the public npm registry.
+# Tag push: git tag postern-mcp-v1.1.1 && git push origin postern-mcp-v1.1.1
 # Or: workflow_dispatch (uses version in mcp/package.json).
 #
 # Required repo secret: NPM_TOKEN (npmjs.com automation token with publish scope
-# for the postern-mcp package / @skyphusion scope if renamed later).
+# for the @skyphusion org).
 
 on:
   push:
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   publish:
-    name: npm publish postern-mcp
+    name: npm publish @skyphusion/postern-mcp
     runs-on: ubuntu-latest
     defaults:
       run:

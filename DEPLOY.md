@@ -108,6 +108,22 @@ Open `https://postern.<your-account>.workers.dev/webmail` to browse the mailbox
 in a browser (paste that origin + your `POSTERN_API_TOKEN`); IMAP clients can use
 the `imap/` proxy. Both are read-only (see `webmail/README.md` and `imap/README.md`).
 
+**Agent and script clients** (no clone required):
+
+```bash
+# MCP (Cursor / Claude Code): npx -y @skyphusion/postern-mcp with POSTERN_API_URL + POSTERN_API_TOKEN
+npm install -g @skyphusion/postern-mcp   # optional global install
+
+# Python CLI + library
+pip install postern-client
+export POSTERN_API_URL=https://postern.<your-account>.workers.dev
+export POSTERN_API_TOKEN=<your-token>
+postern ping
+```
+
+See [docs/INTEGRATION.md](docs/INTEGRATION.md), [mcp/README.md](mcp/README.md), and
+[clients/python/README.md](clients/python/README.md).
+
 ## 3. Wire inbound mail (for the receive leg)
 
 In the Dashboard -> Email -> Email Routing -> Routing Rules, route all addresses

@@ -1,5 +1,7 @@
 # postern-client (Python)
 
+[![PyPI version](https://img.shields.io/pypi/v/postern-client)](https://pypi.org/project/postern-client/)
+
 A dependency-light Python client + CLI for the **Postern mailbox API** (the
 token-gated `/api/*` surface served by the inbound/store worker). Built so crew
 agents and humans can hit the API without rebuilding tooling every session.
@@ -23,7 +25,8 @@ flowchart LR
 
 ## Install
 
-**PyPI** (recommended):
+**PyPI** ([postern-client](https://pypi.org/project/postern-client/); GitHub
+Release `v*` matching `pyproject.toml` triggers CI publish):
 
 ```bash
 pip install postern-client

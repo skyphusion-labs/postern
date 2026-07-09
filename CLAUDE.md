@@ -25,15 +25,16 @@ Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/A
 - **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) on the **directory host** for local services that
   can only speak SMTP (cron, backups, CI failure mail). Accepts MIME on `127.0.0.1:2525`, parses it,
   POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP).
-- **`mcp/`** -- the MCP server (TypeScript) so agents speak the mailbox over MCP. **Per-identity send**
-  is first-class here: each human/agent sends under its OWN identity via per-identity creds
-  (`mcp/PROOF-per-identity-send.md`).
+- **`mcp/`** -- the MCP server (TypeScript) so agents speak the mailbox over MCP. Published on npm
+  as **`@skyphusion/postern-mcp`** (`npx -y @skyphusion/postern-mcp`). **Per-identity send** is first-class here: each
+  human/agent sends under its OWN identity via per-identity creds (`mcp/PROOF-per-identity-send.md`).
 - **`webmail/`** -- a single self-contained page (vanilla HTML/CSS/JS, no build step) served by the
   worker at **`/webmail`**. Read-only human door: list, read, threads, search. BYO-token in
   `sessionStorage` only, HTML rendered in a sandboxed iframe (no scripts/trackers), locked-down CSP.
 - **`imap/`** -- a small Twisted server fronting the read API as **read-only IMAP**, so
   Thunderbird / mutt / iOS Mail can open the mailbox.
-- **`clients/python/`** -- a Python client for the API.
+- **`clients/python/`** -- a Python client + CLI for the API. Published on PyPI as
+  **`postern-client`** (`pip install postern-client`).
 
 Human doors (webmail, imap) are read-only **clients** of the API, never a second store. Sending always
 goes through the structured API.

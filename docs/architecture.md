@@ -115,14 +115,14 @@ flowchart LR
     wr -->|service binding| api
 ```
 
-| Component | Role | Send? |
-|-----------|------|-------|
-| `inbound/` | Core Worker: store, API, ingest, dispatch | yes (API) |
-| `relay/` | Optional SMTP bridge: ingest, submission, BYO dispatch | via worker |
-| `mcp/` | MCP tools for agents (`mailbox_search`, `mailbox_send`, ...) | opt-in send |
-| `webmail/` | Self-contained read UI served at `/webmail` | no (v1) |
-| `imap/` | Read-only IMAP front for MUAs | no (v1) |
-| `clients/python/` | Thin stdlib HTTP client | if token allows |
+| Component | Role | Send? | Published as |
+|-----------|------|-------|--------------|
+| `inbound/` | Core Worker: store, API, ingest, dispatch | yes (API) | -- |
+| `relay/` | Optional SMTP bridge: ingest, submission, BYO dispatch | via worker | -- |
+| `mcp/` | MCP tools for agents (`mailbox_search`, `mailbox_send`, ...) | opt-in send | [`@skyphusion/postern-mcp` on npm](https://www.npmjs.com/package/@skyphusion/postern-mcp) |
+| `webmail/` | Self-contained read UI served at `/webmail` | no (v1) | -- |
+| `imap/` | Read-only IMAP front for MUAs | no (v1) | -- |
+| `clients/python/` | Thin stdlib HTTP client + CLI | if token allows | [`postern-client` on PyPI](https://pypi.org/project/postern-client/) |
 
 Search modes on `/api/search`: `fts` (keyword), `semantic` (Vectorize), `hybrid` (both).
 MCP and webmail default to **hybrid** when Vectorize is bound.
