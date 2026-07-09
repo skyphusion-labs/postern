@@ -73,7 +73,12 @@ async function main() {
   console.log("-".repeat(64));
   console.log(`messages in D1:        ${r.messages}`);
   console.log(`  gated (indexable):   ${r.gatedMessages}`);
-  console.log(`expected vectors:      ${r.expectedVectors}`);
+  console.log(`expected vectors:      ${r.expectedVectors} (${r.expectedSource})`);
+  console.log(`  ledger rows:         ${r.ledgerVectors}`);
+  console.log(`  computed from D1:    ${r.computedVectors}`);
+  if (r.ledgerVectors > 0 && r.ledgerDrift !== 0) {
+    console.log(`  ledger drift:        ${r.ledgerDrift}  (computed - ledger; run reindex)`);
+  }
   console.log(`live vectors (index):  ${r.liveVectorCount}`);
   if (r.verified) {
     console.log(`expected present:      ${r.presentExpected}`);

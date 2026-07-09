@@ -48,6 +48,14 @@ on a 400/401/403 (e.g. `requires send scope`, `invalid to address: ...`).
 
 ## Install / build
 
+**From npm** (after the package is published; tag `postern-mcp-v*` triggers CI):
+
+```bash
+npx -y postern-mcp   # requires POSTERN_API_URL + POSTERN_API_TOKEN in env
+```
+
+**From this repo** (development or before publish):
+
 ```bash
 cd mcp
 npm install
@@ -56,11 +64,28 @@ npm run build      # compiles src -> dist (tsc)
 
 Runtime deps are minimal: the MCP SDK and zod. Node >= 18 (uses the global `fetch`).
 
+### Cursor / Claude MCP config (npm)
+
+```json
+{
+  "mcpServers": {
+    "postern": {
+      "command": "npx",
+      "args": ["-y", "postern-mcp"],
+      "env": {
+        "POSTERN_API_URL": "https://your-postern-api.workers.dev",
+        "POSTERN_API_TOKEN": "<read-scoped Postern token>"
+      }
+    }
+  }
+}
+```
+
 ## Configure it in Claude Code
 
 Add an entry to your MCP client config (e.g. `.mcp.json`, or via `claude mcp add`).
-Point it at the built `dist/index.js` and pass the API origin + a **read-scoped**
-token in `env` (never put the token in a tracked file):
+Point it at the built `dist/index.js` (or `npx postern-mcp` once published) and pass
+the API origin + a **read-scoped** token in `env` (never put the token in a tracked file):
 
 ```json
 {
@@ -86,7 +111,7 @@ claude mcp add postern \
   -- node /absolute/path/to/postern/mcp/dist/index.js
 ```
 
-Once published to npm it is `npx`-runnable (`"command": "npx", "args": ["-y", "postern-mcp"]`).
+Once published to npm, use `"command": "npx", "args": ["-y", "postern-mcp"]` (see above).
 
 ## Configuration
 
