@@ -19,10 +19,9 @@ Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/A
 - **`inbound/`** -- THE core Cloudflare Worker. Ingests inbound mail via Email Routing, stores it in
   D1 (FTS5 search), R2 (attachment bytes), and optionally Vectorize (chunked embeddings for crew RAG),
   and serves the one mailbox API (`/api/messages`, `/api/search`, `/api/send`, `/api/reply`,
-  `/api/threads`) plus a same-account `MailboxService` RPC entrypoint. It also SENDS, so the sent copy
-  is written in the same isolate as the store. This is the heart of postern.
-- **`worker/`** -- the legacy standalone send-only Worker (`EmailService` RPC + token-gated
-  `POST /send`). Kept for back-compat; folds into `inbound/` in a later release.
+  `/api/threads`) plus a same-account `MailboxService` RPC entrypoint (legacy `EmailService` alias
+  for send-only bindings). It also SENDS, so the sent copy is written in the same isolate as the store.
+  This is the heart of postern.
 - **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) on the **directory host** for local services that
   can only speak SMTP (cron, backups, CI failure mail). Accepts MIME on `127.0.0.1:2525`, parses it,
   POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP).
@@ -61,7 +60,6 @@ npm run typecheck                  # tsc --noEmit -- the CI gate; run before pus
 npm run cf-typegen                 # regenerate Env types from wrangler.jsonc
 npx wrangler d1 migrations apply postern   # apply D1 migrations
 
-# worker/  (legacy send Worker) -- same npm scripts as inbound/
 # mcp/     (TypeScript)  -- npm run typecheck; npx vitest run
 # relay/   (Go 1.22+)    -- go vet ./... ; go build -o skyphusion-email-relay .
 # imap/    (Python/Twisted) -- see imap/README.md; trial-based tests
@@ -75,9 +73,9 @@ End-to-end: verify against `npm run dev` + `curl` the mailbox API; verify the re
 
 ## Architecture (load-bearing)
 
-- **One send core, two front doors.** Both `inbound/` and the legacy `worker/` funnel sends through one
-  `sendEmail()` so behavior cannot drift. `POST /send` does a **constant-time** Bearer-token compare
-  before parsing the body. Keep it constant-time; never replace with `===`.
+- **One send core.** All sends funnel through `inbound/src/mailbox.ts` so behavior cannot drift.
+  `POST /send` is a back-compat alias of `/api/send`. Keep the Bearer-token gate constant-time;
+  never replace with `===`.
 - **Sender-domain rewriting.** The worker only accepts `from` on `ALLOWED_FROM_DOMAIN`
   (`skyphusion.org`); the relay rewrites off-domain senders (e.g. `root@directory-host`) to `DEFAULT_FROM`
   and moves the original into `Reply-To`, so CI/cron mail is not rejected.
@@ -96,8 +94,7 @@ End-to-end: verify against `npm run dev` + `curl` the mailbox API; verify the re
 
 ## CI / deploy
 
-**GitHub Actions**. On push to `main`, `deploy.yml` deploys the workers (the live
-inbound worker stays named `skyphusion-email-inbound`; the send worker -> `postern-send`) and runs
+**GitHub Actions**. On push to `main`, `deploy.yml` deploys the inbound worker (`postern`) and runs
 `wrangler d1 migrations apply` first. Public repo -> GitHub-hosted `ubuntu-latest`. The relay is rebuilt
 and reinstalled on the directory host by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
 

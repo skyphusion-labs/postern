@@ -99,7 +99,10 @@
 
   // POSTERN_API_TOKEN is a secret, not a var (gates the send/reply + read API):
   //   wrangler secret put POSTERN_API_TOKEN
-  // (RELAY_TOKEN is still read as a fallback for one release through the rename.)
+
+  // OPTIONAL (#197): MTA-STS policy host. Add a route + set MTA_STS_* vars when enabling
+  // (see docs/MTA-STS.md). Example:
+  //   { pattern = "mta-sts.example.com/.well-known/mta-sts.txt", zone_name = "example.com" },
 
   // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):
   //   Route ALL addresses (including catch-all) to this Worker. The worker

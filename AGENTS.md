@@ -6,7 +6,7 @@ house conventions. `DEPLOY.md` is the clean-install (real Cloudflare) quickstart
 ## Cursor Cloud specific instructions
 
 The startup update script already installs all dependencies: `npm ci` in `inbound/`,
-`worker/`, `mcp/`; `go mod download` in `relay/`; and a `.venv` per Python component
+`mcp/`; `go mod download` in `relay/`; and a `.venv` per Python component
 (`imap/`, `clients/python/`) with the `[dev]` extras. Toolchains (Node 22, Go, Python
 3.12 + `python3.12-venv`) are preinstalled in the VM snapshot.
 
@@ -16,8 +16,8 @@ component's `package.json`/`pyproject.toml`):
 - **`inbound/` (core Worker, required).** Lint/test gate: `npm run typecheck` then
   `npm test` (vitest). Run locally with the DEV config, not the prod one:
   `npx wrangler dev --config wrangler.dev.jsonc` (binds local D1 + local R2, no remote
-  Cloudflare bindings). There is no `npm run dev` script here (unlike `worker/`).
-- **`worker/`, `mcp/` (optional).** `npm run typecheck` + `npm test`.
+  Cloudflare bindings). There is no `npm run dev` script; use `npx wrangler dev --config wrangler.dev.jsonc`.
+- **`mcp/` (optional).** `npm run typecheck` + `npm test`.
 - **`relay/` (optional, Go).** `go vet ./...` + `go test ./...`.
 - **`imap/`, `clients/python/` (optional).** Activate the venv first
   (`. .venv/bin/activate`), then run the tests / `mypy` documented in each README.

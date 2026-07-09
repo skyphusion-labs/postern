@@ -17,10 +17,9 @@ Three components in one repo:
   Routing, stores it in D1 (full-text search), R2 (attachments), and optionally
   Vectorize (embeddings for semantic recall), and serves the one mailbox API
   (`/api/messages`, `/api/search`, `/api/send`, `/api/reply`, `/api/threads`)
-  plus a same-account `MailboxService` RPC entrypoint. It also sends, so the sent
-  copy is written in the same isolate as the store.
-- **`worker/`**: a standalone send-only Worker (`EmailService` RPC + token-gated
-  `POST /send`). Kept for back-compat; folds into `inbound/` in a later release.
+  plus a same-account `MailboxService` RPC entrypoint (legacy send-only consumers
+  may bind `EmailService` on the same worker). It also sends, so the sent copy
+  is written in the same isolate as the store.
 - **`relay/`**: a small Go SMTP daemon. Local services that can only speak SMTP
   hand it a message; it parses the MIME and relays it to the worker over HTTPS.
   Optional, for bring-your-own-SMTP and for non-Worker callers.
@@ -78,10 +77,9 @@ catch-all to the Worker), and run the smoke (see DEPLOY.md).
 
 ## Auth
 
-- **Same-account Workers:** the `MailboxService` RPC entrypoint, tokenless.
+- **Same-account Workers:** the `MailboxService` RPC entrypoint (or legacy `EmailService` alias), tokenless.
 - **Everyone else:** `Authorization: Bearer <POSTERN_API_TOKEN>`, constant-time
-  compared. (`RELAY_TOKEN` is honored as a fallback for one release through the
-  rename.)
+  compared.
 - Transports (`/ingest`, relay `/dispatch`) use a **separate**
   `POSTERN_TRANSPORT_TOKEN`, never the API token, so an API-token leak cannot
   inject mail and vice versa.

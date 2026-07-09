@@ -77,11 +77,9 @@ interface Env {
   /**
    * Mailbox API token for the client-facing send/reply + read endpoints
    * (Authorization: Bearer ...). NOT the transport token. wrangler secret put
-   * POSTERN_API_TOKEN. RELAY_TOKEN is read as a one-release rename fallback.
+   * POSTERN_API_TOKEN.
    */
   POSTERN_API_TOKEN?: string;
-  /** @deprecated Back-compat fallback for POSTERN_API_TOKEN; remove next release. */
-  RELAY_TOKEN?: string;
   /**
    * Optional per-function READ-scoped mailbox token slot (#85). Holds a
    * comma-separated SET of tokens (#154): entries trimmed, empties dropped; a

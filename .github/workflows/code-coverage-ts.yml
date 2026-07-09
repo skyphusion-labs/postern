@@ -1,7 +1,7 @@
 name: coverage
 
-# Unified coverage for relay (Go) + worker + inbound (Vitest/Istanbul). Uploads the
-# worker cobertura report to GitHub Enterprise Code Coverage (org required check:
+# Unified coverage for relay (Go) + inbound (Vitest/Istanbul). Uploads the inbound
+# cobertura report to GitHub Enterprise Code Coverage (org required check:
 # `coverage`) and keeps full multi-component artifacts for inspection.
 
 on:
@@ -40,15 +40,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: |
-            worker/package-lock.json
-            inbound/package-lock.json
-
-      - name: Worker coverage
-        working-directory: worker
-        run: |
-          npm ci
-          npm run test:coverage
+          cache-dependency-path: inbound/package-lock.json
 
       - name: Inbound coverage
         working-directory: inbound
@@ -60,7 +52,7 @@ jobs:
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/upload-code-coverage@v1
         with:
-          file: ./worker/coverage/cobertura-coverage.xml
+          file: ./inbound/coverage/cobertura-coverage.xml
           language: javascript
 
       - name: Upload coverage reports (artifacts)
@@ -69,7 +61,6 @@ jobs:
           name: coverage-reports
           path: |
             relay/coverage.out
-            worker/coverage/
             inbound/coverage/
           if-no-files-found: warn
           retention-days: 14

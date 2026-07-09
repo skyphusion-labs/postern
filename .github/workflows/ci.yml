@@ -13,22 +13,6 @@ permissions:
 
 jobs:
 
-  worker:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: worker
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-
   inbound:
     runs-on: ubuntu-latest
     defaults:
@@ -144,13 +128,12 @@ jobs:
 
   ci:
     name: ci
-    needs: [worker, inbound, relay, imap, clients-python, mcp]
+    needs: [inbound, relay, imap, clients-python, mcp]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require all component jobs
         run: |
-          test "${{ needs.worker.result }}" = "success"
           test "${{ needs.inbound.result }}" = "success"
           test "${{ needs.relay.result }}" = "success"
           test "${{ needs.imap.result }}" = "success"

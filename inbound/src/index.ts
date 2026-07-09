@@ -137,5 +137,13 @@ export class MailboxService extends WorkerEntrypoint<Env> {
   }
 }
 
+/**
+ * Back-compat RPC entrypoint for legacy send-only consumers (#190). Same isolate
+ * and methods as MailboxService; prefer MailboxService for new bindings.
+ *
+ *   { "binding": "EMAIL", "service": "postern", "entrypoint": "EmailService" }
+ */
+export class EmailService extends MailboxService {}
+
 // Re-export the CF-transport helpers for any existing importer of this module.
 export { toArrayBuffer, extractSpfResult, extractDkimResult, extractDmarcResult } from "./headers";

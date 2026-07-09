@@ -1,18 +1,16 @@
 # postern inbound
 
-The receive side of postern: a Cloudflare Worker bound to **Email Routing** that
-ingests every inbound message for the domain into D1 (searchable store), R2
-(attachment bytes), and Vectorize (chunked embeddings for crew RAG), then
-forwards a configured subset to a real inbox.
-
-It is independent of the send-side `worker/`: nothing here sends mail, and the
-two share no bindings.
+The core Cloudflare Worker: ingest via **Email Routing**, store in D1 (searchable
+mailbox), R2 (attachment bytes), and Vectorize (chunked embeddings for RAG), serve
+the mailbox API (`/api/*`), and send outbound mail in the same isolate so sent copies
+land in the store without a cross-worker hop.
 
 ```
 inbound mail ─► Email Routing ─► this Worker ─┬─► message.forward()  (FORWARD_FOR subset only)
                                               ├─► D1 messages + attachments (+ FTS5)
                                               ├─► R2 attachment bytes
-                                              └─► Vectorize chunk embeddings (VECTORIZE_FOR opt-in)
+                                              ├─► Vectorize chunk embeddings (VECTORIZE_FOR opt-in)
+                                              └─► outbound send (CF Email or relay transport)
 ```
 
 ## Processing order (load-bearing)

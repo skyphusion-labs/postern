@@ -1,8 +1,7 @@
 # MTA-STS + TLSRPT design (RFC 8461 / RFC 8460)
 
-Status: DESIGN, staged. The DNS records and the policy-host deploy are
-Conrad-supervised mutations (see the fleet-chezmoi CR). Nothing here mutates
-production; this document is the contract the CR implements.
+Status: IMPLEMENTED in code (#197); DNS/LB deploy is Conrad-supervised (see the fleet-chezmoi CR).
+Nothing here mutates production from the repo alone; this document is the contract the CR implements.
 
 Issue: #197 (edge: implicit-TLS 465 + MTA-STS, STARTTLS-stripping resilience).
 
@@ -97,7 +96,7 @@ across a full max_age window before enforce.
 DECISION (review of PR #213): serve the policy from the EXISTING inbound Worker
 as an env-gated static route, NOT a dedicated Worker. Rationale:
 
-- M10 is consolidating Workers (#190 folds `worker/` into `inbound/`); a new
+- M10 consolidated Workers (#190 folded the legacy send worker into `inbound/`); a new
   deploy lane cuts against that direction.
 - The attack-surface/CSP argument does not apply here: the route is a static text
   response with no query/body parsing and no shared response headers, so it adds

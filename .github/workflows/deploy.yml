@@ -1,18 +1,19 @@
 name: deploy
 
 # Deploy step ported from the decommissioned Jenkins pipeline (the old
-# `skyphusion-email` job): on a green push to main, deploy the two Cloudflare
-# Workers to production via `wrangler deploy`.
+# `skyphusion-email` job): on a green push to main, deploy the inbound
+# Cloudflare Worker to production via `wrangler deploy`.
 #
-# PRs are gated by ci.yml (worker/inbound/relay/imap checks). This workflow owns
-# the main deploy, and re-runs the worker + inbound typecheck/test inline so the
-# deploy is gated behind green on the exact code being shipped (faithful to the
-# Jenkins "deploy only on green main"). Branch/PR pushes never deploy.
+# PRs are gated by ci.yml (inbound/relay/imap checks). This workflow owns the
+# main deploy, and re-runs the inbound typecheck/test inline so the deploy is
+# gated behind green on the exact code being shipped (faithful to the Jenkins
+# "deploy only on green main"). Branch/PR pushes never deploy.
 #
-# Workers deployed (names per the post-rename wrangler.jsonc in each dir):
-#   worker/   -> postern-send   (outbound sending; was skyphusion-email)
-#   inbound/  -> postern        (CF Email Routing ingestion + store/read API;
+# Worker deployed (name per inbound/wrangler.jsonc):
+#   inbound/  -> postern        (CF Email Routing ingestion + store/read/send API;
 #                                was skyphusion-email-inbound)
+#
+# The legacy send-only worker/ (postern-send) was folded into inbound/ (#190).
 #
 # Runner: GitHub-hosted ubuntu-latest. This is a PUBLIC repo, so deploy is gated
 # to push-to-main (never a fork PR) and runs on the fork-safe hosted runner
@@ -77,24 +78,12 @@ jobs:
         with:
           node-version: 22
 
-      # Gate: deploy only if worker + inbound are green on this exact commit.
-      - name: Worker typecheck + test
-        working-directory: worker
-        run: |
-          npm ci
-          npm run typecheck
-          npm test
-
       - name: Inbound typecheck + test
         working-directory: inbound
         run: |
           npm ci
           npm run typecheck
           npm test
-
-      - name: Deploy worker (postern-send)
-        working-directory: worker
-        run: npx wrangler deploy
 
       # The committed inbound/wrangler.jsonc is the PUBLIC template (placeholder
       # ids, postern-named, vectorize/send commented out). An operator points CI
