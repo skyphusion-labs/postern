@@ -124,9 +124,11 @@ lists the viable durable options for getting a complete, deletable target.
 `store.reconcile(env, opts)`, exposed at `POST /api/admin/reconcile` (admin / both-scoped,
 #85), driven by `inbound/reconcile.mjs`:
 
-1. **Enumerate expected.** Page D1 (`pageForReindex`), apply the vectorize gate, and for
-   each gated, non-empty message compute its `base.0..base.(n-1)` ids. Yields
-   `expectedVectors` and the set of still-live `message_id`s.
+1. **Enumerate expected.** When `vector_ledger` has rows (#279), read that set directly
+   (O(ledger), no full D1 re-derive). Otherwise page D1 (`pageForReindex`), apply the
+   vectorize gate, and compute `base.0..base.(n-1)` ids. Always compute `computedVectors`
+   from D1 for drift (`ledgerDrift = computed - ledger`). Yields `expectedVectors`,
+   `expectedSource` (`ledger` | `computed`), and still-live `message_id`s for sampling.
 2. **Read live count.** `describe()` -> `liveVectorCount`.
 3. **Verify presence.** `getByIds` over the expected ids (batched at the live cap of
    **20 ids/call** -- `VECTOR_GET_ERROR 40007` above that -- and bounded-parallel so a
@@ -153,12 +155,17 @@ The whole pass uses D1 + Vectorize `describe`/`getByIds`/`query` only. **It neve
 ### Report shape (`ReconcileResult`)
 
 ```
-messages, gatedMessages, expectedVectors,
+messages, gatedMessages, expectedVectors, expectedSource, ledgerVectors, computedVectors, ledgerDrift,
 liveVectorCount, verified, presentExpected, missingExpected, missingExpectedSample,
 orphanCount, enumerable: false,
 sample: { probes, matchesInspected, distinctOrphans, causeA, causeB, unknown, orphanIds },
 causeDetermination, note
 ```
+
+**Backfill the ledger on an existing store:** run `POST /api/admin/reindex` (not dry-run)
+once after migration `0008_vector_ledger`; every page calls `embedAndUpsert`, which syncs
+`vector_ledger` rows. Until then reconcile uses the computed D1 path (`expectedSource:
+computed`).
 
 ### Running it
 

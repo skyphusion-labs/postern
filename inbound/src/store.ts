@@ -365,6 +365,13 @@ export function plannedChunks(bodyText: string): number {
   return chunkText(bodyText, CHUNK_SIZE, CHUNK_OVERLAP).slice(0, MAX_CHUNKS).length;
 }
 
+/** Deterministic Vectorize ids for a message (sha256hex(messageId)[:56].chunk). */
+export async function vectorIdsForMessage(messageId: string, chunkCount: number): Promise<string[]> {
+  if (chunkCount <= 0) return [];
+  const base = (await sha256hex(messageId)).slice(0, 56);
+  return Array.from({ length: chunkCount }, (_, i) => `${base}.${i}`);
+}
+
 /**
  * embedAndUpsert chunks the body, embeds each chunk (bge-base), and upserts the
  * vectors keyed by a DETERMINISTIC id (sha256(messageId).slice + chunk), so a
@@ -379,10 +386,10 @@ export async function embedAndUpsert(env: Env, f: VectorizeFields): Promise<numb
   if (f.bodyText.length === 0) return 0;
   const chunks = chunkText(f.bodyText, CHUNK_SIZE, CHUNK_OVERLAP).slice(0, MAX_CHUNKS);
   if (chunks.length === 0) return 0;
-  const base = (await sha256hex(f.messageId)).slice(0, 56);
+  const ids = await vectorIdsForMessage(f.messageId, chunks.length);
   const embed = (await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks })) as { data: number[][] };
   const vectors = embed.data.map((values, i) => ({
-    id: `${base}.${i}`,
+    id: ids[i],
     values,
     metadata: {
       message_id: f.messageId,
@@ -398,7 +405,21 @@ export async function embedAndUpsert(env: Env, f: VectorizeFields): Promise<numb
     },
   }));
   if (vectors.length) await env.VECTORIZE.upsert(vectors);
+  if (vectors.length) await syncVectorLedger(env, f.messageId, ids);
   return vectors.length;
+}
+
+/** Record the chunk-vector ids upserted for a message (#279 id-ledger). */
+async function syncVectorLedger(env: Env, messageId: string, vectorIds: string[]): Promise<void> {
+  if (!env.DB || vectorIds.length === 0) return;
+  await env.DB.prepare("DELETE FROM vector_ledger WHERE message_id = ?").bind(messageId).run();
+  for (let i = 0; i < vectorIds.length; i++) {
+    await env.DB.prepare(
+      "INSERT INTO vector_ledger (vector_id, message_id, chunk, indexed_at) VALUES (?, ?, ?, datetime('now'))",
+    )
+      .bind(vectorIds[i], messageId, i)
+      .run();
+  }
 }
 
 async function indexVectors(env: Env, input: StoreInput): Promise<void> {
@@ -1255,7 +1276,11 @@ export interface ReconcileResult {
   // --- D1 side: the authoritative EXPECTED state ---
   messages: number; // total messages in the store
   gatedMessages: number; // messages that pass the vectorize gate AND have a non-empty body
-  expectedVectors: number; // total expected chunk-vectors across gated messages
+  expectedVectors: number; // expected chunk-vectors (from ledger when populated, else computed)
+  expectedSource: "ledger" | "computed"; // where expectedVectors came from (#279)
+  ledgerVectors: number; // rows in vector_ledger (0 when never backfilled)
+  computedVectors: number; // D1-derived expected count (always computed for drift)
+  ledgerDrift: number; // computedVectors - ledgerVectors when ledger is in use
   // --- Vectorize side: what is actually in the index ---
   liveVectorCount: number; // describe(): vectors actually present (may lag, eventually-consistent)
   verified: boolean; // whether the getByIds presence check ran
@@ -1307,13 +1332,32 @@ async function expectedVectorIds(env: Env): Promise<{
       const chunks = plannedChunks(r.body_text);
       if (chunks === 0) continue;
       gatedMessages++;
-      const base = (await sha256hex(r.message_id)).slice(0, 56);
-      for (let i = 0; i < chunks; i++) ids.add(`${base}.${i}`);
+      const vids = await vectorIdsForMessage(r.message_id, chunks);
+      for (const id of vids) ids.add(id);
     }
     if (nextCursor === null) break;
     cursor = nextCursor;
   }
   return { messages, gatedMessages, ids, liveMessageIds, liveMetaKeys };
+}
+
+/** Load every vector_id recorded by embedAndUpsert (#279). Pages by vector_id. */
+async function loadVectorLedgerIds(env: Env): Promise<Set<string>> {
+  const ids = new Set<string>();
+  if (!env.DB) return ids;
+  let after: string | undefined;
+  for (;;) {
+    const stmt = after
+      ? env.DB.prepare("SELECT vector_id FROM vector_ledger WHERE vector_id > ? ORDER BY vector_id LIMIT 500")
+      : env.DB.prepare("SELECT vector_id FROM vector_ledger ORDER BY vector_id LIMIT 500");
+    const page = after ? await stmt.bind(after).all<{ vector_id: string }>() : await stmt.all<{ vector_id: string }>();
+    const rows = page.results ?? [];
+    if (rows.length === 0) break;
+    for (const r of rows) ids.add(r.vector_id);
+    if (rows.length < 500) break;
+    after = rows[rows.length - 1].vector_id;
+  }
+  return ids;
 }
 
 /** Stable key linking an old-scheme orphan (which lacks a message_id) back to a live
@@ -1420,8 +1464,17 @@ export async function reconcile(env: Env, opts: ReconcileOpts = {}): Promise<Rec
   const sampleSize = opts.sampleSize ?? RECONCILE_DEFAULT_SAMPLE;
   const includeOrphanIds = opts.includeOrphanIds === true;
 
-  const expected = await expectedVectorIds(env);
-  const expectedVectors = expected.ids.size;
+  const computed = await expectedVectorIds(env);
+  const ledgerIds = await loadVectorLedgerIds(env);
+  const ledgerVectors = ledgerIds.size;
+  const computedVectors = computed.ids.size;
+  const useLedger = ledgerVectors > 0;
+  const expectedIds = useLedger ? ledgerIds : computed.ids;
+  const expectedSource = useLedger ? "ledger" : "computed";
+  const expectedVectors = expectedIds.size;
+  const ledgerDrift = useLedger ? computedVectors - ledgerVectors : 0;
+
+  const expected = { ...computed, ids: expectedIds };
   const live = await liveVectorCount(env);
 
   // Presence check: confirm the expected set is actually in the index (and surface
@@ -1495,6 +1548,9 @@ export async function reconcile(env: Env, opts: ReconcileOpts = {}): Promise<Rec
   else if (sample.causeB > 0) causeDetermination = "b";
 
   const note =
+    (useLedger
+      ? "Expected ids from vector_ledger (#279); run reindex once to backfill a pre-ledger store. "
+      : "vector_ledger empty: expected ids computed from D1 (run reindex to populate the ledger). ") +
     "Vectorize has no list API: orphanCount is exact, but the orphan SET is sampled, " +
     "not fully enumerable (enumerable=false). causeDetermination is from the sample only. " +
     "READ-ONLY: no vectors were deleted.";
@@ -1503,6 +1559,10 @@ export async function reconcile(env: Env, opts: ReconcileOpts = {}): Promise<Rec
     messages: expected.messages,
     gatedMessages: expected.gatedMessages,
     expectedVectors,
+    expectedSource,
+    ledgerVectors,
+    computedVectors,
+    ledgerDrift,
     liveVectorCount: live,
     verified: verify && expectedVectors > 0,
     presentExpected,
