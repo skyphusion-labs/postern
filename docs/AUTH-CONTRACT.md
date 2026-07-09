@@ -337,12 +337,12 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 
 | Worker secret | Scope | Reaches |
 |---|---|---|
-| `POSTERN_API_TOKEN` (or `RELAY_TOKEN`) | `both` | read + send + credential-admin (the egalitarian single-key default) |
+| `POSTERN_API_TOKEN` | `both` | read + send + credential-admin (the egalitarian single-key default) |
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From) |
 | `POSTERN_SEND_IDENTITIES` (registry, #28) | `send` + bound From | `POST /api/send`/`reply` as the token's OWN identity |
 
-The three STATIC slots (`POSTERN_API_TOKEN`/`RELAY_TOKEN`, `POSTERN_API_TOKEN_READ`,
+The three STATIC slots (`POSTERN_API_TOKEN`, `POSTERN_API_TOKEN_READ`,
 `POSTERN_API_TOKEN_SEND`) each hold a **comma-separated SET of tokens** (#154):
 entries are trimmed, empty entries (stray commas, whitespace) are ignored, and a
 bearer matching ANY member resolves to that slot's scope. A single bare value (no

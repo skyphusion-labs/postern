@@ -1,7 +1,7 @@
 # The Postern contract (M1, Core v1.0)
 
 Status: authoritative for M1. Sourced from design issue #33; field names map 1:1 to the
-code in `inbound/src/index.ts`, `worker/src/email.ts`, and `inbound/schema.sql` so the
+code in `inbound/src/index.ts`, `inbound/src/mailbox.ts`, and `inbound/schema.sql` so the
 refactor diff stays traceable. Section 10 (M8, #189) extends the data model to envelope
 fidelity v2; where it and section 1 disagree, section 10 wins.
 
@@ -207,8 +207,7 @@ trust verdict, D1 insert, R2 attachments, opt-in Vectorize), but as a pure funct
 
 - **In-Worker (default).** The CF `email()` handler runs `postal-mime`, builds `ParsedInbound`
   from the parsed message and the available auth headers, and calls `ingest()`. This is the
-  one surviving `email()` handler (#21): the vestigial forward-only handler in `worker/` is
-  removed.
+  one surviving `email()` handler (#21).
 - **Out-of-Worker.** `POST /ingest` (transport-token gated) accepts a `ParsedInbound` JSON
   body and calls `ingest()`. This is how **postern-relay** delivers SMTP-received mail without
   CF Email Routing (#29). `content` arrives base64-encoded over JSON; the driver decodes to
@@ -229,8 +228,7 @@ result. This ordering is load-bearing and must not move into `ingest()`.
 
 ## 3. Outbound transport contract: `dispatch()` (#23)
 
-The mirror seam. The existing `EmailRequest` / `sendEmail()` validation in `worker/src/email.ts`
-is kept verbatim as the *orchestration*; only the final `env.EMAIL.send()` call moves behind an
+The mirror seam. Send/reply validation lives in `inbound/src/mailbox.ts`; only the final `env.EMAIL.send()` call moves behind an
 interface.
 
 ```ts
@@ -352,12 +350,11 @@ The RPC entrypoint mirrors the read + write operations as typed methods (`list`,
 
 ## 5. Auth
 
-- **Same-account Workers:** the RPC entrypoint, tokenless (as today's `EmailService`).
+- **Same-account Workers:** the `MailboxService` RPC entrypoint (or legacy `EmailService` alias), tokenless.
 - **Everyone else:** `Authorization: Bearer <token>`, **constant-time** compare. Keep the
   existing `timingSafeEqual`; do not switch to `===`. Length may leak (tokens are high-entropy);
   the byte contents must not.
-- The API secret is `POSTERN_API_TOKEN`. For one release, `RELAY_TOKEN` is read as a fallback
-  so deployed relays keep working through the rename.
+- The API secret is `POSTERN_API_TOKEN`.
 - Scoped / multi tokens are a post-v1 enhancement: noted, not built.
 
 `POST /ingest` and `dispatch`-to-relay are infra seams, not API clients. They use a
@@ -400,15 +397,14 @@ Order that stays green at each step:
 
 M3 (relay), M4 (AI Search), M5 (postern-imap) attach to these finished seams.
 
-**Where M2 actually landed (status).** Rather than do the full `worker/` + `inbound/` collapse
-in one move, M2 built the outbound loop *into the `inbound/` worker* -- the isolate that already
-owns the store (D1/R2/Vectorize/AI). `inbound/` now also holds the `send_email` (EMAIL) binding,
+**Where M2 landed (status).** The outbound loop lives in the `inbound/` worker, the isolate
+that owns the store (D1/R2/Vectorize/AI). `inbound/` holds the `send_email` (EMAIL) binding,
 the transport seam (`transport/index.ts` + `transport/cf.ts`), `mailbox.ts` (send/reply),
-`store.ts` (the sole D1/R2/Vectorize owner), and `api.ts` (the HTTP routes) plus a
-`MailboxService` RPC entrypoint. So `inbound/` is the de-facto `core` from the store side; the
-standalone `worker/` (send-only, `EmailService`) stays for back-compat this round and folds in
-later. The send + store now share one isolate (no cross-worker hop), which is the property
-section 6 required; the directory rename to `core/` is cosmetic and deferred.
+`store.ts` (the sole D1/R2/Vectorize owner), and `api.ts` (the HTTP routes) plus
+`MailboxService` RPC entrypoint (and a legacy `EmailService` alias for send-only bindings,
+#190). The standalone `worker/` send-only Worker was retired in #190. Send + store share one
+isolate (no cross-worker hop), which is the property section 6 required; the directory rename
+to `core/` is cosmetic and deferred.
 
 ---
 
@@ -435,8 +431,7 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
 - CF Email = default transport behind `dispatch` / `ingest`, never a hard dependency.
 - One API for agents and humans; IMAP is a client of it, not a peer.
 - `thread_id` denormalized onto `messages` (simple, indexable) over a separate threads table.
-- API secret renamed `RELAY_TOKEN` -> `POSTERN_API_TOKEN`, with `RELAY_TOKEN` honored as a
-  fallback for one release.
+- API secret is `POSTERN_API_TOKEN` (formerly `RELAY_TOKEN`, rename complete as of #190).
 - **Transport auth (DECIDED):** `/ingest` and `dispatch`-to-relay use a **separate**
   `POSTERN_TRANSPORT_TOKEN`, never the mailbox API token. Transports are infra, not API clients,
   so an API-token leak cannot inject mail and a transport-token leak cannot read the mailbox.

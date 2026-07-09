@@ -561,7 +561,7 @@ async function resolveToken(request: Request, env: Env): Promise<TokenResolution
   if (got.length === 0) return null;
 
   const candidates: Array<[Scope, string[]]> = [
-    ["both", tokenSet(env.POSTERN_API_TOKEN || env.RELAY_TOKEN)],
+    ["both", tokenSet(env.POSTERN_API_TOKEN)],
     ["read", tokenSet(env.POSTERN_API_TOKEN_READ)],
     ["send", tokenSet(env.POSTERN_API_TOKEN_SEND)],
   ];

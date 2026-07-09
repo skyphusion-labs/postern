@@ -22,6 +22,13 @@ Worker name from `inbound/wrangler.jsonc`):
 }
 ```
 
+Legacy send-only consumers may keep an `EmailService` binding on the same worker
+(repoint `"service"` from the retired `postern-send` worker; entrypoint unchanged):
+
+```jsonc
+{ "binding": "EMAIL", "service": "postern", "entrypoint": "EmailService" }
+```
+
 After editing the binding, regenerate types: `npx wrangler types`.
 
 Then send from anywhere in the worker:
