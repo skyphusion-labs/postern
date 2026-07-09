@@ -5,12 +5,18 @@ mailbox), R2 (attachment bytes), and Vectorize (chunked embeddings for RAG), ser
 the mailbox API (`/api/*`), and send outbound mail in the same isolate so sent copies
 land in the store without a cross-worker hop.
 
-```
-inbound mail ─► Email Routing ─► this Worker ─┬─► message.forward()  (FORWARD_FOR subset only)
-                                              ├─► D1 messages + attachments (+ FTS5)
-                                              ├─► R2 attachment bytes
-                                              ├─► Vectorize chunk embeddings (VECTORIZE_FOR opt-in)
-                                              └─► outbound send (CF Email or relay transport)
+Stack map: [docs/architecture.md](../docs/architecture.md).
+
+```mermaid
+flowchart LR
+    cf[CF Email Routing] --> W[inbound Worker]
+    relay[relay POST /ingest] --> W
+    W --> D1[(D1 + FTS5)]
+    W --> R2[(R2)]
+    W --> V[(Vectorize)]
+    W --> API[Mailbox API / RPC]
+    API --> CFsend[CF Email Sending]
+    API --> dispatch[relay /dispatch]
 ```
 
 ## Processing order (load-bearing)
@@ -24,9 +30,10 @@ inbound mail ─► Email Routing ─► this Worker ─┬─► message.forwar
 2. **Parse the MIME** (`message.raw` is a tee CF keeps available after forward).
 3. **Derive auth verdicts** (SPF / DKIM / DMARC) and an allowlist `trusted` flag.
 4. **Clean the body** (strip signature + quoted-reply lines), cap at 32 KB.
-5. **D1 insert** with `INSERT OR IGNORE` keyed on `message_id` (dedup). If the
-   row already existed (`changes === 0`), the handler returns early; attachments
-   and embeddings are not re-done for a duplicate.
+5. **D1 upsert** keyed on `message_id` (envelope v2 dedup, #178). A duplicate
+   Message-ID from another envelope recipient **merges** the new address into
+   `delivered_to` instead of dropping the delivery; attachments and embeddings
+   run only on the first insert for that Message-ID.
 6. **Attachments to R2 + D1**, best-effort under `ctx.waitUntil`.
 7. **Vectorize embeddings**, best-effort under `ctx.waitUntil`, opt-in per
    recipient via `VECTORIZE_FOR`.

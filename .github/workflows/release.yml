@@ -1,0 +1,35 @@
+name: release
+
+# Cut a GitHub Release when a v* tag is pushed (update CHANGELOG.md first).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="## v${VERSION}" '
+            $0 == ver { found=1; next }
+            found && /^## v/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG section for v${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-notes.md

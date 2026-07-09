@@ -1,0 +1,73 @@
+name: smoke-staging
+
+# Nightly acceptance smoke against the operator's deployed Postern instance (#25).
+# Outbound + store checks only (no inbound MX poll); opt into inbound with
+# workflow_dispatch + --expect-inbound when needed.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   POSTERN_SMOKE_BASE_URL   -- e.g. https://postern.example.com
+#   POSTERN_SMOKE_API_TOKEN  -- bearer with send + read scope
+#   POSTERN_SMOKE_FROM       -- allowed From address for POST /api/send
+#   POSTERN_SMOKE_TO         -- recipient the smoke can address (need not be readable)
+#
+# Skips cleanly when secrets are absent (forks, fresh clones).
+
+on:
+  schedule:
+    - cron: "0 13 * * *" # 08:00 US/Central (DST-aware enough for ops signal)
+  workflow_dispatch:
+    inputs:
+      expect_inbound:
+        description: "Also poll for an inbound message (requires real MX routing)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Postern v1 smoke (staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.repository == 'skyphusion-labs/postern'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Require smoke secrets
+        id: gate
+        env:
+          BASE: ${{ secrets.POSTERN_SMOKE_BASE_URL }}
+          TOKEN: ${{ secrets.POSTERN_SMOKE_API_TOKEN }}
+          FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
+          TO: ${{ secrets.POSTERN_SMOKE_TO }}
+        run: |
+          if [ -z "$BASE" ] || [ -z "$TOKEN" ] || [ -z "$FROM" ] || [ -z "$TO" ]; then
+            echo "Smoke secrets not configured; skipping (expected on forks)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Run inbound/smoke.mjs
+        if: steps.gate.outputs.skip != 'true'
+        working-directory: inbound
+        env:
+          POSTERN_BASE_URL: ${{ secrets.POSTERN_SMOKE_BASE_URL }}
+          POSTERN_API_TOKEN: ${{ secrets.POSTERN_SMOKE_API_TOKEN }}
+          POSTERN_FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
+          POSTERN_TO: ${{ secrets.POSTERN_SMOKE_TO }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.expect_inbound || 'false' }}" = "true" ]; then
+            ARGS="--expect-inbound"
+          fi
+          node smoke.mjs $ARGS

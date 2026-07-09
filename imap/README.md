@@ -5,6 +5,14 @@ mailbox over plain IMAP so a human (Thunderbird, mutt, iOS Mail, ...) or an
 IMAP-speaking agent can read mail that arrived through Postern, without ever
 touching D1/R2 directly.
 
+Stack map: [docs/architecture.md](../docs/architecture.md).
+
+```mermaid
+flowchart LR
+    mua[Thunderbird / iOS Mail] --> imap[postern-imap]
+    imap -->|GET /api/*| api[Postern Mailbox API]
+```
+
 Postern is "one mailbox reachable two ways: by agents (the structured API) and by
 humans (IMAP/webmail, which are *clients* of that same API)" (see
 [`docs/CONTRACT.md`](../docs/CONTRACT.md)). This proxy is exactly that human door:

@@ -42,6 +42,7 @@ goes through the structured API.
 
 When a change touches one of these areas, update the matching doc.
 
+- `docs/architecture.md` -- visual stack map (mermaid); start here for orientation.
 - `docs/CONTRACT.md` -- authoritative data model + the transport seams. Read FIRST.
 - `docs/AUTH-CONTRACT.md` -- the auth model across the seams.
 - `docs/SEND-IDENTITIES.md` -- per-identity send (every caller sends as itself).
