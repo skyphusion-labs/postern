@@ -298,6 +298,7 @@ none touches D1 directly (#25, #26).
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
+| DELETE | `/api/messages/{messageId}` | hard-delete message + attachments + Vectorize tombstone (admin / `both`-scoped, #278) | (#278) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
 | DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |

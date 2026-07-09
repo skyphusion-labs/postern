@@ -223,15 +223,10 @@ Because the orphan SET is not cleanly enumerable, "list the orphans then delete 
 Whichever path: run it supervised, after a reconcile dry-run report is signed off.
 On the fleet store, option 1 landed 2026-07-09 and #134 is closed.
 
-## 7. Delete-tombstone assessment (#134 item 4)
+## 7. Delete-tombstone (#278)
 
-A delete-tombstone path (propagate a mailbox delete -> `VECTORIZE.deleteByIds`) is the
-correct durable guard so the orphan set cannot regrow **once a delete path exists**. It is
-**not needed today**: there is no message-delete path (IMAP read-only; no worker
-`DELETE FROM messages`), so nothing is currently orphaning vectors. The recommendation is
-to wire the tombstone **in tandem with** any future feature that deletes a message (IMAP
-write mode, a webmail/API delete, a retention job): the deleting code computes the
-message's `base.0..base.(n-1)` ids (same scheme) and calls `deleteByIds`. Building it
-ahead of any delete path would be dead code; building it after, but separately from, the
-delete path would reintroduce exactly this orphan class. So: **bundle the tombstone with
-the delete path, not before, not after.**
+`store.deleteMessage()` and `DELETE /api/messages/{messageId}` (admin-scoped) hard-delete
+the D1 row, attachment metadata, R2 bytes, `vector_ledger` rows, and call
+`VECTORIZE.deleteByIds` for the message's chunk-vectors (ledger ids when present, else
+computed from `body_text`). This is bundled so cause (a) orphans cannot regrow after a
+delete. IMAP `\Deleted`/EXPUNGE mapping is a follow-on (#278).
