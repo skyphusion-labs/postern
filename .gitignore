@@ -1,7 +1,6 @@
 # Worker
 node_modules/
 .wrangler/
-worker/worker-configuration.d.ts
 .dev.vars
 *.log
 
