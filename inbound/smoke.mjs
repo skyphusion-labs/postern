@@ -21,7 +21,8 @@
 //
 // Usage:
 //   POSTERN_BASE_URL=https://postern.<acct>.workers.dev \
-//   POSTERN_API_TOKEN=<token> \
+//   POSTERN_API_TOKEN=<read-scoped or both-scoped bearer> \
+//   POSTERN_SEND_TOKEN=<send-scoped bearer, optional; defaults to POSTERN_API_TOKEN> \
 //   POSTERN_FROM=noreply@<your-domain> \
 //   POSTERN_TO=<a-mailbox-you-can-read>@<your-domain> \
 //   node smoke.mjs [--expect-inbound] [--inbound-subject "..."] [--timeout-ms 120000]
@@ -30,7 +31,8 @@
 
 const cfg = {
   baseUrl: required("POSTERN_BASE_URL").replace(/\/+$/, ""),
-  token: required("POSTERN_API_TOKEN"),
+  readToken: required("POSTERN_API_TOKEN"),
+  sendToken: process.env.POSTERN_SEND_TOKEN || required("POSTERN_API_TOKEN"),
   from: required("POSTERN_FROM"),
   to: process.env.POSTERN_TO || "",
   expectInbound: process.argv.includes("--expect-inbound"),
@@ -60,9 +62,12 @@ function fail(msg, detail) {
 }
 function assert(cond, msg, detail) { cond ? ok(msg) : fail(msg, detail); }
 
-async function api(method, path, { body, auth = true } = {}) {
+async function api(method, path, { body, auth = true, scope = "read" } = {}) {
   const headers = { "content-type": "application/json" };
-  if (auth) headers.authorization = `Bearer ${cfg.token}`;
+  if (auth) {
+    const token = scope === "send" ? cfg.sendToken : cfg.readToken;
+    headers.authorization = `Bearer ${token}`;
+  }
   const res = await fetch(`${cfg.baseUrl}${path}`, {
     method,
     headers,
@@ -102,6 +107,7 @@ async function main() {
   {
     const subject = `${tag} send`;
     const send = await api("POST", "/api/send", {
+      scope: "send",
       body: {
         to: cfg.to || cfg.from, // self-send if no separate mailbox given; still proves the store path
         from: cfg.from,
@@ -132,6 +138,7 @@ async function main() {
   console.log("\n3. POST /api/reply -> shared thread, reply copy stored");
   {
     const reply = await api("POST", "/api/reply", {
+      scope: "send",
       body: { messageId: sentId, text: "Reply leg of the smoke.", html: "<p>Reply leg of the smoke.</p>" },
     });
     assert(reply.status === 200 && reply.json?.ok === true, "POST /api/reply returns 200 ok:true", reply);
