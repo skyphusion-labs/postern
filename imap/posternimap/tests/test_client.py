@@ -40,6 +40,48 @@ class ClientTest(unittest.TestCase):
         page = self.client.list_messages(direction="outbound", limit=10)
         self.assertEqual([m.message_id for m in page.items], ["m3"])
 
+    def test_list_to_filter_delivered_to_membership(self):
+        from posternimap.tests.fakes import FakeTransport
+
+        msgs = [
+            make_message(
+                "multi",
+                to="Support <support@skyphusion.org>, Security <security@skyphusion.org>",
+                deliveredTo=["support@skyphusion.org", "security@skyphusion.org"],
+            )
+        ]
+        transport = FakeTransport(msgs, expected_token="good-token", page_size=10)
+        client = PosternClient("https://postern.example", "good-token", transport=transport)
+        for addr in ("support@skyphusion.org", "security@skyphusion.org"):
+            page = client.list_messages(to=addr, limit=10)
+            self.assertEqual([m.message_id for m in page.items], ["multi"])
+        other = client.list_messages(to="nobody@skyphusion.org", limit=10)
+        self.assertEqual(other.items, [])
+
+    def test_list_to_filter_rejects_substring_false_positive(self):
+        from posternimap.tests.fakes import FakeTransport
+
+        msgs = [
+            make_message(
+                "support",
+                to="support@skyphusion.org",
+                deliveredTo=["support@skyphusion.org"],
+            )
+        ]
+        transport = FakeTransport(msgs, expected_token="good-token", page_size=10)
+        client = PosternClient("https://postern.example", "good-token", transport=transport)
+        page = client.list_messages(to="port@skyphusion.org", limit=10)
+        self.assertEqual(page.items, [])
+
+    def test_list_to_filter_v1_fallback_on_to_field(self):
+        from posternimap.tests.fakes import FakeTransport
+
+        msgs = [make_message("old", to="conrad@skyphusion.org")]
+        transport = FakeTransport(msgs, expected_token="good-token", page_size=10)
+        client = PosternClient("https://postern.example", "good-token", transport=transport)
+        page = client.list_messages(to="conrad@skyphusion.org", limit=10)
+        self.assertEqual([m.message_id for m in page.items], ["old"])
+
     def test_get_message(self):
         msg = self.client.get_message("m2")
         self.assertIsNotNone(msg)
