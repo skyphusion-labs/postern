@@ -9,10 +9,28 @@ description = "Dependency-light Python client + CLI for the Postern mailbox API.
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "skyphusion" }]
+authors = [{ name = "Conrad Rockenhaus", email = "conrad@skyphusion.org" }]
+keywords = ["email", "postern", "mailbox", "agents", "mcp", "self-hosted", "cloudflare"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Communications :: Email",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 # Pure stdlib (urllib): zero runtime dependencies, so it drops into any agent or
 # script without a build step. The transport is injectable, so tests need nothing.
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/skyphusion-labs/postern"
+Repository = "https://github.com/skyphusion-labs/postern"
+Documentation = "https://github.com/skyphusion-labs/postern/tree/main/clients/python"
+Issues = "https://github.com/skyphusion-labs/postern/issues"
 
 [project.optional-dependencies]
 # Tests use stdlib unittest only; mypy is the type gate (house convention, mirrors

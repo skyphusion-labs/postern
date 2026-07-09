@@ -23,7 +23,7 @@ Six surfaces in one repo (one store, one API):
 | **`mcp/`** | MCP server so agents search/read/send over stdio |
 | **`webmail/`** | Read-only browser UI embedded at `/webmail` |
 | **`imap/`** | Read-only IMAP proxy for Thunderbird / mutt / iOS Mail |
-| **`clients/python/`** | Thin stdlib HTTP client for scripts |
+| **`clients/python/`** | Thin stdlib HTTP client for scripts (`pip install postern-client`) |
 
 ```mermaid
 flowchart TD

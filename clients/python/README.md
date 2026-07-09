@@ -23,6 +23,15 @@ flowchart LR
 
 ## Install
 
+**PyPI** (recommended):
+
+```bash
+pip install postern-client
+postern --help
+```
+
+**From source** (development):
+
 ```bash
 cd clients/python
 python -m venv .venv && . .venv/bin/activate
