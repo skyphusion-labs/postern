@@ -128,6 +128,28 @@ class MailboxTest(unittest.TestCase):
         self.assertGreater(msg.getSize(), 0)
         self.assertFalse(msg.isMultipart())
 
+    def test_message_with_attachment_renders_multipart(self):
+        from twisted.mail.imap4 import MessageSet
+
+        gz_name = "google.com!skyphusion.org!1783382400!1783468799!001.json.gz"
+        att_data = b"\x1f\x8b\x08" + b"payload"
+        raw = make_message(
+            "tls1",
+            subject="TLS report",
+            body="This is an aggregate TLS report from google.com",
+            attachments=[{"filename": gz_name, "mime": "application/gzip", "size": len(att_data)}],
+            attachmentBytes=[att_data],
+        )
+        mb, transport = self._custom_mailbox([raw])
+        (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
+        self.assertTrue(msg.isMultipart())
+        body_part = msg.getSubPart(0)
+        self.assertIn("aggregate TLS report", body_part.getBodyFile().read().decode())
+        att_part = msg.getSubPart(1)
+        self.assertEqual(att_part.getBodyFile().read(), att_data)
+        self.assertEqual(transport.body_fetches, 1)
+        self.assertEqual(transport.attachment_fetches, 1)
+
     def test_flags_reflect_trust_and_direction(self):
         from twisted.mail.imap4 import MessageSet
 

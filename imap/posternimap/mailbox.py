@@ -425,6 +425,7 @@ class PosternMailbox:
             uid=summary.uid,
             seq=seq,
             hydrate=lambda: self._client.get_message(mid),
+            fetch_attachment=lambda idx, mid=mid: self._client.get_attachment(mid, idx).body,
             meter=self._meter,
         )
 
