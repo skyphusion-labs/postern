@@ -354,12 +354,14 @@ async function handleCredentialUpsert(request: Request, env: Env): Promise<Respo
 // ids overwrite); dryRun totals the chunk count WITHOUT embedding.
 async function handleReindex(request: Request, env: Env): Promise<Response> {
   let body: { cursor?: unknown; limit?: unknown; dryRun?: unknown } = {};
-  if (request.headers.get("content-length") && request.headers.get("content-length") !== "0") {
-    try {
-      body = (await request.json()) as typeof body;
-    } catch {
-      return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
+  try {
+    const text = await readBodyCapped(request, MAX_BODY_BYTES);
+    if (text) body = JSON.parse(text) as typeof body;
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      return json({ ok: false, error: "E_PAYLOAD_TOO_LARGE", message: "request body too large" }, 413);
     }
+    return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
   }
   const cursor = typeof body.cursor === "string" ? body.cursor : undefined;
   const limit = typeof body.limit === "number" ? body.limit : undefined;

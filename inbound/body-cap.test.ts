@@ -128,3 +128,39 @@ describe("30 MiB body cap through handleApi (#196)", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+describe("reindex body cap through handleApi (#202)", () => {
+  const MIB = 1024 * 1024;
+
+  it("413s a chunked over-cap reindex body before the page runs", async () => {
+    const { env, ctx } = makeFakeEnv({ POSTERN_API_TOKEN: "both-token" });
+    const pulls = { count: 0 };
+    const chunks = Array.from({ length: 6 }, () => new Uint8Array(8 * MIB).fill(123));
+    const req = chunkedRequest(chunks, pulls, "both-token");
+    const res = await handleApi(
+      new Request("https://postern.example/api/admin/reindex", {
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        duplex: "half",
+      } as RequestInit),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(413);
+    expect((await res.json()) as { error: string }).toMatchObject({ error: "E_PAYLOAD_TOO_LARGE" });
+    expect(pulls.count).toBeGreaterThanOrEqual(4);
+    expect(pulls.count).toBeLessThanOrEqual(5);
+  });
+
+  it("accepts an empty reindex body through the capped reader", async () => {
+    const { env, ctx } = makeFakeEnv({ POSTERN_API_TOKEN: "both-token" });
+    const req = new Request("https://postern.example/api/admin/reindex", {
+      method: "POST",
+      headers: { authorization: "Bearer both-token" },
+    });
+    const res = await handleApi(req, env, ctx);
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
+  });
+});
