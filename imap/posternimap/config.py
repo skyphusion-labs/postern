@@ -82,6 +82,11 @@ class Config:
     # client, it only lets the proxy act as an API client on the client's behalf.
     service_token: Optional[str] = None
 
+    # Optional per-function DELETE token (POSTERN_API_TOKEN_DELETE): a member of the
+    # worker POSTERN_API_TOKEN (`both`) set, held ONLY by the IMAP door for EXPUNGE
+    # (#278). Read stays on service_token; delete never shares the read-scoped token.
+    service_delete_token: Optional[str] = None
+
     # --- native mode: worker POST /api/smtp-auth (mirrors relay native) ---
     # The endpoint that validates {username, secret}; defaults to the api_url
     # origin + /api/smtp-auth. Gated by the transport token, NOT the API token.
@@ -219,6 +224,7 @@ class Config:
         # The token is a secret: read it, never echo it. POSTERN_API_TOKEN doubles
         # as the fixed-mode token AND the native/ldap/system service token.
         api_token = e.get("POSTERN_API_TOKEN") or None
+        delete_token = (e.get("POSTERN_API_TOKEN_DELETE") or "").strip() or None
 
         if auth_mode == "fixed":
             if not fixed_username or not api_token:
@@ -375,6 +381,7 @@ class Config:
             fixed_username=fixed_username,
             fixed_token=api_token if auth_mode == "fixed" else None,
             service_token=api_token,
+            service_delete_token=delete_token,
             smtp_auth_url=smtp_auth_url,
             transport_token=transport_token,
             ldap_url=ldap_url,

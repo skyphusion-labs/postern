@@ -121,7 +121,19 @@ class PosternAccount:
             self._cfg.api_url, self._token, timeout=self._cfg.api_timeout, meter=self._meter
         )
 
+    def _delete_client(self) -> Optional[PosternClient]:
+        delete_token = self._cfg.service_delete_token
+        if not delete_token:
+            return None
+        return PosternClient(
+            self._cfg.api_url,
+            delete_token,
+            timeout=self._cfg.api_timeout,
+            meter=self._meter,
+        )
+
     def _mailbox(self, folder: _Folder, *, list_view: bool) -> PosternMailbox:
+        delete_enabled = folder.delete_writable and self._cfg.service_delete_token is not None
         return PosternMailbox(
             self._client(),
             direction=folder.direction,
@@ -134,7 +146,8 @@ class PosternAccount:
             meter=self._meter,
             writable_signal=folder.writable_signal,
             seen_writable=folder.seen_writable,
-            delete_writable=folder.delete_writable,
+            delete_writable=delete_enabled,
+            delete_client=self._delete_client(),
         )
 
     # --- IAccount: read ---

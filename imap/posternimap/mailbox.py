@@ -146,8 +146,12 @@ class PosternMailbox:
         writable_signal: bool = False,
         seen_writable: bool = False,
         delete_writable: bool = False,
+        delete_client: Optional[PosternClient] = None,
     ) -> None:
         self._client = client
+        # EXPUNGE uses delete_client when set (#278 dual-token); falls back to the read
+        # client only in tests that omit the split.
+        self._delete_client = delete_client
         # A disabled Meter by default: measurement hooks are no-ops unless an enabled
         # meter is injected (POSTERN_IMAP_MEASURE, threaded in from the account).
         self._meter = meter or Meter(False)
@@ -700,12 +704,13 @@ class PosternMailbox:
         for i, summary in enumerate(self._summaries):
             if not summary.deleted:
                 continue
+            delete_client = self._delete_client or self._client
             try:
-                self._client.delete_message(summary.message_id)
+                delete_client.delete_message(summary.message_id)
             except PosternError as exc:
                 if exc.status in (401, 403):
                     raise ReadOnlyError(
-                        "EXPUNGE requires an admin-scoped Postern API token (both scope)",
+                        "EXPUNGE requires POSTERN_API_TOKEN_DELETE (a both-scoped member)",
                     ) from exc
                 raise ReadOnlyError(f"EXPUNGE failed: {exc}") from exc
             expunged_uids.append(summary.uid)
