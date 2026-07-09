@@ -265,3 +265,5 @@ The generic self-host path is covered above (Configuration + Run it) and the uni
 ships at [`systemd/postern-imap.service`](systemd/postern-imap.service).
 Internal/production deploy runbooks are maintained out-of-tree in the operator
 private infrastructure repository; this README covers the generic self-host path.
+
+**Apple Mail / operator handoff:** [`docs/IMAP-APPLE-MAIL.md`](../docs/IMAP-APPLE-MAIL.md).

@@ -81,6 +81,9 @@ def _restore_account(restore):
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class ServerE2ETest(twisted_unittest.TestCase):
     def setUp(self):
+        from posternimap.account import _shared_trash_staging
+
+        _shared_trash_staging("agent").clear()
         self.msgs = [
             make_message("m3", direction="outbound", subject="sent note"),
             make_message("m2", subject="meeting tuesday", body="lunch?"),
