@@ -352,6 +352,62 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     )
     select_APPEND = auth_APPEND  # type: ignore[assignment]
 
+    def do_COPY(self, tag, messages, mailbox, uid=0):
+        """Answer COPY; Trash is a delete sink for Apple Mail (#278).
+
+        macOS Mail (and some other clients) delete by COPY/MOVE to the \\Trash
+        mailbox, not STORE \\Deleted + EXPUNGE in the current folder. Trash has no
+        backing store in Postern, so COPY-to-Trash hard-deletes from the selected
+        mailbox via DELETE /api/messages/{id}. Trash SELECT reports READ-WRITE so the
+        client does not reject the destination up front."""
+        dest = imap4._parseMbox(mailbox)
+        classify = getattr(self.account, "copyability", None)
+        src = getattr(self, "mbox", None)
+        if classify is None or src is None:
+            imap4.IMAP4Server.do_COPY(self, tag, messages, mailbox, uid)
+            return
+        kind = classify(dest)
+        if kind == "trash_delete":
+            if not getattr(src, "_delete_writable", False):
+                self.sendNegativeResponse(
+                    tag, b"COPY failed: delete is not enabled on this account"
+                )
+                return
+            maybeDeferred(src.fetch, messages, uid).addCallback(
+                self._cbCopyToTrashDelete, tag
+            ).addErrback(self._ebCopyToTrashDelete, tag)
+            return
+        if kind == "placeholder":
+            self.sendNegativeResponse(
+                tag, b"COPY failed: this folder does not store messages"
+            )
+            return
+        imap4.IMAP4Server.do_COPY(self, tag, messages, mailbox, uid)
+
+    def _cbCopyToTrashDelete(self, fetched, tag):
+        src = getattr(self, "mbox", None)
+        if src is None:
+            self.sendNegativeResponse(tag, b"COPY failed: no mailbox selected")
+            return
+        try:
+            src.delete_fetched_messages(fetched)
+        except imap4.MailboxException as exc:
+            self.sendNegativeResponse(tag, b"COPY failed: " + networkString(str(exc)))
+        except Exception as exc:
+            self.sendBadResponse(tag, b"COPY failed: " + networkString(str(exc)))
+        else:
+            self.sendPositiveResponse(tag, b"COPY completed")
+
+    def _ebCopyToTrashDelete(self, failure, tag):
+        self.sendBadResponse(tag, b"COPY failed: " + networkString(str(failure.value)))
+
+    auth_COPY = (  # type: ignore[assignment]
+        do_COPY,
+        imap4.IMAP4Server.arg_seqset,
+        imap4.IMAP4Server.arg_finalastring,
+    )
+    select_COPY = auth_COPY  # type: ignore[assignment]
+
     def _wire_trace_enabled(self) -> bool:
         cfg = getattr(getattr(self, "factory", None), "_cfg", None)
         return bool(getattr(cfg, "imap_wire_trace", False))

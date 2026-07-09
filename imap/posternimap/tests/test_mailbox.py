@@ -166,6 +166,33 @@ class MailboxTest(unittest.TestCase):
         self.assertTrue(any("drop%40x" in c for c in delete_transport.calls))
         self.assertFalse(any("drop%40x" in c for c in read_transport.calls))
 
+    def test_delete_fetched_messages(self):
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [
+            make_message("keep@x", subject="keep", uid=10),
+            make_message("drop@x", subject="drop", uid=20),
+        ]
+        delete_transport = FakeTransport(msgs, expected_token="delete", page_size=2)
+        read_client = PosternClient(
+            "https://x", "read", transport=FakeTransport(msgs, expected_token="read", page_size=2)
+        )
+        delete_client = PosternClient("https://x", "delete", transport=delete_transport)
+        from posternimap.mailbox import PosternMailbox
+
+        mb = PosternMailbox(
+            read_client,
+            page_size=2,
+            delete_writable=True,
+            delete_client=delete_client,
+        )
+        mb.getMessageCount()
+        fetched = mb.fetch(MessageSet(2, 2), uid=False)
+        mb.delete_fetched_messages(fetched)
+        self.assertEqual(mb.getMessageCount(), 1)
+        self.assertEqual(msgs[0]["messageId"], "keep@x")
+        self.assertTrue(any("drop%40x" in c for c in delete_transport.calls))
+
     def test_append_is_noop_success(self):
         # APPEND must NOT fail (a client copies its sent mail into Sent); it is a
         # no-op that returns a fired Deferred, so the post-send copy succeeds.
@@ -839,6 +866,14 @@ class AccountTest(unittest.TestCase):
         self.assertIn("\\Seen", mb.getPermanentFlags())
         self.assertNotIn("\\Deleted", mb.getPermanentFlags())
 
+    def test_trash_select_is_writable_signal(self):
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        trash = acct.select("Trash")
+        self.assertIsNotNone(trash)
+        self.assertTrue(trash.isWriteable())
+
     def test_lists_special_use_folder_set(self):
         from posternimap.account import PosternAccount
 
@@ -934,16 +969,15 @@ class AccountTest(unittest.TestCase):
 
     def test_writable_matrix_real_views_and_notes(self):
         # SELECT reports READ-WRITE for the real backed views (INBOX/Sent/All), which
-        # persist the \Seen flag (#seen), and for Notes (the #218 iOS provisioning
-        # signal). The empty placeholders (Drafts/Trash/Junk/Archive) store nothing, so
-        # they stay READ-ONLY. Writes other than \Seen are still refused at the store
-        # layer regardless -- isWriteable is the SELECT signal, not blanket writability.
+        # persist the \Seen flag (#seen), for Notes (#218 iOS provisioning signal),
+        # and for Trash (Apple Mail move-to-trash COPY target, #278). Other empty
+        # placeholders stay READ-ONLY.
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
-        for name in ("INBOX", "Sent", "All", "Notes"):
+        for name in ("INBOX", "Sent", "All", "Notes", "Trash"):
             self.assertTrue(acct.select(name).isWriteable(), name)
-        for name in ("Drafts", "Trash", "Junk", "Archive"):
+        for name in ("Drafts", "Junk", "Archive"):
             self.assertFalse(acct.select(name).isWriteable(), name)
 
     def test_permanent_flags_matrix(self):
@@ -956,7 +990,8 @@ class AccountTest(unittest.TestCase):
         for name in ("INBOX", "Sent", "All"):
             self.assertEqual(acct.select(name).getPermanentFlags(), ["\\Seen", "\\Deleted"], name)
         self.assertIn("\\*", acct.select("Notes").getPermanentFlags())
-        for name in ("Drafts", "Trash", "Junk", "Archive"):
+        self.assertIn("\\*", acct.select("Trash").getPermanentFlags())
+        for name in ("Drafts", "Junk", "Archive"):
             self.assertEqual(acct.select(name).getPermanentFlags(), [], name)
 
     def test_appendability_classifies_folders(self):
@@ -969,7 +1004,9 @@ class AccountTest(unittest.TestCase):
             self.assertEqual(acct.appendability(name), "real", name)
         for name in ("Drafts", "Trash", "Junk", "Archive", "Notes"):
             self.assertEqual(acct.appendability(name), "placeholder", name)
-        self.assertEqual(acct.appendability("Nonexistent"), "unknown")
+        self.assertEqual(acct.copyability("Trash"), "trash_delete")
+        self.assertEqual(acct.copyability("Drafts"), "placeholder")
+        self.assertEqual(acct.copyability("Nonexistent"), "unknown")
 
     def test_select_inbox_case_insensitive(self):
         from posternimap.account import PosternAccount

@@ -36,7 +36,8 @@ in #12.
   `PERMANENTFLAGS (\Seen \Deleted)`. `STORE +/-FLAGS (\Deleted)` is session-local
   until `EXPUNGE`, which hard-deletes via `DELETE /api/messages/{id}` (requires
   **POSTERN_API_TOKEN_DELETE**, a `both`-scoped member on the worker, separate from
-  the read token). Every other write -- any other flag,
+  the read token). **Apple Mail** deletes by COPY/MOVE to Trash instead; COPY to
+  Trash is handled as the same hard-delete (Trash is not a second store). Every other write -- any other flag,
   mailbox create/rename/delete -- is refused cleanly (tagged `NO`).
 - **`APPEND` is accepted as a no-op.** A mail client copies its own sent message
   into `Sent` after submission; the Postern submission path already records the

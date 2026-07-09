@@ -284,6 +284,43 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield port.stopListening()
 
     @defer.inlineCallbacks
+    def test_copy_to_trash_deletes_from_inbox(self):
+        # Apple Mail deletes by COPY to Trash, not in-place EXPUNGE (#278).
+        cfg = Config(
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            service_delete_token="tok",
+        )
+        factory, restore = _patched_factory(cfg, self.transport)
+        port = reactor.listenTCP(0, factory, interface="127.0.0.1")
+        addr = port.getHost()
+        try:
+            cc = ClientCreator(reactor, imap4.IMAP4Client)
+            proto = yield cc.connectTCP("127.0.0.1", addr.port)
+            try:
+                yield proto.login(b"agent", b"tok")
+                info = yield proto.select(b"INBOX")
+                self.assertTrue(info["READ-WRITE"])
+                self.assertEqual(info["EXISTS"], 2)
+                trash = yield proto.select(b"Trash")
+                self.assertTrue(trash["READ-WRITE"])
+                yield proto.select(b"INBOX")
+                yield proto.copy(imap4.MessageSet(2, 2), "Trash", uid=False)
+                info = yield proto.select(b"INBOX")
+                self.assertEqual(info["EXISTS"], 1)
+                self.assertTrue(
+                    any("m2" in c or "m2%40" in c for c in self.transport.calls),
+                    "expected delete API for m2",
+                )
+            finally:
+                yield proto.logout()
+        finally:
+            _restore_account(restore)
+            yield port.stopListening()
+
+    @defer.inlineCallbacks
     def test_store_seen_round_trips_read_state(self):
         # #seen end-to-end: an unread INBOX message reported without \Seen; a STORE
         # +FLAGS (\Seen) over the real wire persists to the API and a fresh STATUS then
