@@ -108,6 +108,9 @@ class MessageSummary:
     reply_to: Optional[str] = None
     delivered_to: list[str] = field(default_factory=list)
     wire_size: Optional[int] = None
+    # True when the store holds a non-empty HTML body (#220). Drives multipart/alternative
+    # projection and a body-free Content-Type on the IMAP ENVELOPE scan path.
+    has_html: bool = False
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "MessageSummary":
@@ -132,6 +135,7 @@ class MessageSummary:
             reply_to=d.get("replyTo"),
             delivered_to=_delivered_to(d, to_addr),
             wire_size=_wire_size(d),
+            has_html=bool(d.get("hasHtml", False)),
         )
 
 

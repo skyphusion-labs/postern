@@ -98,4 +98,38 @@ describe("body_html persistence (#57)", () => {
     const msg = await store.get(env, "big@example.com");
     expect(msg!.bodyHtml!.length).toBeLessThanOrEqual(512_000);
   });
+
+  it("list/search summaries expose hasHtml without the body (#220)", async () => {
+    const { env, settle } = makeFakeEnv();
+    await ingest(
+      env,
+      {
+        messageId: "html3@example.com",
+        from: "alice@example.com",
+        to: "agent@example.com",
+        subject: "promo",
+        html: "<p>Big <b>news</b></p>",
+        text: "Big news",
+      },
+      ctx,
+    );
+    await ingest(
+      env,
+      {
+        messageId: "text2@example.com",
+        from: "bob@example.com",
+        to: "agent@example.com",
+        subject: "plain",
+        text: "just text",
+      },
+      ctx,
+    );
+    await settle();
+
+    const list = await store.list(env, { limit: 10 });
+    const htmlRow = list.items.find((m) => m.messageId === "html3@example.com");
+    const textRow = list.items.find((m) => m.messageId === "text2@example.com");
+    expect(htmlRow?.hasHtml).toBe(true);
+    expect(textRow?.hasHtml).toBe(false);
+  });
 });

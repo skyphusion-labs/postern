@@ -234,11 +234,14 @@ class PosternIMAPMessage:
         if self._loaded:
             return self._headers_from_parsed(negate, names_lower)
 
-        # Specific envelope/scan headers (e.g. BODY[HEADER.FIELDS (From To Date)]
-        # or the per-header spew lookups): serve from the summary, no body fetch.
-        if not negate and names_lower and names_lower <= _ENVELOPE_NAMES:
+        # Specific header lookups (e.g. BODY[HEADER.FIELDS (From To Date)] or a
+        # per-header spew): serve from the body-free summary when envelope_headers
+        # carries the requested names. Includes MIME headers (Content-Type) when
+        # hasHtml (#220) without a body fetch.
+        if not negate and names_lower:
             env = envelope_headers(self._summary)
-            return {n: env[n] for n in names_lower if n in env}
+            if names_lower <= set(env.keys()):
+                return {n: env[n] for n in names_lower if n in env}
 
         # The whole-header request (negate=True, no names) is read two ways. Twisted's
         # getEnvelope does per-key lookups (headers.get("subject"), .get("cc"), ...) and
@@ -350,13 +353,31 @@ class _EnvelopeHeaders(dict):
     Iterating the map -- what the RFC822 / RFC822.HEADER / whole-message serializers do
     via .items()/.keys() -- hydrates the message and yields the FULL rendered headers,
     so a cold BODY[]/RFC822 fetch carries Content-Type / Content-Transfer-Encoding /
-    MIME-Version (e.g. text/html for an HTML mail), which the envelope subset omits.
-    Without this a cold whole-message fetch dropped the Content-Type and the client
-    defaulted to text/plain, rendering an HTML body as literal markup."""
+    MIME-Version (e.g. multipart/alternative for an HTML mail), which the envelope
+    subset omits. Per-key MIME header lookups on this map also hydrate (#220): a
+    placeholder Content-Type boundary would disagree with the rendered body, so MIME
+    headers always come from the full render once a client asks for them."""
+
+    _MIME_KEYS = frozenset({"content-type", "content-transfer-encoding", "mime-version"})
 
     def __init__(self, envelope: dict, full) -> None:
         super().__init__(envelope)
         self._full = full
+
+    def _key(self, key: str) -> str:
+        return key.lower() if isinstance(key, str) else key
+
+    def __getitem__(self, key):
+        k = self._key(key)
+        if k in self._MIME_KEYS:
+            return self._full()[key]
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        k = self._key(key)
+        if k in self._MIME_KEYS:
+            return self._full().get(key, default)
+        return super().get(key, default)
 
     def items(self):
         return self._full().items()

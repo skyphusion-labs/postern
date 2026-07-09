@@ -119,10 +119,13 @@ class FakeTransport:
         s = {
             k: v
             for k, v in m.items()
-            if k not in ("bodyText", "attachments", "attachmentBytes")
+            if k not in ("bodyText", "bodyHtml", "attachments", "attachmentBytes")
         }
         s["attachmentCount"] = len(m.get("attachments", []))
         s["uid"] = self._uid_of(m)
+        if "hasHtml" not in s:
+            html = m.get("bodyHtml")
+            s["hasHtml"] = bool(html and str(html).strip())
         return s
 
     def _delivered_set(self, m: Dict[str, Any]) -> str:

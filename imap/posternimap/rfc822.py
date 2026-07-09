@@ -205,18 +205,15 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
     # so the client never double-decodes -- test_render_8bit_is_identity_on_long_lines
     # fails if EmailMessage ever silently re-picks quoted-printable for some payload.
     if html:
-        # The message carried an HTML part: project it as text/html so an HTML client
-        # renders the real message, not the lossy stripped-text (htmlToText) derivation
-        # that landed in body_text. We keep the door SINGLE-PART on purpose: a
-        # multipart/alternative would need the top Content-Type (with boundary) served
-        # in the body-free header path that ENVELOPE scans use (#102), and the summary
-        # carries no "has HTML" signal to compute it without a body fetch. Serving the
-        # HTML alone is a faithful, valid single-representation projection; a
-        # text/plain fallback via multipart/alternative is a future enhancement gated
-        # on a summary hasHtml flag.
+        text = msg.body_text or ""
         if msg.attachments and not inline:
-            html = html + _html_attachment_note(msg)
-        em.set_content(html, subtype="html", cte="8bit")
+            text = text + "\n\n" + _attachment_note(msg)
+        html_part = html
+        if msg.attachments and not inline:
+            html_part = html + _html_attachment_note(msg)
+        # multipart/alternative: plain first, html second (RFC 2046 increasing preference).
+        em.set_content(text, cte="8bit")
+        em.add_alternative(html_part, subtype="html", cte="8bit")
     else:
         text = msg.body_text or ""
         if msg.attachments and not inline:

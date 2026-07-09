@@ -256,6 +256,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             sender_addr: r.sender_addr,
             reply_to_addr: r.reply_to_addr,
             wire_size: r.wire_size,
+            has_html: r.body_html && String(r.body_html).trim() ? 1 : 0,
             attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
           }));
           return { results: results as unknown as T[] };
@@ -344,6 +345,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             sender_addr: r.sender_addr,
             reply_to_addr: r.reply_to_addr,
             wire_size: r.wire_size,
+            has_html: r.body_html && String(r.body_html).trim() ? 1 : 0,
             attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
           }));
           return { results: results as unknown as T[] };

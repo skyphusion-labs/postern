@@ -319,24 +319,22 @@ class MailboxTest(unittest.TestCase):
         self.assertIsNone(bcc_field)  # no Bcc stored -> ENVELOPE NIL
 
     def test_html_message_envelope_scan_is_body_free_but_cold_header_serves_content_type(self):
-        # #210 + #102: a message with an HTML part must still scan body-free (getEnvelope
-        # reads the header map by per-key .get(), never a MIME header), AND a cold
-        # whole-message header serve (iterating getHeaders(True), what the RFC822 /
-        # BODY[] serializers do) must hydrate and carry Content-Type: text/html so the
-        # client renders HTML instead of literal markup.
+        # #210 + #102 + #220: ENVELOPE scan stays body-free; a per-key Content-Type
+        # lookup is served from the summary hasHtml signal without a body fetch; a
+        # cold whole-message header iteration still hydrates for the full MIME tree.
         from twisted.mail.imap4 import MessageSet, getEnvelope
 
         html = "<html><body><h1>hi</h1></body></html>"
         mb, transport = self._custom_mailbox([make_message("h1", subject="rich", bodyHtml=html)])
         (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
-        # ENVELOPE scan: zero body fetch (the lazy header map serves per-key .get()).
         getEnvelope(msg)
         self.assertEqual(transport.body_fetches, 0)
-        # Iterating the whole-header map hydrates and yields the MIME headers.
+        ctype = msg.getHeaders(False, b"content-type")
+        self.assertIn("multipart/alternative", ctype.get("content-type", ""))
+        self.assertEqual(transport.body_fetches, 1)
         headers = dict(msg.getHeaders(True).items())
         self.assertEqual(transport.body_fetches, 1)
-        self.assertIn("text/html", headers.get("content-type", ""))
-        self.assertEqual(headers.get("content-transfer-encoding"), "8bit")
+        self.assertIn("multipart/alternative", headers.get("content-type", ""))
 
     def test_envelope_nil_for_old_row_without_fidelity_fields(self):
         # An old row carries no Cc/Bcc/Sender/Reply-To: ENVELOPE renders them NIL
