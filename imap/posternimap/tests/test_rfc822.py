@@ -287,44 +287,52 @@ class BodyEncodingTest(unittest.TestCase):
 
 
 class HtmlProjectionTest(unittest.TestCase):
-    """#210: a message that carried an HTML part is projected as a single text/html
-    part (8bit) so an HTML client renders the real HTML instead of the lossy
-    stripped-text derivation that landed in body_text. Single-part on purpose: a
-    multipart/alternative would need a body-free Content-Type for the #102 ENVELOPE
-    scan, which the summary cannot supply."""
+    """#220: HTML mail is projected as multipart/alternative (text/plain fallback +
+    text/html, RFC 2046 order) so text-only clients see readable text. hasHtml on the
+    summary lets envelope_headers serve Content-Type body-free (#102)."""
 
     HTML = "<html><body><h1>H\u00e9llo</h1><p>token=abc=def " + ("x" * 90) + "</p></body></html>"
 
-    def _cte(self, parsed):
-        return (parsed.get("content-transfer-encoding") or "").lower()
+    def _html_part(self, parsed):
+        self.assertTrue(parsed.is_multipart())
+        self.assertEqual(parsed.get_content_type(), "multipart/alternative")
+        parts = parsed.get_payload()
+        self.assertEqual(parts[0].get_content_type(), "text/plain")
+        self.assertEqual(parts[1].get_content_type(), "text/html")
+        return parts[1]
 
-    def test_html_message_is_single_text_html_8bit(self):
+    def test_html_message_is_multipart_alternative_8bit(self):
         parsed = email.message_from_bytes(render_rfc822(_msg(body_html=self.HTML)))
-        self.assertFalse(parsed.is_multipart())
-        self.assertEqual(parsed.get_content_type(), "text/html")
-        self.assertEqual(self._cte(parsed), "8bit")
+        self.assertEqual(parsed.get_content_type(), "multipart/alternative")
+        plain, html = parsed.get_payload()
+        self.assertEqual(plain.get_content_type(), "text/plain")
+        self.assertEqual((plain.get("content-transfer-encoding") or "").lower(), "8bit")
+        self.assertEqual(html.get_content_type(), "text/html")
+        self.assertEqual((html.get("content-transfer-encoding") or "").lower(), "8bit")
 
     def test_html_body_is_intact_after_a_client_decode(self):
-        # The served (decoded) body under an 8bit header decodes to the stored HTML
-        # exactly once; "token=abc=def" and the non-ASCII survive (pre-fix the QP
-        # header made the client decode twice and corrupt them).
         parsed = email.message_from_bytes(render_rfc822(_msg(body_html=self.HTML)))
-        body = parsed.get_payload(decode=True).decode("utf-8")
+        html = self._html_part(parsed)
+        body = html.get_payload(decode=True).decode("utf-8")
         self.assertEqual(body.rstrip("\n"), self.HTML)
         self.assertIn("token=abc=def", body)
 
-    def test_html_preferred_over_derived_text(self):
-        # body_text is the lossy strip; when HTML exists we must serve the HTML, not it.
+    def test_html_alternative_includes_plain_fallback(self):
         m = _msg(body_text="stripped soup fallback", body_html=self.HTML)
-        body = email.message_from_bytes(render_rfc822(m)).get_payload(decode=True).decode("utf-8")
-        self.assertIn("<h1>", body)
-        self.assertNotIn("stripped soup fallback", body)
+        parsed = email.message_from_bytes(render_rfc822(m))
+        plain, html = parsed.get_payload()
+        self.assertIn("stripped soup fallback", plain.get_payload(decode=True).decode("utf-8"))
+        self.assertIn("<h1>", html.get_payload(decode=True).decode("utf-8"))
+
+    def test_envelope_headers_html_is_multipart_alternative_body_free(self):
+        h = envelope_headers(_summary(has_html=True))
+        self.assertIn("multipart/alternative", h.get("content-type", ""))
 
     def test_no_html_stays_text_plain(self):
         parsed = email.message_from_bytes(render_rfc822(_msg(body_html=None)))
         self.assertFalse(parsed.is_multipart())
         self.assertEqual(parsed.get_content_type(), "text/plain")
-        self.assertEqual(self._cte(parsed), "8bit")
+        self.assertEqual((parsed.get("content-transfer-encoding") or "").lower(), "8bit")
 
     def test_empty_html_stays_text_plain(self):
         # A whitespace-only HTML body is treated as absent (no empty text/html part).
@@ -332,16 +340,19 @@ class HtmlProjectionTest(unittest.TestCase):
         self.assertFalse(parsed.is_multipart())
         self.assertEqual(parsed.get_content_type(), "text/plain")
 
-    def test_attachment_note_appears_in_html_body_without_bytes(self):
+    def test_attachment_note_appears_in_both_alternative_parts_without_bytes(self):
         m = _msg(
             body_html=self.HTML,
             attachments=[Attachment(filename="report.pdf", mime="application/pdf", size=10)],
         )
-        body = email.message_from_bytes(render_rfc822(m)).get_payload(decode=True).decode("utf-8")
-        self.assertIn("report.pdf", body)
-        self.assertIn("1 attachment(s)", body)
+        parsed = email.message_from_bytes(render_rfc822(m))
+        plain, html = parsed.get_payload()
+        plain_body = plain.get_payload(decode=True).decode("utf-8")
+        html_body = html.get_payload(decode=True).decode("utf-8")
+        self.assertIn("report.pdf", plain_body)
+        self.assertIn("report.pdf", html_body)
 
-    def test_html_with_attachment_bytes_is_multipart(self):
+    def test_html_with_attachment_bytes_is_multipart_mixed(self):
         data = b"%PDF-1.4"
         m = _msg(
             body_html=self.HTML,
@@ -349,7 +360,10 @@ class HtmlProjectionTest(unittest.TestCase):
         )
         parsed = email.message_from_bytes(render_rfc822(m, attachment_bytes=[data]))
         self.assertTrue(parsed.is_multipart())
-        self.assertEqual(parsed.get_payload()[0].get_content_type(), "text/html")
+        self.assertEqual(parsed.get_content_type(), "multipart/mixed")
+        alt = parsed.get_payload()[0]
+        self.assertEqual(alt.get_content_type(), "multipart/alternative")
+        self.assertEqual(alt.get_payload()[1].get_content_type(), "text/html")
         self.assertEqual(parsed.get_payload()[1].get_payload(decode=True), data)
 
 

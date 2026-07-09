@@ -81,6 +81,10 @@ export interface StoredMessageSummary {
   deliveredTo: string[];
   wireSize: number | null;
   attachmentCount: number;
+  /** True when the store holds a non-empty HTML body (#220). List/search summaries
+   *  carry this body-free so the IMAP door can project multipart/alternative (plain
+   *  + html) and serve Content-Type without a per-message body fetch. */
+  hasHtml: boolean;
 }
 
 export interface ListQuery {
@@ -628,9 +632,12 @@ export async function thread(env: Env, threadId: string): Promise<StoredMessage[
 
 // --- List / search (CONTRACT section 1 / section 4) ---
 
-// Summary rows carry the rowid for keyset pagination + an attachment count, but
+// Summary rows carry the rowid for keyset pagination + attachment/hasHtml flags, but
 // not the body. Ordering is (date DESC, id DESC); the cursor encodes the last
 // (date, id) so the next page is a strict keyset seek, stable under inserts.
+const SUMMARY_HAS_HTML_SQL =
+  `(CASE WHEN m.body_html IS NOT NULL AND TRIM(m.body_html) <> '' THEN 1 ELSE 0 END) AS has_html`;
+
 interface SummaryRow {
   id: number;
   message_id: string;
@@ -650,6 +657,7 @@ interface SummaryRow {
   sender_addr: string | null;
   reply_to_addr: string | null;
   wire_size: number | null;
+  has_html: number;
   attachment_count: number;
 }
 
@@ -674,6 +682,7 @@ function rowToSummary(row: SummaryRow): StoredMessageSummary {
     deliveredTo: parseDeliveredTo(row.delivered_to, row.to_addr),
     wireSize: row.wire_size ?? null,
     attachmentCount: row.attachment_count,
+    hasHtml: row.has_html === 1,
   };
 }
 
@@ -765,6 +774,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m ${whereSql}
       ORDER BY m.date DESC, m.id DESC
@@ -839,6 +849,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE ${where.join(" AND ")}
       ORDER BY m.date DESC, m.id DESC
@@ -930,6 +941,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE ${where.join(" AND ")}
       ORDER BY m.date DESC, m.id DESC
@@ -999,6 +1011,7 @@ async function summariesByIds(env: Env, ids: string[]): Promise<Map<string, Stor
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE m.message_id IN (${placeholders})`;
   const res = await env.DB.prepare(sql).bind(...ids).all<SummaryRow>();

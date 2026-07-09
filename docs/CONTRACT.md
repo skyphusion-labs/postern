@@ -117,14 +117,19 @@ interface AttachmentMeta {
 }
 ```
 
-`StoredMessageSummary` is `StoredMessage` without `bodyText` and `attachments` (list views
-do not pay for the body); it adds `attachmentCount: number` and `uid: number`.
+`StoredMessageSummary` is `StoredMessage` without `bodyText`, `bodyHtml`, and `attachments` (list views
+do not pay for the body); it adds `attachmentCount: number`, `hasHtml: boolean`, and `uid: number`.
+
+`hasHtml` is true when the store holds a non-empty `body_html` column. It is derived body-free
+(`TRIM(body_html) <> ''`) so the IMAP door can project `multipart/alternative` and serve the top
+`Content-Type` (with boundary) without a per-message body fetch (#220).
 
 ```ts
 interface StoredMessageSummary {
   uid: number;                        // messages.id (AUTOINCREMENT rowid) -- see below
-  // ...all StoredMessage fields except bodyText + attachments...
+  // ...all StoredMessage fields except bodyText, bodyHtml + attachments...
   attachmentCount: number;
+  hasHtml: boolean;                   // true when body_html is non-empty (#220)
 }
 ```
 
