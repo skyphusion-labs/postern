@@ -1,0 +1,41 @@
+name: npm-mcp
+
+# Publish postern-mcp to the public npm registry.
+# Tag push: git tag postern-mcp-v1.1.0 && git push origin postern-mcp-v1.1.0
+# Or: workflow_dispatch (uses version in mcp/package.json).
+#
+# Required repo secret: NPM_TOKEN (npmjs.com automation token with publish scope
+# for the postern-mcp package / @skyphusion scope if renamed later).
+
+on:
+  push:
+    tags:
+      - "postern-mcp-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: npm publish postern-mcp
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: npm run typecheck && npm test && npm run build
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
