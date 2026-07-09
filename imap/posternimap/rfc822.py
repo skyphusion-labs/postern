@@ -162,13 +162,6 @@ def _inline_attachments(msg: Message, attachment_bytes: Sequence[bytes]) -> bool
     return bool(msg.attachments) and len(attachment_bytes) == len(msg.attachments)
 
 
-def _build_alternative_shell(em: EmailMessage) -> None:
-    """Seed a body-free multipart/alternative so Content-Type (with boundary) is
-    computable without fetching the stored body (#220 / #102 ENVELOPE scan)."""
-    em.set_content("", cte="8bit")
-    em.add_alternative("", subtype="html", cte="8bit")
-
-
 def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] = None) -> bytes:
     """Build a valid RFC822 message from a stored Message. Header values are set
     via EmailMessage, which folds/encodes them safely (no header injection).
@@ -270,8 +263,6 @@ def envelope_headers(summary: MessageSummary) -> dict[str, str]:
             sender=summary.sender,
             reply_to=summary.reply_to,
         )
-        if summary.has_html:
-            _build_alternative_shell(em)
         parsed = email.message_from_bytes(em.as_bytes())
         return {k.lower(): _to_wire(v) for k, v in parsed.items()}
     except Exception:

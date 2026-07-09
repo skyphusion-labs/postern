@@ -1126,12 +1126,10 @@ class ServerIdlePushTest(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class ServerHtmlBodyE2ETest(twisted_unittest.TestCase):
-    """#210 over the wire: an HTML mail whose body contains quoted-printable-looking
-    runs ("token=abc=def") + non-ASCII must reach the client UNCORRUPTED. Pre-fix the
-    door declared Content-Transfer-Encoding: quoted-printable but served the decoded
-    body, so the client decoded a second time and mangled it. Post-fix the body is
-    projected as a single text/html part with cte=8bit; this FETCHes the whole RFC822
-    off the real server and asserts the served body decodes back to the stored HTML."""
+    """#210/#220 over the wire: an HTML mail whose body contains quoted-printable-looking
+    runs ("token=abc=def") + non-ASCII must reach the client UNCORRUPTED. Post-fix the
+    body is projected as multipart/alternative (plain + html, both 8bit); this FETCHes
+    the whole RFC822 off the real server and asserts the html part decodes intact."""
 
     HTML = "<html><body><h1>H\u00e9llo</h1><p>verify token=abc=def link " + ("x" * 90) + "</p></body></html>"
     TEXT = "Verify token=abc=def and don\u2019t worry \u2014 " + ("word " * 15)
@@ -1176,11 +1174,14 @@ class ServerHtmlBodyE2ETest(twisted_unittest.TestCase):
                 # (a utf-8 re-encode would double-encode multibyte chars).
                 raw = raw.encode("latin-1", "replace")
             parsed = _email.message_from_bytes(raw)
-            # Projected as a single text/html part (see HtmlProjectionTest).
-            self.assertEqual(parsed.get_content_type(), "text/html")
+            self.assertEqual(parsed.get_content_type(), "multipart/alternative")
+            html = next(
+                p for p in parsed.walk()
+                if p.get_content_type() == "text/html"
+            )
             # The client honours the part CTE and decodes ONCE; the "=abc=def" run and
             # the non-ASCII survive intact (pre-fix the double-decode corrupted them).
-            body = parsed.get_payload(decode=True).decode("utf-8")
+            body = html.get_payload(decode=True).decode("utf-8")
             self.assertIn("token=abc=def", body)
             self.assertIn("H\u00e9llo", body)
             self.assertEqual(body.rstrip("\n"), self.HTML)

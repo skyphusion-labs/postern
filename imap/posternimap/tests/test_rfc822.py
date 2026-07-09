@@ -259,9 +259,17 @@ class BodyEncodingTest(unittest.TestCase):
         long_line = "x" * 1500 + " token=abc=def"  # a single >998-octet line
         for field in ("body_text", "body_html"):
             parsed = email.message_from_bytes(render_rfc822(_msg(**{field: long_line})))
-            cte = (parsed.get("content-transfer-encoding") or "").lower()
-            self.assertEqual(cte, "8bit", "%s re-encoded to %r" % (field, cte))
-            served = parsed.get_payload(decode=True).decode("utf-8")
+            if field == "body_html":
+                self.assertEqual(parsed.get_content_type(), "multipart/alternative")
+                plain, html = parsed.get_payload()
+                for part in (plain, html):
+                    cte = (part.get("content-transfer-encoding") or "").lower()
+                    self.assertEqual(cte, "8bit", "%s re-encoded to %r" % (field, cte))
+                served = html.get_payload(decode=True).decode("utf-8")
+            else:
+                cte = (parsed.get("content-transfer-encoding") or "").lower()
+                self.assertEqual(cte, "8bit", "%s re-encoded to %r" % (field, cte))
+                served = parsed.get_payload(decode=True).decode("utf-8")
             # Identity under 8bit: the served bytes ARE the declared bytes.
             self.assertIn("token=abc=def", served)
             self.assertIn("x" * 1500, served)
@@ -324,9 +332,9 @@ class HtmlProjectionTest(unittest.TestCase):
         self.assertIn("stripped soup fallback", plain.get_payload(decode=True).decode("utf-8"))
         self.assertIn("<h1>", html.get_payload(decode=True).decode("utf-8"))
 
-    def test_envelope_headers_html_is_multipart_alternative_body_free(self):
+    def test_envelope_headers_html_omits_mime_until_hydrate(self):
         h = envelope_headers(_summary(has_html=True))
-        self.assertIn("multipart/alternative", h.get("content-type", ""))
+        self.assertNotIn("content-type", h)
 
     def test_no_html_stays_text_plain(self):
         parsed = email.message_from_bytes(render_rfc822(_msg(body_html=None)))
