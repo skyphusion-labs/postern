@@ -401,7 +401,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     def _ebCopyToTrashDelete(self, failure, tag):
         self.sendBadResponse(tag, b"COPY failed: " + networkString(str(failure.value)))
 
-    auth_COPY = (  # type: ignore[assignment]
+    auth_COPY = (
         do_COPY,
         imap4.IMAP4Server.arg_seqset,
         imap4.IMAP4Server.arg_finalastring,
