@@ -128,9 +128,28 @@ class FakeTransport:
             s["hasHtml"] = bool(html and str(html).strip())
         return s
 
+    def _delivered_set(self, m: Dict[str, Any]) -> str:
+        """Comma-wrapped membership set (CONTRACT 10.3 / worker COALESCE predicate)."""
+        raw = m.get("deliveredTo")
+        if isinstance(raw, list):
+            addrs = [x.strip().lower() for x in raw if isinstance(x, str) and x]
+        else:
+            addrs = []
+        if not addrs:
+            to = m.get("to", "")
+            if to:
+                addrs = [to.strip().lower()]
+        if not addrs:
+            return ","
+        return "," + ",".join(addrs) + ","
+
     def _list(self, params):
         direction = params.get("direction")
+        to_filter = params.get("to")
         rows = [m for m in self.messages if not direction or m["direction"] == direction]
+        if to_filter:
+            needle = f",{to_filter.strip().lower()},"
+            rows = [m for m in rows if needle in self._delivered_set(m)]
         start = int(params.get("cursor", "0"))
         limit = int(params.get("limit", str(self.page_size)))
         chunk = rows[start : start + limit]
