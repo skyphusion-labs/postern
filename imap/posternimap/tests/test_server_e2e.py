@@ -226,10 +226,11 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.login(b"agent", b"tok")
             info = yield proto.select(b"INBOX")
             self.assertIn("PERMANENTFLAGS", info)
-            self.assertEqual(list(info["PERMANENTFLAGS"]), ["\\Seen"])  # read-state is settable
+            self.assertEqual(list(info["PERMANENTFLAGS"]), ["\\Seen", "\\Deleted"])
             self.assertTrue(info["READ-WRITE"], info)
             flags = set(info["FLAGS"])
             self.assertIn("\\Seen", flags)
+            self.assertIn("\\Deleted", flags)
             self.assertTrue({"Trusted", "Untrusted", "Inbound", "Outbound"} & flags, flags)
             self.assertNotIn("\\Sent", flags)  # special-use LIST attr must not leak
         finally:

@@ -23,9 +23,9 @@ The poll is summary-only (no bodies) and reads only as far back as the previous
 newest message, so its cost tracks new-mail volume, not mailbox size. D1 is the
 source of truth for the fresh window; nothing here caches or gates arrival.
 
-Read-only is deliberate for v1 (#12): humans read here and *send* through the
-structured API, not by IMAP APPEND. Write paths raise so a client gets a clean
-"read-only" rather than silent data loss.
+Read-only for APPEND and mailbox create/rename/delete (#12): humans send through
+the structured API. \\Seen and (on real views) \\Deleted + EXPUNGE are persisted
+via the mailbox API (#seen, #278).
 
 UID model (#102 / fault F9, DURABLE): the mailbox is ordered by the store's
 monotonic insertion key (StoredMessageSummary.uid == messages.id, the D1
@@ -42,11 +42,9 @@ only and never touches messages.id), so no null-fallback path is needed.
 
 Never-reuse note (migration 0005): SQLite can reuse the highest rowid after that
 row is deleted UNLESS the column is AUTOINCREMENT; migration 0005 adds AUTOINCREMENT
-to make never-reuse-after-delete total. Meanwhile this is SAFE because the proxy is
-strictly READ-ONLY -- expunge/store/destroy all raise, so no delete happens through
-it and no rowid is ever freed for reuse within a UIDVALIDITY. If hard deletes are
-ever introduced on the store side before 0005 lands, bump UIDVALIDITY so conformant
-clients re-sync rather than letting a reused UID alias a different message.
+to make never-reuse-after-delete total. EXPUNGE (#278) hard-deletes via the API;
+AUTOINCREMENT keeps UIDs never-reused. Bump UIDVALIDITY only when projection semantics
+change, not on every delete.
 """
 
 from __future__ import annotations
@@ -147,6 +145,7 @@ class PosternMailbox:
         meter: Optional[Meter] = None,
         writable_signal: bool = False,
         seen_writable: bool = False,
+        delete_writable: bool = False,
     ) -> None:
         self._client = client
         # A disabled Meter by default: measurement hooks are no-ops unless an enabled
@@ -175,6 +174,9 @@ class PosternMailbox:
         # signal): a seen-writable folder ONLY accepts \Seen, still refusing APPEND of
         # a new message and every other flag.
         self._seen_writable = seen_writable
+        # #278: STORE \\Deleted + EXPUNGE on the real views. EXPUNGE calls DELETE
+        # /api/messages/{id} (admin-scoped token required).
+        self._delete_writable = delete_writable
         self._summaries: List[MessageSummary] = []
         self._loaded = False
         # Highest UID (== store rowid) currently in the snapshot. UIDNEXT is this
@@ -359,12 +361,15 @@ class PosternMailbox:
         """The flags a client may PERSIST in this mailbox (SELECT PERMANENTFLAGS).
 
         Notes (#218 writable_signal): the standard writable set + \\* (the provisioning
-        signal iOS needs). A seen-writable real folder: only \\Seen, since read state is
-        the one flag this door persists (#seen). Everything else: empty (read-only)."""
+        signal iOS needs). A seen-writable real folder: \\Seen, and \\Deleted when
+        delete_writable (#278). Everything else: empty (read-only)."""
         if self._writable_signal:
             return ["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft", "\\*"]
         if self._seen_writable:
-            return ["\\Seen"]
+            flags = ["\\Seen"]
+            if self._delete_writable:
+                flags.append("\\Deleted")
+            return flags
         return []
 
     def isWriteable(self) -> bool:
@@ -374,9 +379,9 @@ class PosternMailbox:
         #   * writable_signal (#218 Experiment A): the Notes placeholder signals
         #     READ-WRITE so iOS can provision its Notes account.
         # It does NOT make the store fully writable: addMessage (APPEND of a NEW message)
-        # still returns AppendRejectedError on placeholders, store() refuses every flag
-        # but \Seen, and expunge()/destroy() still raise -- each a loud tagged NO, never
-        # a silent drop. EXAMINE stays READ-ONLY for every folder (server enforces).
+        # still returns AppendRejectedError on placeholders; store() persists only \\Seen
+        # and (when delete_writable) \\Deleted; destroy() still raises. EXAMINE stays
+        # READ-ONLY for every folder (server enforces).
         return self._writable_signal or self._seen_writable
 
     def getHierarchicalDelimiter(self) -> str:
@@ -402,10 +407,13 @@ class PosternMailbox:
             return ["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft"]
         # SELECT view: announce every flag/keyword a FETCH on this mailbox can
         # return, so a client is never handed an unadvertised keyword (#218). A
-        # message's getFlags() returns \\Seen plus the trust + direction keywords;
-        # the mailbox FLAGS line must be their union. PERMANENTFLAGS stays empty
-        # (read-only) -- announcing a flag is not a promise it is settable.
-        return ["\\Seen", "Trusted", "Untrusted", "Inbound", "Outbound"]
+        # message's getFlags() returns \\Seen, optional \\Deleted, plus trust/direction;
+        # the mailbox FLAGS line must be their union. PERMANENTFLAGS lists only the
+        # persistable subset (\\Seen, \\Deleted when enabled).
+        flags = ["\\Seen", "Trusted", "Untrusted", "Inbound", "Outbound"]
+        if self._delete_writable:
+            flags.insert(1, "\\Deleted")
+        return flags
 
     def getDefaultFlags(self) -> List[str]:
         return ["\\Seen"]
@@ -567,38 +575,36 @@ class PosternMailbox:
     # --- IMailbox: write (all rejected: read-only proxy) ---
 
     def store(self, messages, flags, mode, uid):
-        """Persist the \\Seen flag (#seen); refuse every other flag mutation.
+        """Persist \\Seen (#seen) and session-local \\Deleted (#278); refuse other flags.
 
-        Read/unread is the ONE piece of per-message state this door owns. A STORE of
-        \\Seen is round-tripped to POST /api/messages/seen so the state is durable and
-        shared across every client and session -- the whole point: a human can tell new
-        mail from mail they have already read. Every OTHER flag stays read-only (the
-        trust/direction keywords are derived; \\Answered/\\Flagged/\\Deleted/\\Draft have
-        no backing store), so a STORE that touches one is refused with a tagged NO
-        rather than silently accepted and dropped.
+        \\Seen round-trips to POST /api/messages/seen. \\Deleted is held on the
+        snapshot until EXPUNGE calls DELETE /api/messages/{id}. Every other flag is
+        read-only (trust/direction are derived).
 
         Returns the RFC 3501 {seq: [flags]} map (post-update flags) the server sends
-        back as an untagged FETCH FLAGS, unless the client asked for .SILENT. `mode` is
-        Twisted's normalized store mode: 0 replace (FLAGS), 1 add (+FLAGS), -1 remove
-        (-FLAGS). When `uid` is set the message set is in UIDs (mapped back to seqs).
+        back as an untagged FETCH FLAGS, unless the client asked for .SILENT.
         """
         self._ensure_loaded()
         if self._empty:
             raise ReadOnlyError("this folder stores no messages; flags are not settable")
-        if not self._seen_writable:
-            # A read-only folder (e.g. a bare view not marked seen-writable): unchanged
-            # posture, refuse the STORE with a tagged NO.
+        if not self._seen_writable and not self._delete_writable:
             raise ReadOnlyError("postern-imap is read-only; flags are not stored")
 
         norm = {str(f).lower() for f in (flags or [])}
-        if norm - {"\\seen"}:
-            # We can only persist \Seen; refuse a STORE that sets any other flag rather
-            # than accept-and-drop it (PERMANENTFLAGS advertises only \Seen, so a
-            # conformant client never gets here).
-            raise ReadOnlyError("postern-imap only persists the \\Seen flag; other flags are read-only")
+        allowed = set()
+        if self._seen_writable:
+            allowed.add("\\seen")
+        if self._delete_writable:
+            allowed.add("\\deleted")
+        if norm - allowed:
+            raise ReadOnlyError(
+                "postern-imap only persists \\Seen"
+                + (" and \\Deleted" if self._delete_writable else "")
+                + "; other flags are read-only",
+            )
         wants_seen = "\\seen" in norm
+        wants_deleted = "\\deleted" in norm
 
-        # Resolve the target sequence numbers over the current snapshot.
         if uid:
             by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
             messages.last = self._summaries[-1].uid if self._summaries else 0
@@ -610,30 +616,46 @@ class PosternMailbox:
         if not seqs:
             return {}
 
-        # Target read state per message from the STORE mode; collect only the ACTUAL
-        # changes (idempotent: STORE +FLAGS \Seen on an already-read message is a no-op).
-        targets = {}
+        seen_targets: dict[int, bool] = {}
+        deleted_targets: dict[int, bool] = {}
         for seq in seqs:
-            current = self._summaries[seq - 1].seen
-            if mode == 0:            # FLAGS (replace)
-                targets[seq] = wants_seen
-            elif mode == 1:          # +FLAGS (add)
-                targets[seq] = True if wants_seen else current
-            else:                    # -FLAGS (remove)
-                targets[seq] = False if wants_seen else current
-        to_read = [self._summaries[s - 1].message_id for s, t in targets.items() if t and not self._summaries[s - 1].seen]
-        to_unread = [self._summaries[s - 1].message_id for s, t in targets.items() if not t and self._summaries[s - 1].seen]
+            summary = self._summaries[seq - 1]
+            current_seen = summary.seen
+            current_deleted = summary.deleted
+            if self._seen_writable:
+                if mode == 0:
+                    seen_targets[seq] = wants_seen
+                elif mode == 1:
+                    seen_targets[seq] = True if wants_seen else current_seen
+                else:
+                    seen_targets[seq] = False if wants_seen else current_seen
+            if self._delete_writable:
+                if mode == 0:
+                    deleted_targets[seq] = wants_deleted
+                elif mode == 1:
+                    deleted_targets[seq] = True if wants_deleted else current_deleted
+                else:
+                    deleted_targets[seq] = False if wants_deleted else current_deleted
 
-        # Persist server-side (one call per direction), then reflect locally so the
-        # returned flags and any later FETCH in this session stay consistent.
+        to_read = [
+            self._summaries[s - 1].message_id
+            for s, t in seen_targets.items()
+            if t and not self._summaries[s - 1].seen
+        ]
+        to_unread = [
+            self._summaries[s - 1].message_id
+            for s, t in seen_targets.items()
+            if not t and self._summaries[s - 1].seen
+        ]
         if to_read:
             self._client.set_seen(to_read, True)
         if to_unread:
             self._client.set_seen(to_unread, False)
-        for seq, target in targets.items():
+        for seq, target in seen_targets.items():
             self._summaries[seq - 1].seen = target
+        for seq, target in deleted_targets.items():
+            self._summaries[seq - 1].deleted = target
 
-        # {seq: post-update flags}; getFlags is summary-served, so this fires no body GET.
         return {seq: list(self._wrap(seq)[1].getFlags()) for seq in seqs}
 
     def addMessage(self, message, flags=(), date=None):
@@ -661,7 +683,37 @@ class PosternMailbox:
         return defer.succeed(None)
 
     def expunge(self):
-        raise ReadOnlyError("postern-imap is read-only; nothing to expunge")
+        """Remove messages marked \\Deleted from the snapshot and the store (#278).
+
+        Each deleted message is hard-deleted via DELETE /api/messages/{id} (Vectorize
+        tombstone bundled server-side). Returns the UIDs expunged (RFC 3501). Requires
+        a both-scoped API token; a read-only token yields a tagged NO.
+        """
+        self._ensure_loaded()
+        if self._empty:
+            return []
+        if not self._delete_writable:
+            raise ReadOnlyError("postern-imap is read-only; nothing to expunge")
+
+        expunged_uids: List[int] = []
+        remove_at: List[int] = []
+        for i, summary in enumerate(self._summaries):
+            if not summary.deleted:
+                continue
+            try:
+                self._client.delete_message(summary.message_id)
+            except PosternError as exc:
+                if exc.status in (401, 403):
+                    raise ReadOnlyError(
+                        "EXPUNGE requires an admin-scoped Postern API token (both scope)",
+                    ) from exc
+                raise ReadOnlyError(f"EXPUNGE failed: {exc}") from exc
+            expunged_uids.append(summary.uid)
+            remove_at.append(i)
+
+        for i in reversed(remove_at):
+            del self._summaries[i]
+        return expunged_uids
 
     def destroy(self):
         raise ReadOnlyError("postern-imap is read-only; mailboxes cannot be destroyed")

@@ -51,7 +51,7 @@ from .measure import Meter
 class _Folder:
     """Static description of one advertised mailbox."""
 
-    __slots__ = ("direction", "special_use", "empty", "windowed", "writable_signal", "seen_writable")
+    __slots__ = ("direction", "special_use", "empty", "windowed", "writable_signal", "seen_writable", "delete_writable")
 
     def __init__(
         self,
@@ -61,6 +61,7 @@ class _Folder:
         windowed: bool = False,
         writable_signal: bool = False,
         seen_writable: bool = False,
+        delete_writable: bool = False,
     ) -> None:
         self.direction = direction
         self.special_use = special_use
@@ -77,14 +78,17 @@ class _Folder:
         # mark-read sticks; only \Seen is settable (see mailbox.store). Placeholders
         # (empty) never set this -- they store nothing.
         self.seen_writable = seen_writable
+        # #278: EXPUNGE on the real views; DELETE /api/messages/{id} requires a both-scoped
+        # token (see mailbox.expunge). Placeholders stay read-only.
+        self.delete_writable = delete_writable
 
 
 # name (as the client sees it) -> folder description. INBOX/Sent/All are real
 # direction views; the rest are RFC 6154 special-use placeholders (empty in v1).
 _MAILBOXES: Dict[str, _Folder] = {
-    "INBOX": _Folder("inbound", [], False, windowed=True, seen_writable=True),
-    "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True, seen_writable=True),
-    "All": _Folder(None, ["\\All"], False, seen_writable=True),
+    "INBOX": _Folder("inbound", [], False, windowed=True, seen_writable=True, delete_writable=True),
+    "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True, seen_writable=True, delete_writable=True),
+    "All": _Folder(None, ["\\All"], False, seen_writable=True, delete_writable=True),
     "Drafts": _Folder(None, ["\\Drafts"], True),
     "Trash": _Folder(None, ["\\Trash"], True),
     "Junk": _Folder(None, ["\\Junk"], True),
@@ -130,6 +134,7 @@ class PosternAccount:
             meter=self._meter,
             writable_signal=folder.writable_signal,
             seen_writable=folder.seen_writable,
+            delete_writable=folder.delete_writable,
         )
 
     # --- IAccount: read ---

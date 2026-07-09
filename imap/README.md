@@ -32,10 +32,11 @@ in #12.
   (\Seen)` round-trips to `POST /api/messages/seen`, so marking a message read/unread
   sticks across clients and sessions and a human can tell new mail from mail they have
   already read. Inbound mail arrives **unread**; the mailbox's own sent copies are
-  stored **read**. The real views (INBOX/Sent/All) therefore SELECT as `READ-WRITE`
-  with `PERMANENTFLAGS (\Seen)`. Every OTHER write -- any flag but `\Seen`, plus
-  `EXPUNGE`/mailbox create/rename/delete -- is still refused cleanly (tagged `NO`)
-  rather than silently dropping data.
+  stored **read**. The real views (INBOX/Sent/All) SELECT as `READ-WRITE` with
+  `PERMANENTFLAGS (\Seen \Deleted)`. `STORE +/-FLAGS (\Deleted)` is session-local
+  until `EXPUNGE`, which hard-deletes via `DELETE /api/messages/{id}` (requires a
+  **both-scoped** API token, not read-only). Every other write -- any other flag,
+  mailbox create/rename/delete -- is refused cleanly (tagged `NO`).
 - **`APPEND` is accepted as a no-op.** A mail client copies its own sent message
   into `Sent` after submission; the Postern submission path already records the
   outbound message in the store, so the proxy acknowledges the `APPEND` (it never
