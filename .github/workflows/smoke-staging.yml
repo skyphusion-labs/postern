@@ -6,7 +6,8 @@ name: smoke-staging
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
 #   POSTERN_SMOKE_BASE_URL   -- e.g. https://postern.example.com
-#   POSTERN_SMOKE_API_TOKEN  -- bearer with send + read scope
+#   POSTERN_SMOKE_API_TOKEN  -- read-scoped bearer (or a both-scoped single key)
+#   POSTERN_SMOKE_SEND_TOKEN -- send-scoped bearer (optional; defaults to API token)
 #   POSTERN_SMOKE_FROM       -- allowed From address for POST /api/send
 #   POSTERN_SMOKE_TO         -- recipient the smoke can address (need not be readable)
 #
@@ -63,6 +64,7 @@ jobs:
         env:
           POSTERN_BASE_URL: ${{ secrets.POSTERN_SMOKE_BASE_URL }}
           POSTERN_API_TOKEN: ${{ secrets.POSTERN_SMOKE_API_TOKEN }}
+          POSTERN_SEND_TOKEN: ${{ secrets.POSTERN_SMOKE_SEND_TOKEN }}
           POSTERN_FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
           POSTERN_TO: ${{ secrets.POSTERN_SMOKE_TO }}
         run: |
