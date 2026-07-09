@@ -19,7 +19,7 @@ jobs:
       run:
         working-directory: inbound
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -35,7 +35,7 @@ jobs:
       run:
         working-directory: relay
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           # Track the relay go.mod toolchain so CI never drifts from the code.
@@ -62,8 +62,8 @@ jobs:
       run:
         working-directory: imap
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # Twisted is the only runtime dep; mypy is the type gate (mirrors the
@@ -91,8 +91,8 @@ jobs:
       run:
         working-directory: clients/python
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # Zero runtime deps (pure stdlib urllib); install the package + dev extras so
@@ -117,7 +117,7 @@ jobs:
       run:
         working-directory: mcp
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: 22
