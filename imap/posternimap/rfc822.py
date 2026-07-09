@@ -224,18 +224,12 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
         assert attachment_bytes is not None
         for att, data in zip(msg.attachments, attachment_bytes):
             maintype, subtype = _split_mime(att.mime)
-            # cte="binary" is load-bearing for attachments (same #210 invariant as
-            # text bodies). EmailMessage defaults attachments to base64 on the wire,
-            # but the IMAP door serves the DECODED payload (getBodyFile /
-            # get_payload(decode=True)). A client that honours Content-Transfer-Encoding
-            # would base64-decode the already-decoded bytes and corrupt PDFs/images.
             em.add_attachment(
                 data,
                 maintype=maintype,
                 subtype=subtype,
                 filename=att.filename or "attachment",
                 disposition="attachment",
-                cte="binary",
             )
     return em.as_bytes()
 

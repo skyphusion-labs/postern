@@ -360,6 +360,13 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         backing store in Postern, so COPY-to-Trash hard-deletes from the selected
         mailbox via DELETE /api/messages/{id}. Trash SELECT reports READ-WRITE so the
         client does not reject the destination up front."""
+        self._copy_or_move_to_mailbox(tag, messages, mailbox, uid)
+
+    def do_MOVE(self, tag, messages, mailbox, uid=0):
+        """RFC 6851 MOVE: same Trash delete sink as COPY (#278)."""
+        self._copy_or_move_to_mailbox(tag, messages, mailbox, uid)
+
+    def _copy_or_move_to_mailbox(self, tag, messages, mailbox, uid=0):
         dest = imap4._parseMbox(mailbox)
         classify = getattr(self.account, "copyability", None)
         src = getattr(self, "mbox", None)
@@ -407,6 +414,13 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         imap4.IMAP4Server.arg_finalastring,
     )
     select_COPY = auth_COPY  # type: ignore[assignment]
+
+    auth_MOVE = (
+        do_MOVE,
+        imap4.IMAP4Server.arg_seqset,
+        imap4.IMAP4Server.arg_finalastring,
+    )
+    select_MOVE = auth_MOVE
 
     def _wire_trace_enabled(self) -> bool:
         cfg = getattr(getattr(self, "factory", None), "_cfg", None)

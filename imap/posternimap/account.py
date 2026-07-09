@@ -118,6 +118,11 @@ class PosternAccount:
         self._cfg = cfg
         self._username = username
         self._token = token
+        # Session-local Trash staging (#278): Apple Mail COPY/MOVE to Trash expects the
+        # message to appear in Trash after the command. Postern has no Trash store; we
+        # hard-delete from the API but keep summaries here until EXPUNGE on Trash or
+        # logout so the client does not revert the delete when Trash SELECT shows zero.
+        self._trash_staging: list = []
         # One meter per session, gated by POSTERN_IMAP_MEASURE (default off = no-op),
         # shared by every client + mailbox + message this account builds.
         self._meter = Meter(cfg.measure)
@@ -155,6 +160,8 @@ class PosternAccount:
             delete_writable=delete_enabled,
             delete_client=self._delete_client(),
             trash_sink=folder.trash_sink,
+            trash_staging=self._trash_staging if folder.trash_sink else None,
+            trash_staging_sink=self._trash_staging,
         )
 
     # --- IAccount: read ---

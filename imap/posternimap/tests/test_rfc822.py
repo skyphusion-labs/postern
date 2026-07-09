@@ -85,24 +85,24 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(parts[1].get_content_type(), "application/gzip")
         self.assertEqual(parts[1].get_filename(), "report.json.gz")
         self.assertEqual(parts[1].get_payload(decode=True), data)
-        self.assertEqual((parts[1].get("Content-Transfer-Encoding") or "").lower(), "binary")
+        self.assertEqual((parts[1].get("Content-Transfer-Encoding") or "").lower(), "base64")
 
-    def test_attachment_cte_is_binary_not_base64(self):
-        """#210 applies to attachment parts: served bytes must match the declared CTE."""
+    def test_attachment_imap_body_serves_base64_wire(self):
+        """#210 on attachment parts: IMAP FETCH must return base64 wire bytes."""
         import base64
 
-        data = b"%PDF-1.4\n" + b"x" * 200
+        data = b"%PDF-1.4\n" + bytes(range(256)) * 60
         m = _msg(
             attachments=[Attachment(filename="inv.pdf", mime="application/pdf", size=len(data))],
         )
         parsed = email.message_from_bytes(render_rfc822(m, attachment_bytes=[data]))
         att = [p for p in parsed.walk() if p.get_content_type() == "application/pdf"][0]
-        self.assertEqual((att.get("Content-Transfer-Encoding") or "").lower(), "binary")
-        served = att.get_payload(decode=True)
-        self.assertEqual(served, data)
-        # A client honouring the old base64 header would corrupt the file.
-        with self.assertRaises(Exception):
-            base64.b64decode(served)
+        self.assertEqual((att.get("Content-Transfer-Encoding") or "").lower(), "base64")
+        from posternimap.message import _RFC822Part
+
+        wire = _RFC822Part(att).getBodyFile().read()
+        self.assertNotEqual(wire, data)
+        self.assertEqual(base64.b64decode(wire), data)
 
     def test_header_injection_is_neutralized(self):
         # A subject with CRLF + a fake header must not inject a second header.

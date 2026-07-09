@@ -193,6 +193,52 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(msgs[0]["messageId"], "keep@x")
         self.assertTrue(any("drop%40x" in c for c in delete_transport.calls))
 
+    def test_delete_fetched_messages_stages_trash(self):
+        from twisted.mail.imap4 import MessageSet
+        from posternimap.mailbox import PosternMailbox
+
+        msgs = [make_message("drop@x", subject="drop", uid=20)]
+        staging: list = []
+        read_transport = FakeTransport(msgs, expected_token="read", page_size=2)
+        delete_transport = FakeTransport(msgs, expected_token="delete", page_size=2)
+        mb = PosternMailbox(
+            PosternClient("https://x", "read", transport=read_transport),
+            page_size=2,
+            delete_writable=True,
+            delete_client=PosternClient("https://x", "delete", transport=delete_transport),
+            trash_staging_sink=staging,
+        )
+        mb.getMessageCount()
+        mb.delete_fetched_messages(mb.fetch(MessageSet(1, 1), uid=False))
+        self.assertEqual(len(staging), 1)
+        self.assertEqual(staging[0].message_id, "drop@x")
+
+    def test_trash_mailbox_loads_staging(self):
+        from posternimap.client import MessageSummary
+        from posternimap.mailbox import PosternMailbox
+
+        summary = MessageSummary(
+            uid=20,
+            message_id="drop@x",
+            direction="inbound",
+            thread_id="drop@x",
+            from_addr="a@b.com",
+            to_addr="c@d.com",
+            subject="drop",
+            date="2026-07-09T00:00:00Z",
+            in_reply_to=None,
+            trusted=True,
+            received_at="2026-07-09T00:00:01Z",
+            attachment_count=0,
+        )
+        staging = [summary]
+        trash = PosternMailbox(
+            PosternClient("https://x", "read", transport=FakeTransport([], page_size=2)),
+            trash_sink=True,
+            trash_staging=staging,
+        )
+        self.assertEqual(trash.getMessageCount(), 1)
+
     def test_append_is_noop_success(self):
         # APPEND must NOT fail (a client copies its sent mail into Sent); it is a
         # no-op that returns a fired Deferred, so the post-send copy succeeds.
@@ -249,7 +295,10 @@ class MailboxTest(unittest.TestCase):
         body_part = msg.getSubPart(0)
         self.assertIn("aggregate TLS report", body_part.getBodyFile().read().decode())
         att_part = msg.getSubPart(1)
-        self.assertEqual(att_part.getBodyFile().read(), att_data)
+        import base64
+
+        wire = att_part.getBodyFile().read()
+        self.assertEqual(base64.b64decode(wire), att_data)
         self.assertEqual(transport.body_fetches, 1)
         self.assertEqual(transport.attachment_fetches, 1)
 
