@@ -222,9 +222,11 @@ injectable transport, so no network is touched.
   insertion key as the UID, exposed by #103 and consumed in a follow-up; if a shift
   is ever observed before then we bump `UIDVALIDITY` rather than let UIDs move
   silently.
-- **Attachments are referenced, not inlined.** A FETCH body notes the attachments;
-  their bytes live behind `GET /api/messages/{id}/attachments/{i}`. Inlining MIME
-  parts over IMAP is a follow-up.
+- **Attachments are inlined over IMAP.** When a message is opened, the proxy fetches
+  attachment bytes from `GET /api/messages/{id}/attachments/{i}` and projects them as
+  MIME parts in a `multipart/mixed` message, so MUAs (Thunderbird, Apple Mail, etc.)
+  can download attachments normally. If bytes cannot be fetched, the body falls back
+  to a short note pointing at the Postern API.
 - **Live refresh / IDLE.** While a mailbox is selected the proxy polls the store
   (`POSTERN_IMAP_POLL_SECONDS`, summary-only, recent end only) and pushes an
   untagged `EXISTS` when new mail arrives, so MUAs and `IDLE` see new mail

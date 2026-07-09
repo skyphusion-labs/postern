@@ -143,6 +143,15 @@ class Attachment:
 
 
 @dataclass
+class AttachmentBytes:
+    """Raw attachment payload from GET /api/messages/{id}/attachments/{i}."""
+
+    body: bytes
+    mime: str
+    filename: str
+
+
+@dataclass
 class Message:
     """A full message + attachment metadata, mirroring the API StoredMessage."""
 
@@ -229,6 +238,7 @@ class _HttpTransport:
         self._timeout = timeout
         self._conn: Optional[http.client.HTTPConnection] = None
         self._key: Optional[Tuple[str, str, Optional[int]]] = None
+        self.last_headers: dict[str, str] = {}
 
     def __call__(self, req: urllib.request.Request) -> Tuple[int, bytes]:
         # A reused keep-alive connection may have been closed by the worker's idle
@@ -261,6 +271,10 @@ class _HttpTransport:
             path += "?" + parts.query
         self._conn.request(req.get_method(), path, body=req.data, headers=dict(req.header_items()))
         resp = self._conn.getresponse()
+        try:
+            self.last_headers = {k.lower(): v for k, v in resp.getheaders()}
+        except AttributeError:
+            self.last_headers = {}
         # MUST fully read the body so the connection is left clean for reuse.
         return resp.status, resp.read()
 
@@ -339,6 +353,22 @@ class PosternClient:
             raise
         msg = body.get("message")
         return Message.from_json(msg) if msg else None
+
+    def get_attachment(self, message_id: str, index: int) -> AttachmentBytes:
+        """GET /api/messages/{id}/attachments/{i}. Returns the raw attachment bytes."""
+        path = (
+            f"/api/messages/{urllib.parse.quote(message_id, safe='')}"
+            f"/attachments/{int(index)}"
+        )
+        status, hdrs, raw = self._get_raw(path)
+        if status == 401:
+            raise PosternAuthError("Postern API rejected the token", status=401)
+        if status >= 400:
+            raise PosternError(f"Postern API error (HTTP {status})", status=status)
+        mime = hdrs.get("content-type") or hdrs.get("Content-Type") or "application/octet-stream"
+        disp = hdrs.get("content-disposition") or hdrs.get("Content-Disposition") or ""
+        filename = _filename_from_disposition(disp) or f"attachment-{index}"
+        return AttachmentBytes(body=raw, mime=mime, filename=filename)
 
     def get_thread(self, thread_id: str) -> list[Message]:
         body = self._get(f"/api/threads/{urllib.parse.quote(thread_id, safe='')}", {})
@@ -421,6 +451,20 @@ class PosternClient:
 
     # --- internals ---
 
+    def _get_raw(self, path: str) -> tuple[int, dict[str, str], bytes]:
+        url = self._base + path
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Accept", "*/*")
+        req.add_header("User-Agent", USER_AGENT)
+        with self._meter.timed("api_request", path=path) as span:
+            status, raw = self._transport(req)
+            span.set(status=status, bytes=len(raw))
+        hdrs: dict[str, str] = {}
+        if hasattr(self._transport, "last_headers"):
+            hdrs = dict(getattr(self._transport, "last_headers") or {})
+        return status, hdrs, raw
+
     def _get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
         # urlencode quotes every value, so caller-supplied filters/queries cannot
         # smuggle extra query params or break the URL (injection-safe).
@@ -468,3 +512,15 @@ class PosternClient:
             return json.loads(raw.decode("utf-8")) if raw else {}
         except (ValueError, UnicodeDecodeError) as e:
             raise PosternError(f"invalid JSON from Postern API: {e}") from e
+
+
+def _filename_from_disposition(disp: str) -> Optional[str]:
+    marker = "filename="
+    i = disp.find(marker)
+    if i < 0:
+        return None
+    name = disp[i + len(marker):].strip()
+    if name.startswith('"'):
+        end = name.find('"', 1)
+        return name[1:end] if end > 0 else name[1:]
+    return name.split(";")[0].strip() or None

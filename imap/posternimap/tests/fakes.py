@@ -61,6 +61,8 @@ class FakeTransport:
         # count of per-message body fetches (GET /api/messages/{id}); the #102 proof
         # is that an ENVELOPE/header scan never increments this.
         self.body_fetches = 0
+        self.attachment_fetches = 0
+        self.last_headers: dict[str, str] = {}
 
     def __call__(self, req):
         self.calls.append(req.full_url)
@@ -79,11 +81,13 @@ class FakeTransport:
             return self._set_seen(req)
 
         if method == "GET" and path.startswith("/api/messages/") and path != "/api/messages/seen":
+            if "/attachments/" in path:
+                return self._get_attachment(path)
             self.body_fetches += 1
 
         if path == "/api/messages":
             return self._list(params)
-        if path.startswith("/api/messages/"):
+        if path.startswith("/api/messages/") and "/attachments/" not in path:
             mid = urllib.parse.unquote(path[len("/api/messages/"):])
             return self._get(mid)
         if path.startswith("/api/threads/"):
@@ -112,7 +116,11 @@ class FakeTransport:
         return 0
 
     def _summary_of(self, m: Dict[str, Any]) -> Dict[str, Any]:
-        s = {k: v for k, v in m.items() if k not in ("bodyText", "attachments")}
+        s = {
+            k: v
+            for k, v in m.items()
+            if k not in ("bodyText", "attachments", "attachmentBytes")
+        }
         s["attachmentCount"] = len(m.get("attachments", []))
         s["uid"] = self._uid_of(m)
         return s
@@ -131,7 +139,35 @@ class FakeTransport:
     def _get(self, mid):
         for m in self.messages:
             if m["messageId"] == mid:
-                return 200, json.dumps({"ok": True, "message": m}).encode()
+                msg = {k: v for k, v in m.items() if k != "attachmentBytes"}
+                return 200, json.dumps({"ok": True, "message": msg}).encode()
+        return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
+
+    def _get_attachment(self, path: str):
+        self.attachment_fetches += 1
+        rest = path[len("/api/messages/"):]
+        mid_part, _, index_part = rest.partition("/attachments/")
+        mid = urllib.parse.unquote(mid_part)
+        try:
+            index = int(index_part)
+        except ValueError:
+            return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
+        for m in self.messages:
+            if m["messageId"] != mid:
+                continue
+            raw_list = m.get("attachmentBytes") or []
+            meta = m.get("attachments") or []
+            if index < 0 or index >= len(meta):
+                return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
+            att = meta[index]
+            body = raw_list[index] if index < len(raw_list) else b""
+            filename = att.get("filename") or f"attachment-{index}"
+            mime = att.get("mime") or "application/octet-stream"
+            self.last_headers = {
+                "content-type": mime,
+                "content-disposition": f'attachment; filename="{filename}"',
+            }
+            return 200, body
         return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
 
     def _set_seen(self, req):

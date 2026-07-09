@@ -1,11 +1,11 @@
 """Render a Postern stored Message as an RFC822 byte string for IMAP FETCH.
 
 Pure stdlib (email.message), so it is unit-testable without Twisted. Postern
-stores cleaned plain-text bodies; we project them back into a minimal but valid
-RFC822 message: the stored headers we have (From/To/Subject/Date/Message-ID, plus
-In-Reply-To when threaded) and the text body. Attachments are surfaced as a short
-note line (their bytes live behind the API; the reference frontend lists them
-rather than re-downloading), keeping this projection faithful and lightweight.
+stores cleaned plain-text bodies; we project them back into a valid RFC822 message:
+the stored headers we have (From/To/Subject/Date/Message-ID, plus In-Reply-To when
+threaded) and the text body. When attachment bytes are supplied (fetched from the
+Postern API during IMAP hydration), they are inlined as MIME parts in a
+multipart/mixed projection so MUAs can download them normally.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 import email
 import re
 from html import escape as _html_escape
-from typing import Optional
+from typing import Optional, Sequence
 from email.message import EmailMessage
 from email.utils import format_datetime, parsedate_to_datetime
 
@@ -136,9 +136,40 @@ def _apply_envelope_headers(
         em["In-Reply-To"] = _hdr(_angle(in_reply_to))
 
 
-def render_rfc822(msg: Message) -> bytes:
+def _split_mime(mime: Optional[str]) -> tuple[str, str]:
+    if not mime:
+        return "application", "octet-stream"
+    main, _, rest = mime.partition("/")
+    if not rest:
+        return "application", main
+    return main, rest.split(";", 1)[0].strip()
+
+
+def _attachment_note(msg: Message) -> str:
+    names = ", ".join(a.filename or "(unnamed)" for a in msg.attachments)
+    return f"[{len(msg.attachments)} attachment(s): {names}; fetch via the Postern API]"
+
+
+def _html_attachment_note(msg: Message) -> str:
+    names = ", ".join(_html_escape(a.filename or "(unnamed)") for a in msg.attachments)
+    return (
+        f"<p>[{len(msg.attachments)} attachment(s): "
+        f"{names}; fetch via the Postern API]</p>"
+    )
+
+
+def _inline_attachments(msg: Message, attachment_bytes: Sequence[bytes]) -> bool:
+    return bool(msg.attachments) and len(attachment_bytes) == len(msg.attachments)
+
+
+def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] = None) -> bytes:
     """Build a valid RFC822 message from a stored Message. Header values are set
-    via EmailMessage, which folds/encodes them safely (no header injection)."""
+    via EmailMessage, which folds/encodes them safely (no header injection).
+
+    When `attachment_bytes` is supplied with one entry per stored attachment, the
+    render becomes multipart/mixed with real attachment parts. Without bytes (or
+    when the count does not match), attachments are noted in the body text only.
+    """
     em = EmailMessage()
     _apply_envelope_headers(
         em,
@@ -155,9 +186,7 @@ def render_rfc822(msg: Message) -> bytes:
     )
 
     html = (msg.body_html or "").strip()
-    names = ""
-    if msg.attachments:
-        names = ", ".join(a.filename or "(unnamed)" for a in msg.attachments)
+    inline = attachment_bytes is not None and _inline_attachments(msg, attachment_bytes)
 
     # cte="8bit" is load-bearing (#210). EmailMessage otherwise picks
     # quoted-printable/base64 for any non-ASCII, long-line, or "="-bearing body
@@ -185,19 +214,26 @@ def render_rfc822(msg: Message) -> bytes:
         # HTML alone is a faithful, valid single-representation projection; a
         # text/plain fallback via multipart/alternative is a future enhancement gated
         # on a summary hasHtml flag.
-        if msg.attachments:
-            html = html + (
-                f"<p>[{len(msg.attachments)} attachment(s): "
-                f"{_html_escape(names)}; fetch via the Postern API]</p>"
-            )
+        if msg.attachments and not inline:
+            html = html + _html_attachment_note(msg)
         em.set_content(html, subtype="html", cte="8bit")
     else:
         text = msg.body_text or ""
-        if msg.attachments:
-            text = text + (
-                f"\n\n[{len(msg.attachments)} attachment(s): {names}; fetch via the Postern API]"
-            )
+        if msg.attachments and not inline:
+            text = text + "\n\n" + _attachment_note(msg)
         em.set_content(text, cte="8bit")
+
+    if inline:
+        assert attachment_bytes is not None
+        for att, data in zip(msg.attachments, attachment_bytes):
+            maintype, subtype = _split_mime(att.mime)
+            em.add_attachment(
+                data,
+                maintype=maintype,
+                subtype=subtype,
+                filename=att.filename or "attachment",
+                disposition="attachment",
+            )
     return em.as_bytes()
 
 

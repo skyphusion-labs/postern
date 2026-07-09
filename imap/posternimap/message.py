@@ -36,7 +36,7 @@ from email.message import Message as PyMessage
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from io import BytesIO
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Sequence
 
 from zope.interface import implementer
 
@@ -54,6 +54,56 @@ from .rfc822 import _to_wire, envelope_headers, render_rfc822
 _ENVELOPE_NAMES = frozenset(
     {"from", "to", "subject", "date", "message-id", "in-reply-to", "cc", "bcc", "sender", "reply-to"}
 )
+
+
+@implementer(imap4.IMessagePart)
+class _RFC822Part:
+    """One MIME subpart from a hydrated, rendered message."""
+
+    def __init__(self, parsed: PyMessage) -> None:
+        self._parsed = parsed
+        self._body = self._extract_body()
+
+    def _extract_body(self) -> bytes:
+        payload = self._parsed.get_payload(decode=True)
+        if isinstance(payload, bytes):
+            return payload
+        text = self._parsed.get_payload()
+        return (text if isinstance(text, str) else "").encode("utf-8", "replace")
+
+    def getHeaders(self, negate: bool, *names):
+        names_lower = {
+            (n.decode("ascii", "replace") if isinstance(n, (bytes, bytearray)) else n).lower()
+            for n in names
+        }
+        result = {}
+        for key, value in self._parsed.items():
+            in_set = key.lower() in names_lower
+            if (not negate and in_set) or (negate and not in_set):
+                result[key.lower()] = _to_wire(value)
+        return result
+
+    def getBodyFile(self) -> BytesIO:
+        return BytesIO(self._body)
+
+    def getSize(self) -> int:
+        return len(self._body)
+
+    def isMultipart(self) -> bool:
+        return self._parsed.is_multipart()
+
+    def getSubPart(self, part: int):
+        if not self._parsed.is_multipart():
+            raise TypeError("Requested subpart of non-multipart message")
+        subparts = self._parsed.get_payload()
+        if not isinstance(subparts, list):
+            raise IndexError(part)
+        if part < 0 or part >= len(subparts):
+            raise IndexError(part)
+        child = subparts[part]
+        if not isinstance(child, PyMessage):
+            raise IndexError(part)
+        return _RFC822Part(child)
 
 
 @implementer(imap4.IMessage)
@@ -75,11 +125,13 @@ class PosternIMAPMessage:
         seq: int,
         hydrate: Callable[[], Optional[Message]],
         meter: Optional[Meter] = None,
+        fetch_attachment: Optional[Callable[[int], bytes]] = None,
     ) -> None:
         self._summary = summary
         self._uid = uid
         self._seq = seq
         self._hydrate_cb = hydrate
+        self._fetch_attachment_cb = fetch_attachment
         # A disabled Meter by default: the hydrate hook is a no-op unless an enabled
         # meter is injected (threaded in from the mailbox / account).
         self._meter = meter or Meter(False)
@@ -122,7 +174,13 @@ class PosternIMAPMessage:
             placeholder = full is None
             if full is None:
                 full = self._placeholder()
-            self._rendered = render_rfc822(full)
+            attachment_bytes: Optional[Sequence[bytes]] = None
+            if full.attachments and self._fetch_attachment_cb is not None:
+                fetched: list[bytes] = []
+                for i in range(len(full.attachments)):
+                    fetched.append(self._fetch_attachment_cb(i))
+                attachment_bytes = fetched
+            self._rendered = render_rfc822(full, attachment_bytes=attachment_bytes)
             self._parsed = email.message_from_bytes(self._rendered)
             self._loaded = True
             span.set(bytes=len(self._rendered), placeholder=placeholder)
@@ -230,6 +288,14 @@ class PosternIMAPMessage:
     def getBodyFile(self) -> BytesIO:
         self._hydrate()
         assert self._parsed is not None
+        if self._parsed.is_multipart():
+            sep = b"\r\n\r\n"
+            start = self._rendered.find(sep)
+            if start < 0:
+                sep = b"\n\n"
+                start = self._rendered.find(sep)
+            body = self._rendered[start + len(sep):] if start >= 0 else b""
+            return BytesIO(body)
         payload = self._parsed.get_payload(decode=True)
         if isinstance(payload, bytes):
             return BytesIO(payload)
@@ -258,9 +324,19 @@ class PosternIMAPMessage:
         return self._parsed.is_multipart()
 
     def getSubPart(self, part: int):
-        # The projection is single-part (text/plain or text/html, #210); there are no
-        # addressable subparts. Twisted's subparts() iterator stops on IndexError.
-        raise IndexError("postern-imap messages are single-part")
+        self._hydrate()
+        assert self._parsed is not None
+        if not self._parsed.is_multipart():
+            raise IndexError("postern-imap messages are single-part")
+        subparts = self._parsed.get_payload()
+        if not isinstance(subparts, list):
+            raise IndexError(part)
+        if part < 0 or part >= len(subparts):
+            raise IndexError(part)
+        child = subparts[part]
+        if not isinstance(child, PyMessage):
+            raise IndexError(part)
+        return _RFC822Part(child)
 
 
 class _EnvelopeHeaders(dict):

@@ -59,13 +59,32 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(h["in-reply-to"], "<parent@github.com>")
         self.assertEqual(h["message-id"], "<abc123>")
 
-    def test_attachment_note_has_real_newlines(self):
+    def test_attachment_note_without_bytes(self):
         m = _msg(attachments=[Attachment(filename="report.pdf", mime="application/pdf", size=10)])
         body = email.message_from_bytes(render_rfc822(m)).get_payload(decode=True).decode()
         self.assertIn("report.pdf", body)
         self.assertIn("1 attachment(s)", body)
+        self.assertIn("Postern API", body)
         # The note must use a real newline, not the literal backslash-n bug.
         self.assertNotIn("\\n", body)
+
+    def test_attachment_inlined_as_multipart_when_bytes_supplied(self):
+        data = b'{"report":"ok"}'
+        m = _msg(
+            attachments=[Attachment(filename="report.json.gz", mime="application/gzip", size=len(data))],
+        )
+        raw = render_rfc822(m, attachment_bytes=[data])
+        parsed = email.message_from_bytes(raw)
+        self.assertTrue(parsed.is_multipart())
+        self.assertEqual(parsed.get_content_type(), "multipart/mixed")
+        parts = parsed.get_payload()
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0].get_content_type(), "text/plain")
+        body = parts[0].get_payload(decode=True).decode()
+        self.assertNotIn("Postern API", body)
+        self.assertEqual(parts[1].get_content_type(), "application/gzip")
+        self.assertEqual(parts[1].get_filename(), "report.json.gz")
+        self.assertEqual(parts[1].get_payload(decode=True), data)
 
     def test_header_injection_is_neutralized(self):
         # A subject with CRLF + a fake header must not inject a second header.
@@ -313,7 +332,7 @@ class HtmlProjectionTest(unittest.TestCase):
         self.assertFalse(parsed.is_multipart())
         self.assertEqual(parsed.get_content_type(), "text/plain")
 
-    def test_attachment_note_appears_in_html_body(self):
+    def test_attachment_note_appears_in_html_body_without_bytes(self):
         m = _msg(
             body_html=self.HTML,
             attachments=[Attachment(filename="report.pdf", mime="application/pdf", size=10)],
@@ -321,6 +340,17 @@ class HtmlProjectionTest(unittest.TestCase):
         body = email.message_from_bytes(render_rfc822(m)).get_payload(decode=True).decode("utf-8")
         self.assertIn("report.pdf", body)
         self.assertIn("1 attachment(s)", body)
+
+    def test_html_with_attachment_bytes_is_multipart(self):
+        data = b"%PDF-1.4"
+        m = _msg(
+            body_html=self.HTML,
+            attachments=[Attachment(filename="report.pdf", mime="application/pdf", size=len(data))],
+        )
+        parsed = email.message_from_bytes(render_rfc822(m, attachment_bytes=[data]))
+        self.assertTrue(parsed.is_multipart())
+        self.assertEqual(parsed.get_payload()[0].get_content_type(), "text/html")
+        self.assertEqual(parsed.get_payload()[1].get_payload(decode=True), data)
 
 
 if __name__ == "__main__":

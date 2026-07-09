@@ -79,6 +79,19 @@ class ClientTest(unittest.TestCase):
     def test_ping_good_token(self):
         self.assertTrue(self.client.ping())
 
+    def test_get_attachment(self):
+        self.msgs[0]["attachments"] = [{"filename": "photo.png", "mime": "image/png", "size": 7}]
+        self.msgs[0]["attachmentBytes"] = [b"PNGDATA"]
+        att = self.client.get_attachment("m3", 0)
+        self.assertEqual(att.body, b"PNGDATA")
+        self.assertEqual(att.mime, "image/png")
+        self.assertEqual(att.filename, "photo.png")
+        self.assertTrue(self.transport.calls[-1].endswith("/api/messages/m3/attachments/0"))
+
+    def test_get_attachment_404_raises(self):
+        with self.assertRaises(PosternError):
+            self.client.get_attachment("m3", 99)
+
     def test_bad_token_raises_auth_error(self):
         bad = PosternClient("https://postern.example", "wrong", transport=self.transport)
         with self.assertRaises(PosternAuthError):

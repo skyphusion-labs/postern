@@ -420,11 +420,15 @@ class PosternMailbox:
         mid = summary.message_id
         # hydrate is bound per message (its own scope), so there is no late-binding
         # capture bug; the body GET happens only if the client opens the message.
+        def fetch_attachment(index: int, message_id: str = mid) -> bytes:
+            return self._client.get_attachment(message_id, index).body
+
         return seq, PosternIMAPMessage(
             summary,
             uid=summary.uid,
             seq=seq,
             hydrate=lambda: self._client.get_message(mid),
+            fetch_attachment=fetch_attachment,
             meter=self._meter,
         )
 
