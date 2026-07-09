@@ -6,9 +6,8 @@ import { handleApi } from "./src/api";
 import { makeFakeEnv } from "./fakes";
 
 // The worker embeds the page (it cannot read a file at request time), but the
-// canonical editable source is webmail/index.html at the repo root. This guard
-// fails if the two drift, so an edit to the HTML must be reflected in the
-// embedded copy (and vice versa).
+// canonical editable source is webmail/index.html at the repo root. Regenerate
+// the embed with `npm run sync-webmail`; this guard fails if the two drift.
 describe("webmail embed stays in sync with the source file", () => {
   it("WEBMAIL_HTML equals webmail/index.html byte for byte", () => {
     const file = readFileSync(resolve(__dirname, "../webmail/index.html"), "utf8");

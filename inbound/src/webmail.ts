@@ -7,8 +7,10 @@
 // Served same-origin by the inbound worker (so the page and the API it calls
 // share an origin, avoiding CORS and keeping the token in one security context).
 // The canonical, editable source is webmail/index.html at the repo root; this
-// embedded copy is kept byte-identical to it, enforced by webmail.test.ts (the
-// worker runtime cannot read a file at request time, so the page is embedded).
+// embedded copy is generated from it by scripts/sync-webmail.mjs and checked by
+// webmail.test.ts (the worker runtime cannot read a file at request time).
+//
+// After editing webmail/index.html: cd inbound && npm run sync-webmail
 //
 // Security: all message-derived content is inserted via text nodes / setAttribute
 // in the page script, never innerHTML, so stored message bytes cannot inject
