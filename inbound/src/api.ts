@@ -248,6 +248,15 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       });
     }
 
+    // --- delete: one message (admin-scoped; bundled Vectorize tombstone, #278) ---
+    if (request.method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) {
+      const id = decodeURIComponent(path.slice("/api/messages/".length));
+      if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "message id required" }, 400);
+      const deleted = await store.deleteMessage(env, id, ctx);
+      if (!deleted) return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
+      return json({ ok: true, deleted: id });
+    }
+
     // --- read: one message ---
     if (request.method === "GET" && path.startsWith("/api/messages/")) {
       const id = decodeURIComponent(path.slice("/api/messages/".length));
@@ -548,6 +557,7 @@ function requiredScope(method: string, path: string): RouteScope | null {
   // Reconcile is read-only but reports over the whole estate; gate it `admin` like
   // reindex so only a both-scoped token can run the audit (#134).
   if (method === "POST" && path === "/api/admin/reconcile") return "admin";
+  if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "admin";
   if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
   if (method === "GET" && path === "/api/search") return "read";
   if (method === "GET" && path === "/api/mobileconfig") return "read";

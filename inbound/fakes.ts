@@ -137,6 +137,28 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           });
           return { meta: { changes: 1 } };
         }
+        if (/DELETE FROM attachments WHERE message_id/i.test(sql)) {
+          const message_id = String(bound[0]);
+          let changes = 0;
+          for (let i = atts.length - 1; i >= 0; i--) {
+            if (atts[i].message_id === message_id) {
+              atts.splice(i, 1);
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
+        if (/DELETE FROM messages WHERE message_id/i.test(sql)) {
+          const message_id = String(bound[0]);
+          let changes = 0;
+          for (let i = rows.length - 1; i >= 0; i--) {
+            if (rows[i].message_id === message_id) {
+              rows.splice(i, 1);
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
         return { meta: { changes: 0 } };
       },
       async first<T>() {
@@ -225,7 +247,21 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         }
         if (/FROM attachments WHERE message_id/i.test(sql)) {
           const id = bound[0] as string;
+          if (/SELECT r2_key FROM attachments/i.test(sql)) {
+            return {
+              results: atts.filter((a) => a.message_id === id).map((a) => ({ r2_key: a.r2_key })) as unknown as T[],
+            };
+          }
           return { results: atts.filter((a) => a.message_id === id) as unknown as T[] };
+        }
+        if (/FROM vector_ledger WHERE message_id/i.test(sql)) {
+          const message_id = String(bound[0]);
+          return {
+            results: vectorLedger
+              .filter((r) => r.message_id === message_id)
+              .sort((a, b) => a.chunk - b.chunk)
+              .map((r) => ({ vector_id: r.vector_id })) as unknown as T[],
+          };
         }
         if (/FROM vector_ledger/i.test(sql)) {
           let work = vectorLedger.slice().sort((a, b) => a.vector_id.localeCompare(b.vector_id));
@@ -420,6 +456,10 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           },
         };
       },
+      async delete(key: string) {
+        const i = r2.findIndex((o) => o.key === key);
+        if (i >= 0) r2.splice(i, 1);
+      },
     },
     VECTORIZE: {
       async upsert(v: unknown[]) {
@@ -450,6 +490,14 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         return (vectors as { id: string; values: number[]; metadata?: unknown }[]).filter((v) =>
           want.has(v.id),
         );
+      },
+      async deleteByIds(ids: string[]) {
+        if (ids.length > 20) throw new Error("too many ids in payload; max id count is 20");
+        const drop = new Set(ids);
+        for (let i = vectors.length - 1; i >= 0; i--) {
+          const v = vectors[i] as { id: string };
+          if (drop.has(v.id)) vectors.splice(i, 1);
+        }
       },
     },
     AI: {

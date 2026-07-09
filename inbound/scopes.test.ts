@@ -81,6 +81,11 @@ describe("per-function token scopes (#85)", () => {
       const { env, ctx } = scopedEnv();
       expect((await handleApi(req("POST", "/api/admin/reindex", { token: "read-token", body: {} }), env, ctx)).status).toBe(403);
     });
+
+    it("cannot delete messages (-> 403, #278)", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("DELETE", "/api/messages/a@example.com", { token: "read-token" }), env, ctx)).status).toBe(403);
+    });
   });
 
   describe("send-scoped token", () => {
@@ -114,6 +119,11 @@ describe("per-function token scopes (#85)", () => {
       const { env, ctx } = scopedEnv();
       expect((await handleApi(req("POST", "/api/admin/reindex", { token: "send-token", body: {} }), env, ctx)).status).toBe(403);
     });
+
+    it("cannot delete messages (-> 403, #278)", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("DELETE", "/api/messages/a@example.com", { token: "send-token" }), env, ctx)).status).toBe(403);
+    });
   });
 
   describe("both-scoped token (back-compat / egalitarian default)", () => {
@@ -136,6 +146,12 @@ describe("per-function token scopes (#85)", () => {
       const res = await handleApi(req("POST", "/api/admin/reindex", { token: "both-token", body: { dryRun: true } }), env, ctx);
       expect(res.status).toBe(200);
       expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
+    });
+
+    it("can delete a message (DELETE /api/messages/{id} is admin-scoped, #278)", async () => {
+      const { env, ctx } = scopedEnv();
+      // Scope gate only: message absent -> 404 proves admin scope was accepted.
+      expect((await handleApi(req("DELETE", "/api/messages/nope@example.com", { token: "both-token" }), env, ctx)).status).toBe(404);
     });
   });
 

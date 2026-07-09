@@ -619,6 +619,68 @@ export async function setSeen(env: Env, messageIds: string[], seen: boolean): Pr
   return (res.results ?? []).length;
 }
 
+/** Batch-delete Vectorize ids (20/call cap matches getByIds). */
+async function deleteVectorIds(env: Env, ids: string[]): Promise<void> {
+  if (!env.VECTORIZE || ids.length === 0) return;
+  const batch = 20; // Vectorize getByIds/deleteByIds payload cap
+  for (let i = 0; i < ids.length; i += batch) {
+    await env.VECTORIZE.deleteByIds(ids.slice(i, i + batch));
+  }
+}
+
+/** Vector ids to tombstone on delete: ledger first, else computed from body (#279). */
+async function vectorIdsForDelete(env: Env, messageId: string, bodyText: string): Promise<string[]> {
+  if (env.DB) {
+    const res = await env.DB.prepare(
+      "SELECT vector_id FROM vector_ledger WHERE message_id = ? ORDER BY chunk",
+    )
+      .bind(messageId)
+      .all<{ vector_id: string }>();
+    const rows = res.results ?? [];
+    if (rows.length > 0) return rows.map((r) => r.vector_id);
+  }
+  const chunks = plannedChunks(bodyText);
+  return vectorIdsForMessage(messageId, chunks);
+}
+
+/**
+ * Hard-delete a message from the store, bundled with Vectorize tombstone (#278).
+ * Removes D1 rows (messages + attachments + vector_ledger), deletes Vectorize
+ * chunk-vectors, and purges attachment bytes from R2 (waitUntil). Returns false
+ * when the message_id is unknown. Irreversible; admin-scoped at the API layer.
+ */
+export async function deleteMessage(
+  env: Env,
+  messageId: string,
+  ctx?: ExecutionContext,
+): Promise<boolean> {
+  if (!env.DB) return false;
+  const row = await env.DB.prepare("SELECT body_text FROM messages WHERE message_id = ? LIMIT 1")
+    .bind(messageId)
+    .first<{ body_text: string }>();
+  if (!row) return false;
+
+  const vectorIds = await vectorIdsForDelete(env, messageId, row.body_text);
+  await deleteVectorIds(env, vectorIds);
+  await env.DB.prepare("DELETE FROM vector_ledger WHERE message_id = ?").bind(messageId).run();
+
+  const attRes = await env.DB.prepare("SELECT r2_key FROM attachments WHERE message_id = ?")
+    .bind(messageId)
+    .all<{ r2_key: string }>();
+  const r2Keys = (attRes.results ?? []).map((r) => r.r2_key);
+
+  await env.DB.prepare("DELETE FROM attachments WHERE message_id = ?").bind(messageId).run();
+  const del = await env.DB.prepare("DELETE FROM messages WHERE message_id = ?").bind(messageId).run();
+  if ((del.meta?.changes ?? 0) === 0) return false;
+
+  if (ctx && r2Keys.length > 0) {
+    ctx.waitUntil(
+      Promise.all(r2Keys.map((key) => env.ATTACHMENTS.delete(key))).then(() => undefined),
+    );
+  }
+  return true;
+}
+
 /** Full message + attachment metadata, or null if not found. */
 export async function get(env: Env, messageId: string): Promise<StoredMessage | null> {
   const row = await env.DB.prepare(
