@@ -96,9 +96,14 @@ class _RFC822Part:
         if not self._parsed.is_multipart():
             raise TypeError("Requested subpart of non-multipart message")
         subparts = self._parsed.get_payload()
+        if not isinstance(subparts, list):
+            raise IndexError(part)
         if part < 0 or part >= len(subparts):
             raise IndexError(part)
-        return _RFC822Part(subparts[part])
+        child = subparts[part]
+        if not isinstance(child, PyMessage):
+            raise IndexError(part)
+        return _RFC822Part(child)
 
 
 @implementer(imap4.IMessage)
@@ -324,9 +329,14 @@ class PosternIMAPMessage:
         if not self._parsed.is_multipart():
             raise IndexError("postern-imap messages are single-part")
         subparts = self._parsed.get_payload()
+        if not isinstance(subparts, list):
+            raise IndexError(part)
         if part < 0 or part >= len(subparts):
             raise IndexError(part)
-        return _RFC822Part(subparts[part])
+        child = subparts[part]
+        if not isinstance(child, PyMessage):
+            raise IndexError(part)
+        return _RFC822Part(child)
 
 
 class _EnvelopeHeaders(dict):
