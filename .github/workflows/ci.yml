@@ -63,7 +63,7 @@ jobs:
         working-directory: imap
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # Twisted is the only runtime dep; mypy is the type gate (mirrors the
@@ -92,7 +92,7 @@ jobs:
         working-directory: clients/python
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       # Zero runtime deps (pure stdlib urllib); install the package + dev extras so
