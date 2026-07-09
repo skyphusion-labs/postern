@@ -135,6 +135,7 @@ class PosternMailbox:
         client: PosternClient,
         *,
         direction: Optional[str] = None,
+        to: Optional[str] = None,
         special_use: Optional[List[str]] = None,
         list_view: bool = False,
         empty: bool = False,
@@ -152,6 +153,9 @@ class PosternMailbox:
         # meter is injected (POSTERN_IMAP_MEASURE, threaded in from the account).
         self._meter = meter or Meter(False)
         self._direction = direction
+        # Envelope-membership filter (#178/#208): when set, list only messages whose
+        # delivered set (falling back to to_addr for a v1 row) includes this address.
+        self._to = to
         self._special_use = list(special_use or [])
         self._list_view = list_view
         self._empty = empty
@@ -203,7 +207,10 @@ class PosternMailbox:
                 pages = 0
                 while True:
                     page = self._client.list_messages(
-                        direction=self._direction, limit=self._page_size, cursor=cursor
+                        direction=self._direction,
+                        to=self._to,
+                        limit=self._page_size,
+                        cursor=cursor,
                     )
                     items.extend(page.items)
                     pages += 1
@@ -274,7 +281,10 @@ class PosternMailbox:
         found = False
         while True:
             page = self._client.list_messages(
-                direction=self._direction, limit=self._page_size, cursor=cursor
+                direction=self._direction,
+                to=self._to,
+                limit=self._page_size,
+                cursor=cursor,
             )
             for item in page.items:  # newest-first by (date DESC, id DESC)
                 if boundary is not None and item.message_id == boundary:
