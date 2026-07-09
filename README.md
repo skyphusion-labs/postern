@@ -148,6 +148,16 @@ to Email Sending, and deploys the worker to Cloudflare via CI on every green
 build of `main`. No secrets live in the tree: `POSTERN_API_TOKEN` is a Worker
 secret, untouched by deploy.
 
+## Who this is for
+
+Self-hosters, agent builders, and mail admins who want a mailbox they own on Cloudflare: one searchable store, one API for humans and agents, webmail and IMAP included.
+
+## Links
+
+- **Quickstart:** [DEPLOY.md](DEPLOY.md)
+- **Skyphusion Labs:** https://skyphusion.org · **Org:** https://github.com/skyphusion-labs
+- **Related:** [prism](https://github.com/skyphusion-labs/prism) (AI playground), [search-mcp](https://github.com/skyphusion-labs/search-mcp)
+
 ## License
 
 [AGPL-3.0-only](LICENSE). Postern is software you self-host; if you run it as a network service for
