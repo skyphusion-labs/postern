@@ -1,0 +1,25 @@
+name: npm-deprecate-unscoped
+
+# One-off ops: deprecate the legacy unscoped postern-mcp package.
+# Canonical package: @skyphusion/postern-mcp
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deprecate:
+    name: deprecate postern-mcp on npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Deprecate unscoped postern-mcp
+        run: npm deprecate postern-mcp "Use @skyphusion/postern-mcp instead"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
