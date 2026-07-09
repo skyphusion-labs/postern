@@ -74,6 +74,8 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(mb.getMessageCount(), 1)
 
     def test_to_filter_shows_multi_recipient_in_both_views(self):
+        import urllib.parse
+
         msgs = [
             make_message(
                 "multi",
@@ -84,7 +86,12 @@ class MailboxTest(unittest.TestCase):
         for addr in ("support@skyphusion.org", "security@skyphusion.org"):
             mb, transport = self._custom_mailbox(msgs, to=addr)
             self.assertEqual(mb.getMessageCount(), 1)
-            self.assertTrue(any(f"to={addr}" in u for u in transport.calls))
+            list_calls = [
+                urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
+                for u in transport.calls
+                if "/api/messages" in u and "/api/messages/seen" not in u
+            ]
+            self.assertTrue(any(q.get("to") == [addr] for q in list_calls))
 
     def test_to_filter_v1_row_matches_to_header(self):
         msgs = [make_message("old", to="conrad@skyphusion.org")]
