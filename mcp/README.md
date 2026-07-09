@@ -1,5 +1,7 @@
 # postern-mcp
 
+[![npm version](https://img.shields.io/npm/v/@skyphusion/postern-mcp)](https://www.npmjs.com/package/@skyphusion/postern-mcp)
+
 A [Model Context Protocol](https://modelcontextprotocol.io) server that exposes the
 Postern mailbox to an AI agent. It is a thin, stdio MCP wrapper over the Postern
 mailbox API (the same token-gated endpoints the IMAP proxy uses), so an agent can use
@@ -48,13 +50,15 @@ on a 400/401/403 (e.g. `requires send scope`, `invalid to address: ...`).
 
 ## Install / build
 
-**From npm** (after the package is published; tag `postern-mcp-v*` triggers CI):
+**From npm** ([@skyphusion/postern-mcp](https://www.npmjs.com/package/@skyphusion/postern-mcp); tag
+`postern-mcp-v*` triggers CI publish):
 
 ```bash
-npx -y postern-mcp   # requires POSTERN_API_URL + POSTERN_API_TOKEN in env
+npx -y @skyphusion/postern-mcp   # requires POSTERN_API_URL + POSTERN_API_TOKEN in env
+# or: npm install -g @skyphusion/postern-mcp && postern-mcp
 ```
 
-**From this repo** (development or before publish):
+**From this repo** (development):
 
 ```bash
 cd mcp
@@ -71,7 +75,7 @@ Runtime deps are minimal: the MCP SDK and zod. Node >= 18 (uses the global `fetc
   "mcpServers": {
     "postern": {
       "command": "npx",
-      "args": ["-y", "postern-mcp"],
+      "args": ["-y", "@skyphusion/postern-mcp"],
       "env": {
         "POSTERN_API_URL": "https://your-postern-api.workers.dev",
         "POSTERN_API_TOKEN": "<read-scoped Postern token>"
@@ -84,8 +88,9 @@ Runtime deps are minimal: the MCP SDK and zod. Node >= 18 (uses the global `fetc
 ## Configure it in Claude Code
 
 Add an entry to your MCP client config (e.g. `.mcp.json`, or via `claude mcp add`).
-Point it at the built `dist/index.js` (or `npx postern-mcp` once published) and pass
-the API origin + a **read-scoped** token in `env` (never put the token in a tracked file):
+Prefer `npx @skyphusion/postern-mcp` from npm (see [Install / build](#install--build)); for local
+dev, point at the built `dist/index.js`. Pass the API origin + a **read-scoped** token
+in `env` (never put the token in a tracked file):
 
 ```json
 {
@@ -111,7 +116,7 @@ claude mcp add postern \
   -- node /absolute/path/to/postern/mcp/dist/index.js
 ```
 
-Once published to npm, use `"command": "npx", "args": ["-y", "postern-mcp"]` (see above).
+For production, use `"command": "npx", "args": ["-y", "@skyphusion/postern-mcp"]` (see [Cursor / Claude MCP config](#cursor--claude-mcp-config-npm)).
 
 ## Configuration
 

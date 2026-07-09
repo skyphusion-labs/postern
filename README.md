@@ -2,6 +2,8 @@
 
 [![Release](https://img.shields.io/github/v/release/skyphusion-labs/postern?label=release)](https://github.com/skyphusion-labs/postern/releases)
 [![CI](https://github.com/skyphusion-labs/postern/actions/workflows/ci.yml/badge.svg)](https://github.com/skyphusion-labs/postern/actions/workflows/ci.yml)
+[![npm @skyphusion/postern-mcp](https://img.shields.io/npm/v/@skyphusion/postern-mcp?label=postern-mcp)](https://www.npmjs.com/package/@skyphusion/postern-mcp)
+[![PyPI postern-client](https://img.shields.io/pypi/v/postern-client?label=postern-client)](https://pypi.org/project/postern-client/)
 
 Email, for humans and agents. Postern is a self-hostable mailbox on Cloudflare:
 it sends and receives mail, stores every message in a searchable store, and
@@ -20,10 +22,10 @@ Six surfaces in one repo (one store, one API):
 |------|------|
 | **`inbound/`** | Core Cloudflare Worker: ingest, store (D1 + R2 + Vectorize), mailbox API, send |
 | **`relay/`** | Optional Go SMTP daemon: loopback ingest, submission 587/465, BYO dispatch |
-| **`mcp/`** | MCP server so agents search/read/send over stdio |
+| **`mcp/`** | MCP server for agents ([`@skyphusion/postern-mcp`](https://www.npmjs.com/package/@skyphusion/postern-mcp) on npm) |
 | **`webmail/`** | Read-only browser UI embedded at `/webmail` |
 | **`imap/`** | Read-only IMAP proxy for Thunderbird / mutt / iOS Mail |
-| **`clients/python/`** | Thin stdlib HTTP client for scripts (`pip install postern-client`) |
+| **`clients/python/`** | Stdlib HTTP client + CLI ([`postern-client`](https://pypi.org/project/postern-client/) on PyPI) |
 
 ```mermaid
 flowchart TD
@@ -105,6 +107,35 @@ npm install && npm run deploy
 
 Then route inbound mail to the Worker (Email Routing -> Routing Rules ->
 catch-all to the Worker), and run the smoke (see DEPLOY.md).
+
+## Client packages
+
+After deploy, connect agents and scripts without cloning the repo. Both packages
+talk to the same token-gated mailbox API; they are clients of the store, not a
+second copy of it.
+
+| Package | Registry | Install | Docs |
+|---------|----------|---------|------|
+| **@skyphusion/postern-mcp** | [npm](https://www.npmjs.com/package/@skyphusion/postern-mcp) | `npx -y @skyphusion/postern-mcp` | [mcp/README.md](mcp/README.md) |
+| **postern-client** | [PyPI](https://pypi.org/project/postern-client/) | `pip install postern-client` | [clients/python/README.md](clients/python/README.md) |
+
+Configure with your deployed origin and token:
+
+```bash
+export POSTERN_API_URL=https://postern.<your-account>.workers.dev
+export POSTERN_API_TOKEN=<read-scoped token>
+```
+
+**MCP (Cursor / Claude Code):** add an MCP server entry with `command: npx`,
+`args: ["-y", "@skyphusion/postern-mcp"]`, and the env vars above in `env`. Send tools
+(`mailbox_send`, `mailbox_reply`) register only when `POSTERN_SEND_TOKEN` is also
+set (opt-in; see [docs/SEND-IDENTITIES.md](docs/SEND-IDENTITIES.md)).
+
+**Python CLI:** `postern ping`, `postern list`, `postern search`, `postern send`,
+and the rest; see [clients/python/README.md](clients/python/README.md).
+
+Release tags: `postern-mcp-v*` (npm CI) and GitHub Release `v*` matching
+`clients/python/pyproject.toml` (PyPI CI). See [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 ## Auth
 

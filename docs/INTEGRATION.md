@@ -1,8 +1,40 @@
 # Integrating callers
 
-Two ways to reach Postern. Same-account Workers use the service binding (no
-token, no public hop). Everything else uses the public HTTPS endpoint with the
-`POSTERN_API_TOKEN` bearer.
+Three ways to reach Postern:
+
+1. **Same-account Worker** -- service binding RPC (no token, no public hop).
+2. **Official client packages** -- npm (`@skyphusion/postern-mcp`) and PyPI (`postern-client`).
+3. **Raw HTTPS** -- `curl` or your own HTTP client with `Authorization: Bearer`.
+
+All paths hit the same mailbox API and store; see [architecture.md](architecture.md).
+
+## Official client packages
+
+Published packages are thin wrappers over the token-gated `/api/*` surface. They
+do not embed a second store.
+
+| Package | Registry | Install | Send? |
+|---------|----------|---------|-------|
+| `@skyphusion/postern-mcp` | [npm](https://www.npmjs.com/package/@skyphusion/postern-mcp) | `npx -y @skyphusion/postern-mcp` | opt-in (`POSTERN_SEND_TOKEN`) |
+| `postern-client` | [PyPI](https://pypi.org/project/postern-client/) | `pip install postern-client` | if token allows |
+
+Both need your deployed origin and a read-scoped API token:
+
+```bash
+export POSTERN_API_URL=https://postern.<your-account>.workers.dev
+export POSTERN_API_TOKEN=<read-scoped token>
+```
+
+**MCP:** configure your agent's MCP server with `command: npx`, `args: ["-y", "@skyphusion/postern-mcp"]`,
+and the env vars above. Full tool list, send opt-in, and per-identity send:
+[mcp/README.md](../mcp/README.md).
+
+**Python:** CLI (`postern ping`, `postern list`, `postern search`, `postern send`, ...)
+and importable `PosternClient`. Details: [clients/python/README.md](../clients/python/README.md).
+
+Release mechanics: push tag `postern-mcp-v*` for npm (`.github/workflows/npm-mcp.yml`);
+publish a GitHub Release whose tag matches `clients/python/pyproject.toml` for PyPI
+(`.github/workflows/publish-pypi.yml`).
 
 ## Same-account Worker (service binding)
 
