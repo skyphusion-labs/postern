@@ -104,6 +104,20 @@ class RenderTest(unittest.TestCase):
         self.assertNotEqual(wire, data)
         self.assertEqual(base64.b64decode(wire), data)
 
+    def test_attachment_content_type_has_name_param(self):
+        data = b"%PDF-1.4\n"
+        m = _msg(
+            attachments=[Attachment(filename="invoice.pdf", mime="application/pdf", size=len(data))],
+        )
+        parsed = email.message_from_bytes(render_rfc822(m, attachment_bytes=[data]))
+        att = [p for p in parsed.walk() if p.get_content_type() == "application/pdf"][0]
+        self.assertEqual(att.get_param("name", header="Content-Type"), "invoice.pdf")
+        from twisted.mail.imap4 import getBodyStructure
+        from posternimap.message import _RFC822Part
+
+        struct = getBodyStructure(_RFC822Part(att), True)
+        self.assertEqual(struct[2], ["name", "invoice.pdf"])
+
     def test_header_injection_is_neutralized(self):
         # A subject with CRLF + a fake header must not inject a second header.
         m = _msg(subject="Evil\r\nBcc: victim@example.com")
