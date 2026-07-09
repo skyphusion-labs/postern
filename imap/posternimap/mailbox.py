@@ -148,6 +148,8 @@ class PosternMailbox:
         delete_writable: bool = False,
         delete_client: Optional[PosternClient] = None,
         trash_sink: bool = False,
+        trash_staging: Optional[list] = None,
+        trash_staging_sink: Optional[list] = None,
     ) -> None:
         self._client = client
         # EXPUNGE uses delete_client when set (#278 dual-token); falls back to the read
@@ -184,6 +186,10 @@ class PosternMailbox:
         self._delete_writable = delete_writable
         # Trash sink: no messages stored here; COPY/MOVE is handled server-side as delete.
         self._trash_sink = trash_sink
+        # Trash SELECT reads staged summaries (see account._trash_staging).
+        self._trash_staging = trash_staging
+        # Real views stage summaries here on COPY-to-Trash delete.
+        self._trash_staging_sink = trash_staging_sink
         self._summaries: List[MessageSummary] = []
         self._loaded = False
         # Highest UID (== store rowid) currently in the snapshot. UIDNEXT is this
@@ -200,6 +206,13 @@ class PosternMailbox:
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
+            return
+        if self._trash_sink:
+            staged = self._trash_staging or []
+            self._summaries = list(staged)
+            self._newest_uid = self._summaries[-1].uid if self._summaries else 0
+            self._newest_id = self._summaries[-1].message_id if self._summaries else None
+            self._loaded = True
             return
         if self._empty:
             # Placeholder folder (e.g. Drafts/Trash): always empty, never hit the API.
@@ -696,11 +709,16 @@ class PosternMailbox:
     def expunge(self):
         """Remove messages marked \\Deleted from the snapshot and the store (#278).
 
-        Each deleted message is hard-deleted via DELETE /api/messages/{id} (Vectorize
-        tombstone bundled server-side). Returns the UIDs expunged (RFC 3501). Requires
-        a both-scoped API token; a read-only token yields a tagged NO.
+        Trash is session-staged only: EXPUNGE clears the staging list (the API delete
+        already ran on COPY-to-Trash). Real views hard-delete via DELETE /api/messages.
         """
         self._ensure_loaded()
+        if self._trash_sink:
+            expunged_uids = [s.uid for s in self._summaries]
+            if self._trash_staging is not None:
+                self._trash_staging.clear()
+            self._summaries = []
+            return expunged_uids
         if self._empty:
             return []
         if not self._delete_writable:
@@ -741,6 +759,12 @@ class PosternMailbox:
         ids = {msg._summary.message_id for _seq, msg in fetched}
         if not ids:
             return
+
+        if self._trash_staging_sink is not None:
+            staged_ids = {s.message_id for s in self._trash_staging_sink}
+            for _seq, msg in fetched:
+                if msg._summary.message_id not in staged_ids:
+                    self._trash_staging_sink.append(msg._summary)
 
         delete_client = self._delete_client or self._client
         for mid in ids:

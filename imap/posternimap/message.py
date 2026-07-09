@@ -56,20 +56,36 @@ _ENVELOPE_NAMES = frozenset(
 )
 
 
+def _imap_body_bytes(parsed: PyMessage) -> bytes:
+    """Bytes to serve for an IMAP BODY[] FETCH on this MIME part (#210).
+
+    Text bodies are rendered as 8bit (identity). Attachment parts stay base64 on the
+    wire; the IMAP server must serve those encoded bytes, not the decoded payload,
+    so the client performs exactly one decode. Using cte=binary on attachments is
+    unsafe: EmailMessage normalizes bare CR out of binary payloads and corrupts PDFs.
+    """
+    cte = (parsed.get("Content-Transfer-Encoding") or "7bit").lower()
+    if cte in ("base64", "quoted-printable"):
+        raw = parsed.get_payload(decode=False)
+        if isinstance(raw, bytes):
+            return raw
+        if isinstance(raw, str):
+            return raw.encode("ascii")
+        return b""
+    payload = parsed.get_payload(decode=True)
+    if isinstance(payload, bytes):
+        return payload
+    text = parsed.get_payload(decode=False)
+    return (text if isinstance(text, str) else "").encode("utf-8", "replace")
+
+
 @implementer(imap4.IMessagePart)
 class _RFC822Part:
     """One MIME subpart from a hydrated, rendered message."""
 
     def __init__(self, parsed: PyMessage) -> None:
         self._parsed = parsed
-        self._body = self._extract_body()
-
-    def _extract_body(self) -> bytes:
-        payload = self._parsed.get_payload(decode=True)
-        if isinstance(payload, bytes):
-            return payload
-        text = self._parsed.get_payload()
-        return (text if isinstance(text, str) else "").encode("utf-8", "replace")
+        self._body = _imap_body_bytes(parsed)
 
     def getHeaders(self, negate: bool, *names):
         names_lower = {

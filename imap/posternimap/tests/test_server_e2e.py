@@ -310,6 +310,8 @@ class ServerE2ETest(twisted_unittest.TestCase):
                 yield proto.copy(imap4.MessageSet(2, 2), "Trash", uid=False)
                 info = yield proto.select(b"INBOX")
                 self.assertEqual(info["EXISTS"], 1)
+                trash = yield proto.select(b"Trash")
+                self.assertEqual(trash["EXISTS"], 1)
                 self.assertTrue(
                     any("m2" in c or "m2%40" in c for c in self.transport.calls),
                     "expected delete API for m2",
