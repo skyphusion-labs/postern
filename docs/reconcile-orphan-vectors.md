@@ -1,8 +1,9 @@
 # Vectorize reconcile / orphan-vector audit (#134)
 
-Status: **read-only tooling of record** for the orphan-vector audit. The prune itself
-is **not implemented here**: it is a separate, Conrad-supervised, gated step (see
-section 6). This document is reproducible from itself (ICD discipline): the id scheme,
+Status: **read-only tooling of record** for the orphan-vector audit. The one-time
+prune (section 6, option 1) **completed 2026-07-09** on the fleet index; the tool
+remains the audit path for any future drift. This document is reproducible from itself
+(ICD discipline): the id scheme,
 the enumerability constraint, the report shape, and the prune options below were
 verified read-only against the code in `inbound/src/store.ts` and the live
 `@cloudflare/workers-types` `VectorizeIndex` surface.
@@ -57,6 +58,21 @@ Findings:
 The orphans are overwhelmingly GitHub-notification mail re-indexed as the id scheme
 evolved across the #116 epic; the old-scheme vectors were never overwritten because
 their ids differ from the unified `base.chunk`.
+
+## 1b. Prune completed (fleet, 2026-07-09)
+
+Option 1 (full rebuild from D1) was executed against the live fleet store:
+
+| step | outcome |
+| --- | --- |
+| new index | `skyphusion-mail-vec-v2` (768-dim, cosine) |
+| backfill | 3762 messages, 4718 vectors (`reindex.mjs`, two passes) |
+| binding flip | `skyphusion-email-inbound` VECTORIZE -> v2 |
+| legacy index | `skyphusion-mail-vec` deleted (1022 orphans retired with it) |
+| post-flip reconcile | 4718/4718 expected present, **0 orphans**, **0 missing** |
+
+Hybrid semantic search (`mode=hybrid`) was live-verified immediately after the flip.
+Issue **#134** is closed; this section is the durable record of the prune landing.
 
 ## 2. The id scheme (the contract the audit mirrors)
 
@@ -168,12 +184,14 @@ an ongoing leak. With `message_id` stable, the standing hypothesis was that the 
 pre-#116-scheme vectors for still-live messages. **The live audit confirmed it: 314/314
 sampled orphans are cause (b), zero cause (a)** (section 1a).
 
-## 6. Proposed prune plan (NOT implemented; Conrad-supervised, gated)
+## 6. Prune plan (option 1 executed on fleet, 2026-07-09)
 
-The live audit (section 1a) confirms the orphans are cause (b): stale-id vectors for
-messages that are STILL in D1. A **full rebuild from D1 (option 1)** is therefore the
-clean fix -- it re-keys every live message under the unified `base.chunk` scheme and
-carries none of the old-scheme ids across, so the orphan class disappears in one pass.
+The live audit (section 1a) confirmed the orphans are cause (b): stale-id vectors for
+messages that are STILL in D1. A **full rebuild from D1 (option 1)** is the clean fix:
+it re-keys every live message under the unified `base.chunk` scheme and carries none of
+the old-scheme ids across, so the orphan class disappears in one pass. **Fleet executed
+this on 2026-07-09** (section 1b). The steps below remain the operator playbook for
+any other account that inherits the pre-#116 orphan class.
 
 Because the orphan SET is not cleanly enumerable, "list the orphans then delete them" is
 **not** safely complete. Options, in recommended order:
@@ -195,8 +213,8 @@ Because the orphan SET is not cleanly enumerable, "list the orphans then delete 
    reconciles can diff exactly. It does **not** know about the pre-existing ~1,023
    orphans (they predate it), so it complements, not replaces, option 1.
 
-Whichever path: it runs **with Conrad watching**, after a reconcile dry-run report is
-signed off, and is **out of scope for this PR**. #134 stays open until the prune lands.
+Whichever path: run it supervised, after a reconcile dry-run report is signed off.
+On the fleet store, option 1 landed 2026-07-09 and #134 is closed.
 
 ## 7. Delete-tombstone assessment (#134 item 4)
 

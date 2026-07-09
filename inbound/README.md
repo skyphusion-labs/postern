@@ -38,10 +38,13 @@ delivery; their errors are logged, not thrown.
 
 | Binding | Type | Purpose |
 |---------|------|---------|
-| `DB` | D1 (`skyphusion-mail`) | `messages`, `attachments`, `messages_fts` (FTS5) |
-| `VECTORIZE` | Vectorize (`skyphusion-mail-vec`, 768-dim, cosine) | semantic recall over bodies |
-| `ATTACHMENTS` | R2 (`skyphusion-mail-attachments`) | attachment bytes; keys referenced in `DB.attachments` |
-| `AI` | Workers AI via AI Gateway `skyphusion-llm` | `@cf/baai/bge-base-en-v1.5` embeddings |
+| `DB` | D1 (`postern` in `wrangler.jsonc`) | `messages`, `attachments`, `messages_fts` (FTS5) |
+| `VECTORIZE` | Vectorize (`postern-vec`, 768-dim, cosine) | semantic recall over bodies |
+| `ATTACHMENTS` | R2 (`postern-attachments`) | attachment bytes; keys referenced in `DB.attachments` |
+| `AI` | Workers AI (optional AI Gateway) | `@cf/baai/bge-base-en-v1.5` embeddings |
+
+Fleet live deploy uses operator-chosen resource names (for example `skyphusion-mail`,
+`skyphusion-mail-vec-v2`); the template in `wrangler.jsonc` stays generic.
 
 ## Vars (`wrangler.jsonc` `vars`)
 
@@ -100,11 +103,11 @@ Storage is best-effort per attachment; one failure is logged and the rest procee
 cd inbound
 npm install
 
-# One-time resource creation (IDs already wired in wrangler.jsonc for the live deploy):
-npx wrangler d1 create skyphusion-mail
-npx wrangler d1 execute skyphusion-mail --remote --file=schema.sql
-npx wrangler vectorize create skyphusion-mail-vec --dimensions=768 --metric=cosine
-npx wrangler r2 bucket create skyphusion-mail-attachments
+# One-time resource creation (paste IDs into wrangler.jsonc):
+npx wrangler d1 create postern
+npx wrangler d1 execute postern --remote --file=schema.sql
+npx wrangler vectorize create postern-vec --dimensions=768 --metric=cosine
+npx wrangler r2 bucket create postern-attachments
 
 npm run typecheck     # CI gate
 npx vitest run        # unit suite (pure helpers)
@@ -136,6 +139,6 @@ suite. Run `npm run typecheck` before pushing (it is not part of the test run).
 Query D1 directly (the `messages` table + `messages_fts` for full-text search):
 
 ```bash
-npx wrangler d1 execute skyphusion-mail --remote \
+npx wrangler d1 execute postern --remote \
   --command "SELECT received_at, from_addr, subject, trusted FROM messages ORDER BY received_at DESC LIMIT 20"
 ```
