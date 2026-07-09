@@ -135,9 +135,17 @@ the page because it cannot read a file at request time; the source of truth is
 
 ## Editing
 
-`webmail/index.html` is the canonical, editable source. After changing it, mirror
-it into the embedded copy in `inbound/src/webmail.ts` (the `WEBMAIL_HTML`
-constant); the sync test enforces they match.
+`webmail/index.html` is the canonical, editable source. The worker serves an
+embedded copy from `inbound/src/webmail.ts` (no filesystem read at runtime), so
+after changing the HTML regenerate the embed:
+
+```bash
+cd inbound && npm run sync-webmail
+```
+
+`inbound/webmail.test.ts` asserts the embed stays byte-identical to
+`webmail/index.html`. The served route at `/webmail` carries the locked-down CSP
+and security headers; opening the standalone file directly does not.
 
 ## Deferred (follow-ups)
 
