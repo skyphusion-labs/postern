@@ -35,6 +35,7 @@ load_secret() {
 # modes). POSTERN_TRANSPORT_TOKEN is the native-mode transport bearer; load it too so
 # either service-token mode can be driven entirely from swarm secrets.
 load_secret POSTERN_API_TOKEN
+load_secret POSTERN_API_TOKEN_DELETE
 load_secret POSTERN_TRANSPORT_TOKEN
 
 exec "$@"

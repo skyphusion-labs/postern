@@ -328,6 +328,7 @@ Presence-check with `${VAR:+SET}` only.
 | `POSTERN_TRANSPORT_TOKEN` | transport seam (`/ingest`, `/dispatch`, native `/api/smtp-auth`) | relay (inbound + native submission) | crew-secrets -> `/etc/...env` 0600 | exists |
 | `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | submission door (587/465) | crew-secrets -> `/etc/postern-submission.env` 0600 | exists; holds a `send`-scoped value once provisioned (worker `POSTERN_API_TOKEN_SEND`, #85) |
 | `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store (`/api/messages`, `/search`) in `ldap`/`pam` mode | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | exists; holds a `read`-scoped value once provisioned (worker `POSTERN_API_TOKEN_READ`, #85) |
+| `POSTERN_API_TOKEN_DELETE` (store-delete) | IMAP proxy EXPUNGE only (`DELETE /api/messages/{id}`) | postern-imap | crew-secrets minter tier -> swarm `postern_imap_delete_token` | provisioned as a dedicated member of worker `POSTERN_API_TOKEN` (#278); NOT the read token |
 | ~~`POSTERN_LDAP_BIND_PASSWORD`~~ | **RETIRED** -- direct-bind (Option A, section 5b) uses no service account, so there is no search-bind password to hold. | -- | -- | -- |
 | `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname (587 STARTTLS + 465 implicit share it) | submission door (587/465) | crew-secrets / cert store (staged) | **gated** (exposure) |
 

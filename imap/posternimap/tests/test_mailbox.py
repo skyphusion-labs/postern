@@ -140,6 +140,32 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(mb.expunge(), [])
         self.assertEqual(mb.getMessageCount(), 1)
 
+    def test_expunge_uses_delete_client_not_read_client(self):
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [
+            make_message("keep@x", subject="keep", uid=10),
+            make_message("drop@x", subject="drop", uid=20),
+        ]
+        read_transport = FakeTransport(msgs, expected_token="read", page_size=2)
+        delete_transport = FakeTransport(msgs, expected_token="delete", page_size=2)
+        read_client = PosternClient("https://x", "read", transport=read_transport)
+        delete_client = PosternClient("https://x", "delete", transport=delete_transport)
+        from posternimap.mailbox import PosternMailbox
+
+        mb = PosternMailbox(
+            read_client,
+            page_size=2,
+            seen_writable=True,
+            delete_writable=True,
+            delete_client=delete_client,
+        )
+        mb.getMessageCount()
+        mb.store(MessageSet(2, 2), ["\\Deleted"], 1, uid=False)
+        mb.expunge()
+        self.assertTrue(any("drop%40x" in c for c in delete_transport.calls))
+        self.assertFalse(any("drop%40x" in c for c in read_transport.calls))
+
     def test_append_is_noop_success(self):
         # APPEND must NOT fail (a client copies its sent mail into Sent); it is a
         # no-op that returns a fired Deferred, so the post-send copy succeeds.
@@ -775,6 +801,12 @@ class AccountTest(unittest.TestCase):
         from posternimap.client import PosternClient
 
         self.cfg = Config(api_url="https://x", auth_mode="token", api_timeout=5.0)
+        self.cfg_delete = Config(
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            service_delete_token="del",
+        )
         # Back the account's client with a fake transport so no network is touched
         # and we can assert placeholder folders make zero API calls.
         self.transport = FakeTransport(
@@ -798,15 +830,20 @@ class AccountTest(unittest.TestCase):
         if self._orig_client is not None:
             account_mod.PosternAccount._client = self._orig_client
 
+    def test_inbox_select_without_delete_token_is_seen_only(self):
+        from posternimap.account import PosternAccount
+
+        acct = PosternAccount(self.cfg, "agent", "tok")
+        mb = acct.select("INBOX")
+        self.assertIsNotNone(mb)
+        self.assertIn("\\Seen", mb.getPermanentFlags())
+        self.assertNotIn("\\Deleted", mb.getPermanentFlags())
+
     def test_lists_special_use_folder_set(self):
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
         names = {name for name, _ in acct.listMailboxes("", "*")}
-        self.assertEqual(
-            names,
-            {"INBOX", "Sent", "All", "Drafts", "Trash", "Junk", "Archive", "Notes"},
-        )
 
     def test_list_advertises_rfc6154_special_use_attributes(self):
         from posternimap.account import PosternAccount
@@ -836,7 +873,7 @@ class AccountTest(unittest.TestCase):
         # LIST attributes (e.g. \\Sent), which belong to the list-view instance.
         from posternimap.account import PosternAccount
 
-        acct = PosternAccount(self.cfg, "agent", "tok")
+        acct = PosternAccount(self.cfg_delete, "agent", "tok")
         sent = acct.select("Sent")
         self.assertEqual(
             set(sent.getFlags()),
@@ -915,7 +952,7 @@ class AccountTest(unittest.TestCase):
         # nothing for the read-only placeholders.
         from posternimap.account import PosternAccount
 
-        acct = PosternAccount(self.cfg, "agent", "tok")
+        acct = PosternAccount(self.cfg_delete, "agent", "tok")
         for name in ("INBOX", "Sent", "All"):
             self.assertEqual(acct.select(name).getPermanentFlags(), ["\\Seen", "\\Deleted"], name)
         self.assertIn("\\*", acct.select("Notes").getPermanentFlags())

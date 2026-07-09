@@ -34,8 +34,9 @@ in #12.
   already read. Inbound mail arrives **unread**; the mailbox's own sent copies are
   stored **read**. The real views (INBOX/Sent/All) SELECT as `READ-WRITE` with
   `PERMANENTFLAGS (\Seen \Deleted)`. `STORE +/-FLAGS (\Deleted)` is session-local
-  until `EXPUNGE`, which hard-deletes via `DELETE /api/messages/{id}` (requires a
-  **both-scoped** API token, not read-only). Every other write -- any other flag,
+  until `EXPUNGE`, which hard-deletes via `DELETE /api/messages/{id}` (requires
+  **POSTERN_API_TOKEN_DELETE**, a `both`-scoped member on the worker, separate from
+  the read token). Every other write -- any other flag,
   mailbox create/rename/delete -- is refused cleanly (tagged `NO`).
 - **`APPEND` is accepted as a no-op.** A mail client copies its own sent message
   into `Sent` after submission; the Postern submission path already records the
@@ -105,6 +106,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_API_URL` | yes | -- | Postern mailbox API origin, e.g. `https://postern.example` |
 | `POSTERN_IMAP_AUTH_MODE` | no | `token` | `token`, `fixed`, `native`, `ldap`, or `system` (`pam` aliases `system`) |
 | `POSTERN_API_TOKEN` | in `fixed`/`native`/`ldap`/`system` | -- | the token the proxy presents: the login token in `fixed`, the per-function **service** token in `native`/`ldap`/`system` |
+| `POSTERN_API_TOKEN_DELETE` | no | -- | optional `both`-scoped member for EXPUNGE only (#278); separate from the read token |
 | `POSTERN_IMAP_USERNAME` | in `fixed` | -- | the login username in `fixed` mode |
 | `POSTERN_TRANSPORT_TOKEN` | in `native` | -- | transport-seam bearer for `POST /api/smtp-auth` (mirrors the relay) |
 | `POSTERN_SMTP_AUTH_URL` | no | `${POSTERN_API_URL}/api/smtp-auth` | the `native` auth endpoint |

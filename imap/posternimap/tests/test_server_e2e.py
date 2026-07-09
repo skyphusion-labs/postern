@@ -50,11 +50,32 @@ def _patched_factory(cfg, transport):
         return PosternClient(self._cfg.api_url, self._token, transport=transport)
 
     account_mod.PosternAccount._client = fake_client
+    orig_delete_client = account_mod.PosternAccount._delete_client
+
+    def fake_delete_client(self):
+        tok = self._cfg.service_delete_token
+        if not tok:
+            return None
+        return PosternClient(self._cfg.api_url, tok, transport=transport)
+
+    account_mod.PosternAccount._delete_client = fake_delete_client
 
     factory = PosternIMAPFactory.__new__(PosternIMAPFactory)
     factory._cfg = cfg
     factory._portal = build_portal(cfg, verify=verify)
-    return factory, (account_mod.PosternAccount, "_client", orig_client)
+    return factory, (
+        account_mod.PosternAccount,
+        "_client",
+        orig_client,
+        "_delete_client",
+        orig_delete_client,
+    )
+
+
+def _restore_account(restore):
+    cls, attr1, orig1, attr2, orig2 = restore
+    setattr(cls, attr1, orig1)
+    setattr(cls, attr2, orig2)
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
@@ -77,8 +98,7 @@ class ServerE2ETest(twisted_unittest.TestCase):
         self.addr = self.port.getHost()
 
     def tearDown(self):
-        cls, attr, orig = self._restore
-        setattr(cls, attr, orig)
+        _restore_account(self._restore)
         return self.port.stopListening()
 
     @defer.inlineCallbacks
@@ -216,7 +236,8 @@ class ServerE2ETest(twisted_unittest.TestCase):
     @defer.inlineCallbacks
     def test_select_announces_permanentflags_and_flag_keywords(self):
         # #218/#seen: through the REAL client, SELECT INBOX must carry PERMANENTFLAGS
-        # (\Seen) -- the one flag a real view persists, so a client's mark-read sticks --
+        # (\Seen) when no delete token is configured -- the one flag a real view
+        # persists without POSTERN_API_TOKEN_DELETE, so a client's mark-read sticks --
         # and READ-WRITE, plus a FLAGS list that announces the custom keywords a FETCH
         # actually returns, so a strict client (Apple Mail) is never handed an
         # unadvertised keyword. (UIDNEXT is asserted at the unit layer -- the stock
@@ -226,15 +247,41 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.login(b"agent", b"tok")
             info = yield proto.select(b"INBOX")
             self.assertIn("PERMANENTFLAGS", info)
-            self.assertEqual(list(info["PERMANENTFLAGS"]), ["\\Seen", "\\Deleted"])
+            self.assertEqual(list(info["PERMANENTFLAGS"]), ["\\Seen"])
             self.assertTrue(info["READ-WRITE"], info)
             flags = set(info["FLAGS"])
             self.assertIn("\\Seen", flags)
-            self.assertIn("\\Deleted", flags)
+            self.assertNotIn("\\Deleted", flags)
             self.assertTrue({"Trusted", "Untrusted", "Inbound", "Outbound"} & flags, flags)
             self.assertNotIn("\\Sent", flags)  # special-use LIST attr must not leak
         finally:
             yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_select_announces_deleted_when_delete_token_configured(self):
+        cfg = Config(
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            service_delete_token="del",
+        )
+        factory, restore = _patched_factory(cfg, self.transport)
+        port = reactor.listenTCP(0, factory, interface="127.0.0.1")
+        addr = port.getHost()
+        try:
+            cc = ClientCreator(reactor, imap4.IMAP4Client)
+            proto = yield cc.connectTCP("127.0.0.1", addr.port)
+            try:
+                yield proto.login(b"agent", b"tok")
+                info = yield proto.select(b"INBOX")
+                self.assertEqual(list(info["PERMANENTFLAGS"]), ["\\Seen", "\\Deleted"])
+                self.assertIn("\\Deleted", set(info["FLAGS"]))
+            finally:
+                yield proto.logout()
+        finally:
+            _restore_account(restore)
+            yield port.stopListening()
 
     @defer.inlineCallbacks
     def test_store_seen_round_trips_read_state(self):
@@ -623,8 +670,7 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
         return port.getHost(), transport
 
     def tearDown(self):
-        cls, attr, orig = self._restore
-        setattr(cls, attr, orig)
+        _restore_account(self._restore)
         return self._port.stopListening()
 
     @defer.inlineCallbacks
@@ -758,8 +804,7 @@ class ServerEnvelopeUnicodeE2ETest(twisted_unittest.TestCase):
         self.addr = self.port.getHost()
 
     def tearDown(self):
-        cls, attr, orig = self._restore
-        setattr(cls, attr, orig)
+        _restore_account(self._restore)
         return self.port.stopListening()
 
     @defer.inlineCallbacks
@@ -860,8 +905,7 @@ class ServerProxyProtocolE2ETest(twisted_unittest.TestCase):
         self.addr = self.port.getHost()
 
     def tearDown(self):
-        cls, attr, orig = self._restore
-        setattr(cls, attr, orig)
+        _restore_account(self._restore)
         return self.port.stopListening()
 
     @defer.inlineCallbacks
@@ -1012,8 +1056,7 @@ class ServerNoopRefreshE2ETest(twisted_unittest.TestCase):
         self.addr = self.port.getHost()
 
     def tearDown(self):
-        cls, attr, orig = self._restore
-        setattr(cls, attr, orig)
+        _restore_account(self._restore)
         return self.port.stopListening()
 
     @defer.inlineCallbacks
@@ -1057,8 +1100,7 @@ class ServerIdleCapabilityE2ETest(twisted_unittest.TestCase):
         return self._port.getHost()
 
     def tearDown(self):
-        cls, attr, orig = self._restore
-        setattr(cls, attr, orig)
+        _restore_account(self._restore)
         return self._port.stopListening()
 
     @defer.inlineCallbacks
@@ -1148,8 +1190,7 @@ class ServerHtmlBodyE2ETest(twisted_unittest.TestCase):
         self.addr = self.port.getHost()
 
     def tearDown(self):
-        cls, attr, orig = self._restore
-        setattr(cls, attr, orig)
+        _restore_account(self._restore)
         return self.port.stopListening()
 
     @defer.inlineCallbacks
