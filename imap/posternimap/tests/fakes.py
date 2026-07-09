@@ -80,6 +80,9 @@ class FakeTransport:
         if path == "/api/messages/seen" and method == "POST":
             return self._set_seen(req)
 
+        if method == "DELETE" and path.startswith("/api/messages/") and "/attachments/" not in path:
+            return self._delete_message(path)
+
         if method == "GET" and path.startswith("/api/messages/") and path != "/api/messages/seen":
             if "/attachments/" in path:
                 return self._get_attachment(path)
@@ -204,6 +207,14 @@ class FakeTransport:
                 m["seen"] = seen
                 updated += 1
         return 200, json.dumps({"ok": True, "updated": updated}).encode()
+
+    def _delete_message(self, path: str):
+        mid = urllib.parse.unquote(path[len("/api/messages/"):])
+        before = len(self.messages)
+        self.messages = [m for m in self.messages if m["messageId"] != mid]
+        if len(self.messages) == before:
+            return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
+        return 200, json.dumps({"ok": True, "deleted": mid}).encode()
 
     def _thread(self, tid):
         msgs = [m for m in self.messages if m.get("threadId") == tid]

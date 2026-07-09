@@ -32,7 +32,7 @@ class MailboxTest(unittest.TestCase):
         self.transport = FakeTransport(self.msgs, expected_token="t", page_size=2)
         self.client = PosternClient("https://x", "t", transport=self.transport)
 
-    def _mailbox(self, direction=None, *, window=0, poll_seconds=0, clock=None, seen_writable=False):
+    def _mailbox(self, direction=None, *, window=0, poll_seconds=0, clock=None, seen_writable=False, delete_writable=False):
         from posternimap.mailbox import PosternMailbox
 
         return PosternMailbox(
@@ -43,6 +43,7 @@ class MailboxTest(unittest.TestCase):
             poll_seconds=poll_seconds,
             clock=clock,
             seen_writable=seen_writable,
+            delete_writable=delete_writable,
         )
 
     def test_count_and_ordering_oldest_first(self):
@@ -114,6 +115,30 @@ class MailboxTest(unittest.TestCase):
             mb.expunge()
         with self.assertRaises(ReadOnlyError):
             mb.store(None, ["\\Seen"], 1, False)
+
+    def test_store_deleted_and_expunge(self):
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [
+            make_message("keep@x", subject="keep", uid=10),
+            make_message("drop@x", subject="drop", uid=20),
+        ]
+        mb, transport = self._custom_mailbox(msgs, seen_writable=True, delete_writable=True)
+        mb.getMessageCount()
+        res = mb.store(MessageSet(2, 2), ["\\Deleted"], 1, uid=False)
+        self.assertIn("\\Deleted", res[2])
+        self.assertEqual(len(msgs), 2)
+        uids = mb.expunge()
+        self.assertEqual(uids, [20])
+        self.assertEqual(mb.getMessageCount(), 1)
+        self.assertEqual(msgs[0]["messageId"], "keep@x")
+        self.assertTrue(any("drop%40x" in c for c in transport.calls))
+
+    def test_expunge_without_deleted_is_noop(self):
+        mb, _ = self._custom_mailbox([make_message("m1@x")], delete_writable=True)
+        mb.getMessageCount()
+        self.assertEqual(mb.expunge(), [])
+        self.assertEqual(mb.getMessageCount(), 1)
 
     def test_append_is_noop_success(self):
         # APPEND must NOT fail (a client copies its sent mail into Sent); it is a
@@ -815,7 +840,7 @@ class AccountTest(unittest.TestCase):
         sent = acct.select("Sent")
         self.assertEqual(
             set(sent.getFlags()),
-            {"\\Seen", "Trusted", "Untrusted", "Inbound", "Outbound"},
+            {"\\Seen", "\\Deleted", "Trusted", "Untrusted", "Inbound", "Outbound"},
         )
         # regression guard: the special-use LIST attribute must not leak into SELECT.
         self.assertNotIn("\\Sent", set(sent.getFlags()))
@@ -892,7 +917,7 @@ class AccountTest(unittest.TestCase):
 
         acct = PosternAccount(self.cfg, "agent", "tok")
         for name in ("INBOX", "Sent", "All"):
-            self.assertEqual(acct.select(name).getPermanentFlags(), ["\\Seen"], name)
+            self.assertEqual(acct.select(name).getPermanentFlags(), ["\\Seen", "\\Deleted"], name)
         self.assertIn("\\*", acct.select("Notes").getPermanentFlags())
         for name in ("Drafts", "Trash", "Junk", "Archive"):
             self.assertEqual(acct.select(name).getPermanentFlags(), [], name)

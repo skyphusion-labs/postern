@@ -324,6 +324,8 @@ returns `{ ok, updated }` (rows actually changed; unknown ids are skipped, an em
 It is **`read`-scoped**, not send/admin: marking mail read is a side effect of READING it, and the IMAP
 read door commonly holds only a read token, so a read token must be able to persist its own read state.
 It backs the IMAP `\Seen` flag (`postern-imap` STOREs it) and the webmail unread view. Inbound mail is
+stored unread; outbound sent copies are stored read. IMAP `\Deleted` + `EXPUNGE` on INBOX/Sent/All
+call this route (requires a `both`-scoped token; read-only IMAP creds can still mark `\Seen`).
 stored unread and outbound sent copies read (`store.put`); the column DEFAULT is `read` so migration
 0007 backfills existing rows without resurfacing the whole historical mailbox as unread.
 

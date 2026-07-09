@@ -111,6 +111,9 @@ class MessageSummary:
     # True when the store holds a non-empty HTML body (#220). Drives multipart/alternative
     # projection and a body-free Content-Type on the IMAP ENVELOPE scan path.
     has_html: bool = False
+    # Session-local \Deleted flag (#278): set by STORE, cleared on EXPUNGE or when the
+    # message is removed from the snapshot. Not persisted in the Postern API until EXPUNGE.
+    deleted: bool = False
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "MessageSummary":
@@ -445,6 +448,15 @@ class PosternClient:
         updated = body.get("updated", 0)
         return int(updated) if isinstance(updated, (int, float)) else 0
 
+    def delete_message(self, message_id: str) -> None:
+        """Hard-delete one message via DELETE /api/messages/{id} (#278).
+
+        Backs IMAP EXPUNGE after a client STOREs \\Deleted. Requires an admin-scoped
+        (`both`) API token; a read-only token gets HTTP 403.
+        """
+        path = "/api/messages/" + urllib.parse.quote(message_id, safe="")
+        self._delete(path)
+
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""
         try:
@@ -516,6 +528,24 @@ class PosternClient:
             return json.loads(raw.decode("utf-8")) if raw else {}
         except (ValueError, UnicodeDecodeError) as e:
             raise PosternError(f"invalid JSON from Postern API: {e}") from e
+
+    def _delete(self, path: str) -> None:
+        url = self._base + path
+        req = urllib.request.Request(url, method="DELETE")
+        req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", USER_AGENT)
+        with self._meter.timed("api_request", path=path) as span:
+            status, raw = self._transport(req)
+            span.set(status=status, bytes=len(raw))
+        if status == 401:
+            raise PosternAuthError("Postern API rejected the token", status=401)
+        if status == 403:
+            raise PosternError("Postern API denied delete (requires admin scope)", status=403)
+        if status == 404:
+            raise PosternError("message not found", status=404)
+        if status >= 400:
+            raise PosternError(f"Postern API error (HTTP {status})", status=status)
 
 
 def _filename_from_disposition(disp: str) -> Optional[str]:

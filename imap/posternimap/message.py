@@ -200,6 +200,8 @@ class PosternIMAPMessage:
         flags = []
         if self._summary.seen:
             flags.append("\\Seen")
+        if self._summary.deleted:
+            flags.append("\\Deleted")
         flags.append("Trusted" if self._summary.trusted else "Untrusted")
         flags.append(self._summary.direction.capitalize())  # Inbound / Outbound
         return flags
