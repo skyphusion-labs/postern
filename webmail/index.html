@@ -54,9 +54,10 @@
   #app { flex: 1; display: none; min-height: 0; }
   #app.on { display: flex; }
   .sidebar { width: 360px; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
-  .toolbar { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
-  .toolbar input { flex: 1; }
+  .toolbar { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .toolbar input { flex: 1; min-width: 120px; }
   .toolbar select { width: auto; }
+  .toolbar .mode { min-width: 6.5rem; }
   .list { overflow-y: auto; flex: 1; }
   .row-item {
     padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
@@ -104,7 +105,11 @@
   .thread .t-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; cursor: pointer; }
   .thread .t-item:hover { border-color: var(--accent); }
   .loading { color: var(--muted); padding: 12px; }
-  a { color: var(--accent); }
+  .compose label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  .compose input, .compose textarea { width: 100%; }
+  .compose textarea { min-height: 180px; resize: vertical; }
+  .compose-actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .compose-note { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
 </style>
 </head>
 <body>
@@ -113,6 +118,7 @@
   <h1>Postern webmail</h1>
   <span class="grow"></span>
   <span class="who" id="who"></span>
+  <button id="composeBtn" style="display:none">Compose</button>
   <button id="logout" class="link" style="display:none">Sign out</button>
 </header>
 
@@ -120,13 +126,15 @@
 <div id="gate">
   <div class="card">
     <h2>Connect to your mailbox</h2>
-    <p>This is a read-only view of one Postern mailbox. Your API token is kept in
-       this browser tab only (sessionStorage), never sent anywhere but the API you
-       name below, and cleared when you sign out or close the tab.</p>
+    <p>Paste a read-scoped API token to browse mail. Optionally add a send-scoped token
+       (or per-identity send token) to compose and reply. Tokens stay in this browser
+       tab only (sessionStorage), never sent anywhere but the API you name below.</p>
     <label for="origin">API origin</label>
     <input id="origin" type="url" placeholder="https://postern.example" autocomplete="off" spellcheck="false">
-    <label for="token">Postern API token</label>
-    <input id="token" type="password" placeholder="paste your token" autocomplete="off" spellcheck="false">
+    <label for="token">Postern read token</label>
+    <input id="token" type="password" placeholder="read-scoped API token" autocomplete="off" spellcheck="false">
+    <label for="sendToken">Send token (optional)</label>
+    <input id="sendToken" type="password" placeholder="send-scoped token for compose" autocomplete="off" spellcheck="false">
     <div class="row">
       <button id="connect">Connect</button>
     </div>
@@ -139,6 +147,11 @@
   <div class="sidebar">
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search (press Enter)">
+      <select id="searchMode" class="mode" title="Search mode (applies when searching)">
+        <option value="hybrid">Hybrid</option>
+        <option value="fts">Keyword</option>
+        <option value="semantic">Semantic</option>
+      </select>
       <select id="folder" title="Folder">
         <option value="">All</option>
         <option value="inbound">Inbox</option>
@@ -177,9 +190,15 @@
 
   // --- session state ---------------------------------------------------------
   var SS = window.sessionStorage;
+  var SEARCH_MODES = ["fts", "semantic", "hybrid"];
+  function normalizeSearchMode(v) {
+    return SEARCH_MODES.indexOf(v) >= 0 ? v : "hybrid";
+  }
   var state = {
     origin: SS.getItem("postern_origin") || "",
     token: SS.getItem("postern_token") || "",
+    sendToken: SS.getItem("postern_send_token") || "",
+    searchMode: normalizeSearchMode(SS.getItem("postern_search_mode") || "hybrid"),
     folder: "", q: "", cursor: null, items: [], selected: null
   };
 
@@ -208,6 +227,37 @@
           return body;
         });
     });
+  }
+
+  function apiWrite(path, body) {
+    if (!state.sendToken) throw new Error("send token not configured");
+    var url = state.origin.replace(/\/+$/, "") + path;
+    return fetch(url, {
+      method: "POST",
+      headers: {
+        "authorization": "Bearer " + state.sendToken,
+        "content-type": "application/json",
+        "accept": "application/json"
+      },
+      body: JSON.stringify(body),
+      credentials: "omit",
+      referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      return r.json().catch(function () { return { ok: false, error: "bad_json", status: r.status }; })
+        .then(function (j) {
+          if (r.status === 401) { var e = new Error("unauthorized"); e.code = 401; throw e; }
+          if (r.status === 403) throw new Error((j && (j.message || j.error)) || "requires send scope");
+          if (!r.ok || j.ok === false) {
+            var msg = (j && (j.message || j.error)) || ("HTTP " + r.status);
+            throw new Error(msg);
+          }
+          return j;
+        });
+    });
+  }
+
+  function updateComposeButton() {
+    $("composeBtn").style.display = state.sendToken ? "" : "none";
   }
 
   // --- attachment download (Bearer fetch -> Blob -> object URL) --------------
@@ -422,34 +472,41 @@
     $("app").className = "on";
     $("logout").style.display = "";
     $("who").textContent = state.origin;
+    $("searchMode").value = state.searchMode;
+    updateComposeButton();
   }
 
   function connect() {
     var origin = $("origin").value.trim();
     var token = $("token").value;
+    var sendTok = $("sendToken").value.trim();
     $("gateErr").textContent = "";
     if (!/^https?:\/\//.test(origin)) { $("gateErr").textContent = "Enter the API origin (https://...)."; return; }
-    if (!token) { $("gateErr").textContent = "Enter your Postern API token."; return; }
-    state.origin = origin; state.token = token;
+    if (!token) { $("gateErr").textContent = "Enter your Postern read token."; return; }
+    state.origin = origin; state.token = token; state.sendToken = sendTok;
     // Validate by hitting an authed endpoint before persisting the token.
     api("/api/messages", { limit: 1 }).then(function () {
       SS.setItem("postern_origin", origin);
       SS.setItem("postern_token", token);
+      if (sendTok) SS.setItem("postern_send_token", sendTok);
+      else SS.removeItem("postern_send_token");
       $("token").value = "";
+      $("sendToken").value = "";
       showApp();
       resetAndLoad();
     }).catch(function (e) {
-      state.token = "";
+      state.token = ""; state.sendToken = "";
       $("gateErr").textContent = e.code === 401 ? "Token rejected by the API." : ("Could not connect: " + e.message);
     });
   }
 
   function logout() {
     SS.removeItem("postern_token");
+    SS.removeItem("postern_send_token");
     SS.removeItem("postern_origin");
-    state.token = ""; state.items = []; state.selected = null; state.cursor = null;
+    state.token = ""; state.sendToken = ""; state.items = []; state.selected = null; state.cursor = null;
     clear($("list")); renderReading(null);
-    showGate("Signed out. Your token was cleared from this browser.");
+    showGate("Signed out. Your tokens were cleared from this browser.");
   }
 
   // --- list ------------------------------------------------------------------
@@ -459,11 +516,12 @@
     loadMore();
   }
 
-  function loadMore() {
+  function loadMore(fallbackFts) {
     var loading = el("div", { class: "loading", text: "Loading..." });
     $("list").appendChild(loading);
+    var mode = fallbackFts ? "fts" : state.searchMode;
     var req = state.q
-      ? api("/api/search", { q: state.q, mode: "hybrid", limit: 50, cursor: state.cursor })
+      ? api("/api/search", { q: state.q, mode: mode, limit: 50, cursor: state.cursor })
       : api("/api/messages", { direction: state.folder, limit: 50, cursor: state.cursor });
     req.then(function (body) {
       $("list").removeChild(loading);
@@ -472,6 +530,9 @@
       state.items = state.items.concat(rows);
       state.cursor = body.cursor || null;
       rows.forEach(appendRow);
+      if (fallbackFts) {
+        $("list").appendChild(el("div", { class: "loading", text: "Semantic search unavailable; showing keyword results." }));
+      }
       if (state.cursor) {
         var more = el("div", { class: "more" }, [el("button", { class: "link", text: "Load more" })]);
         more.firstChild.addEventListener("click", function () { $("list").removeChild(more); loadMore(); });
@@ -482,6 +543,18 @@
     }).catch(function (e) {
       try { $("list").removeChild(loading); } catch (_) {}
       if (e.code === 401) { logout(); return; }
+      if (state.q && !fallbackFts && state.searchMode !== "fts") {
+        var msg = String(e.message || "");
+        if (/semantic|hybrid|vector|embed|ai/i.test(msg)) {
+          state.searchMode = "fts";
+          SS.setItem("postern_search_mode", "fts");
+          $("searchMode").value = "fts";
+          state.cursor = null; state.items = [];
+          clear($("list"));
+          loadMore(true);
+          return;
+        }
+      }
       $("list").appendChild(el("div", { class: "err", text: "Error: " + e.message }));
     });
   }
@@ -526,6 +599,60 @@
     var r = $("reading"); clear(r); r.appendChild(el("div", { class: "err", text: "Error: " + msg }));
   }
 
+  function renderComposeForm(opts) {
+    opts = opts || {};
+    var r = $("reading"); clear(r);
+    var err = el("div", { class: "err", text: "" });
+    var toInput = el("input", { id: "cmpTo", type: "text", value: opts.to || "" });
+    var subInput = el("input", { id: "cmpSub", type: "text", value: opts.subject || "" });
+    var bodyInput = el("textarea", { id: "cmpBody" });
+    if (opts.text) bodyInput.value = opts.text;
+    var form = el("div", { class: "compose" }, [
+      el("h2", { text: opts.replyTo ? "Reply" : "Compose" }),
+      el("p", { class: "compose-note", text: "Sends via POST /api/" + (opts.replyTo ? "reply" : "send") + " with your send token." }),
+      err,
+      el("label", { for: "cmpTo", text: "To" }), toInput,
+      el("label", { for: "cmpSub", text: "Subject" }), subInput,
+      el("label", { for: "cmpBody", text: "Message" }), bodyInput,
+      el("div", { class: "compose-actions" }, [
+        el("button", { id: "cmpSend", text: "Send" }),
+        el("button", { id: "cmpCancel", text: "Cancel" })
+      ])
+    ]);
+    r.appendChild(form);
+    if (opts.replyTo) {
+      toInput.disabled = true;
+      subInput.disabled = true;
+    }
+    $("cmpCancel").addEventListener("click", function () {
+      if (state.selected) renderReading(state.selected);
+      else renderReading(null);
+    });
+    $("cmpSend").addEventListener("click", function () {
+      err.textContent = "";
+      var text = bodyInput.value.trim();
+      if (!text) { err.textContent = "Enter a message."; return; }
+      $("cmpSend").disabled = true;
+      var req = opts.replyTo
+        ? apiWrite("/api/reply", { messageId: opts.replyTo, text: text })
+        : apiWrite("/api/send", {
+            to: toInput.value.trim(),
+            subject: subInput.value.trim() || "(no subject)",
+            text: text
+          });
+      req.then(function (res) {
+        state.folder = "outbound"; state.q = ""; $("search").value = ""; $("folder").value = "outbound";
+        resetAndLoad();
+        if (res.messageId) selectMessage(res.messageId, null);
+        else renderReading(null);
+      }).catch(function (e) {
+        $("cmpSend").disabled = false;
+        if (e.code === 401) { logout(); return; }
+        err.textContent = e.message;
+      });
+    });
+  }
+
   function kv(label, value) {
     return el("div", { class: "kv" }, [el("b", { text: label + ": " }), document.createTextNode(value || "")]);
   }
@@ -548,6 +675,19 @@
         )
       ])
     ]);
+    if (state.sendToken) {
+      var replyBtn = el("button", { text: "Reply" });
+      replyBtn.addEventListener("click", function () {
+        var reSub = (m.subject || "").match(/^Re:/i) ? (m.subject || "") : ("Re: " + (m.subject || ""));
+        renderComposeForm({
+          replyTo: m.messageId,
+          to: m.from || "",
+          subject: reSub,
+          text: "\n\n---\nOn " + (m.date ? new Date(m.date).toLocaleString() : "") + ", " + (m.from || "") + " wrote:\n" + (m.bodyText || "")
+        });
+      });
+      head.appendChild(el("div", { class: "compose-actions" }, [replyBtn]));
+    }
     r.appendChild(head);
 
     // Body: rendered inside a sandboxed iframe (sandbox="" = no scripts, no
@@ -596,8 +736,14 @@
   $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
   $("origin").addEventListener("keydown", function (e) { if (e.key === "Enter") $("token").focus(); });
   $("logout").addEventListener("click", logout);
+  $("composeBtn").addEventListener("click", function () { renderComposeForm({}); });
   $("search").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { state.q = e.target.value.trim(); resetAndLoad(); }
+  });
+  $("searchMode").addEventListener("change", function (e) {
+    state.searchMode = normalizeSearchMode(e.target.value);
+    SS.setItem("postern_search_mode", state.searchMode);
+    if (state.q) resetAndLoad();
   });
   $("folder").addEventListener("change", function (e) {
     state.folder = e.target.value; state.q = ""; $("search").value = ""; resetAndLoad();

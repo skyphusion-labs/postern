@@ -33,8 +33,16 @@ describe("serveWebmail", () => {
 });
 
 describe("the page is XSS-conscious by construction", () => {
-  it("defaults search to hybrid mode (parity with MCP)", () => {
-    expect(WEBMAIL_HTML).toContain('mode: "hybrid"');
+  it("supports optional send token and compose UI when configured", () => {
+    expect(WEBMAIL_HTML).toContain('id="sendToken"');
+    expect(WEBMAIL_HTML).toContain("postern_send_token");
+    expect(WEBMAIL_HTML).toContain('id="composeBtn"');
+    expect(WEBMAIL_HTML).toContain("function apiWrite");
+  });
+  it("defaults search to hybrid mode with a mode selector (parity with MCP)", () => {
+    expect(WEBMAIL_HTML).toContain("mode: mode");
+    expect(WEBMAIL_HTML).toContain('id="searchMode"');
+    expect(WEBMAIL_HTML).toContain("postern_search_mode");
   });
   it("never assigns innerHTML (all message content goes through text nodes)", () => {
     // A blunt but effective guard: the page script must not use innerHTML, which
