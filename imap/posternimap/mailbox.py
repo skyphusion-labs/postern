@@ -147,6 +147,7 @@ class PosternMailbox:
         seen_writable: bool = False,
         delete_writable: bool = False,
         delete_client: Optional[PosternClient] = None,
+        trash_sink: bool = False,
     ) -> None:
         self._client = client
         # EXPUNGE uses delete_client when set (#278 dual-token); falls back to the read
@@ -181,6 +182,8 @@ class PosternMailbox:
         # #278: STORE \\Deleted + EXPUNGE on the real views. EXPUNGE calls DELETE
         # /api/messages/{id} (admin-scoped token required).
         self._delete_writable = delete_writable
+        # Trash sink: no messages stored here; COPY/MOVE is handled server-side as delete.
+        self._trash_sink = trash_sink
         self._summaries: List[MessageSummary] = []
         self._loaded = False
         # Highest UID (== store rowid) currently in the snapshot. UIDNEXT is this
@@ -668,7 +671,11 @@ class PosternMailbox:
         from twisted.internet import defer
 
         if self._empty:
-            # Placeholder folders (Drafts/Trash/Junk/Archive) have no backing store
+            if self._trash_sink:
+                # Trash never stores bytes; COPY addMessage is a no-op success if the
+                # stock Twisted path runs. Server-side COPY-to-Trash deletes at source.
+                return defer.succeed(None)
+            # Placeholder folders (Drafts/Junk/Archive) have no backing store
             # in v1; the pre-#109 behaviour fake-acked the APPEND with OK and then
             # DROPPED the message -> silent data loss (RFC 3501 / audit F11). Reject
             # with a failed Deferred so the server returns a tagged NO and a client
@@ -719,6 +726,34 @@ class PosternMailbox:
         for i in reversed(remove_at):
             del self._summaries[i]
         return expunged_uids
+
+    def delete_fetched_messages(self, fetched) -> None:
+        """Hard-delete messages just fetched (COPY-to-Trash / move-to-trash clients).
+
+        Apple Mail deletes by COPY/MOVE to the \\Trash mailbox rather than STORE
+        \\Deleted + EXPUNGE in place. Postern has no Trash store; accepting the COPY
+        means DELETE /api/messages/{id} on the source snapshot.
+        """
+        self._ensure_loaded()
+        if self._empty or not self._delete_writable:
+            raise ReadOnlyError("delete is not enabled on this mailbox")
+
+        ids = {msg._summary.message_id for _seq, msg in fetched}
+        if not ids:
+            return
+
+        delete_client = self._delete_client or self._client
+        for mid in ids:
+            try:
+                delete_client.delete_message(mid)
+            except PosternError as exc:
+                if exc.status in (401, 403):
+                    raise ReadOnlyError(
+                        "COPY to Trash requires POSTERN_API_TOKEN_DELETE (both scope)",
+                    ) from exc
+                raise ReadOnlyError(f"delete failed: {exc}") from exc
+
+        self._summaries = [s for s in self._summaries if s.message_id not in ids]
 
     def destroy(self):
         raise ReadOnlyError("postern-imap is read-only; mailboxes cannot be destroyed")

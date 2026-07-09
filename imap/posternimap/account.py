@@ -7,7 +7,7 @@ login, #32). It exposes a fixed set of mailboxes over the one underlying store:
   Sent     -> outbound mail (the stored sent copies, #27); RFC 6154 \\Sent
   All      -> the whole mailbox, both directions; \\All
   Drafts   -> present-but-empty placeholder; \\Drafts
-  Trash    -> present-but-empty placeholder; \\Trash
+  Trash    -> delete sink for clients that MOVE/COPY here (Apple Mail); \\Trash
   Junk     -> present-but-empty placeholder; \\Junk
   Archive  -> present-but-empty placeholder; \\Archive
   Notes    -> present-but-empty placeholder; NO special-use (bare flags)
@@ -51,7 +51,7 @@ from .measure import Meter
 class _Folder:
     """Static description of one advertised mailbox."""
 
-    __slots__ = ("direction", "special_use", "empty", "windowed", "writable_signal", "seen_writable", "delete_writable")
+    __slots__ = ("direction", "special_use", "empty", "windowed", "writable_signal", "seen_writable", "delete_writable", "trash_sink")
 
     def __init__(
         self,
@@ -62,6 +62,7 @@ class _Folder:
         writable_signal: bool = False,
         seen_writable: bool = False,
         delete_writable: bool = False,
+        trash_sink: bool = False,
     ) -> None:
         self.direction = direction
         self.special_use = special_use
@@ -81,6 +82,10 @@ class _Folder:
         # #278: EXPUNGE on the real views; DELETE /api/messages/{id} requires a both-scoped
         # token (see mailbox.expunge). Placeholders stay read-only.
         self.delete_writable = delete_writable
+        # #278 Apple Mail: COPY/MOVE to Trash must succeed; we treat it as hard-delete
+        # from the source mailbox (Postern has no Trash store). SELECT reports READ-WRITE
+        # so the client does not pre-reject the destination as immovable.
+        self.trash_sink = trash_sink
 
 
 # name (as the client sees it) -> folder description. INBOX/Sent/All are real
@@ -90,7 +95,8 @@ _MAILBOXES: Dict[str, _Folder] = {
     "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True, seen_writable=True, delete_writable=True),
     "All": _Folder(None, ["\\All"], False, seen_writable=True, delete_writable=True),
     "Drafts": _Folder(None, ["\\Drafts"], True),
-    "Trash": _Folder(None, ["\\Trash"], True),
+    # Trash is empty in the store but accepts COPY/MOVE as delete-from-source (#278).
+    "Trash": _Folder(None, ["\\Trash"], True, writable_signal=True, trash_sink=True),
     "Junk": _Folder(None, ["\\Junk"], True),
     "Archive": _Folder(None, ["\\Archive"], True),
     # No RFC 6154 special-use exists for Notes; bare flags. Present-but-empty so iOS
@@ -148,6 +154,7 @@ class PosternAccount:
             seen_writable=folder.seen_writable,
             delete_writable=delete_enabled,
             delete_client=self._delete_client(),
+            trash_sink=folder.trash_sink,
         )
 
     # --- IAccount: read ---
@@ -190,6 +197,22 @@ class PosternAccount:
         folder = _MAILBOXES.get(_canonical(name))
         if folder is None:
             return "unknown"
+        return "placeholder" if folder.empty else "real"
+
+    def copyability(self, name: str) -> str:
+        """Classify a mailbox for COPY/MOVE (#278 Apple Mail trash).
+
+        Returns:
+          * "trash_delete" -- Trash: COPY here deletes from the selected mailbox.
+          * "real"         -- INBOX/Sent/All: stock COPY (unused in v1).
+          * "placeholder"  -- other empty folders: reject COPY.
+          * "unknown"      -- no such mailbox.
+        """
+        folder = _MAILBOXES.get(_canonical(name))
+        if folder is None:
+            return "unknown"
+        if folder.trash_sink:
+            return "trash_delete"
         return "placeholder" if folder.empty else "real"
 
     # --- IAccount: write (mostly rejected; fixed read-only set) ---
