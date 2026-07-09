@@ -450,8 +450,9 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
   (`Authenticate(username, secret) -> identity`) selected by `AUTH_BACKEND`, with three backends.
   **native** (DEFAULT, zero extra deps): validate at the worker `POST /api/smtp-auth` (transport
   token) against the `smtp_credentials` D1 table (PBKDF2 hash, never plaintext); the fresh-clone
-  quickstart uses this and needs no LDAP/PAM. **ldap**: simple-bind or search+bind over TLS via
-  pure-Go `go-ldap`; bound identity = the mail attribute. **system**: local Unix accounts via PAM,
+  quickstart uses this and needs no LDAP/PAM. **ldap**: direct-bind + self-read over TLS via
+  pure-Go `go-ldap` (`LDAP_BIND_DN_TEMPLATE`; the search+bind path is retired, #182); bound
+  identity = the mail attribute read from the user's own entry. **system**: local Unix accounts via PAM,
   a cgo build-tagged (`-tags pam`) extra excluded from the default static binary; bound identity =
   `<user>@<configured-domain>`. From-enforcement is identical for every backend.
 - **Submission attachments (DECIDED, #68 + #70, DONE):** `/api/send` carries attachments as
@@ -464,8 +465,8 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
   cap), else `E_PAYLOAD_TOO_LARGE` (413, mapped to SMTP `552`). For v1 every part is delivered with
   disposition `attachment`; rendering inline parts inline (cid) is a tracked refinement, never a silent
   drop (the bytes are always preserved). The default CF transport is the supported attachment path for
-  v1: the relay `/dispatch` OUTBOUND bridge (`OUTBOUND_TRANSPORT=relay`) does NOT yet carry attachments
-  and rejects a send-with-attachment loud (`400`, never a silent drop), tracked in #92.
+  The relay `/dispatch` OUTBOUND bridge (`OUTBOUND_TRANSPORT=relay`) carries attachments as
+  `OutboundMessage.attachments` (base64 over JSON, multipart/mixed MIME, #92 DONE).
 - **AI Search: hand-rolled Vectorize query, not managed AutoRAG (DECIDED, #31).** The store
   populates a Vectorize index (one vector per body chunk, `@cf/baai/bge-base-en-v1.5`, metadata
   carries `message_id`, `chunk`, `direction`, `from`, `to`, `date`, `subject`). The index covers
@@ -552,10 +553,11 @@ rotate / revoke credentials via the API-token-gated `POST` / `DELETE /api/admin/
   unknown user is verified against a dummy hash so timing does not reveal whether the username
   exists. Operators mint / rotate / revoke credentials via the API-token-gated `POST` /
   `DELETE /api/admin/smtp-credentials` (the secret is returned once and never logged).
-- **ldap**: LDAP simple-bind (`LDAP_BIND_DN_TEMPLATE`) or search+bind (`LDAP_BIND_DN` +
-  `LDAP_SEARCH_BASE` + `LDAP_SEARCH_FILTER`) over TLS (`ldaps://` or `LDAP_STARTTLS`). The bound
-  identity is the `LDAP_MAIL_ATTR` attribute (default `mail`). Pure-Go `go-ldap`, no cgo. An empty
-  password is rejected before the wire (an empty bind can be an anonymous-bind bypass).
+- **ldap**: LDAP direct-bind + self-read (`LDAP_BIND_DN_TEMPLATE` required) over TLS (`ldaps://`
+  or `LDAP_STARTTLS`). After bind success the backend self-reads the user's entry for the
+  `LDAP_MAIL_ATTR` identity (default `mail`) and optional `LDAP_REQUIRE_GROUP` gate (#182).
+  The search+bind vars (`LDAP_BIND_DN`, `LDAP_SEARCH_*`) are retired. Pure-Go `go-ldap`, no cgo.
+  An empty password is rejected before the wire (an empty bind can be an anonymous-bind bypass).
 - **system**: local Unix accounts via PAM. The bound identity is `<user>@AUTH_SYSTEM_DOMAIN`. PAM
   needs cgo, so this backend is **build-tagged**: the default static binary excludes it and rejects
   `AUTH_BACKEND=system` with a "rebuild with -tags pam" error. Build `go build -tags pam` (libpam

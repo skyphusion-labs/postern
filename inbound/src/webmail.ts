@@ -481,7 +481,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     var loading = el("div", { class: "loading", text: "Loading..." });
     $("list").appendChild(loading);
     var req = state.q
-      ? api("/api/search", { q: state.q, limit: 50, cursor: state.cursor })
+      ? api("/api/search", { q: state.q, mode: "hybrid", limit: 50, cursor: state.cursor })
       : api("/api/messages", { direction: state.folder, limit: 50, cursor: state.cursor });
     req.then(function (body) {
       $("list").removeChild(loading);

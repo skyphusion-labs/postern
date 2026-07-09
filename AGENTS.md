@@ -17,6 +17,7 @@ component's `package.json`/`pyproject.toml`):
   `npm test` (vitest). Run locally with the DEV config, not the prod one:
   `npx wrangler dev --config wrangler.dev.jsonc` (binds local D1 + local R2, no remote
   Cloudflare bindings). There is no `npm run dev` script; use `npx wrangler dev --config wrangler.dev.jsonc`.
+- **Stack map:** [docs/architecture.md](docs/architecture.md) (mermaid diagrams for every component).
 - **`mcp/` (optional).** `npm run typecheck` + `npm test`.
 - **`relay/` (optional, Go).** `go vet ./...` + `go test ./...`.
 - **`imap/`, `clients/python/` (optional).** Activate the venv first

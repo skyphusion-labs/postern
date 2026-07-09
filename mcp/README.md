@@ -5,6 +5,14 @@ Postern mailbox to an AI agent. It is a thin, stdio MCP wrapper over the Postern
 mailbox API (the same token-gated endpoints the IMAP proxy uses), so an agent can use
 the mailbox as a knowledge base and, when explicitly enabled, send mail.
 
+Stack map: [docs/architecture.md](../docs/architecture.md).
+
+```mermaid
+flowchart LR
+    agent[AI agent / Cursor] --> mcp[postern-mcp stdio]
+    mcp -->|HTTPS Bearer| api[Postern Mailbox API]
+```
+
 - **Read tools** (always on): search, list, read a message, read a thread.
 - **Send tools** (v1.1, **opt-in**): `mailbox_send` / `mailbox_reply`, registered
   **only** when a send-scoped token is configured. With a **per-identity** send token

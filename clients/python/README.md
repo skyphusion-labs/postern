@@ -4,6 +4,13 @@ A dependency-light Python client + CLI for the **Postern mailbox API** (the
 token-gated `/api/*` surface served by the inbound/store worker). Built so crew
 agents and humans can hit the API without rebuilding tooling every session.
 
+Stack map: [docs/architecture.md](../../docs/architecture.md).
+
+```mermaid
+flowchart LR
+    script[Python script / CLI] -->|HTTPS Bearer| api[Postern Mailbox API]
+```
+
 - **Zero runtime dependencies.** Pure stdlib (`urllib`). No build step.
 - **Importable client** (`PosternClient`) and a **CLI** (`postern`).
 - **Per-user own key.** The API origin and token come from the environment

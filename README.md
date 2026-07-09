@@ -1,5 +1,8 @@
 # postern
 
+[![Release](https://img.shields.io/github/v/release/skyphusion-labs/postern?label=release)](https://github.com/skyphusion-labs/postern/releases)
+[![CI](https://github.com/skyphusion-labs/postern/actions/workflows/ci.yml/badge.svg)](https://github.com/skyphusion-labs/postern/actions/workflows/ci.yml)
+
 Email, for humans and agents. Postern is a self-hostable mailbox on Cloudflare:
 it sends and receives mail, stores every message in a searchable store, and
 exposes one structured API that agents and human clients (IMAP/webmail) both
@@ -11,22 +14,50 @@ message, and receive + read it back. See **[DEPLOY.md](DEPLOY.md)** for the
 clean-install quickstart and **[inbound/smoke.mjs](inbound/smoke.mjs)** for the
 scripted v1.0 acceptance smoke (issue #25).
 
-Three components in one repo:
+Six surfaces in one repo (one store, one API):
 
-- **`inbound/`**: the core Cloudflare Worker. It ingests inbound mail via Email
-  Routing, stores it in D1 (full-text search), R2 (attachments), and optionally
-  Vectorize (embeddings for semantic recall), and serves the one mailbox API
-  (`/api/messages`, `/api/search`, `/api/send`, `/api/reply`, `/api/threads`)
-  plus a same-account `MailboxService` RPC entrypoint (legacy send-only consumers
-  may bind `EmailService` on the same worker). It also sends, so the sent copy
-  is written in the same isolate as the store.
-- **`relay/`**: a small Go SMTP daemon. Local services that can only speak SMTP
-  hand it a message; it parses the MIME and relays it to the worker over HTTPS.
-  Optional, for bring-your-own-SMTP and for non-Worker callers.
+| Path | Role |
+|------|------|
+| **`inbound/`** | Core Cloudflare Worker: ingest, store (D1 + R2 + Vectorize), mailbox API, send |
+| **`relay/`** | Optional Go SMTP daemon: loopback ingest, submission 587/465, BYO dispatch |
+| **`mcp/`** | MCP server so agents search/read/send over stdio |
+| **`webmail/`** | Read-only browser UI embedded at `/webmail` |
+| **`imap/`** | Read-only IMAP proxy for Thunderbird / mutt / iOS Mail |
+| **`clients/python/`** | Thin stdlib HTTP client for scripts |
 
-See [docs/CONTRACT.md](docs/CONTRACT.md) for the authoritative data model and
-transport seams, and [docs/INTEGRATION.md](docs/INTEGRATION.md) for caller setup
-(service binding + REST).
+```mermaid
+flowchart TD
+    subgraph transports[Transport seams]
+        cfIn[CF Email Routing]
+        cfOut[CF Email Sending]
+        relay[postern-relay SMTP]
+    end
+
+    subgraph core[inbound Worker]
+        store[(D1 + R2 + Vectorize)]
+        api[Mailbox API + RPC]
+    end
+
+    subgraph clients[Clients]
+        webmail[webmail]
+        imap[imap]
+        mcp[mcp]
+        py[clients/python]
+    end
+
+    cfIn --> store
+    relay --> store
+    api --> cfOut
+    api --> relay
+    webmail --> api
+    imap --> api
+    mcp --> api
+    py --> api
+```
+
+See [docs/architecture.md](docs/architecture.md) for the full visual map (inbound/outbound
+sequences, client doors). [docs/CONTRACT.md](docs/CONTRACT.md) is the authoritative data
+model; [docs/INTEGRATION.md](docs/INTEGRATION.md) covers RPC + REST caller setup.
 
 ## Email for humans, too: webmail and IMAP
 

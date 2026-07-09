@@ -7,6 +7,18 @@ transport seams from [`docs/CONTRACT.md`](../docs/CONTRACT.md): inbound `ingest`
 transport on each seam; this relay is the bring-your-own-SMTP alternative that
 plugs into the same shapes without touching the store or the API.
 
+Stack map: [docs/architecture.md](../docs/architecture.md).
+
+```mermaid
+flowchart TD
+    cron[cron / CI / backups] -->|SMTP loopback| relay[postern-relay]
+    relay -->|POST /ingest| worker[inbound Worker]
+    worker -->|POST /dispatch| relay
+    relay -->|BYO SMTP| mx[Upstream MTA]
+    mua[Mail client] -->|587/465 AUTH| relay
+    relay -->|POST /api/send shape| worker
+```
+
 ```
                               INBOUND  (CONTRACT section 2)
  local services ──SMTP──► relay ──ParsedInbound (HTTPS + transport token)──► core POST /ingest
@@ -138,10 +150,11 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
   (the **transport** token), which checks the D1 `smtp_credentials` table (secret
   stored as a PBKDF2 hash). This is the fresh-clone quickstart; no LDAP/PAM needed.
   Set `POSTERN_SMTP_AUTH_URL` + `POSTERN_TRANSPORT_TOKEN`.
-- **ldap**: simple-bind (`LDAP_BIND_DN_TEMPLATE`) or search+bind (`LDAP_BIND_DN` +
-  `LDAP_SEARCH_BASE` + `LDAP_SEARCH_FILTER`) over TLS (`ldaps://` or
-  `LDAP_STARTTLS=true`). Bound identity = the `LDAP_MAIL_ATTR` attribute (default
-  `mail`). Two mutually-exclusive trust models for a private/awkward directory cert
+- **ldap**: direct-bind + self-read (`LDAP_BIND_DN_TEMPLATE`) over TLS (`ldaps://` or
+  `LDAP_STARTTLS=true`). After bind the backend self-reads the user's entry for
+  `LDAP_MAIL_ATTR` (default `mail`) and optional `LDAP_REQUIRE_GROUP` (#182). The
+  search+bind vars (`LDAP_BIND_DN`, `LDAP_SEARCH_*`) are retired and refuse startup.
+  Two mutually-exclusive trust models for a private/awkward directory cert
   (both strict verification, never an insecure-skip): `LDAP_TLS_PIN_SHA256` pins the
   EXACT leaf by SHA-256 (SAN-independent, for a cert with an unusable SAN such as an
   Authentik default cert whose only SAN is the bare wildcard `*`); or `LDAP_TLS_CA`
@@ -159,16 +172,13 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
   error. Build it with `go build -tags pam` (needs libpam headers) and add a PAM
   service file (default `/etc/pam.d/postern`).
 
-> **Container deploys use `AUTH_BACKEND=ldap` (search+bind), never `system`/PAM.**
+> **Container deploys use `AUTH_BACKEND=ldap` (direct-bind + self-read), never `system`/PAM.**
 > The published image (`ghcr.io/skyphusion-labs/postern-relay`) is cgo-free, so the
 > `system`/PAM backend is not compiled in; PAM stays a host (`-tags pam`) build. On
-> the fleet the door uses **search+bind**, not simple-bind, because the relay
-> enforces `From == mail` and so MUST read the `mail` attribute (search+bind reads
-> it with a low-privilege service account; simple-bind would depend on a bound user
-> self-reading `mail`), and because the `memberOf=mail-users` **authorization gate**
-> lives in the search filter (simple-bind drops it, so any directory account could
-> send). See `docs/AUTH-CONTRACT.md` section 5b ("the contract shape") and
-> `imap/README.md`; the two doors share one login by design (#75).
+> the fleet the door uses **direct-bind + self-read** (#182): the user binds as
+> themselves, then reads their own entry for `mail` and the optional `memberOf`
+> authorization gate. See `docs/AUTH-CONTRACT.md` section 5b and `imap/README.md`;
+> the two doors share one login by design (#75).
 
 ### Online brute-force throttle (`AUTH_THROTTLE_*`, #105)
 
@@ -264,7 +274,7 @@ secrets (`POSTERN_SEND_TOKEN`, `POSTERN_TRANSPORT_TOKEN`, `EMAIL_RELAY_TOKEN`,
 `SMTP_OUT_PASSWORD`, `LDAP_BIND_PASSWORD`) from their mount paths; the TLS cert/key
 are read as PATHs directly (`SUBMISSION_TLS_CERT` / `_KEY`).
 
-Container deploys use **`AUTH_BACKEND=ldap` (search+bind)** -- the cgo-free image
+Container deploys use **`AUTH_BACKEND=ldap` (direct-bind + self-read, #182)** -- the cgo-free image
 has no `system`/PAM backend (see the auth-backend note above). The operator Swarm
 stack + secret wiring live out-of-tree in the operator private infrastructure
 repository; the door binds its private VLAN address only (e.g. `192.0.2.10:587`),

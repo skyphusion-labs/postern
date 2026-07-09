@@ -6,6 +6,14 @@ Postern read API** (`/api/messages`, `/api/messages/{id}`, `/api/threads/{id}`,
 `/api/search`, see [`docs/CONTRACT.md`](../docs/CONTRACT.md) section 4) that lets
 a person browse and read the one Postern mailbox in a web browser.
 
+Stack map: [docs/architecture.md](../docs/architecture.md).
+
+```mermaid
+flowchart LR
+    browser[Browser] -->|GET /webmail| worker[inbound Worker]
+    browser -->|Bearer GET /api/*| worker
+```
+
 One self-contained `index.html`: vanilla HTML/CSS/JS, **no framework and no build
 step**, zero runtime dependencies.
 
@@ -152,5 +160,5 @@ and security headers; opening the standalone file directly does not.
 - **Compose / reply / send.** Read-only by design for v1; sending is the
   structured API's job. A compose surface (calling `POST /api/send` / `/api/reply`)
   is the natural next step.
-- **Keyset pagination polish** and richer search (mode selector for
-  fts/semantic/hybrid).
+- **Keyset pagination polish** and an explicit search mode selector in the UI
+  (search defaults to hybrid; users cannot yet pick fts-only from the page).
