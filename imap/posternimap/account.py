@@ -112,17 +112,26 @@ class ReadOnlyAccountError(imap4.MailboxException):
     """Raised for mutating account operations (the mailbox set is fixed in v1)."""
 
 
+# Process-wide Trash staging keyed by IMAP username (#278). Apple Mail opens INBOX
+# and Trash on separate TCP connections (each gets its own PosternAccount), so
+# per-account-instance staging left Trash empty while INBOX delete succeeded.
+_TRASH_STAGING_BY_USER: Dict[str, list] = {}
+
+
+def _shared_trash_staging(username: str) -> list:
+    return _TRASH_STAGING_BY_USER.setdefault(username, [])
+
+
 @implementer(imap4.IAccount, imap4.INamespacePresenter)
 class PosternAccount:
     def __init__(self, cfg: Config, username: str, token: str) -> None:
         self._cfg = cfg
         self._username = username
         self._token = token
-        # Session-local Trash staging (#278): Apple Mail COPY/MOVE to Trash expects the
-        # message to appear in Trash after the command. Postern has no Trash store; we
-        # hard-delete from the API but keep summaries here until EXPUNGE on Trash or
-        # logout so the client does not revert the delete when Trash SELECT shows zero.
-        self._trash_staging: list = []
+        # Trash staging (#278): COPY/MOVE to Trash hard-deletes from the API but
+        # keeps summaries visible in Trash until EXPUNGE or reconnect. Shared across
+        # connections for this username (see module note above).
+        self._trash_staging = _shared_trash_staging(username)
         # One meter per session, gated by POSTERN_IMAP_MEASURE (default off = no-op),
         # shared by every client + mailbox + message this account builds.
         self._meter = Meter(cfg.measure)

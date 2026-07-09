@@ -38,10 +38,11 @@ in #12.
   **POSTERN_API_TOKEN_DELETE**, a `both`-scoped member on the worker, separate from
   the read token). **Apple Mail** deletes by COPY/MOVE to Trash instead; COPY to
   Trash is handled as the same hard-delete (Trash is not a second store; staged
-  session-local summaries keep Apple Mail from reverting when Trash SELECT is empty).
-  Attachment parts stay base64 on the wire; the IMAP FETCH serves those encoded bytes
-  so the client decodes exactly once (never cte=binary, which strips CR from PDFs).
-  Every other write -- any other flag,
+  summaries are shared across IMAP connections until EXPUNGE or reconnect). Archive
+  is an empty placeholder and is never used for deletes. Attachment parts include
+  Content-Type `name=` for BODYSTRUCTURE so MUAs recognize PDFs without an Open With
+  prompt. IMAP FETCH serves base64 wire bytes (never cte=binary, which strips CR from
+  PDFs). Every other write -- any other flag,
   mailbox create/rename/delete -- is refused cleanly (tagged `NO`).
 - **`APPEND` is accepted as a no-op.** A mail client copies its own sent message
   into `Sent` after submission; the Postern submission path already records the
@@ -264,3 +265,5 @@ The generic self-host path is covered above (Configuration + Run it) and the uni
 ships at [`systemd/postern-imap.service`](systemd/postern-imap.service).
 Internal/production deploy runbooks are maintained out-of-tree in the operator
 private infrastructure repository; this README covers the generic self-host path.
+
+**Apple Mail / operator handoff:** [`docs/IMAP-APPLE-MAIL.md`](../docs/IMAP-APPLE-MAIL.md).

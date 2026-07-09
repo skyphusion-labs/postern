@@ -145,6 +145,33 @@ def _split_mime(mime: Optional[str]) -> tuple[str, str]:
     return main, rest.split(";", 1)[0].strip()
 
 
+def _mime_from_filename(filename: Optional[str]) -> Optional[str]:
+    if not filename or "." not in filename:
+        return None
+    ext = filename.rsplit(".", 1)[-1].lower()
+    by_ext = {
+        "pdf": "application/pdf",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "txt": "text/plain",
+        "html": "text/html",
+        "htm": "text/html",
+        "json": "application/json",
+        "gz": "application/gzip",
+        "zip": "application/zip",
+    }
+    return by_ext.get(ext)
+
+
+def _set_attachment_content_name(part, filename: str) -> None:
+    """Set Content-Type name= so BODYSTRUCTURE carries NAME for MUAs (#294)."""
+    name = filename or "attachment"
+    part.set_param("name", name, header="Content-Type", replace=True)
+
+
 def _attachment_note(msg: Message) -> str:
     names = ", ".join(a.filename or "(unnamed)" for a in msg.attachments)
     return f"[{len(msg.attachments)} attachment(s): {names}; fetch via the Postern API]"
@@ -223,14 +250,19 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
     if inline:
         assert attachment_bytes is not None
         for att, data in zip(msg.attachments, attachment_bytes):
-            maintype, subtype = _split_mime(att.mime)
+            mime = att.mime or _mime_from_filename(att.filename)
+            maintype, subtype = _split_mime(mime)
+            filename = att.filename or "attachment"
             em.add_attachment(
                 data,
                 maintype=maintype,
                 subtype=subtype,
-                filename=att.filename or "attachment",
+                filename=filename,
                 disposition="attachment",
             )
+            payload = em.get_payload()
+            if isinstance(payload, list) and payload:
+                _set_attachment_content_name(payload[-1], filename)
     return em.as_bytes()
 
 

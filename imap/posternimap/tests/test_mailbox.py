@@ -923,6 +923,30 @@ class AccountTest(unittest.TestCase):
         self.assertIsNotNone(trash)
         self.assertTrue(trash.isWriteable())
 
+    def test_trash_staging_shared_across_account_instances(self):
+        from posternimap.account import PosternAccount, _shared_trash_staging
+        from posternimap.client import MessageSummary
+
+        _shared_trash_staging("agent").clear()
+        summary = MessageSummary(
+            uid=20,
+            message_id="drop@x",
+            direction="inbound",
+            thread_id="drop@x",
+            from_addr="a@b.com",
+            to_addr="c@d.com",
+            subject="drop",
+            date="2026-07-09T00:00:00Z",
+            in_reply_to=None,
+            trusted=True,
+            received_at="2026-07-09T00:00:01Z",
+            attachment_count=0,
+        )
+        a1 = PosternAccount(self.cfg, "agent", "tok")
+        a2 = PosternAccount(self.cfg, "agent", "tok")
+        a1._trash_staging.append(summary)
+        self.assertEqual(len(a2._trash_staging), 1)
+
     def test_lists_special_use_folder_set(self):
         from posternimap.account import PosternAccount
 
