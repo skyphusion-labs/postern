@@ -43,6 +43,19 @@ Postern has **no Trash store**. The IMAP door:
 3. Hard-deletes via `DELETE /api/messages/{id}` using **`POSTERN_API_TOKEN_DELETE`** (both scope).
 4. Removes the message from the source folder snapshot.
 
+**COPY vs MOVE (RFC 6851, PR #304):** `MOVE` is advertised in CAPABILITY and
+implemented fully. Both verbs hard-delete from the source as above, but they differ in
+what the client is told about the source view:
+
+- **MOVE** additionally emits an untagged `EXPUNGE` for every moved message (message
+  SEQUENCE numbers, high-to-low, per RFC 3501 7.4.1 and the #300/#301 fix) BEFORE the
+  tagged `OK`, so the client's source view updates in the same round-trip. No stale
+  view; no COPYUID is emitted (Trash has no backing store / persistent destination UIDs
+  and we do not advertise UIDPLUS, so a COPYUID would fabricate UIDs).
+- **COPY** emits no untagged `EXPUNGE`; the client re-syncs the source on its next poll
+  (the historical COPY-to-Trash client-view gap). Apple Mail prefers MOVE, so it now
+  gets the immediate update.
+
 **Trash folder semantics:**
 
 - **Archive** is an empty placeholder; deletes never go there.
@@ -55,7 +68,7 @@ Postern has **no Trash store**. The IMAP door:
 | Secret / env | Scope | Used for |
 |---|---|---|
 | `POSTERN_API_TOKEN` / read member | read | LIST, FETCH, seen, attachments |
-| `POSTERN_API_TOKEN_DELETE` / delete member | both | EXPUNGE, COPY-to-Trash delete |
+| `POSTERN_API_TOKEN_DELETE` / delete member | both | EXPUNGE, COPY/MOVE-to-Trash delete |
 
 ## Apple Mail attachments (#210)
 
