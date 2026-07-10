@@ -11,6 +11,12 @@ exposes one structured API that agents and human clients (IMAP/webmail) both
 speak. Cloudflare Email is the default transport on each seam, never a hard
 dependency.
 
+Humans and agents each **send as themselves**, under per-identity credentials
+rather than a shared mailbox (see [docs/SEND-IDENTITIES.md](docs/SEND-IDENTITIES.md)),
+and agents speak the mailbox natively over **MCP**
+([`@skyphusion/postern-mcp`](https://www.npmjs.com/package/@skyphusion/postern-mcp)) as
+a first-class door, not an afterthought.
+
 From a fresh clone, with only your own domain, you can deploy it, send a
 message, and receive + read it back. See **[DEPLOY.md](DEPLOY.md)** for the
 clean-install quickstart and **[inbound/smoke.mjs](inbound/smoke.mjs)** for the
@@ -23,8 +29,8 @@ Six surfaces in one repo (one store, one API):
 | **`inbound/`** | Core Cloudflare Worker: ingest, store (D1 + R2 + Vectorize), mailbox API, send |
 | **`relay/`** | Optional Go SMTP daemon: loopback ingest, submission 587/465, BYO dispatch |
 | **`mcp/`** | MCP server for agents ([`@skyphusion/postern-mcp`](https://www.npmjs.com/package/@skyphusion/postern-mcp) on npm) |
-| **`webmail/`** | Read-only browser UI embedded at `/webmail` |
-| **`imap/`** | Read-only IMAP proxy for Thunderbird / mutt / iOS Mail |
+| **`webmail/`** | Browser UI embedded at `/webmail`: read, plus compose/reply when the token is send-capable |
+| **`imap/`** | IMAP proxy (read, `\Seen`, delete) for Thunderbird / mutt / iOS Mail |
 | **`clients/python/`** | Stdlib HTTP client + CLI ([`postern-client`](https://pypi.org/project/postern-client/) on PyPI) |
 
 ```mermaid
@@ -63,18 +69,20 @@ model; [docs/INTEGRATION.md](docs/INTEGRATION.md) covers RPC + REST caller setup
 
 ## Email for humans, too: webmail and IMAP
 
-Agents speak the structured API; humans get two read doors onto the same mailbox,
-both clients of that API (never a second store):
+Agents speak the structured API; humans get two doors onto the same mailbox, both
+clients of that API (never a second store):
 
 - **Webmail** (`webmail/`): a single self-contained page (vanilla HTML/CSS/JS, no
   build step) served by the worker at **`/webmail`**. Paste your API origin and
-  token and browse the mailbox: list, read, threads, search.
+  token and browse the mailbox (list, read, threads, search); compose and reply
+  unlock when the token is send-capable.
 - **IMAP proxy** (`imap/`): a small Twisted server that fronts the API as IMAP
   (read, the `\Seen` read/unread flag, and delete via a `both`-scoped token), so
   Thunderbird / mutt / iOS Mail can open the mailbox too.
 
-Webmail is read-only; IMAP adds read/unread (`\Seen`) and delete, both through the
-API and never a second store. Sending stays the structured API's job for both.
+Webmail adds compose/reply when the token is send-capable; IMAP adds read/unread
+(`\Seen`) and delete via a `both`-scoped token. Both are API clients, never a second
+store, and all sending funnels through the structured API.
 
 An HTML email rendered in the webmail (safely, in a sandboxed iframe; no scripts,
 no remote trackers running):
@@ -193,7 +201,14 @@ Self-hosters, agent builders, and mail admins who want a mailbox they own on Clo
 
 ## License
 
-[AGPL-3.0-only](LICENSE). Postern is software you self-host; if you run it as a network service for
-others, you must offer them the complete corresponding source under the same license. See
-[NOTICE](NOTICE) for the short version and [PRIVACY.md](PRIVACY.md) for what self-hosting means for
+The server core in this repository is [AGPL-3.0-only](LICENSE): Postern is software you self-host, and
+if you run it as a network service for others, you must offer them the complete corresponding source
+under the same license.
+
+The two published client integrations are MIT-licensed so they are trivial to embed in any codebase:
+the MCP server [`@skyphusion/postern-mcp`](mcp/LICENSE) and the Python client
+[`postern-client`](clients/python/LICENSE). Each package ships its own `LICENSE` and metadata, which
+govern that package.
+
+See [NOTICE](NOTICE) for the short version and [PRIVACY.md](PRIVACY.md) for what self-hosting means for
 data (short version: Skyphusion Labs operates nothing, so we hold none of your mail).

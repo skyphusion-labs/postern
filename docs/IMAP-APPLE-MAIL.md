@@ -1,8 +1,7 @@
-# IMAP + Apple Mail -- operator handoff (2026-07-09)
+# IMAP + Apple Mail -- door contract
 
-Checkpoint for the Apple Mail IMAP work stream: dual-token delete, attachment
-serving, Trash behavior. Written for crew handoff (laptop -> rancid.internal or
-any new session).
+The Apple Mail IMAP door contract: dual-token delete, attachment serving, Trash
+behavior.
 
 ## What shipped (merged on `main`)
 
@@ -20,16 +19,10 @@ any new session).
 |---|---|
 | [#295](https://github.com/skyphusion-labs/postern/pull/295) | Content-Type `name=` on attachments (PDF UTI); Trash staging **shared per username** across IMAP connections |
 
-## Production (as of 2026-07-09)
+## Deployment
 
-- **Host:** biafra (`10.1.1.6`), Swarm service `postern-imap_postern-imap`
-- **Image:** `ghcr.io/skyphusion-labs/postern-imap:<main-sha>` (CI `imap-image` + fleet roll)
-- **API origin:** `https://postern.skyphusion.org`
-- **Listener:** IMAPS `10.1.1.6:993` (PROXY protocol optional)
-- **Secrets (Swarm):** `postern_imap_api_token`, `postern_imap_delete_token`, TLS cert/key
-- **Roll:** `fleet-chezmoi/system/swarm/bin/roll-postern-door.sh imap` (or CI dispatch)
-
-Token minting: `crew-secrets/operator/postern/` (`provision-imap-delete-token.sh`, README).
+The door runs wherever the operator hosts it. See [`imap/README.md`](../imap/README.md)
+for env vars and deployment.
 
 ## Apple Mail delete path
 
@@ -43,6 +36,19 @@ Postern has **no Trash store**. The IMAP door:
 3. Hard-deletes via `DELETE /api/messages/{id}` using **`POSTERN_API_TOKEN_DELETE`** (both scope).
 4. Removes the message from the source folder snapshot.
 
+**COPY vs MOVE (RFC 6851, PR #304):** `MOVE` is advertised in CAPABILITY and
+implemented fully. Both verbs hard-delete from the source as above, but they differ in
+what the client is told about the source view:
+
+- **MOVE** additionally emits an untagged `EXPUNGE` for every moved message (message
+  SEQUENCE numbers, high-to-low, per RFC 3501 7.4.1 and the #300/#301 fix) BEFORE the
+  tagged `OK`, so the client's source view updates in the same round-trip. No stale
+  view; no COPYUID is emitted (Trash has no backing store / persistent destination UIDs
+  and we do not advertise UIDPLUS, so a COPYUID would fabricate UIDs).
+- **COPY** emits no untagged `EXPUNGE`; the client re-syncs the source on its next poll
+  (the historical COPY-to-Trash client-view gap). Apple Mail prefers MOVE, so it now
+  gets the immediate update.
+
 **Trash folder semantics:**
 
 - **Archive** is an empty placeholder; deletes never go there.
@@ -55,7 +61,7 @@ Postern has **no Trash store**. The IMAP door:
 | Secret / env | Scope | Used for |
 |---|---|---|
 | `POSTERN_API_TOKEN` / read member | read | LIST, FETCH, seen, attachments |
-| `POSTERN_API_TOKEN_DELETE` / delete member | both | EXPUNGE, COPY-to-Trash delete |
+| `POSTERN_API_TOKEN_DELETE` / delete member | both | EXPUNGE, COPY/MOVE-to-Trash delete |
 
 ## Apple Mail attachments (#210)
 
@@ -77,7 +83,7 @@ payloads and corrupts PDFs.
 
 ## Smoke (after roll)
 
-From a host that reaches biafra IMAPS (or SSH + docker exec):
+From a host that reaches your IMAPS door:
 
 1. **Attachment:** open a PDF on a message with attachments; should open in Preview
    without an app picker (re-sync Mail first: Mailbox -> Synchronize).
@@ -99,28 +105,3 @@ Key tests: `test_copy_to_trash_deletes_from_inbox`, `test_attachment_imap_body_s
 - [`imap/README.md`](../imap/README.md) -- proxy behavior, env vars
 - [`docs/AUTH-CONTRACT.md`](AUTH-CONTRACT.md) -- token scopes
 - [`docs/CONTRACT.md`](CONTRACT.md) -- attachment API, store model
-- Fleet deploy: `fleet-chezmoi/system/postern/runbooks/imap-door-deploy.md` (generic);
-  live Swarm stack under `fleet-chezmoi/system/swarm/stacks/postern-imap.stack.yml`
-
-## Session context (Cursor laptop, 2026-07-09)
-
-- User verified on Apple Mail (Skyphusion account, biafra IMAPS).
-- Sample messages: Cloudflare invoice, xAI forwarded test (`~/xai-test-email.eml`).
-- Issue #278 tracks dual-token delete + Apple Mail parity.
-
-## rancid.internal handoff (2026-07-09)
-
-**Cursor crew box:** rancid (`10.1.1.8`, `rancid.internal`). Clone postern at
-`/home/conrad/dev/postern` after Remote SSH connect.
-
-**Before Apple Mail smoke on prod:**
-
-1. Merge PR #295 (CI fix: clear shared Trash staging in e2e `setUp`).
-2. Wait for `imap-image` CI + fleet roll on **biafra** (not rancid; IMAP runs on swarm manager).
-3. Re-sync Mail account; retest PDF open + Trash visibility.
-
-**From rancid:** reach biafra IMAPS on `10.1.1.6:993` over VLAN; API at
-`https://postern.skyphusion.org`. Fleet record:
-`fleet-chezmoi/system/postern-imap/README.md`.
-
-**Do not** deploy IMAP on rancid; it is podman-first, no swarm. Ops stay on biafra.
