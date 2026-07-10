@@ -193,7 +193,14 @@ Self-hosters, agent builders, and mail admins who want a mailbox they own on Clo
 
 ## License
 
-[AGPL-3.0-only](LICENSE). Postern is software you self-host; if you run it as a network service for
-others, you must offer them the complete corresponding source under the same license. See
-[NOTICE](NOTICE) for the short version and [PRIVACY.md](PRIVACY.md) for what self-hosting means for
+The server core in this repository is [AGPL-3.0-only](LICENSE): Postern is software you self-host, and
+if you run it as a network service for others, you must offer them the complete corresponding source
+under the same license.
+
+The two published client integrations are MIT-licensed so they are trivial to embed in any codebase:
+the MCP server [`@skyphusion/postern-mcp`](mcp/LICENSE) and the Python client
+[`postern-client`](clients/python/LICENSE). Each package ships its own `LICENSE` and metadata, which
+govern that package.
+
+See [NOTICE](NOTICE) for the short version and [PRIVACY.md](PRIVACY.md) for what self-hosting means for
 data (short version: Skyphusion Labs operates nothing, so we hold none of your mail).
