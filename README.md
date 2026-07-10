@@ -24,6 +24,27 @@ OK. See **[DEPLOY.md](DEPLOY.md)** for the
 clean-install quickstart and **[inbound/smoke.mjs](inbound/smoke.mjs)** for the
 scripted v1.0 acceptance smoke (issue #25).
 
+## Try it live
+
+Live read-only demo: [https://demo.posternonline.com](https://demo.posternonline.com).
+Open `/webmail` and log in with the demo token below.
+
+Mail **any** address `@posternonline.com` and watch it appear in the mailbox.
+That is the product working: Email Routing -> worker -> D1 store.
+
+The demo token is READ-scoped and public by design: send, reply, and delete are
+refused by the API scope wall, and webmail hides compose for it. The demo mailbox
+is shared and public, so do not mail anything private.
+
+MCP config for agents:
+
+```
+POSTERN_API_URL=https://demo.posternonline.com
+POSTERN_API_TOKEN=a5fb2da1a13ab468adc1d147272126a4a977f3db44ace5c961ce87d26e0055d8
+```
+
+Run your own in about 10 minutes: follow [DEPLOY.md](DEPLOY.md).
+
 Six surfaces in one repo (one store, one API):
 
 | Path | Role |
