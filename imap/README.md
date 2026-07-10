@@ -201,7 +201,7 @@ without Twisted:
 | `config.py` | no | env-driven `Config` |
 | `auth.py` | core no / portal yes | `resolve_token` (#32/#77) + the native/ldap/pam backends + the Twisted cred portal |
 | `message.py` | yes | `IMessage`/`IMessagePart` over a rendered message |
-| `mailbox.py` | yes | read-only `IMailbox` (snapshot, fetch, status) |
+| `mailbox.py` | yes | `IMailbox` (snapshot, fetch, status, `\Seen`, delete/EXPUNGE) |
 | `account.py` | yes | `IAccount`: the special-use mailbox set (INBOX/Sent/All + empty Drafts/Trash/Junk/Archive), APPEND no-op |
 | `server.py` | yes | the `IMAP4Server` factory + reactor wiring |
 | `__main__.py` | -- | `python -m posternimap` entrypoint |
