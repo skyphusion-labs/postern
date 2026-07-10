@@ -12,6 +12,8 @@ here is specific to any one account or domain.
 - The sending domain onboarded to **Email Sending** (SPF/DKIM/bounce records):
   Dashboard -> Compute & AI -> Email Service -> Email Sending -> Onboard Domain,
   then `npx wrangler email sending list` should show `enabled=yes`.
+  Outbound send uses Cloudflare Email Sending, which requires the **Workers Paid**
+  plan (USD 5/month). Inbound receive via Email Routing works on the free plan.
 - For the inbound leg: **Email Routing** enabled on the same domain (Dashboard
   -> Email -> Email Routing), with MX pointed at Cloudflare.
 
