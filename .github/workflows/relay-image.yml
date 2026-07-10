@@ -9,7 +9,7 @@ name: relay-image
 # `docker service update --image ...:<sha>` is exact.
 #
 # After a green push, dispatches fleet-chezmoi `postern-door-roll` to pin the image on
-# biafra and redeploy `postern-submission` (requires org secret FLEET_DISPATCH_TOKEN).
+# the door host and redeploy `postern-submission` (requires org secret FLEET_DISPATCH_TOKEN).
 #
 # Triggers:
 #   - push to main that touches relay/** (or this workflow): rebuild on real
