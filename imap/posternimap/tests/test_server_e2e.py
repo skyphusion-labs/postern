@@ -1470,3 +1470,154 @@ class IDCommandSelectAndTraceTest(unittest.TestCase):
         out = srv.transport.value()
         self.assertIn(b"* SEARCH 5 7\r\n", out)
         self.assertIn(b"t4 OK SEARCH completed", out)
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class MoveUntaggedSequencingTest(unittest.TestCase):
+    """RFC 6851 sec 3 + RFC 3501 7.4.1 (#304): a MOVE to the Trash delete sink emits an
+    untagged EXPUNGE per moved message, carrying the 1-based message SEQUENCE number
+    (never the UID), high-to-low, BEFORE the tagged OK. COPY emits none. Deterministic
+    StringTransport; the response callback is driven directly with a UID != seq fixture
+    so a sequence/UID mix-up cannot hide behind uid == seq (the #300 class)."""
+
+    def _server(self):
+        from twisted.internet.testing import StringTransport
+        from posternimap.server import PosternIMAP4Server
+
+        srv = PosternIMAP4Server()
+        srv.makeConnection(StringTransport())
+        srv.setTimeout(None)
+        self.addCleanup(srv.setTimeout, None)
+        return srv
+
+    def _fetched_uid_ne_seq(self):
+        # A non-contiguous move set: seq 1 -> uid 101, seq 3 -> uid 103. uid != seq so a
+        # UID leak into the untagged EXPUNGE would read 101/103, not the sequence 1/3.
+        class _S:
+            def __init__(self, uid, mid):
+                self.uid = uid
+                self.message_id = mid
+
+        class _M:
+            def __init__(self, uid, mid):
+                self._summary = _S(uid, mid)
+
+        return [(1, _M(101, "a")), (3, _M(103, "c"))]
+
+    def _mbox(self, deleted):
+        class _Mbox:
+            _delete_writable = True
+
+            def delete_fetched_messages(self, fetched):
+                deleted.append([seq for seq, _m in fetched])
+
+        return _Mbox()
+
+    def test_move_emits_untagged_expunge_sequence_numbers_high_to_low(self):
+        srv = self._server()
+        deleted = []
+        srv.mbox = self._mbox(deleted)
+        srv.transport.clear()
+        srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t1", is_move=True)
+        out = srv.transport.value()
+        self.assertIn(b"* 3 EXPUNGE\r\n", out)
+        self.assertIn(b"* 1 EXPUNGE\r\n", out)
+        # high-to-low, and both before the tagged OK
+        self.assertLess(out.index(b"* 3 EXPUNGE"), out.index(b"* 1 EXPUNGE"))
+        self.assertLess(out.index(b"* 1 EXPUNGE"), out.index(b"t1 OK MOVE completed"))
+        # the UIDs (101/103) must never surface as EXPUNGE sequence ids
+        self.assertNotIn(b"101 EXPUNGE", out)
+        self.assertNotIn(b"103 EXPUNGE", out)
+        self.assertEqual(deleted, [[1, 3]])
+
+    def test_copy_emits_no_untagged_expunge(self):
+        srv = self._server()
+        srv.mbox = self._mbox([])
+        srv.transport.clear()
+        srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t2", is_move=False)
+        out = srv.transport.value()
+        self.assertNotIn(b"EXPUNGE", out)
+        self.assertIn(b"t2 OK COPY completed", out)
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerMoveRFC6851E2ETest(twisted_unittest.TestCase):
+    """RFC 6851 MOVE (#304) end to end over the real wire: MOVE is advertised in
+    CAPABILITY and, for the Trash delete sink, hard-deletes from the source mailbox like
+    COPY. UID != seq fixture (pinned uids 101/102) so a sequence/UID confusion in the
+    move set cannot pass (the #300 class)."""
+
+    def setUp(self):
+        from posternimap.account import _shared_trash_staging
+
+        _shared_trash_staging("agent").clear()
+        # Two inbound messages, pinned uids 101/102 (seq 1/2) so uid != seq.
+        self.msgs = [
+            make_message("mb", subject="second", body="two", uid=102),
+            make_message("ma", subject="first", body="one", uid=101),
+        ]
+        self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=50)
+        self.cfg = Config(
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            service_delete_token="tok",
+        )
+        self.factory, self._restore = _patched_factory(self.cfg, self.transport)
+        self.port = reactor.listenTCP(0, self.factory, interface="127.0.0.1")
+        self.addr = self.port.getHost()
+
+    def tearDown(self):
+        _restore_account(self._restore)
+        return self.port.stopListening()
+
+    @defer.inlineCallbacks
+    def _client(self):
+        cc = ClientCreator(reactor, imap4.IMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", self.addr.port)
+        defer.returnValue(proto)
+
+    @defer.inlineCallbacks
+    def test_move_advertised_in_capability(self):
+        proto = yield self._client()
+        try:
+            caps = yield proto.getCapabilities()
+            self.assertIn(b"MOVE", caps)
+        finally:
+            yield proto.transport.loseConnection()
+
+    @defer.inlineCallbacks
+    def test_move_to_trash_deletes_from_inbox(self):
+        from twisted.mail.imap4 import Command
+
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            info = yield proto.select(b"INBOX")
+            self.assertEqual(info["EXISTS"], 2)
+            # Twisted's client has no move(); send the raw RFC 6851 command. MOVE
+            # sequence 2 (uid 102, "mb") to Trash: hard-delete from INBOX + untagged
+            # EXPUNGE, then a tagged OK the client's sendCommand fires on.
+            yield proto.sendCommand(Command(b"MOVE", b"2 Trash"))
+            info = yield proto.select(b"INBOX")
+            self.assertEqual(info["EXISTS"], 1)
+            self.assertTrue(
+                any("mb" in c for c in self.transport.calls),
+                "expected delete API for the moved message mb",
+            )
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_move_to_placeholder_is_rejected(self):
+        from twisted.mail.imap4 import Command
+
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            yield proto.select(b"INBOX")
+            d = proto.sendCommand(Command(b"MOVE", b"1 Drafts"))
+            yield self.assertFailure(d, imap4.IMAP4Exception)
+        finally:
+            yield proto.logout()
