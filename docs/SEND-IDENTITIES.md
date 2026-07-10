@@ -21,7 +21,7 @@ The endstate this serves: openness AND accountability converge by decomposing se
 | Name | `POSTERN_SEND_IDENTITIES` |
 |---|---|
 | Kind | Worker **secret** (`wrangler secret put`), NOT a `wrangler.jsonc` var |
-| Worker | `skyphusion-email-inbound` (the inbound worker, `inbound/`) |
+| Worker | `postern` (the inbound worker, `inbound/`) |
 | Optional | Yes. Unset = the static `both`/`read`/`send` posture only (fully back-compat). |
 | Holds | Token **hashes**, never raw tokens (see section 5). |
 
