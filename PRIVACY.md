@@ -1,10 +1,9 @@
 # Postern Privacy Policy
 
-> **STATUS: DRAFT for review. Not legal advice. Not yet in force.**
-> Written by Ernst (Conrad's legal-affairs helper, not a lawyer) and grounded in what the software
-> actually does. Conrad signs off before it goes live.
+> Grounded in what the software actually does. Written by Ernst (Conrad's legal-affairs helper, not a
+> lawyer); this is not legal advice.
 
-**Last updated:** DRAFT (unpublished)
+**Last updated:** 2026-07-10
 
 ---
 
