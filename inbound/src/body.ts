@@ -7,9 +7,10 @@
 // aborts the moment the cap is crossed -- before the remainder is pulled or
 // buffered -- so the guard holds regardless of framing.
 //
-// LOCKSTEP: this module is kept byte-identical in inbound/src/body.ts and
-// worker/src/body.ts (one send core, two front doors; same pattern as the
-// MAX_RECIPIENTS pairing between email.ts and smtp.go). Change both together.
+// The legacy send worker carried a byte-identical copy of this module; the #190
+// fold removed it, so body.ts is now single-source here in inbound/src. The
+// live cross-file lockstep is the MAX_RECIPIENTS pairing between
+// inbound/src/mailbox.ts and relay/smtp.go -- change those two together.
 
 // Thrown when the body is, or would become, larger than the cap. Callers map
 // it to their own 413 shape (MailboxError in inbound, a JSON response in the
