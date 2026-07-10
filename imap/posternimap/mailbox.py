@@ -707,24 +707,35 @@ class PosternMailbox:
         return defer.succeed(None)
 
     def expunge(self):
-        """Remove messages marked \\Deleted from the snapshot and the store (#278).
+        """Remove messages marked \\Deleted; return their message SEQUENCE numbers.
+
+        RFC 3501 7.4.1: the untagged EXPUNGE response carries the message SEQUENCE
+        number (not the UID), and Twisted's __cbExpunge emits every element of this
+        return list verbatim as `<n> EXPUNGE`. We return the 1-based sequence numbers
+        HIGH-TO-LOW so no running decrement is needed (removing the highest first
+        leaves every lower sequence number still valid).
 
         Trash is session-staged only: EXPUNGE clears the staging list (the API delete
         already ran on COPY-to-Trash). Real views hard-delete via DELETE /api/messages.
         """
         self._ensure_loaded()
         if self._trash_sink:
-            expunged_uids = [s.uid for s in self._summaries]
+            # Every staged summary is expunged; emit its 1-based sequence number,
+            # high-to-low, then clear the shared staging.
+            seqs = list(range(len(self._summaries), 0, -1))
             if self._trash_staging is not None:
                 self._trash_staging.clear()
             self._summaries = []
-            return expunged_uids
+            return seqs
         if self._empty:
             return []
         if not self._delete_writable:
-            raise ReadOnlyError("postern-imap is read-only; nothing to expunge")
+            # A seen-writable-only mailbox (single read-token deploy) reports
+            # isWriteable() True, so do_CLOSE calls expunge() on it. No message can be
+            # flagged \\Deleted without a delete token (store() refuses it), so EXPUNGE
+            # is a clean no-op OK here (RFC 3501 6.4.3) -- raising broke CLOSE.
+            return []
 
-        expunged_uids: List[int] = []
         remove_at: List[int] = []
         for i, summary in enumerate(self._summaries):
             if not summary.deleted:
@@ -738,12 +749,15 @@ class PosternMailbox:
                         "EXPUNGE requires POSTERN_API_TOKEN_DELETE (a both-scoped member)",
                     ) from exc
                 raise ReadOnlyError(f"EXPUNGE failed: {exc}") from exc
-            expunged_uids.append(summary.uid)
             remove_at.append(i)
 
+        # RFC 3501 7.4.1: return message SEQUENCE numbers (1-based), high-to-low so the
+        # untagged EXPUNGE responses need no running decrement. remove_at is ascending
+        # 0-based indices into the pre-deletion snapshot.
+        expunged_seqs = [i + 1 for i in reversed(remove_at)]
         for i in reversed(remove_at):
             del self._summaries[i]
-        return expunged_uids
+        return expunged_seqs
 
     def delete_fetched_messages(self, fetched) -> None:
         """Hard-delete messages just fetched (COPY-to-Trash / move-to-trash clients).

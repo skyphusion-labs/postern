@@ -111,8 +111,10 @@ class MailboxTest(unittest.TestCase):
 
         mb = self._mailbox()
         self.assertFalse(mb.isWriteable())
-        with self.assertRaises(ReadOnlyError):
-            mb.expunge()
+        # isWriteable() is False, so Twisted never calls expunge() on this mailbox; a
+        # direct call is a clean no-op (nothing is deletable without a delete token,
+        # #300). store() is the real read-only guard and still raises.
+        self.assertEqual(mb.expunge(), [])
         with self.assertRaises(ReadOnlyError):
             mb.store(None, ["\\Seen"], 1, False)
 
@@ -128,8 +130,10 @@ class MailboxTest(unittest.TestCase):
         res = mb.store(MessageSet(2, 2), ["\\Deleted"], 1, uid=False)
         self.assertIn("\\Deleted", res[2])
         self.assertEqual(len(msgs), 2)
-        uids = mb.expunge()
-        self.assertEqual(uids, [20])
+        # RFC 3501 7.4.1: EXPUNGE returns message SEQUENCE numbers, not UIDs. The
+        # dropped message is at seq 2 (uid 20) in a 2-message mailbox (#300).
+        seqs = mb.expunge()
+        self.assertEqual(seqs, [2])
         self.assertEqual(mb.getMessageCount(), 1)
         self.assertEqual(msgs[0]["messageId"], "keep@x")
         self.assertTrue(any("drop%40x" in c for c in transport.calls))
@@ -165,6 +169,66 @@ class MailboxTest(unittest.TestCase):
         mb.expunge()
         self.assertTrue(any("drop%40x" in c for c in delete_transport.calls))
         self.assertFalse(any("drop%40x" in c for c in read_transport.calls))
+
+    def test_expunge_returns_sequence_numbers_high_to_low(self):
+        # RFC 3501 7.4.1: untagged EXPUNGE carries message SEQUENCE numbers (Twisted
+        # emits expunge()'s return verbatim as `<n> EXPUNGE`). With rowids != sequence
+        # numbers and TWO deletes, the result must be the 1-based sequence numbers
+        # high-to-low (so each removal leaves lower sequence numbers valid), never the
+        # UIDs (#300).
+        from twisted.mail.imap4 import MessageSet
+
+        msgs = [
+            make_message("a@x", subject="a", uid=10),  # seq 1
+            make_message("b@x", subject="b", uid=20),  # seq 2 -> delete
+            make_message("c@x", subject="c", uid=30),  # seq 3
+            make_message("d@x", subject="d", uid=40),  # seq 4 -> delete
+        ]
+        mb, _ = self._custom_mailbox(msgs, seen_writable=True, delete_writable=True)
+        mb.getMessageCount()
+        mb.store(MessageSet(2, 2), ["\\Deleted"], 1, uid=False)
+        mb.store(MessageSet(4, 4), ["\\Deleted"], 1, uid=False)
+        self.assertEqual(mb.expunge(), [4, 2])  # seq numbers high-to-low, not [20, 40]
+        self.assertEqual(mb.getMessageCount(), 2)
+
+    def test_expunge_is_noop_without_delete_token(self):
+        # A seen-writable-only mailbox (single read-token deploy) reports isWriteable()
+        # True, so Twisted's do_CLOSE calls expunge() on it. With no delete token nothing
+        # can be flagged \\Deleted, so EXPUNGE must be a clean no-op ([]), NOT raise --
+        # raising made every CLOSE on INBOX/Sent/All return BAD (#300).
+        mb, _ = self._custom_mailbox(
+            [make_message("a@x", uid=10), make_message("b@x", uid=20)],
+            seen_writable=True,
+            delete_writable=False,
+        )
+        mb.getMessageCount()
+        self.assertTrue(mb.isWriteable())  # so do_CLOSE will call expunge()
+        self.assertEqual(mb.expunge(), [])
+        self.assertEqual(mb.getMessageCount(), 2)
+
+    def test_trash_expunge_returns_sequence_numbers(self):
+        # Emptying Trash (Apple Mail) EXPUNGEs the staged summaries; the untagged
+        # responses must be sequence numbers (1..n, high-to-low), not the staged UIDs (#300).
+        from posternimap.client import MessageSummary
+        from posternimap.mailbox import PosternMailbox
+
+        def summary(uid, mid):
+            return MessageSummary(
+                uid=uid, message_id=mid, direction="inbound", thread_id=mid,
+                from_addr="a@b", to_addr="c@d", subject="s", date="2026-07-09T00:00:00Z",
+                in_reply_to=None, trusted=True, received_at="2026-07-09T00:00:01Z",
+                attachment_count=0,
+            )
+
+        staging = [summary(50, "x@x"), summary(60, "y@y")]
+        trash = PosternMailbox(
+            PosternClient("https://x", "t", transport=FakeTransport([], page_size=2)),
+            trash_sink=True,
+            trash_staging=staging,
+        )
+        self.assertEqual(trash.getMessageCount(), 2)
+        self.assertEqual(trash.expunge(), [2, 1])  # seq numbers, not [50, 60]
+        self.assertEqual(len(staging), 0)
 
     def test_delete_fetched_messages(self):
         from twisted.mail.imap4 import MessageSet
