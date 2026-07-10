@@ -359,14 +359,29 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         mailbox, not STORE \\Deleted + EXPUNGE in the current folder. Trash has no
         backing store in Postern, so COPY-to-Trash hard-deletes from the selected
         mailbox via DELETE /api/messages/{id}. Trash SELECT reports READ-WRITE so the
-        client does not reject the destination up front."""
-        self._copy_or_move_to_mailbox(tag, messages, mailbox, uid)
+        client does not reject the destination up front. COPY does NOT emit untagged
+        EXPUNGE for the source (RFC 3501 semantics); the client re-syncs the source
+        mailbox on its next poll (the documented COPY-to-Trash client-view gap, see
+        docs/IMAP-APPLE-MAIL.md). MOVE (do_MOVE) closes that gap."""
+        self._copy_or_move_to_mailbox(tag, messages, mailbox, uid, is_move=False)
 
     def do_MOVE(self, tag, messages, mailbox, uid=0):
-        """RFC 6851 MOVE: same Trash delete sink as COPY (#278)."""
-        self._copy_or_move_to_mailbox(tag, messages, mailbox, uid)
+        """RFC 6851 MOVE, advertised in CAPABILITY (#304).
 
-    def _copy_or_move_to_mailbox(self, tag, messages, mailbox, uid=0):
+        MOVE = COPY + mark \\Deleted + EXPUNGE, atomically. For the Trash delete sink
+        this is the same source hard-delete as COPY, but MOVE additionally emits an
+        untagged EXPUNGE for every moved message BEFORE the tagged OK (RFC 6851 sec 3),
+        so the client's source view updates in the same round-trip instead of going
+        stale until re-sync. Sequence numbers, high-to-low, per RFC 3501 7.4.1 and the
+        #300/#301 EXPUNGE fix (untagged EXPUNGE carries 1-based SEQUENCE numbers, never
+        UIDs). COPYUID (RFC 6851 sec 4.3) is deliberately NOT emitted: it is a UIDPLUS
+        (RFC 4315) response code and we neither advertise UIDPLUS nor give Trash a
+        backing store with persistent destination UIDs, so a COPYUID would fabricate
+        UIDs that do not exist."""
+        self._copy_or_move_to_mailbox(tag, messages, mailbox, uid, is_move=True)
+
+    def _copy_or_move_to_mailbox(self, tag, messages, mailbox, uid=0, is_move=False):
+        verb = b"MOVE" if is_move else b"COPY"
         dest = imap4._parseMbox(mailbox)
         classify = getattr(self.account, "copyability", None)
         src = getattr(self, "mbox", None)
@@ -377,36 +392,46 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         if kind == "trash_delete":
             if not getattr(src, "_delete_writable", False):
                 self.sendNegativeResponse(
-                    tag, b"COPY failed: delete is not enabled on this account"
+                    tag, verb + b" failed: delete is not enabled on this account"
                 )
                 return
             maybeDeferred(src.fetch, messages, uid).addCallback(
-                self._cbCopyToTrashDelete, tag
-            ).addErrback(self._ebCopyToTrashDelete, tag)
+                self._cbCopyToTrashDelete, tag, is_move
+            ).addErrback(self._ebCopyToTrashDelete, tag, verb)
             return
         if kind == "placeholder":
             self.sendNegativeResponse(
-                tag, b"COPY failed: this folder does not store messages"
+                tag, verb + b" failed: this folder does not store messages"
             )
             return
         imap4.IMAP4Server.do_COPY(self, tag, messages, mailbox, uid)
 
-    def _cbCopyToTrashDelete(self, fetched, tag):
+    def _cbCopyToTrashDelete(self, fetched, tag, is_move=False):
         src = getattr(self, "mbox", None)
+        verb = b"MOVE" if is_move else b"COPY"
         if src is None:
-            self.sendNegativeResponse(tag, b"COPY failed: no mailbox selected")
+            self.sendNegativeResponse(tag, verb + b" failed: no mailbox selected")
             return
+        # RFC 6851 sec 3: MOVE emits an untagged EXPUNGE per moved message. Capture the
+        # source SEQUENCE numbers from the pre-delete snapshot and emit them high-to-low
+        # so no running decrement is needed (removing the highest first leaves every
+        # lower sequence number valid), the same rule as PosternMailbox.expunge()
+        # (#300/#301). COPY emits none (see do_COPY).
+        moved_seqs = sorted((seq for seq, _msg in fetched), reverse=True)
         try:
             src.delete_fetched_messages(fetched)
         except imap4.MailboxException as exc:
-            self.sendNegativeResponse(tag, b"COPY failed: " + networkString(str(exc)))
+            self.sendNegativeResponse(tag, verb + b" failed: " + networkString(str(exc)))
         except Exception as exc:
-            self.sendBadResponse(tag, b"COPY failed: " + networkString(str(exc)))
+            self.sendBadResponse(tag, verb + b" failed: " + networkString(str(exc)))
         else:
-            self.sendPositiveResponse(tag, b"COPY completed")
+            if is_move:
+                for seq in moved_seqs:
+                    self.sendUntaggedResponse(b"%d EXPUNGE" % (seq,))
+            self.sendPositiveResponse(tag, verb + b" completed")
 
-    def _ebCopyToTrashDelete(self, failure, tag):
-        self.sendBadResponse(tag, b"COPY failed: " + networkString(str(failure.value)))
+    def _ebCopyToTrashDelete(self, failure, tag, verb=b"COPY"):
+        self.sendBadResponse(tag, verb + b" failed: " + networkString(str(failure.value)))
 
     auth_COPY = (
         do_COPY,
@@ -458,6 +483,9 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             cap.pop(b"IDLE", None)
         # RFC 2971: advertise ID so a client knows the server implements it (#218).
         cap[b"ID"] = None
+        # RFC 6851: advertise MOVE (#304). do_MOVE implements it fully for the Trash
+        # delete sink (untagged EXPUNGE per moved message, then tagged OK).
+        cap[b"MOVE"] = None
         return cap
 
     @staticmethod
