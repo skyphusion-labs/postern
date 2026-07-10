@@ -151,3 +151,8 @@ python -m mypy                                         # the type gate (house st
 
 The transport is injectable, so the suite runs entirely offline; the API is
 faked, no token or origin is needed to test.
+
+## License
+
+MIT (see [LICENSE](LICENSE)). The Postern server core is AGPL-3.0-only; this
+client is MIT to maximize reuse, matching the other Postern client integrations.
