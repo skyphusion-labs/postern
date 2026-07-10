@@ -30,6 +30,11 @@ npx wrangler r2 bucket create postern-attachments
 Edit `inbound/wrangler.jsonc`:
 - paste your `database_id` into the `d1_databases` block,
 - set `DEFAULT_FROM`, `DEFAULT_FROM_NAME`, `ALLOWED_FROM_DOMAIN` to your domain,
+- to reach the worker over `https://postern.<subdomain>.workers.dev` (the URL the
+  webmail and smoke steps below use), set `"workers_dev": true`. The shipped
+  default is `false` (secure-by-default: no public door; a production install
+  instead adds a token-gated custom route on your own domain), so with the
+  default left in place `npm run deploy` gives you no reachable URL to smoke.
 - (optional) uncomment the `vectorize` + `ai` blocks if you created the index.
 
 Apply the schema:
@@ -101,10 +106,11 @@ npm install
 npm run deploy
 ```
 
-`npm run deploy` prints the deployed URL, e.g.
-`https://postern.<your-account>.workers.dev`.
+With `workers_dev` enabled (above), `npm run deploy` prints the deployed URL, e.g.
+`https://postern.<your-subdomain>.workers.dev`. Allow up to a minute after the
+first deploy for the workers.dev route to go live before you smoke it.
 
-Open `https://postern.<your-account>.workers.dev/webmail` to browse the mailbox
+Open `https://postern.<your-subdomain>.workers.dev/webmail` to browse the mailbox
 in a browser (paste that origin + your `POSTERN_API_TOKEN`); IMAP clients can use
 the `imap/` proxy. Both are read-only (see `webmail/README.md` and `imap/README.md`).
 
@@ -116,7 +122,7 @@ npm install -g @skyphusion/postern-mcp   # optional global install
 
 # Python CLI + library
 pip install postern-client
-export POSTERN_API_URL=https://postern.<your-account>.workers.dev
+export POSTERN_API_URL=https://postern.<your-subdomain>.workers.dev
 export POSTERN_API_TOKEN=<your-token>
 postern ping
 ```
@@ -136,14 +142,14 @@ The smoke takes your own values; it has no built-in domain or account.
 
 ```bash
 # Outbound + store + reply-threading (no real inbound needed):
-POSTERN_BASE_URL=https://postern.<your-account>.workers.dev \
+POSTERN_BASE_URL=https://postern.<your-subdomain>.workers.dev \
 POSTERN_API_TOKEN=<your-token> \
 POSTERN_FROM=noreply@<your-domain> \
 POSTERN_TO=you@<your-domain> \
 node inbound/smoke.mjs
 
 # Full v1.0 acceptance, including a real inbound delivery (step 3 wired):
-POSTERN_BASE_URL=https://postern.<your-account>.workers.dev \
+POSTERN_BASE_URL=https://postern.<your-subdomain>.workers.dev \
 POSTERN_API_TOKEN=<your-token> \
 POSTERN_FROM=noreply@<your-domain> \
 POSTERN_TO=you@<your-domain> \
