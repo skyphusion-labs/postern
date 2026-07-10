@@ -50,6 +50,21 @@ describe("the page is XSS-conscious by construction", () => {
     // edit introduces it, this test forces a deliberate review.
     expect(WEBMAIL_HTML).not.toMatch(/\.innerHTML\s*=/);
   });
+  it("gates compose/reply on a PROBED send capability, not just a pasted token (#277)", () => {
+    // A read-only token pasted into the send field must not get a compose UI. The page
+    // probes POST /api/send with an empty body (no mail sent) and enables compose only
+    // when the scope gate is cleared; a later 403 degrades the UI honestly.
+    expect(WEBMAIL_HTML).toContain("function probeSendCapability");
+    expect(WEBMAIL_HTML).toContain("state.sendCapable");
+    // the probe is a non-mutating empty-body POST to /api/send
+    expect(WEBMAIL_HTML).toContain('body: "{}"');
+    // compose + reply gate on the PROBED fact (=== true), never on token presence
+    expect(WEBMAIL_HTML).toContain("state.sendCapable === true");
+    // reactive degrade: a 403 from a real send flips capability off
+    expect(WEBMAIL_HTML).toContain("state.sendCapable = false; updateComposeUI();");
+    // the old presence-only gate is gone
+    expect(WEBMAIL_HTML).not.toContain('state.sendToken ? "" : "none"');
+  });
   it("requests the token as a Bearer header, never places it in a URL", () => {
     expect(WEBMAIL_HTML).toContain('"authorization": "Bearer "');
   });
@@ -106,5 +121,40 @@ describe("the inbound worker serves the webmail route", () => {
     const { env } = makeFakeEnv();
     const res = await handleApi(new Request("https://postern.example/api/messages"), env, ctx);
     expect(res.status).toBe(401);
+  });
+});
+
+describe("send scope is enforced before body validation (honest-probe contract, #277)", () => {
+  const req = (token: string) =>
+    new Request("https://postern.example/api/send", {
+      method: "POST",
+      headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+      body: "{}",
+    });
+
+  it("read-only token -> 403 before send() runs, and dispatches no mail", async () => {
+    const { env, ctx, sent } = makeFakeEnv({
+      POSTERN_API_TOKEN: undefined,
+      POSTERN_API_TOKEN_READ: "read-tok",
+      POSTERN_API_TOKEN_SEND: "send-tok",
+    });
+    const res = await handleApi(req("read-tok"), env, ctx);
+    expect(res.status).toBe(403);
+    expect(sent.length).toBe(0);
+  });
+
+  it("send token + empty body -> 400 validation (NOT 403), and dispatches no mail", async () => {
+    // Exactly what probeSendCapability() issues: the scope gate passes, then body
+    // validation rejects the empty body BEFORE any dispatch. A non-403 with zero mail
+    // sent is the signal the webmail reads as "send-capable".
+    const { env, ctx, sent } = makeFakeEnv({
+      POSTERN_API_TOKEN: undefined,
+      POSTERN_API_TOKEN_READ: "read-tok",
+      POSTERN_API_TOKEN_SEND: "send-tok",
+    });
+    const res = await handleApi(req("send-tok"), env, ctx);
+    expect(res.status).not.toBe(403);
+    expect(res.status).toBe(400);
+    expect(sent.length).toBe(0);
   });
 });

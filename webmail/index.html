@@ -110,6 +110,7 @@
   .compose textarea { min-height: 180px; resize: vertical; }
   .compose-actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
   .compose-note { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .sendnote { color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -118,6 +119,7 @@
   <h1>Postern webmail</h1>
   <span class="grow"></span>
   <span class="who" id="who"></span>
+  <span class="sendnote" id="sendNote" style="display:none"></span>
   <button id="composeBtn" style="display:none">Compose</button>
   <button id="logout" class="link" style="display:none">Sign out</button>
 </header>
@@ -199,7 +201,13 @@
     token: SS.getItem("postern_token") || "",
     sendToken: SS.getItem("postern_send_token") || "",
     searchMode: normalizeSearchMode(SS.getItem("postern_search_mode") || "hybrid"),
-    folder: "", q: "", cursor: null, items: [], selected: null
+    folder: "", q: "", cursor: null, items: [], selected: null,
+    // Send capability is a PROBED fact, not "a send token was pasted": null until
+    // probed, true when POST /api/send cleared the scope gate, false when refused (#277).
+    sendCapable: null,
+    // Why compose is disabled, so the note stays truthful: readonly (403), invalid
+    // (401), unreachable (network). Empty when capable or no send token.
+    sendReason: ""
   };
 
   // --- API client (Bearer token; token never logged, never in a URL) ---------
@@ -246,7 +254,13 @@
       return r.json().catch(function () { return { ok: false, error: "bad_json", status: r.status }; })
         .then(function (j) {
           if (r.status === 401) { var e = new Error("unauthorized"); e.code = 401; throw e; }
-          if (r.status === 403) throw new Error((j && (j.message || j.error)) || "requires send scope");
+          if (r.status === 403) {
+            // The token cannot send: degrade honestly (never keep offering compose as
+            // if a retry might work), then surface it to the caller (#277).
+            state.sendCapable = false; state.sendReason = "readonly"; updateComposeUI();
+            var e403 = new Error((j && (j.message || j.error)) || "requires send scope");
+            e403.code = 403; throw e403;
+          }
           if (!r.ok || j.ok === false) {
             var msg = (j && (j.message || j.error)) || ("HTTP " + r.status);
             throw new Error(msg);
@@ -256,8 +270,51 @@
     });
   }
 
-  function updateComposeButton() {
-    $("composeBtn").style.display = state.sendToken ? "" : "none";
+  function updateComposeUI() {
+    var capable = state.sendCapable === true;
+    $("composeBtn").style.display = capable ? "" : "none";
+    var note = $("sendNote");
+    var reasons = {
+      readonly: "Send token is read-only; compose disabled.",
+      invalid: "Send token was rejected; compose disabled.",
+      unreachable: "Could not verify the send token; compose disabled."
+    };
+    if (state.sendToken && state.sendCapable === false && reasons[state.sendReason]) {
+      note.textContent = reasons[state.sendReason]; note.style.display = "";
+    } else {
+      note.textContent = ""; note.style.display = "none";
+    }
+    // Reflect current capability in an open reading pane (the Reply button).
+    if (state.selected) renderReading(state.selected);
+  }
+
+  // Honest send-capability probe (#277): a read-only token must NEVER be offered a
+  // compose/reply UI, and we must learn that WITHOUT sending mail. The worker checks
+  // token SCOPE before it validates the body, and POST /api/send with an empty body is
+  // rejected by validation (400) before any message is dispatched. So an empty-body
+  // POST reveals the token's send scope with zero mail sent: 403 = not send-capable,
+  // 401 = bad token, anything else (400 validation) = the token cleared the scope gate.
+  function probeSendCapability() {
+    if (!state.sendToken) { state.sendCapable = false; updateComposeUI(); return; }
+    state.sendCapable = null; updateComposeUI();
+    var url = state.origin.replace(/\/+$/, "") + "/api/send";
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "authorization": "Bearer " + state.sendToken,
+        "content-type": "application/json",
+        "accept": "application/json"
+      },
+      body: "{}",
+      credentials: "omit", referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      if (r.status === 403) { state.sendCapable = false; state.sendReason = "readonly"; }
+      else if (r.status === 401) { state.sendCapable = false; state.sendReason = "invalid"; }
+      else { state.sendCapable = true; state.sendReason = ""; }
+    }).catch(function () {
+      // Network/other error: do not claim capability. Reactive 403-degrade still guards.
+      state.sendCapable = false; state.sendReason = "unreachable";
+    }).then(function () { updateComposeUI(); });
   }
 
   // --- attachment download (Bearer fetch -> Blob -> object URL) --------------
@@ -473,7 +530,8 @@
     $("logout").style.display = "";
     $("who").textContent = state.origin;
     $("searchMode").value = state.searchMode;
-    updateComposeButton();
+    updateComposeUI();
+    probeSendCapability();
   }
 
   function connect() {
@@ -504,7 +562,7 @@
     SS.removeItem("postern_token");
     SS.removeItem("postern_send_token");
     SS.removeItem("postern_origin");
-    state.token = ""; state.sendToken = ""; state.items = []; state.selected = null; state.cursor = null;
+    state.token = ""; state.sendToken = ""; state.sendCapable = null; state.sendReason = ""; state.items = []; state.selected = null; state.cursor = null;
     clear($("list")); renderReading(null);
     showGate("Signed out. Your tokens were cleared from this browser.");
   }
@@ -646,8 +704,14 @@
         if (res.messageId) selectMessage(res.messageId, null);
         else renderReading(null);
       }).catch(function (e) {
-        $("cmpSend").disabled = false;
         if (e.code === 401) { logout(); return; }
+        if (e.code === 403) {
+          // Not send-capable: apiWrite already hid the compose entry points; keep Send
+          // disabled and say so plainly rather than inviting a doomed retry (#277).
+          err.textContent = "This token is read-only; sending is disabled. Provide a send-scoped token to compose.";
+          return;
+        }
+        $("cmpSend").disabled = false;
         err.textContent = e.message;
       });
     });
@@ -675,7 +739,7 @@
         )
       ])
     ]);
-    if (state.sendToken) {
+    if (state.sendCapable === true) {
       var replyBtn = el("button", { text: "Reply" });
       replyBtn.addEventListener("click", function () {
         var reSub = (m.subject || "").match(/^Re:/i) ? (m.subject || "") : ("Re: " + (m.subject || ""));
