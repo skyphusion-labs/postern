@@ -69,10 +69,12 @@ both clients of that API (never a second store):
 - **Webmail** (`webmail/`): a single self-contained page (vanilla HTML/CSS/JS, no
   build step) served by the worker at **`/webmail`**. Paste your API origin and
   token and browse the mailbox: list, read, threads, search.
-- **IMAP proxy** (`imap/`): a small Twisted server that fronts the read API as
-  read-only IMAP, so Thunderbird / mutt / iOS Mail can open the mailbox too.
+- **IMAP proxy** (`imap/`): a small Twisted server that fronts the API as IMAP
+  (read, the `\Seen` read/unread flag, and delete via a `both`-scoped token), so
+  Thunderbird / mutt / iOS Mail can open the mailbox too.
 
-Both are read-only; sending stays the structured API's job.
+Webmail is read-only; IMAP adds read/unread (`\Seen`) and delete, both through the
+API and never a second store. Sending stays the structured API's job for both.
 
 An HTML email rendered in the webmail (safely, in a sandboxed iframe; no scripts,
 no remote trackers running):
