@@ -17,7 +17,7 @@ import (
 
 // MaxRecipients caps the number of envelope recipients (to + cc + bcc) the
 // go-smtp server accepts per message. Keep this in sync with the worker's
-// MAX_RECIPIENTS in worker/src/email.ts.
+// MAX_RECIPIENTS in inbound/src/mailbox.ts.
 const MaxRecipients = 50
 
 // Backend hands out a fresh Session per SMTP connection.
