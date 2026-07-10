@@ -18,7 +18,9 @@ and agents speak the mailbox natively over **MCP**
 a first-class door, not an afterthought.
 
 From a fresh clone, with only your own domain, you can deploy it, send a
-message, and receive + read it back. See **[DEPLOY.md](DEPLOY.md)** for the
+message, and receive + read it back. Outbound send needs Cloudflare Email Sending
+on the **Workers Paid** plan (USD 5/month); inbound via Email Routing is free-plan
+OK. See **[DEPLOY.md](DEPLOY.md)** for the
 clean-install quickstart and **[inbound/smoke.mjs](inbound/smoke.mjs)** for the
 scripted v1.0 acceptance smoke (issue #25).
 
