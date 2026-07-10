@@ -67,7 +67,7 @@ Option 1 (full rebuild from D1) was executed against the live fleet store:
 | --- | --- |
 | new index | `skyphusion-mail-vec-v2` (768-dim, cosine) |
 | backfill | 3762 messages, 4718 vectors (`reindex.mjs`, two passes) |
-| binding flip | `skyphusion-email-inbound` VECTORIZE -> v2 |
+| binding flip | `skyphusion-email-inbound` VECTORIZE -> v2 (worker since renamed `postern`) |
 | legacy index | `skyphusion-mail-vec` deleted (1022 orphans retired with it) |
 | post-flip reconcile | 4718/4718 expected present, **0 orphans**, **0 missing** |
 

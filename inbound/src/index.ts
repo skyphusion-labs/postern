@@ -113,7 +113,7 @@ export default {
  *
  *   // consumer wrangler.jsonc
  *   "services": [
- *     { "binding": "MAILBOX", "service": "skyphusion-email-inbound", "entrypoint": "MailboxService" }
+ *     { "binding": "MAILBOX", "service": "postern", "entrypoint": "MailboxService" }
  *   ]
  */
 export class MailboxService extends WorkerEntrypoint<Env> {
