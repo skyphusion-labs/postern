@@ -110,7 +110,7 @@ With `workers_dev` enabled (above), `npm run deploy` prints the deployed URL, e.
 `https://postern.<your-subdomain>.workers.dev`. Allow up to a minute after the
 first deploy for the workers.dev route to go live before you smoke it.
 
-Open `https://postern.<your-account>.workers.dev/webmail` to browse the mailbox
+Open `https://postern.<your-subdomain>.workers.dev/webmail` to browse the mailbox
 in a browser (paste that origin + your `POSTERN_API_TOKEN`); IMAP clients can use
 the `imap/` proxy. Both are read-only (see `webmail/README.md` and `imap/README.md`).
 
@@ -122,7 +122,7 @@ npm install -g @skyphusion/postern-mcp   # optional global install
 
 # Python CLI + library
 pip install postern-client
-export POSTERN_API_URL=https://postern.<your-account>.workers.dev
+export POSTERN_API_URL=https://postern.<your-subdomain>.workers.dev
 export POSTERN_API_TOKEN=<your-token>
 postern ping
 ```
@@ -142,14 +142,14 @@ The smoke takes your own values; it has no built-in domain or account.
 
 ```bash
 # Outbound + store + reply-threading (no real inbound needed):
-POSTERN_BASE_URL=https://postern.<your-account>.workers.dev \
+POSTERN_BASE_URL=https://postern.<your-subdomain>.workers.dev \
 POSTERN_API_TOKEN=<your-token> \
 POSTERN_FROM=noreply@<your-domain> \
 POSTERN_TO=you@<your-domain> \
 node inbound/smoke.mjs
 
 # Full v1.0 acceptance, including a real inbound delivery (step 3 wired):
-POSTERN_BASE_URL=https://postern.<your-account>.workers.dev \
+POSTERN_BASE_URL=https://postern.<your-subdomain>.workers.dev \
 POSTERN_API_TOKEN=<your-token> \
 POSTERN_FROM=noreply@<your-domain> \
 POSTERN_TO=you@<your-domain> \
