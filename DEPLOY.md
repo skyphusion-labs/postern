@@ -30,6 +30,11 @@ npx wrangler r2 bucket create postern-attachments
 Edit `inbound/wrangler.jsonc`:
 - paste your `database_id` into the `d1_databases` block,
 - set `DEFAULT_FROM`, `DEFAULT_FROM_NAME`, `ALLOWED_FROM_DOMAIN` to your domain,
+- to reach the worker over `https://postern.<subdomain>.workers.dev` (the URL the
+  webmail and smoke steps below use), set `"workers_dev": true`. The shipped
+  default is `false` (secure-by-default: no public door; a production install
+  instead adds a token-gated custom route on your own domain), so with the
+  default left in place `npm run deploy` gives you no reachable URL to smoke.
 - (optional) uncomment the `vectorize` + `ai` blocks if you created the index.
 
 Apply the schema:
@@ -101,8 +106,9 @@ npm install
 npm run deploy
 ```
 
-`npm run deploy` prints the deployed URL, e.g.
-`https://postern.<your-account>.workers.dev`.
+With `workers_dev` enabled (above), `npm run deploy` prints the deployed URL, e.g.
+`https://postern.<your-subdomain>.workers.dev`. Allow up to a minute after the
+first deploy for the workers.dev route to go live before you smoke it.
 
 Open `https://postern.<your-account>.workers.dev/webmail` to browse the mailbox
 in a browser (paste that origin + your `POSTERN_API_TOKEN`); IMAP clients can use
