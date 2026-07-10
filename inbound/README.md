@@ -127,7 +127,7 @@ For an existing DB that predates the attachments/FTS/dmarc columns, apply
 ### Email Routing wiring (CF Dashboard)
 
 Email > Email Routing > Routing Rules: route **all** addresses (including
-catch-all) to Worker `skyphusion-email-inbound`. Remove any direct "Forward to
+catch-all) to Worker `postern`. Remove any direct "Forward to
 email" rules; forwarding is handled inside the Worker (after ingestion) so every
 message is stored exactly once.
 

@@ -115,4 +115,14 @@ jobs:
           npx wrangler d1 migrations apply DB --remote -c "$CFG"
           echo "Deploying inbound worker"
           npx wrangler deploy -c "$CFG"
-          rm -f wrangler.ci.json migrations.pending.txt
+
+      # Always remove the CI-materialized operator config, even when the deploy
+      # step above failed partway: GitHub runs run: blocks under bash -e, so a
+      # failed migrations-list / gate / apply / deploy exits before any trailing
+      # rm. The file is derived from the POSTERN_INBOUND_WRANGLER secret, so its
+      # teardown must be deterministic, never conditional on the happy path
+      # (wrangler.ci.json is also gitignored, #296). (#298)
+      - name: Clean up materialized config
+        if: always()
+        working-directory: inbound
+        run: rm -f wrangler.ci.json migrations.pending.txt

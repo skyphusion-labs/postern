@@ -31,12 +31,15 @@ Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/A
 - **`webmail/`** -- a single self-contained page (vanilla HTML/CSS/JS, no build step) served by the
   worker at **`/webmail`**. Read-only human door: list, read, threads, search. BYO-token in
   `sessionStorage` only, HTML rendered in a sandboxed iframe (no scripts/trackers), locked-down CSP.
-- **`imap/`** -- a small Twisted server fronting the read API as **read-only IMAP**, so
-  Thunderbird / mutt / iOS Mail can open the mailbox.
+- **`imap/`** -- a small Twisted server fronting the API as IMAP: read, plus the
+  `\Seen` read/unread flag and delete (via a `both`-scoped `POSTERN_API_TOKEN_DELETE`);
+  sending still only through the structured API. Thunderbird / mutt / iOS Mail can open
+  the mailbox.
 - **`clients/python/`** -- a Python client + CLI for the API. Published on PyPI as
   **`postern-client`** (`pip install postern-client`).
 
-Human doors (webmail, imap) are read-only **clients** of the API, never a second store. Sending always
+Human doors (webmail, imap) are **clients** of the API, never a second store: webmail is read-only;
+imap adds the `\Seen` flag and delete, both persisted through the API (not a local store). Sending always
 goes through the structured API.
 
 ## Documentation map
