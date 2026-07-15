@@ -284,6 +284,18 @@ never `0.0.0.0`. The PROXY-protocol edge contract (the L4 LB in front) is
 Internal/production deploy runbooks are maintained out-of-tree in the operator
 private infrastructure repository; this README covers the generic self-host path.
 
+## Dependency upgrades (go-smtp / go-sasl)
+
+go-smtp **0.24** pulls go-sasl without `NewLoginServer` (LOGIN is obsolete; PLAIN
+is preferred). Submission still advertises AUTH LOGIN for legacy MUAs (Windows
+Send-MailMessage, some Apple clients). The LOGIN server implementation lives in
+`sasl_login.go` (vendored from pre-removal go-sasl). Do not delete without
+confirming clients tolerate PLAIN-only.
+
+Fleet LDAP pin + IMAP incident runbook:
+`fleet-chezmoi/docs/runlog/2026-07-15-laptop-dependabot-postern.md` and
+`fleet-chezmoi/system/swarm/RUNBOOK-ldap-outpost-stable-cert.md`.
+
 ## Files
 
 ```
@@ -302,6 +314,7 @@ relay/
   auth_ldap.go        #68  ldap backend (go-ldap simple/search bind over TLS)
   auth_system.go      #68  system backend stub (default build; rejects without -tags pam)
   auth_system_pam.go  #68  system backend (PAM; build-tagged `pam`, cgo)
+  sasl_login.go       vendored LOGIN SASL server (go-sasl removed NewLoginServer)
   cert.go             #68  TLS cert loader with hot-reload on renewal
   systemd/            hardened service unit
 ```
