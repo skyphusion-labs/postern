@@ -9,8 +9,8 @@ go 1.25.0
 toolchain go1.25.12
 
 require (
-	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21
-	github.com/emersion/go-smtp v0.21.3
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
+	github.com/emersion/go-smtp v0.24.0
 	github.com/go-ldap/ldap/v3 v3.4.13
 	github.com/jhillyerd/enmime v1.3.0
 	github.com/msteinert/pam v1.2.0
