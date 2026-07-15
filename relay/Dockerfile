@@ -16,7 +16,7 @@
 # Build context is relay/ (see .github/workflows/relay-image.yml).
 
 # ---- stage 1: builder -- compile a static, cgo-free binary ------------------
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 
 ENV CGO_ENABLED=0 \
     GOFLAGS=-trimpath

@@ -12,7 +12,7 @@
 # Build context is imap/ (see .github/workflows/imap-image.yml).
 
 # ---- stage 1: builder -- resolve + install the package into a self-contained venv
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -29,7 +29,7 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install '.[tls,ldap]'
 
 # ---- stage 2: runtime -- slim, non-root, venv only (no build tools, no source tree)
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # libcap2-bin only to setcap the interpreter so the NON-ROOT user may bind the
 # privileged port 993 (CAP_NET_BIND_SERVICE), scoped to this one interpreter. This
