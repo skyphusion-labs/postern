@@ -83,7 +83,8 @@ func (s *submissionSession) Auth(mech string) (sasl.Server, error) {
 			return s.authenticate(username, password)
 		}), nil
 	case sasl.Login:
-		return sasl.NewLoginServer(func(username, password string) error {
+		// NewLoginServer was removed from go-sasl; local copy in sasl_login.go.
+		return newLoginServer(func(username, password string) error {
 			return s.authenticate(username, password)
 		}), nil
 	default:
