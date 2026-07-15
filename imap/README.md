@@ -7,6 +7,10 @@ touching D1/R2 directly.
 
 Stack map: [docs/architecture.md](../docs/architecture.md).
 
+**Production image:** `imap/Dockerfile` builds `ghcr.io/skyphusion-labs/postern-imap`
+on **Python 3.14 slim** (stay current; do not pin back without cause). Fleet deploy
+record: `fleet-chezmoi/system/postern-imap/README.md`.
+
 ```mermaid
 flowchart LR
     mua[Thunderbird / iOS Mail] --> imap[postern-imap]
