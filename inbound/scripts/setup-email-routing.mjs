@@ -19,6 +19,10 @@
 //                shipped wrangler.jsonc "name"; pass the value you actually
 //                deployed under if you renamed it)
 // --dry-run      resolve and print the rule payload without applying it
+//
+// Deliberately does not echo CF_ACCOUNT_ID / CF_ZONE_ID / any request path
+// back to stdout/stderr: those are read once from the environment and used
+// only inside fetch() calls, never interpolated into a log message.
 
 const token = process.env.CF_API_TOKEN || "";
 const accountId = process.env.CF_ACCOUNT_ID || "";
@@ -40,22 +44,24 @@ function flag(name) {
 const API = "https://api.cloudflare.com/client/v4";
 const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
 
-async function cf(path, init) {
+// `step` is a fixed, human-readable label (never request path or account/zone
+// ids) so a failure message can never echo the ids read from the environment.
+async function cf(step, path, init) {
   const res = await fetch(`${API}${path}`, { headers, ...init });
-  const body = await res.json();
+  const body = await res.json().catch(() => ({}));
   if (!res.ok || body.success === false) {
-    const msg = (body.errors || []).map((e) => `${e.code}: ${e.message}`).join("; ") || res.statusText;
-    throw new Error(`${init?.method || "GET"} ${path} -> HTTP ${res.status}: ${msg}`);
+    const detail = (body.errors || []).map((e) => `${e.code}: ${e.message}`).join("; ") || res.statusText;
+    throw new Error(`${step} failed: HTTP ${res.status} (${detail})`);
   }
   return body.result;
 }
 
 async function main() {
-  const scripts = await cf(`/accounts/${accountId}/workers/scripts`);
+  const scripts = await cf("list Worker scripts", `/accounts/${accountId}/workers/scripts`);
   const script = scripts.find((s) => s.id === workerName);
   if (!script) {
     console.error(
-      `no Worker named "${workerName}" in account ${accountId}. ` +
+      `no Worker named "${workerName}" found in this account. ` +
         `Deploy it first (npm run deploy), or pass --worker-name <name>.`,
     );
     process.exit(1);
@@ -70,19 +76,18 @@ async function main() {
     source: "api",
   };
 
-  console.log(`worker "${workerName}" tag: ${script.tag}`);
-  console.log(`catch-all rule payload:\n${JSON.stringify(payload, null, 2)}`);
-
   if (dryRun) {
-    console.log("--dry-run: not applied. Remove the flag to write the rule.");
+    console.log(`dry run: would route the zone's catch-all Email Routing rule to Worker "${workerName}".`);
+    console.log(JSON.stringify(payload, null, 2));
+    console.log("Remove --dry-run to apply.");
     return;
   }
 
-  const rule = await cf(`/zones/${zoneId}/email/routing/rules/catch_all`, {
+  await cf("set catch-all Email Routing rule", `/zones/${zoneId}/email/routing/rules/catch_all`, {
     method: "PUT",
     body: JSON.stringify(payload),
   });
-  console.log(`catch-all rule now routes to Worker "${workerName}" (rule id: ${rule.id ?? "n/a"}).`);
+  console.log(`catch-all Email Routing rule now routes to Worker "${workerName}".`);
   console.log(
     "Remove any conflicting per-address 'Forward to email' rules in the Dashboard " +
       "so every address reaches the Worker (DEPLOY.md section 3).",
@@ -90,6 +95,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e.message || e);
+  console.error(e.message || String(e));
   process.exit(1);
 });
