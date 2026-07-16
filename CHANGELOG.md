@@ -3,6 +3,12 @@
 Notable changes per release. SemVer-style: **v1.0.0** is the first production-ready
 Core v1.0 mailbox (M1 contract). Newest first.
 
+## v1.0.1 -- 2026-07-16
+
+Production catch-up release. Marks the current deployed tip (`inbound` Worker +
+IMAP/relay images on GHCR `latest`) after post-v1.0.0 main landings (docs, IMAP
+image policy, Dependabot, operator notes). No intentional Core contract break.
+
 ## v1.0.0
 
 **Postern Core v1.0 -- email for humans and agents.** First tagged release of the
