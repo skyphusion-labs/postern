@@ -14,7 +14,7 @@ silent. Only the network is faked (FakeTransport); the meter, its construction f
 config, and the sink are all the production objects.
 
 NOTE: a green CI here does NOT prove the running box emits -- a stale deploy is
-invisible to repo tests. The standing post-deploy emit-sanity in imap/DEPLOY.md is
+invisible to repo tests. The standing post-deploy emit-sanity in imap/MEASUREMENT.md is
 the guard for that. This test guards the wiring against a code regression.
 """
 
