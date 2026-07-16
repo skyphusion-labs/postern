@@ -108,4 +108,6 @@
   //   Route ALL addresses (including catch-all) to this Worker. The worker
   //   handles forwarding to FORWARD_TO after ingestion. Remove any direct
   //   "Forward to email" rules so everything goes through the worker.
+  //   Scriptable alternative for agent/CI installs (#314): npm run
+  //   setup-email-routing (see DEPLOY.md section 3).
 }

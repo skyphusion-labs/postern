@@ -138,6 +138,24 @@ In the Dashboard -> Email -> Email Routing -> Routing Rules, route all addresses
 (including catch-all) to the deployed Worker. The worker stores every inbound
 message, then forwards the original to `FORWARD_TO` if you set one.
 
+**Scripted alternative (#314), for agent-driven or CI installs.** The Dashboard
+click-through above is the only step in this guide that a scoped API token
+cannot do end to end; `inbound/scripts/setup-email-routing.mjs` closes that gap
+by pointing the zone's catch-all rule at the deployed Worker over the API:
+
+```bash
+cd inbound
+CF_API_TOKEN=<token> CF_ACCOUNT_ID=<account-id> CF_ZONE_ID=<zone-id> \
+  node scripts/setup-email-routing.mjs --dry-run   # print the plan first
+# drop --dry-run to apply
+```
+
+The token needs **Email Routing Rules: Edit** (zone) to write the rule, plus
+**Workers Scripts: Read** (account) so the script can resolve the deployed
+Worker's `owner_worker_tag`. This still only sets the catch-all rule; remove
+any conflicting per-address "Forward to email" rules in the Dashboard so every
+address reaches the Worker.
+
 ## 4. Run the smoke
 
 The smoke takes your own values; it has no built-in domain or account.
