@@ -1,4 +1,4 @@
-# Deploying the Postern 587 submission server on dischord
+# Deploying the Postern 587 submission server on the mail host
 
 The self-hosted **send** door for Postern: the Go `relay/` binary in its
 authenticated SMTP **submission** role (587), the SMTP companion to the IMAP read
@@ -11,14 +11,14 @@ reproducible from the docs alone; it installs the server as a hardened systemd u
 ## Deployment contract (what runs where)
 
 ```
-mail client / agent ──SMTP submission (STARTTLS + AUTH)──► postern-submission (systemd, dischord)
+mail client / agent ──SMTP submission (STARTTLS + AUTH)──► postern-submission (systemd, mail host)
                                                               │ AUTH: PAM -> nslcd -> Authentik (the user)
                                                               │ HTTPS + Bearer (POSTERN_SEND_TOKEN)
                                                               ▼
                                                    worker /api/send (DKIM-sign + store + MX)
 ```
 
-- **Host:** dischord (10.1.1.2). Same box as the IMAP proxy, the inbound relay, and
+- **Host:** the mail host (192.0.2.10). Same box as the IMAP proxy, the inbound relay, and
   the Authentik LDAP outpost; PAM auth is a local nslcd hop (no TLS-to-directory
   needed; see AUTH-CONTRACT.md section 3a).
 - **Listener (v1):** loopback `127.0.0.1:1587`, STARTTLS + AUTH. AUTH is offered
@@ -54,15 +54,15 @@ NO inbound intake port: the old `2587` dead-loopback stub is gone. Leave
 relay still needs at least one active seam (submission, inbound, or the `/dispatch`
 bridge) or `loadConfig` fails with a `nothing to do: ...` error.
 
-**Live-unit follow-up:** the running `postern-submission` unit on dischord still
+**Live-unit follow-up:** the running `postern-submission` unit on the mail host still
 carries the `2587` `SMTP_LISTEN` stub + dummy `POSTERN_INGEST_URL`. Dropping those
 from `/etc/postern-submission.env` (and the deployed unit) is a separate mesh-side
 change, NOT part of this code PR; do it on the next supervised deploy.
 
 ## Prerequisites
 - Go >= 1.22 and **libpam headers** (`libpam0g-dev`) to build `-tags pam`; `libpam`
-  + `libpam-ldapd` (nslcd) at runtime (already present on dischord).
-- `nslcd` running and `getent group mail-users` resolving (verified on dischord).
+  + `libpam-ldapd` (nslcd) at runtime (already present on the mail host).
+- `nslcd` running and `getent group mail-users` resolving (verified on the mail host).
 - The PAM service file `/etc/pam.d/postern` installed (fleet-chezmoi
   `system/pam.d/postern`).
 - The worker send origin (`POSTERN_SEND_URL`) reachable. v1 uses
@@ -153,7 +153,7 @@ account, a bad password, or a `From` != bound identity must be rejected (535/550
 No public listener. Tunnel over the bastion and point a client at the local end:
 
 ```bash
-ssh -J lagwagon -L 1587:127.0.0.1:1587 dischord
+ssh -J <bastion> -L 1587:127.0.0.1:1587 <mail-host>
 # Thunderbird: outgoing SMTP 127.0.0.1:1587, STARTTLS, normal password; username =
 # your short login (or full address), password = your Authentik password.
 ```

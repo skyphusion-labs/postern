@@ -217,7 +217,7 @@ func TestIntakeAddrIsLoopback(t *testing.T) {
 		{":2525", false},         // wildcard bind, every interface
 		{"0.0.0.0:2525", false},
 		{"[::]:2525", false},
-		{"10.1.1.2:2525", false}, // a real interface
+		{"192.0.2.10:2525", false}, // a real interface
 		{"smtp.example.com:2525", false},
 	}
 	for _, tc := range cases {
