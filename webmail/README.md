@@ -1,10 +1,11 @@
 # Postern webmail
 
-A minimal, **read-only** browser frontend for [Postern](../README.md): the human
-door, complementing the [IMAP proxy](../imap/README.md). It is a **client of the
-Postern read API** (`/api/messages`, `/api/messages/{id}`, `/api/threads/{id}`,
-`/api/search`, see [`docs/CONTRACT.md`](../docs/CONTRACT.md) section 4) that lets
-a person browse and read the one Postern mailbox in a web browser.
+A minimal browser frontend for [Postern](../README.md): the human door,
+complementing the [IMAP proxy](../imap/README.md). It is a **client of the Postern
+API** (`/api/messages`, `/api/messages/{id}`, `/api/threads/{id}`, `/api/search`,
+see [`docs/CONTRACT.md`](../docs/CONTRACT.md) section 4) that lets a person browse
+and read the one Postern mailbox in a web browser, and **compose and reply** when a
+send-scoped token is supplied ([`COMPOSE.md`](COMPOSE.md)).
 
 Stack map: [docs/architecture.md](../docs/architecture.md).
 
@@ -52,17 +53,21 @@ apply `schema.sql` then `seed.dev.sql` to a local D1, `wrangler dev`, open
   with a **Download** button each.
 - **Thread view**: sibling messages in the same thread, click to jump.
 - **Search** over the mailbox (the `/api/search` endpoint).
-- **Read-only.** No compose / send / reply. Sending stays the structured API's
-  job, the same boundary as the IMAP proxy. (Compose is a deferred follow-up,
-  see below.)
+- **Compose and reply** when a send-scoped token is configured at connect;
+  plain-text bodies. Read-only without one: the compose controls are gated on a
+  probed send capability, never on the presence of a token, so a read-only token is
+  never offered a UI that can only fail. Full contract: [`COMPOSE.md`](COMPOSE.md).
 
 ## Auth (#32): bring your own token
 
-Same single-token model as Postern and the IMAP proxy. You supply two things in
-the browser:
+Same bring-your-own-token model as Postern and the IMAP proxy. You supply up to
+three things in the browser:
 
-- the **API origin** (e.g. `https://postern.example`), and
-- your **Postern API token**.
+- the **API origin** (e.g. `https://postern.example`),
+- your **Postern read token**, and
+- optionally a **send-scoped token** to compose and reply ([`COMPOSE.md`](COMPOSE.md)).
+  A `send`-scope token gets `403` on every GET, so it cannot stand in for the read
+  token; they are separate credentials in separate `sessionStorage` keys.
 
 The token is the `Authorization: Bearer` for the read-API calls. It is kept in
 `sessionStorage` for that browser tab **only**: never sent anywhere but the API
@@ -157,5 +162,11 @@ and security headers; opening the standalone file directly does not.
 
 ## Deferred (follow-ups)
 
-- **Compose / reply / send.** Shipped in #277 when a send token is configured at connect.
+- **Compose extras:** `cc` / `bcc`, attachments, HTML bodies, and drafts. The API
+  supports them; the compose UI is plain-text only for now ([`COMPOSE.md`](COMPOSE.md)
+  section 4).
+- **"Sending as ..." identity display.** The page cannot introspect its own send
+  identity (a send token gets `403` on every GET), so it shows no identity rather
+  than guessing one; needs a send-scoped echo on the worker side
+  ([`COMPOSE.md`](COMPOSE.md) section 3).
 - **Keyset pagination polish** (search mode selector shipped in #282).
