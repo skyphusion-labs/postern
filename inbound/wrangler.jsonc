@@ -80,7 +80,17 @@
     "DEFAULT_FROM": "noreply@example.com",
     "DEFAULT_FROM_NAME": "Postern",
     "ALLOWED_FROM_DOMAIN": "example.com",
-    "OUTBOUND_TRANSPORT": "cf"
+    "OUTBOUND_TRANSPORT": "cf",
+
+    // OPTIONAL (#28/#335): the per-identity send registry. A JSON object (as a
+    // string) mapping sha256hex(raw send token) -> { "from": "...", "displayName"?: "..." }.
+    // It holds token HASHES and display names ONLY, never a credential, so it is
+    // a readable var, NOT a secret: readable, mergeable, diffable, and always
+    // recoverable from the deployed worker. "" disables the registry (static
+    // token posture only). NOTE: wrangler deploy replaces vars (only secrets
+    // persist across deploys), so this value must live in the config you deploy
+    // with. Contract + operator recipe: docs/SEND-IDENTITIES.md.
+    "POSTERN_SEND_IDENTITIES": ""
   }
 
   // OPTIONAL (#187): the per-user .mobileconfig generator (GET /api/mobileconfig)

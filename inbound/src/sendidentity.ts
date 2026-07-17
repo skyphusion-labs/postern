@@ -4,10 +4,13 @@
 // each carry the SAME send scope but a different bound From, so everyone sends as
 // THEMSELVES through their own per-identity token instead of one shared key.
 //
-// The registry is OPERATOR CONFIG (a worker secret, POSTERN_SEND_IDENTITIES), not
-// code: an operator adds an identity by editing the secret, with no deploy. It
-// stores sha256 HASHES of tokens, never the raw tokens, so the secret itself never
-// holds a plaintext send credential. Resolution hashes the presented Bearer and
+// The registry is OPERATOR CONFIG (the POSTERN_SEND_IDENTITIES var in wrangler
+// config, #335; a worker secret before that), not code: an operator adds an identity
+// by editing the var and redeploying. It stores sha256 HASHES of tokens, never the
+// raw tokens, so the registry never holds a plaintext send credential -- which is
+// exactly why it is a readable var and not a write-only secret: there is nothing
+// confidential in it, and a write-only registry cannot be merged, diffed, or
+// recovered (#335). Resolution hashes the presented Bearer and
 // indexes the map by that hash (an index on a hash of a high-entropy secret, so
 // the non-constant-time Map lookup does not leak the token).
 
