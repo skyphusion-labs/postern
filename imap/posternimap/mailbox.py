@@ -124,6 +124,9 @@ class PosternMailbox:
     selectable with zero messages and NO API hit, so a client (Thunderbird) maps
     its special-use folders to ours and never tries to CREATE them.
 
+    `append_noop` lets Drafts acknowledge Apple Mail autosaves without persisting
+    bytes. The draft remains client-local; other placeholders still reject APPEND.
+
     `window` caps the snapshot to the most-recent N messages (0 = unlimited).
     `poll_seconds` enables a live-refresh poll while selected (0 = disabled).
     """
@@ -148,6 +151,7 @@ class PosternMailbox:
         delete_writable: bool = False,
         delete_client: Optional[PosternClient] = None,
         trash_sink: bool = False,
+        append_noop: bool = False,
         trash_staging: Optional[list] = None,
         trash_staging_sink: Optional[list] = None,
     ) -> None:
@@ -186,6 +190,9 @@ class PosternMailbox:
         self._delete_writable = delete_writable
         # Trash sink: no messages stored here; COPY/MOVE is handled server-side as delete.
         self._trash_sink = trash_sink
+        # Drafts compatibility: acknowledge Apple Mail's mid-compose APPEND without
+        # pretending Postern has a server-side draft store.
+        self._append_noop = append_noop
         # Trash SELECT reads staged summaries (see account._trash_staging).
         self._trash_staging = trash_staging
         # Real views stage summaries here on COPY-to-Trash delete.
@@ -684,11 +691,12 @@ class PosternMailbox:
         from twisted.internet import defer
 
         if self._empty:
-            if self._trash_sink:
+            if self._trash_sink or self._append_noop:
                 # Trash never stores bytes; COPY addMessage is a no-op success if the
                 # stock Twisted path runs. Server-side COPY-to-Trash deletes at source.
+                # Drafts also accepts APPEND as a no-op for Apple Mail autosave.
                 return defer.succeed(None)
-            # Placeholder folders (Drafts/Junk/Archive) have no backing store
+            # Placeholder folders (Junk/Archive/Notes) have no backing store
             # in v1; the pre-#109 behaviour fake-acked the APPEND with OK and then
             # DROPPED the message -> silent data loss (RFC 3501 / audit F11). Reject
             # with a failed Deferred so the server returns a tagged NO and a client

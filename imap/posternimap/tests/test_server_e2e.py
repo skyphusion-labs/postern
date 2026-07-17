@@ -402,16 +402,30 @@ class ServerE2ETest(twisted_unittest.TestCase):
 
 
     @defer.inlineCallbacks
-    def test_append_to_placeholder_folder_is_rejected(self):
-        # #109 end-to-end: APPEND into a placeholder (Drafts) returns a tagged NO
-        # with a clear reason, NOT a fake OK that silently drops the message.
+    def test_append_to_drafts_succeeds_as_noop(self):
+        # Apple Mail auto-saves mid-compose via APPEND Drafts. A positive response
+        # keeps the draft client-local and avoids an error dialog; Postern stores no
+        # bytes and Drafts remains empty.
         import io
 
         proto = yield self._client()
         try:
             yield proto.login(b"agent", b"tok")
             msg = io.BytesIO(b"From: a@example.com\r\nSubject: draft\r\n\r\nbody\r\n")
-            d = proto.append("Drafts", msg, ("\\Seen",))
+            yield proto.append("Drafts", msg, ("\\Draft",))
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_append_to_other_placeholder_folder_is_rejected(self):
+        # #109 stays intact for placeholders other than the Drafts compatibility path.
+        import io
+
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent", b"tok")
+            msg = io.BytesIO(b"From: a@example.com\r\nSubject: junk\r\n\r\nbody\r\n")
+            d = proto.append("Junk", msg, ("\\Seen",))
             exc = yield self.assertFailure(d, imap4.IMAP4Exception)
             self.assertIn("does not store", str(exc))
         finally:
@@ -805,9 +819,9 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
             yield proto.transport.loseConnection()
 
     @defer.inlineCallbacks
-    def test_append_to_placeholder_is_rejected_without_a_store_read(self):
-        # A placeholder folder has no backing store; APPEND must be a clean tagged NO
-        # (#109), and it must not depend on the store either.
+    def test_append_to_drafts_succeeds_without_a_store_read(self):
+        # Drafts no-op compatibility must not depend on the store. ErrorTransport
+        # makes every API call fail; success proves APPEND touched no API.
         import io
 
         addr, transport = self._spin(503)
@@ -815,7 +829,7 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
         try:
             yield proto.login(b"agent", b"tok")
             msg = io.BytesIO(b"From: a@b.com\r\nSubject: draft\r\n\r\nx\r\n")
-            yield self.assertFailure(proto.append("Drafts", msg), imap4.IMAP4Exception)
+            yield proto.append("Drafts", msg, ("\\Draft",))
             self.assertEqual(transport.calls, [])
         finally:
             yield proto.transport.loseConnection()

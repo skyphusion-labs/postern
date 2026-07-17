@@ -3,6 +3,12 @@
 Notable changes per release. SemVer-style: **v1.0.0** is the first production-ready
 Core v1.0 mailbox (M1 contract). Newest first.
 
+## v1.0.2 -- 2026-07-17
+
+- IMAP: accept Apple Mail's mid-compose `APPEND Drafts` autosave as a no-op so
+  composing does not raise a Drafts error. Drafts remains client-local; Postern
+  still stores no server-side draft.
+
 ## v1.0.1 -- 2026-07-16
 
 Production catch-up release. Marks the current deployed tip (`inbound` Worker +

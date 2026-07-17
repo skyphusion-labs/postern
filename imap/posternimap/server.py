@@ -318,7 +318,9 @@ class PosternIMAP4Server(imap4.IMAP4Server):
           * real view (INBOX/Sent/All) -> tagged OK. EXISTS is optional on APPEND (RFC
             3501 7.4.1), and the copy is not actually stored, so we omit it; the client
             re-syncs Sent on its next poll/SELECT.
-          * placeholder (Drafts/Trash/Junk/Archive/Notes) -> tagged NO (no backing store,
+          * noop (Drafts) -> tagged OK for Apple Mail mid-compose autosave. Postern
+            stores no draft bytes; the client retains its local draft.
+          * placeholder (Trash/Junk/Archive/Notes) -> tagged NO (no backing store,
             #109: fail honestly rather than fake-ack and drop the message).
           * unknown mailbox -> NO [TRYCREATE], matching the stock behavior.
         The message literal is already fully read by the APPEND arg parser (arg_literal),
@@ -336,8 +338,10 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             self.sendNegativeResponse(
                 tag, b"APPEND failed: this folder does not store messages; APPEND is not supported"
             )
-        else:
+        elif kind in ("real", "noop"):
             self.sendPositiveResponse(tag, b"APPEND complete")
+        else:
+            self.sendBadResponse(tag, b"APPEND failed: unsupported mailbox classification")
 
     # Route APPEND through the override in both states it is valid (authenticated +
     # selected). dispatchCommand reads the class tuple, not getattr(self, "do_APPEND");

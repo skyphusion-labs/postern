@@ -3,6 +3,18 @@
 The Apple Mail IMAP door contract: dual-token delete, attachment serving, Trash
 behavior.
 
+## Draft autosave
+
+Apple Mail issues `APPEND Drafts` repeatedly while a message is being composed.
+Postern advertises `Drafts` as the RFC 6154 `\Drafts` folder but has no server-side
+draft store. The IMAP door therefore acknowledges Drafts APPEND as a no-op:
+
+- Apple Mail keeps its local draft and does not show an APPEND failure dialog.
+- Postern writes no message bytes and makes no mailbox API call.
+- Drafts remains empty after reconnect; drafts do not roam between devices.
+- Trash, Junk, Archive, and Notes still reject APPEND because they have no backing
+  store (#109).
+
 ## What shipped (merged on `main`)
 
 | PR | Commit area | What |

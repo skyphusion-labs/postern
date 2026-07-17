@@ -315,9 +315,22 @@ class MailboxTest(unittest.TestCase):
         d.addCallback(out.append)
         self.assertEqual(out, [None])  # already fired, no error
 
-    def test_append_to_placeholder_folder_is_rejected(self):
-        # #109: a placeholder folder has no backing store; APPEND must FAIL (tagged
-        # NO at the protocol layer) rather than fake-ack OK and drop the message.
+    def test_append_to_drafts_is_noop_success(self):
+        # Apple Mail auto-saves mid-compose with APPEND Drafts. Drafts has no backing
+        # store, but this scoped compatibility path succeeds so the client keeps its
+        # local draft without displaying an error.
+        from twisted.internet import defer
+        from posternimap.mailbox import PosternMailbox
+
+        mb = PosternMailbox(self.client, empty=True, append_noop=True)
+        d = mb.addMessage(b"raw rfc822 bytes", flags=["\\Draft"], date=None)
+        self.assertIsInstance(d, defer.Deferred)
+        out = []
+        d.addCallback(out.append)
+        self.assertEqual(out, [None])
+
+    def test_append_to_other_placeholder_folder_is_rejected(self):
+        # #109 remains intact for placeholders without the Drafts exception.
         from twisted.internet import defer
         from posternimap.mailbox import AppendRejectedError, PosternMailbox
 
@@ -1133,13 +1146,14 @@ class AccountTest(unittest.TestCase):
 
     def test_appendability_classifies_folders(self):
         # #233: the server uses this to answer APPEND with no store read. Real backed
-        # views accept the Sent-copy no-op; placeholders reject; unknown -> TRYCREATE.
+        # views and Drafts accept no-op; other placeholders reject; unknown -> TRYCREATE.
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
         for name in ("INBOX", "inbox", "Sent", "All"):
             self.assertEqual(acct.appendability(name), "real", name)
-        for name in ("Drafts", "Trash", "Junk", "Archive", "Notes"):
+        self.assertEqual(acct.appendability("Drafts"), "noop")
+        for name in ("Trash", "Junk", "Archive", "Notes"):
             self.assertEqual(acct.appendability(name), "placeholder", name)
         self.assertEqual(acct.copyability("Trash"), "trash_delete")
         self.assertEqual(acct.copyability("Drafts"), "placeholder")
