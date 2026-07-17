@@ -223,13 +223,19 @@ infrastructure on every self-hoster.
 
 ```
 request arrives
-  -> has __Host-postern_session cookie?  --yes--> hash -> webmail_sessions lookup
+  -> has Authorization: Bearer?          --yes--> existing resolveToken (WINS)
+        (static scope tokens, then per-identity registry)
+  -> else has __Host-postern_session cookie?  --yes--> hash -> webmail_sessions lookup
         -> valid + not revoked + not expired?  --yes--> { scope = caps, identity }
         (state-changing method also requires matching X-Postern-CSRF)
-  -> else has Authorization: Bearer?     --yes--> existing resolveToken
-        (static scope tokens, then per-identity registry)
   -> else 401
 ```
+
+**An explicit `Authorization` header WINS over the ambient session cookie.** A request
+that carries a Bearer is asking to act as that token (BYO-token / operator mode); honoring
+the cookie instead would silently bind the wrong From and a different capability set to an
+explicit-token call on the same origin. So Bearer is resolved first; the cookie is the
+fallback only when no `Authorization` header is present.
 
 The cookie branch produces the identical `{ scope, identity }` the Bearer branch does, so
 `/api/send` and `/api/reply` bind the From to `identity.from` for a session EXACTLY as
@@ -337,6 +343,8 @@ CREATE TABLE IF NOT EXISTS drafts (
   body_html    TEXT,               -- stored as authored; sanitized at SEND, section 3-adjacent
   in_reply_to  TEXT,               -- set when the draft is a reply/forward
   thread_id    TEXT,               -- for reply drafts, so the composed reply threads
+  uid          INTEGER NOT NULL,   -- per-folder IMAP UID from mailbox_uid_counter['drafts'];
+                                   -- a NEW uid is minted on every autosave (see 2.4.1)
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
@@ -347,6 +355,21 @@ Draft attachments: staged bytes go to R2 under a `drafts/<id>/<n>` key with a
 `draft_attachments` metadata table (same additive shape as `attachments`); deferred to the
 compose-parity phase (4) with the schema reserved here. For phase 1 the contract is the
 `drafts` table above.
+
+#### 2.4.1 Draft IMAP UID semantics (RFC 3501 immutability, load-bearing)
+
+A draft is REWRITTEN on every autosave, but RFC 3501 messages are IMMUTABLE: a UID always
+names the same bytes. So an in-place mutation of a draft under a stable UID would be
+non-conformant, and bumping the Drafts UIDVALIDITY on every keystroke would force a full
+client resync per autosave (unusable). The Drafts folder therefore joins the
+`mailbox_uid_counter` model (2.6) with its own `'drafts'` counter row and its own
+UIDVALIDITY, and **each autosave revision mints a NEW `folder_uid` and EXPUNGES the old
+one**: the door presents an autosave as `EXPUNGE(old uid)` + a new higher UID for the
+revised draft. The draft's stable identity for the API/webmail is `drafts.id` (the uuid);
+its IMAP UID is `drafts.uid`, reassigned from the counter on every `PUT`. UIDVALIDITY for
+Drafts is minted ONCE (the folder had no durable state before) and never bumped on
+autosave, because the expunge+new-UID dance is exactly how RFC 3501 expresses a changed
+message without a validity break. `DELETE /api/drafts/{id}` presents as a plain EXPUNGE.
 
 Draft API (new, capability = `send`, because a draft is composed outbound mail owned by
 the sending identity):
@@ -461,7 +484,8 @@ The advertised set is unchanged (INBOX, Sent, All, Drafts, Trash, Junk, Archive,
 so a client that already auto-mapped folders is undisturbed. What changes is that
 Drafts/Trash/Junk/Archive **stop being empty placeholders** and become real views:
 
-- Drafts -> the `drafts` table (2.4), projected as messages.
+- Drafts -> the `drafts` table (2.4), projected as messages, under the per-draft
+  `drafts.uid` and the folder's own UIDVALIDITY; an autosave is an EXPUNGE + new UID (2.4.1).
 - Trash -> `messages WHERE mailbox='trash'`.
 - Junk -> `messages WHERE mailbox='junk'`.
 - Archive -> `messages WHERE mailbox='archive'`.
@@ -478,8 +502,32 @@ non-Postern-SMTP Sent copy). New semantics per target:
 | APPEND target | New behavior |
 |---|---|
 | Drafts | **Store a durable draft** (`POST /api/drafts` equivalent): a genuine draft APPEND now persists. Apple Mail mid-compose autosave finally survives a reconnect. |
-| Trash / Junk / Archive | If the appended message already exists in the store (same Message-ID), set its `mailbox` placement; if it is genuinely new, store it as an inbound-class record placed in that folder. Either way the bytes are kept, never discarded. |
-| INBOX / Sent / All | A genuine new-message APPEND here has no honest home (these are direction-derived, not arbitrary sinks). **Refuse with a tagged `NO`** (RFC-compliant explicit refusal), NOT a silent OK. The one exception stays the post-submission Sent copy, which is already in the store by Message-ID and dedups (no discard, no double-store). |
+| Sent | Run the **fallback matcher** (see below), NOT a Message-ID match. On a hit -> **no-op OK** (the copy is already in the store, put there by the submission path). On a miss -> **store it as a genuine outbound record** (an honest Sent copy of externally-sent mail), never a silent discard and never a spurious `NO`. |
+| Trash / Junk / Archive | If the appended message already exists in the store (same Message-ID), set its `mailbox` placement; if it is genuinely new, store it as an inbound-class record placed in that folder (impl consideration: it must also seed `delivered_to`, see below). Either way the bytes are kept, never discarded. |
+| INBOX / All | A genuine new-message APPEND into a direction-derived view has no honest home (these are not arbitrary sinks). **Refuse with a tagged `NO`** (RFC-compliant explicit refusal), NOT a silent OK. |
+
+**Why Sent needs a fallback matcher, not a Message-ID match (traced in code, not assumed).**
+The core mints its OWN Message-ID for every outbound message (`inbound/src/mailbox.ts`
+`generateMessageId`, called unconditionally in `dispatchAndStore`; a client-supplied id is
+never adopted on the send path). So the stored Sent copy always carries a core-generated
+UUID id, while a standard MUA's post-send APPEND-to-Sent carries the MUA's OWN
+Message-ID. **The two ids never match.** A naive Message-ID dedup would therefore miss on
+every send and hit the tagged `NO`, so every IMAP client would show a "copy to Sent failed"
+error on every message sent -- the exact UX regression the current `append_noop` exists to
+prevent. The matcher instead treats an APPEND to Sent as already-stored when it finds a
+recent OUTBOUND message with the same `from` + `to` + `subject` within a short window (e.g.
+a few minutes); a Message-ID match is accepted too when the client happened to preserve a
+recognizable id, but it is never REQUIRED. Only a genuine miss (mail sent via a non-Postern
+SMTP, then copied here) falls through to storing a real outbound record. This keeps the
+D5 no-silent-loss guarantee AND avoids the copy-failed regression.
+
+**Impl consideration (not a contract change): APPEND-new into Trash/Junk/Archive and the
+read-filter.** Storing an appended new message as an inbound-class record means it must
+seed `delivered_to` (CONTRACT section 10) or the `COALESCE(delivered_to, ',' || to_addr ||
+',')` view predicate will place it inconsistently. The implementation must set
+`delivered_to`/`to_addr` coherently (e.g. from the APPEND envelope or the mailbox address)
+so the placed message appears in exactly the folder it was appended to and in `All`, and
+nowhere it should not. Flagged for the mailbox-operations phase.
 
 The principle: an APPEND either PERSISTS honestly or is REFUSED loudly; it never returns
 OK while dropping the message. This retires the D5 silent-loss class for real views.
@@ -502,7 +550,8 @@ The load-bearing rule from 2.6, stated for the door:
 - INBOX / Sent / All keep `messages.id` as the UID and their **existing UIDVALIDITY**.
   Introducing durable folders does NOT change their UID semantics, so their UIDVALIDITY
   MUST NOT bump (a bump force-resyncs every existing client for no reason).
-- Archive / Trash / Junk expose their **per-folder `folder_uid`** (2.6) under a UIDVALIDITY
+- Archive / Trash / Junk (and Drafts, via `drafts.uid`, 2.4.1) expose a **per-folder UID**
+  from the `mailbox_uid_counter` model (2.6) under a UIDVALIDITY
   minted once when the folder goes durable. Because these folders had no durable state
   before (they were empty placeholders), no client holds a cached UID for them, so
   assigning them a fresh UIDVALIDITY is free and correct.
@@ -583,7 +632,7 @@ Each has a recommendation; none is unilaterally settled in this doc.
 | **D-HTML-1** | HTML compose sanitization approach? | **Server-side allowlist sanitize at SEND** (authoritative), plus the existing sandboxed-iframe render on read. Browser-side sanitization is treated as UX only, never trusted. | The worker is authoritative and must not trust browser-sanitized HTML (bypassable). Open sub-question for signoff: hand-rolled allowlist serializer (zero-dep, house-preferred) vs one vetted sanitizer dep. Recommend hand-rolled allowlist (strip scripts/styles/event-handlers/remote refs/`cid` abuse; permit a small safe tag/attr set) to hold the minimal-dep line; escalate if the safe-HTML surface proves too large to hand-roll safely. |
 | **D-AUTH-1** | Session custody: HttpOnly cookie vs bearer-in-JS? | **HttpOnly same-origin session cookie for hosted; bearer-in-JS retained for BYO/operator.** (Section 1.4.) | XSS token-theft resistance + instant server-side revocation outweigh the CSRF cost, which is mitigated (1.6). BYO-token stays for self-host. |
 | **D-AUTH-2** | Directory (ldap/system) webmail login now or later? | **Later, gated.** Phase 1 specifies `native` (smtp_credentials) end to end; directory login uses the verifier seam (1.9) in a later, signoff-gated phase (it touches fleet exposure). BYO-token covers directory deployments meanwhile. | A CF Worker cannot bind the directory; the verifier-URL seam keeps the account contract ONE contract without inventing a parallel store, but it is a fleet-topology change that needs supervision. |
-| **D-DELETE-1** | Organize mutations (move / flag / soft-delete-to-Trash): `read`-scoped or a new `organize` scope? | **`read`-scoped** (only hard delete gets the new `delete` scope). | Consistent with the standing `\Seen`-is-read-scoped decision; soft-delete is recoverable (Trash window), so it is non-destructive. A separate `organize` scope adds a fourth token most deployments never split. Flagged because it is a posture call. |
+| **D-DELETE-1** | Organize mutations (move / flag / soft-delete-to-Trash): `read`-scoped or a new `organize` scope? | **`read`-scoped** (only hard delete gets the new `delete` scope). | Consistent with the standing `\Seen`-is-read-scoped decision; soft-delete is recoverable (Trash window), so it is non-destructive. A separate `organize` scope adds a fourth token most deployments never split. Flagged because it is a posture call. **Accepted consequence (must be stated):** because a `read` token can move mail to Trash and the retention purge (2.5) eventually hard-deletes trashed mail, a leaked READ token is EVENTUALLY destructive (trash everything, wait out `TRASH_RETENTION_DAYS`). This is accepted for consistency + the recovery window, on the CONDITION that the retention purge is a **gated, announced maintenance job, never a silent auto-run**, and the window is operator-configured with a sane floor. A deployment that cannot tolerate this can split `organize` out later (the model admits it). |
 | **D-SESSION-STORE-1** | Session state: server-side D1 rows vs stateless signed token? | **Server-side D1 rows** (1.5.2). | Instant revocation is an epic hard requirement; D1 write amplification is bounded by the throttled sliding-refresh (1.5.3). A stateless JWT trades away revocation. |
 
 ---
