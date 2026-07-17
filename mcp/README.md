@@ -159,8 +159,9 @@ registry; the authoritative contract is **[`docs/SEND-IDENTITIES.md`](../docs/SE
 
 How it works (the MCP client implements none of it; the worker is authoritative):
 
-- The worker holds one secret `POSTERN_SEND_IDENTITIES` mapping the **sha256 hex of a
-  raw send token** to `{ from, displayName? }` (hashes, never raw tokens).
+- The worker holds one config var `POSTERN_SEND_IDENTITIES` mapping the **sha256 hex
+  of a raw send token** to `{ from, displayName? }` (hashes, never raw tokens; it holds
+  no credential, so it is a readable var, not a secret -- #335).
 - On `POST /api/send` / `/api/reply`, when the presented Bearer resolves to a registry
   entry, the worker **overrides** the outbound `From` to that bound identity and
   discards any caller-supplied `from`. A token cannot send as anyone else. The stored
@@ -178,7 +179,7 @@ and the worker binds your From for you. You do not set or send a `from`; it is s
 Sending is a mutating capability, so it ships **off until a send token is present**.
 The read MCP is unchanged for everyone. Enabling send for an agent is a deliberate,
 gated step: register the agent's `sha256hex(token) -> { from }` in the worker's
-`POSTERN_SEND_IDENTITIES` secret (no code change; `docs/SEND-IDENTITIES.md` section 7),
+`POSTERN_SEND_IDENTITIES` registry var (no code change; `docs/SEND-IDENTITIES.md` section 7),
 hand the agent its **raw** token out of band, and set `POSTERN_SEND_TOKEN` in that
 agent's MCP server `env`. Until that toggle is flipped, the send tools do not exist at
 runtime. Do not wire a send token into shared/default agent config silently; each

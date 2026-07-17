@@ -341,7 +341,7 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN` | `both` | read + send + credential-admin (the egalitarian single-key default) |
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From) |
-| `POSTERN_SEND_IDENTITIES` (registry, #28) | `send` + bound From | `POST /api/send`/`reply` as the token's OWN identity |
+| `POSTERN_SEND_IDENTITIES` (registry, #28; a config VAR, not a secret -- #335) | `send` + bound From | `POST /api/send`/`reply` as the token's OWN identity |
 
 The three STATIC slots (`POSTERN_API_TOKEN`, `POSTERN_API_TOKEN_READ`,
 `POSTERN_API_TOKEN_SEND`) each hold a **comma-separated SET of tokens** (#154):
@@ -364,7 +364,9 @@ set, every consumer keeps using that one `both` value exactly as before.
 
 **Per-identity send registry (#28) -- one scope, many identities.** The scope split
 above bounds a leaked token to a FUNCTION; the registry adds WHO. The optional worker
-secret `POSTERN_SEND_IDENTITIES` is a JSON map of `sha256hex(token) -> { from, displayName? }`:
+config var `POSTERN_SEND_IDENTITIES` (a var, not a secret: it stores hashes, so it
+holds no credential and stays readable + mergeable, #335) is a JSON map of
+`sha256hex(token) -> { from, displayName? }`:
 many send-scoped tokens, each the SAME `send` scope but a DISTINCT, authoritative From.
 The worker hashes the presented Bearer, looks it up, and on `/api/send` + `/api/reply`
 OVERRIDES the From to the bound identity (a token cannot send as anyone else). It stores
