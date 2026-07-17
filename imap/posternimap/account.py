@@ -6,7 +6,7 @@ login, #32). It exposes a fixed set of mailboxes over the one underlying store:
   INBOX    -> inbound mail
   Sent     -> outbound mail (the stored sent copies, #27); RFC 6154 \\Sent
   All      -> the whole mailbox, both directions; \\All
-  Drafts   -> present-but-empty placeholder; \\Drafts
+  Drafts   -> present-but-empty placeholder; \\Drafts; APPEND no-op for Apple Mail
   Trash    -> delete sink for clients that MOVE/COPY here (Apple Mail); \\Trash
   Junk     -> present-but-empty placeholder; \\Junk
   Archive  -> present-but-empty placeholder; \\Archive
@@ -29,9 +29,10 @@ longer needs to try.
 The mailbox set is fixed: create/rename/delete are rejected. SUBSCRIBE/LSUB are
 satisfied (every advertised folder is implicitly subscribed). APPEND is accepted
 as a no-op SUCCESS on the real views (INBOX/Sent/All) so a client's post-send
-"copy to Sent" never fails and never double-stores, but REJECTED with a tagged NO
-on the placeholder folders (Drafts/Trash/Junk/Archive), which have no backing store:
-failing honestly beats fake-acking and dropping the message (#109).
+"copy to Sent" never fails and never double-stores. Drafts is a narrowly scoped
+client-compat exception: Apple Mail auto-saves mid-compose via APPEND, so it also
+gets a no-op SUCCESS. The draft remains local to the client; Postern still has no
+draft store. Trash/Junk/Archive/Notes reject APPEND with a tagged NO (#109).
 """
 
 from __future__ import annotations
@@ -51,7 +52,17 @@ from .measure import Meter
 class _Folder:
     """Static description of one advertised mailbox."""
 
-    __slots__ = ("direction", "special_use", "empty", "windowed", "writable_signal", "seen_writable", "delete_writable", "trash_sink")
+    __slots__ = (
+        "direction",
+        "special_use",
+        "empty",
+        "windowed",
+        "writable_signal",
+        "seen_writable",
+        "delete_writable",
+        "trash_sink",
+        "append_noop",
+    )
 
     def __init__(
         self,
@@ -63,6 +74,7 @@ class _Folder:
         seen_writable: bool = False,
         delete_writable: bool = False,
         trash_sink: bool = False,
+        append_noop: bool = False,
     ) -> None:
         self.direction = direction
         self.special_use = special_use
@@ -86,6 +98,10 @@ class _Folder:
         # from the source mailbox (Postern has no Trash store). SELECT reports READ-WRITE
         # so the client does not pre-reject the destination as immovable.
         self.trash_sink = trash_sink
+        # Apple Mail auto-saves drafts with APPEND. Drafts has no backing store, but
+        # accepting this as a no-op lets the client retain its local draft without
+        # surfacing an error on every compose autosave.
+        self.append_noop = append_noop
 
 
 # name (as the client sees it) -> folder description. INBOX/Sent/All are real
@@ -94,7 +110,7 @@ _MAILBOXES: Dict[str, _Folder] = {
     "INBOX": _Folder("inbound", [], False, windowed=True, seen_writable=True, delete_writable=True),
     "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True, seen_writable=True, delete_writable=True),
     "All": _Folder(None, ["\\All"], False, seen_writable=True, delete_writable=True),
-    "Drafts": _Folder(None, ["\\Drafts"], True),
+    "Drafts": _Folder(None, ["\\Drafts"], True, append_noop=True),
     # Trash is empty in the store but accepts COPY/MOVE as delete-from-source (#278).
     "Trash": _Folder(None, ["\\Trash"], True, writable_signal=True, trash_sink=True),
     "Junk": _Folder(None, ["\\Junk"], True),
@@ -169,6 +185,7 @@ class PosternAccount:
             delete_writable=delete_enabled,
             delete_client=self._delete_client(),
             trash_sink=folder.trash_sink,
+            append_noop=folder.append_noop,
             trash_staging=self._trash_staging if folder.trash_sink else None,
             trash_staging_sink=self._trash_staging,
         )
@@ -206,13 +223,16 @@ class PosternAccount:
           * "real"        -- INBOX/Sent/All: accept a client's post-send Sent copy as a
                              no-op success (the outbound message is already in the store
                              via the submission path; re-storing would double-count).
-          * "placeholder" -- Drafts/Trash/Junk/Archive/Notes: reject cleanly (tagged NO),
-                             they have no backing store, so a fake-ack would drop data (#109).
+          * "noop"        -- Drafts: accept Apple Mail autosave without storing it.
+          * "placeholder" -- Trash/Junk/Archive/Notes: reject cleanly (tagged NO);
+                             they have no backing store (#109).
           * "unknown"     -- no such mailbox -> the server answers NO [TRYCREATE].
         """
         folder = _MAILBOXES.get(_canonical(name))
         if folder is None:
             return "unknown"
+        if folder.append_noop:
+            return "noop"
         return "placeholder" if folder.empty else "real"
 
     def copyability(self, name: str) -> str:
