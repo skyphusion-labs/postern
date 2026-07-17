@@ -1,6 +1,6 @@
 # Per-identity send registry (#28)
 
-> Interface Control Document. This file is the contract: the registry secret, its
+> Interface Control Document. This file is the contract: the registry var, its
 > JSON shape, how a token maps to a From, and how an operator registers a new
 > per-member token. Reproducible from this doc alone.
 
@@ -16,17 +16,33 @@ through their own per-identity token, never through one shared god-token.
 The endstate this serves: openness AND accountability converge by decomposing send into
 **per-identity credentials**, not by restricting who may send.
 
-## 2. The secret
+## 2. The registry var
 
 | Name | `POSTERN_SEND_IDENTITIES` |
 |---|---|
-| Kind | Worker **secret** (`wrangler secret put`), NOT a `wrangler.jsonc` var |
+| Kind | Worker config **var** (`wrangler.jsonc` `"vars"`), NOT a secret (#335; see below) |
 | Worker | `postern` (the inbound worker, `inbound/`) |
-| Optional | Yes. Unset = the static `both`/`read`/`send` posture only (fully back-compat). |
+| Optional | Yes. Unset/empty = the static `both`/`read`/`send` posture only (fully back-compat). |
 | Holds | Token **hashes**, never raw tokens (see section 5). |
 
 It is mirrored in the hand-authored `Env` interface (`inbound/src/env.d.ts`); no
 `worker-configuration.d.ts` is generated.
+
+**Why a var and not a secret (#335).** The registry stores sha256 hashes and display
+names only, so by construction it holds no credential: making it write-only buys no
+confidentiality. A Worker secret cannot be read back, so a write-only registry cannot
+be merged (adding one identity risks destroying the rest), diffed, or recovered. As a
+var it is readable, mergeable, and always recoverable from the deployed worker.
+Because `wrangler deploy` replaces vars (only secrets persist across deploys), the
+registry lives in the wrangler config you deploy with; adding an identity is a config
+edit plus a redeploy.
+
+**Migrating a pre-#335 deployment** (registry currently held as a Worker secret):
+copy your registry JSON into the `"vars"` block of your deploy config, then
+`wrangler secret delete POSTERN_SEND_IDENTITIES` and `wrangler deploy`. Delete the
+secret FIRST: a config var cannot deploy over an existing secret of the same name.
+Between the delete and the deploy, registry tokens 401 (deny-only, no escalation;
+static tokens are unaffected), so do both steps back to back.
 
 ## 3. JSON shape
 
@@ -112,15 +128,15 @@ The registry can only DENY, never escalate, and never breaks the static tokens:
 | Condition | Result |
 |---|---|
 | Token not static and not in the registry | `401` unknown token |
-| Registry secret unset / empty | No registry tokens; static posture only |
-| Registry secret is malformed JSON | The whole registry is empty (its tokens 401); static tokens unaffected |
+| Registry var unset / empty | No registry tokens; static posture only |
+| Registry var is malformed JSON | The whole registry is empty (its tokens 401); static tokens unaffected |
 | Registry entry key is not 64-char sha256 hex | That entry skipped |
 | Registry entry `from` missing or not a valid address | That entry skipped (its token 401) |
 | Registry entry `from` valid but off `ALLOWED_FROM_DOMAIN` | Entry dropped at resolve time + logged; its token resolves to nothing -> `401`, nothing sent (`resolveFrom`'s `403 E_SENDER_NOT_ALLOWED` is the second layer) |
 
 ## 7. Operator: register a new per-member token
 
-No code change, no deploy of code -- only the secret is updated.
+No code change -- the registry var in your deploy config is extended, then redeployed.
 
 ```sh
 # 1. Mint a high-entropy raw token (per-identity credential).
@@ -129,20 +145,23 @@ TOKEN=$(openssl rand -hex 32)
 # 2. Hash it (lowercase sha256 hex == the registry key).
 HASH=$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
 
-# 3. Build/extend the JSON map, then set the secret on the inbound worker:
+# 3. MERGE the new entry into the CURRENT registry value (never overwrite blind;
+#    the current value is readable from your deploy config, or from the live
+#    worker if the config drifted):
 #    { "<HASH>": { "from": "<member>@skyphusion.org", "displayName": "<Name>" }, ... }
-wrangler secret put POSTERN_SEND_IDENTITIES   # paste the whole JSON object
+#    Put the merged object in the "vars" block of your wrangler config as
+#    POSTERN_SEND_IDENTITIES (JSON as a string), then:
+wrangler deploy
 
 # 4. Hand each member their RAW $TOKEN out of band (e.g. crew-secrets, per-member
-#    age recipient). The raw token NEVER lands in the secret or any tracked file.
+#    age recipient). The raw token NEVER lands in the registry or any tracked file.
 ```
 
 Each member then presents their own raw token as `Authorization: Bearer <token>` from
 their own MCP / client config; the worker binds the From to their identity.
 
-To rotate: mint a new token, add its hash, set the secret, hand out the new raw token,
-then remove the old hash on the next `wrangler secret put`. To revoke: remove the hash
-and re-put the secret.
+To rotate: mint a new token, add its hash, deploy, hand out the new raw token, then
+remove the old hash on the next deploy. To revoke: remove the hash and redeploy.
 
 ## 8. Scope and boundaries
 
