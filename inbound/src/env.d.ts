@@ -107,10 +107,13 @@ interface Env {
    * of a send token -> its bound sender identity { from, displayName? }. MANY tokens,
    * each the SAME send scope but a DISTINCT, authoritative From, so crew + released
    * users send as THEMSELVES via their own token instead of one shared key. Stores
-   * token HASHES, never raw tokens, so this secret never holds a plaintext send
+   * token HASHES, never raw tokens, so the registry never holds a plaintext send
    * credential. The worker hashes the presented Bearer and looks it up; a hit forces
    * the From to the bound identity on /api/send + /api/reply. Additive: leave unset to
-   * keep the static both/read/send posture. wrangler secret put POSTERN_SEND_IDENTITIES.
+   * keep the static both/read/send posture. Because it holds NO credential it is a
+   * plain-text VAR in wrangler config ("vars"), not a secret (#335): readable,
+   * mergeable, diffable, and recoverable from the deployed worker. Vars ship on every
+   * wrangler deploy (only secrets persist), so it lives in the config you deploy with.
    */
   POSTERN_SEND_IDENTITIES?: string;
   /** Default From when a send omits it. Must be on ALLOWED_FROM_DOMAIN. */

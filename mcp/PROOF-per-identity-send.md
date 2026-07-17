@@ -91,7 +91,8 @@ ICD, merged in #138), with the scope table in `docs/AUTH-CONTRACT.md` section 7.
 MCP client does not implement any of this; it forwards a composed message and the
 worker is authoritative. Summary of what the client relies on:
 
-- **Registry, not per-token secrets.** One worker secret `POSTERN_SEND_IDENTITIES`
+- **Registry, not per-token secrets.** One worker registry `POSTERN_SEND_IDENTITIES`
+  (a secret at proof time; a readable config var since #335 -- hashes only, no credential)
   maps the lowercase **sha256 hex of the raw token** to `{ from, displayName? }`. It
   stores hashes, never raw tokens. Operators register an identity by editing the
   secret; no code change (`docs/SEND-IDENTITIES.md` sections 3, 7).
