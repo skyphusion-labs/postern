@@ -112,7 +112,7 @@ accepted limitation / doc fix. File references are at the reviewed commit.
 | O3 | medium | Human doors are absent from the clean-install narrative: DEPLOY points at `imap/` in passing; the IMAP and webmail bring-up path is not in the journey | DEPLOY.md:116-117 | "Email for humans" self-host journey hits a documentation cliff | "Human doors (optional)" DEPLOY section | new issue (with O2) |
 | O4 | medium | DEPLOY baseline-seed list is stale (hardcodes 0001..0007, omits 0008); harmless today (0008 is idempotent) but the copy-paste pattern breaks on the next non-idempotent migration | DEPLOY.md:69-79 | First CI deploy failure for future fresh installs | Refresh plus "regenerate from ls migrations/" | doc fix |
 | O5 | medium | CHANGELOG documents v1.0.2 (2026-07-17) but tags stop at v1.0.1; release workflow fires on tag push only | CHANGELOG.md:6, `git tag` | Version discipline drift; no v1.0.2 release exists | Push the tag or hold the entry | operator action |
-| O6 | medium | No CodeQL/SAST and no secret-scanning workflow (dependency-vuln gates DO exist: govulncheck, pip-audit) | `.github/workflows/` | Static-analysis gap for a public mail server parsing untrusted MIME | CodeQL (js, go, python) plus push protection | roadmap |
+| O6 | medium (revised down) | CORRECTED during review: CodeQL IS running via org default setup (Analyze js/go/python checks observed green on PR #339); the sweep's file-grep missed it because default setup needs no workflow file. Residual gap: secret-scanning/push-protection status unconfirmed, and default-setup config is not visible in-repo | PR #339 checks vs `.github/workflows/` | Smaller than first assessed; residual is confirmation, not absence | Confirm secret-scanning/push protection; optionally pin CodeQL config in-repo for visibility | verify |
 | O7 | medium | No CONTRIBUTING, code of conduct, or issue/PR templates on a repo inviting self-hosters | repo root, `.github/` | No contributor onramp | Short CONTRIBUTING plus one template | roadmap |
 | O8 | medium | `/health` and Workers observability exist but no operator doc mentions monitoring or alerting | `inbound/src/api.ts:45`, `wrangler.jsonc:7` | Self-hosters have primitives with no guidance | Monitoring section in the ops doc (bundle with O1) | new issue (with O1) |
 | O9 | low | Doc maps omit docs/PROXY-PROTOCOL.md and docs/reconcile-orphan-vectors.md | CLAUDE.md, docs/architecture.md | Two real docs undiscoverable | Add to maps | doc fix |
@@ -167,7 +167,8 @@ architectural; all are fixable without new dependencies.
 7. A real `delete` scope for the door credential (C4).
 8. Send idempotency key and documented at-least-once semantics (C2), attachment-presence
    audit (C3).
-9. Rate limiting and structured logging (C8); CodeQL and secret scanning (O6).
+9. Rate limiting and structured logging (C8); confirm secret scanning and push
+   protection (O6; CodeQL itself verified running via default setup).
 10. Community onramp: CONTRIBUTING and templates (O7), tag/CHANGELOG sync (O5), stale-doc
     refresh (D13, O9, M5).
 
