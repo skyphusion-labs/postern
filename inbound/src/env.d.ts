@@ -107,7 +107,7 @@ interface Env {
    * of a send token -> its bound sender identity { from, displayName? }. MANY tokens,
    * each the SAME send scope but a DISTINCT, authoritative From, so crew + released
    * users send as THEMSELVES via their own token instead of one shared key. Stores
-   * token HASHES, never raw tokens, so this secret never holds a plaintext send
+   * token HASHES, never raw tokens, so the registry never holds a plaintext send
    * credential. The worker hashes the presented Bearer and looks it up; a hit forces
    * the From to the bound identity on /api/send + /api/reply. Additive: leave unset to
    * keep the static both/read/send posture. Because it holds NO credential it is a
