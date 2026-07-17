@@ -116,7 +116,7 @@ accepted limitation / doc fix. File references are at the reviewed commit.
 | O7 | medium | No CONTRIBUTING, code of conduct, or issue/PR templates on a repo inviting self-hosters | repo root, `.github/` | No contributor onramp | Short CONTRIBUTING plus one template | roadmap |
 | O8 | medium | `/health` and Workers observability exist but no operator doc mentions monitoring or alerting | `inbound/src/api.ts:45`, `wrangler.jsonc:7` | Self-hosters have primitives with no guidance | Monitoring section in the ops doc (bundle with O1) | new issue (with O1) |
 | O9 | low | Doc maps omit docs/PROXY-PROTOCOL.md and docs/reconcile-orphan-vectors.md | CLAUDE.md, docs/architecture.md | Two real docs undiscoverable | Add to maps | doc fix |
-| O10 | low | Residual CI question: can a fork PR satisfy the required `coverage` check (token/permissions on fork runs)? The action itself is public (verified) | `.github/workflows/code-coverage-ts.yml` | If not, external PRs stall on a required check | Verify with a test fork | verify |
+| O10 | resolved | VERIFIED during review via a live fork probe (fork PR #348, opened and closed for this test): fork PRs are NOT stranded. The required `coverage` check is the Actions job, which passes on fork heads; the workflow's if-guard intentionally skips only the coverage *upload* on forks. Caveat: probe used an org-member fork, not a fully external account | probe PR #348, `.github/workflows/code-coverage-ts.yml` | None; behavior is as intended | None needed | resolved |
 | O11 | opportunity | No examples/ directory (curl walkthrough, agent config samples) | repo root | Polish | Add examples/ | roadmap |
 
 ## Journey verdicts
