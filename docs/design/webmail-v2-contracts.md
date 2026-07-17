@@ -132,12 +132,19 @@ session cookie is never honored cross-origin (CORS never reflects credentials fo
 
 #### 1.5.1 `POST /api/session`
 
+An unauthenticated `GET /api/session` returns `401` with `{ "ok": false,
+"authBackend": "native" | "off" }` so a client can distinguish sessions-disabled
+(`off` -> show the BYO-token gate) from simply-logged-out (`native` -> show the sign-in
+form). This is the only unauthed discovery echo; it leaks no identity.
+
 ```
 POST /api/session          (same-origin; no Authorization header)
   { "username": "conrad", "password": "..." }
 
 200 Set-Cookie: __Host-postern_session=<opaque-32-byte-base64url>;
                 HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=<idle-window>
+    Set-Cookie: __Host-postern_csrf=<per-session synchronizer token>;
+                Secure; SameSite=Lax; Path=/; Max-Age=<idle-window>   (NOT HttpOnly: JS reads it)
   {
     "identity":     { "from": "conrad@skyphusion.org", "displayName": "Conrad" },
     "capabilities": ["read", "send", "delete"],
@@ -156,6 +163,15 @@ POST /api/session          (same-origin; no Authorization header)
   `smtp_credentials.from_addr`). The browser can finally show **Sending as ...**
   (closes the D12 / #338 known gap): `GET /api/session` echoes the identity, which a
   send token could never do (a send token gets `403` on every GET).
+- **The CSRF token rides a companion cookie, not just the JSON body.** `POST /api/session`
+  sets `__Host-postern_csrf` (readable, NOT HttpOnly) alongside the HttpOnly session
+  cookie, and `GET /api/session` (restore) RE-SETS it. This closes the reload defect Joan
+  found: the server stores only `csrf_hash` and cannot re-issue the raw token, so a
+  body-only token would be lost on a tab refresh and every subsequent write would fail. The
+  companion cookie survives the reload, the client reads it and echoes it in
+  `X-Postern-CSRF` (double-submit), and the server checks BOTH that the header equals the
+  companion cookie AND that it hashes to the session's stored `csrf_hash` (double-submit +
+  session binding, belt and braces).
 
 #### 1.5.2 The session record (server-side, D1)
 
@@ -201,7 +217,7 @@ table yields no usable cookie. Resolution hashes the presented cookie and looks 
 | Threat | Mitigation |
 |---|---|
 | **XSS token theft** | HttpOnly cookie; JS cannot read the session credential. The rendered-email XSS surface stays sandboxed (existing srcdoc iframe + CSP); the session cannot leak even if a top-frame XSS ever landed, because it is not in JS-reachable storage. |
-| **CSRF** | (1) SameSite=Lax cookie; (2) every state-changing route (POST/DELETE, send, reply, flag, move, delete, draft) REQUIRES an `X-Postern-CSRF` header equal to the session synchronizer token, which a cross-site form or simple request cannot set (it forces a preflight the attacker origin fails); (3) the token is bound to the session server-side (`csrf_hash`). Reads are cookie+SameSite protected; writes need the header too. |
+| **CSRF** | Double-submit + session binding. (1) SameSite=Lax on the session cookie; (2) every state-changing route (POST/PUT/DELETE, send, reply, flag, move, delete, draft) REQUIRES an `X-Postern-CSRF` header; the server checks it EQUALS the readable `__Host-postern_csrf` companion cookie (double-submit: a cross-site caller can neither read the companion cookie nor set a custom header, and a custom header forces a preflight the attacker origin fails) AND that it hashes to the session's stored `csrf_hash` (session binding). Both checks must pass. Reads are cookie+SameSite protected; writes need the header too. The companion cookie is re-set on login and on `GET /api/session` restore so a reload never strands writes. |
 | **Session fixation** | A fresh opaque id is minted on every successful `POST /api/session`; a client-supplied session id is never accepted or adopted. Re-auth mints a new id and revokes the old. |
 | **Credential stuffing / brute force** | Per-username AND per-IP throttle on `POST /api/session` with exponential backoff + temporary lockout (the auth-path slice of C8 rate-limiting gap). Counters keyed server-side; lockout returns `429` with `Retry-After`. |
 | **Account enumeration** | Constant-time verify with a dummy-hash path for an unknown username (the pattern `POST /api/smtp-auth` already uses); identical error (`E_AUTH_FAILED`) and indistinguishable timing for bad-user vs bad-password. No user-not-found signal. |
@@ -235,7 +251,10 @@ request arrives
 that carries a Bearer is asking to act as that token (BYO-token / operator mode); honoring
 the cookie instead would silently bind the wrong From and a different capability set to an
 explicit-token call on the same origin. So Bearer is resolved first; the cookie is the
-fallback only when no `Authorization` header is present.
+fallback only when no `Authorization` header is present. Pinned: **a request must not be
+treated as carrying two credentials at once; when both a cookie and an `Authorization`
+header are present, the explicit `Authorization` wins and the cookie is ignored for that
+request** (never an AND of the two capability sets).
 
 The cookie branch produces the identical `{ scope, identity }` the Bearer branch does, so
 `/api/send` and `/api/reply` bind the From to `identity.from` for a session EXACTLY as
@@ -323,6 +342,21 @@ labels/junction table because (a) it is additive columns, no new join on every r
 so a many-to-many is not yet needed. The placement/UID table in 2.6 is where the
 many-to-many extension point lives when user folders arrive.
 
+**Mailbox operation routes (so the doc is reproducible without the impl).** The SQL above
+is driven by these routes:
+
+| Method | Route | Purpose | Scope |
+|---|---|---|---|
+| POST | `/api/messages/move` | body `{ ids: string[], mailbox: "archive"\|"trash"\|"junk"\|null }`; moves/restores placement; `null` restores to the direction-default view; a move to `trash` also stamps `trashed_at` | `read` (organize; D-DELETE-1) |
+| GET | `/api/messages?...&mailbox=` | the existing list route gains a `?mailbox=` filter (`archive`\|`trash`\|`junk`, or unset = the direction-default INBOX/Sent view); `all` selects the union view | `read` |
+| GET | `/api/folders` | returns `[{ id, label, count, unread }]` for INBOX, Sent, All, Drafts, Trash, Junk, Archive; the server-side projection that delivers the epic's folder counts | `read` |
+| DELETE | `/api/messages/{id}` | hard delete / empty-Trash (existing route, now `delete`-scoped, section 4) | `delete` |
+
+`GET /api/folders` counts project the same predicates the IMAP door uses (2.3 / 3.1), so
+webmail and IMAP report consistent folder membership. "Empty Trash" is a client loop over
+`DELETE /api/messages/{id}` for the Trash set, or a future `DELETE /api/messages?mailbox=trash`
+convenience (deferred; the per-id path is the phase-1 contract).
+
 ### 2.4 Server-side drafts (new table)
 
 A draft is not a `messages` row: it has no Message-ID identity, no direction, no thread
@@ -376,8 +410,8 @@ the sending identity):
 
 | Method | Route | Purpose |
 |---|---|---|
-| POST | `/api/drafts` | create; body = draft fields; returns `{ id }` |
-| PUT | `/api/drafts/{id}` | autosave/replace (idempotent upsert by id) |
+| POST | `/api/drafts` | create; body = draft fields; returns `{ id }`. Optional: a client MAY instead PUT with a client-minted id to create (see below), which kills the POST-then-PUT autosave race |
+| PUT | `/api/drafts/{id}` | autosave/replace with OPTIMISTIC CONCURRENCY (see below); creates the draft if `{id}` does not exist (client-supplied id allowed) |
 | GET | `/api/drafts` / `/api/drafts/{id}` | list / read own drafts (scoped to `identity`) |
 | DELETE | `/api/drafts/{id}` | discard |
 | POST | `/api/drafts/{id}/send` | send the draft via the one send core, then delete the row |
@@ -387,6 +421,17 @@ sent copy stores once and threads correctly (no double-store). Draft state is se
 so it **syncs across sessions and devices** by construction (epic requirement). IDOR: every
 draft route filters on the session `identity`; one account cannot read/edit another draft
 (the mailbox is shared per-domain, but drafts are per-composing-identity).
+
+**Optimistic concurrency (draft sync must not silently last-write-wins).** Because a draft
+syncs across devices, two tabs autosaving the same draft would silently clobber each other
+under a naive upsert, contradicting "syncs across devices". So `PUT /api/drafts/{id}`
+carries the `updated_at` the client last saw and the server compares it: a match applies
+the write and returns the new `updated_at`; a MISMATCH returns `409` with the current row
+so the client can merge/prompt rather than lose an edit. To also kill the create-race (a
+`POST` then a first `PUT` before the id is known), a client MAY PUT to a
+CLIENT-minted id (a uuid) to create the draft in one call; the server accepts a PUT-create
+for a non-existent id owned by the session identity. `POST /api/drafts` stays for a
+server-minted id.
 
 ### 2.5 Trash soft-delete and the recovery window (retires D6)
 
