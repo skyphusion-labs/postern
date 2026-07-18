@@ -176,6 +176,26 @@ class Config:
     # capture a client's exact protocol sequence; not a steady-state setting.
     imap_wire_trace: bool = False
 
+    # --- per-account view scoping (#357) ---
+    # POSTERN_IMAP_VIEWER_MODE: "estate" (default) shows the whole shared mailbox,
+    # byte-identical to the historical door; "per_account" scopes every real folder to
+    # the authenticated login's viewer address V (INBOX = mail delivered to V, Sent =
+    # mail from V, per-recipient seen), per CONTRACT 10.9. This is a VIEW tier (a
+    # deterrent that keeps honest people honest), NOT a credential boundary: the door
+    # still reads the store with an estate-wide service token, so a determined login can
+    # still reach other mail via the raw API. Per-user credential enforcement is the
+    # later hardening (#351 / D-AUTH-2). The live flip is an operator window: env change
+    # + a UIDVALIDITY bump + a stop-first roll, since folder membership changes (RFC 3501).
+    viewer_mode: str = "estate"
+    # POSTERN_IMAP_VIEWER_DOMAIN: the mail domain V is built on. REQUIRED when
+    # viewer_mode is per_account (V = localpart(login) @ domain). None in estate mode.
+    viewer_domain: Optional[str] = None
+    # POSTERN_IMAP_VIEWER_MAP: optional login->address overrides for directories where
+    # the login id is NOT the mail local part (e.g. "crockenhaus=conrad@example.org").
+    # An override wins over the rule; a login absent from the map falls back to the rule.
+    # Keys and values are lower-cased. Empty in estate mode.
+    viewer_map: Mapping[str, str] = field(default_factory=dict)
+
     # --- auth brute-force throttle (#105) ---
     # RATIFIED cross-door contract: identical AUTH_THROTTLE_* knobs on the SMTP
     # relay (587) and this IMAP door (993), integer seconds. Account-keyed +
@@ -327,6 +347,22 @@ class Config:
         measure = _bool(e, "POSTERN_IMAP_MEASURE", False)
         imap_wire_trace = _bool(e, "POSTERN_IMAP_WIRE_TRACE", False)
 
+        # Per-account view scoping (#357). estate (default) = unchanged. per_account
+        # scopes folders to the login's viewer address; it REQUIRES a viewer domain so
+        # V is always derivable (fail loud, never a silent fall-back to the estate view).
+        viewer_mode = (e.get("POSTERN_IMAP_VIEWER_MODE") or "estate").strip().lower()
+        if viewer_mode not in ("estate", "per_account"):
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_MODE must be 'estate' or 'per_account'"
+            )
+        viewer_domain = (e.get("POSTERN_IMAP_VIEWER_DOMAIN") or "").strip().lower() or None
+        viewer_map = _parse_viewer_map(e.get("POSTERN_IMAP_VIEWER_MAP") or "")
+        if viewer_mode == "per_account" and not viewer_domain:
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_MODE=per_account requires POSTERN_IMAP_VIEWER_DOMAIN "
+                "(the mail domain the viewer address is built on)"
+            )
+
         # Auth throttle (#105). Door-agnostic AUTH_THROTTLE_* names, integer seconds,
         # shared verbatim with the relay so one vocabulary configures both doors.
         throttle_enabled = _bool(e, "AUTH_THROTTLE_ENABLED", True)
@@ -401,6 +437,9 @@ class Config:
             imap_uidvalidity=imap_uidvalidity,
             measure=measure,
             imap_wire_trace=imap_wire_trace,
+            viewer_mode=viewer_mode,
+            viewer_domain=viewer_domain,
+            viewer_map=viewer_map,
             throttle_enabled=throttle_enabled,
             throttle_max_failures=throttle_max_failures,
             throttle_lockout_seconds=throttle_lockout_seconds,
@@ -430,6 +469,32 @@ def normalize_pin_sha256(s: str) -> bytes:
             f"LDAP_TLS_PIN_SHA256 must be a 32-byte SHA-256 (64 hex chars), got {len(raw)} bytes"
         )
     return raw
+
+
+def _parse_viewer_map(raw: str) -> dict:
+    """Parse POSTERN_IMAP_VIEWER_MAP ("login=addr,login2=addr2") into a lower-cased
+    dict. Whitespace around entries and the '=' is tolerated. A malformed entry (no
+    '=', an empty side, or an address without '@') is a loud ConfigError so a typo
+    never silently drops an override. Empty input -> empty map."""
+    out: dict = {}
+    for chunk in raw.split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_MAP entries must be login=address (got %r)" % entry
+            )
+        login, _, addr = entry.partition("=")
+        login = login.strip().lower()
+        addr = addr.strip().lower()
+        if not login or not addr or "@" not in addr:
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_MAP entry %r must be login=address with a valid address"
+                % entry
+            )
+        out[login] = addr
+    return out
 
 
 def _int(e: Mapping[str, str], name: str, default: int) -> int:

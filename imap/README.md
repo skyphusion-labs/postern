@@ -149,6 +149,35 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_POLL_SECONDS` | no | `30` | live-refresh interval while selected: re-poll the store and push EXISTS for new mail (0 = disable) |
 | `POSTERN_IMAP_MEASURE` | no | `false` | emit additive, structured `@measure` read-path diagnostics to the log (journald); behaviour-neutral, off by default (see `MEASUREMENT.md`) |
 | `POSTERN_IMAP_WIRE_TRACE` | no | `false` | log each received command line + sent response line for protocol diagnosis; LOGIN/AUTHENTICATE args redacted at capture; off by default (zero behaviour change) -- diagnostic-window use only, not a steady-state setting |
+| `POSTERN_IMAP_VIEWER_MODE` | no | `estate` | `estate` = the whole shared mailbox (historical door, byte-identical). `per_account` = scope every real folder to the login's viewer address V (see below). A **view** tier, not a credential boundary (#357) |
+| `POSTERN_IMAP_VIEWER_DOMAIN` | in `per_account` | -- | the mail domain V is built on: `V = localpart(login)@THIS`. REQUIRED when `per_account` (startup fails loud without it, never a silent fall-back to the estate view) |
+| `POSTERN_IMAP_VIEWER_MAP` | no | -- | optional `login=addr,login2=addr2` overrides for directories where the login id is NOT the mail local part (e.g. `crockenhaus=conrad@example.org`). An override wins over the rule |
+
+### Per-account view scoping (#357)
+
+By default (`estate`) the door is one shared mailbox: every login sees the whole
+estate, exactly as it always has. Set `POSTERN_IMAP_VIEWER_MODE=per_account` (with a
+`POSTERN_IMAP_VIEWER_DOMAIN`) to make each login see only its own lens:
+
+- **INBOX** = mail delivered to you that you did not send (this now includes
+  same-domain sends from other people on the domain, which the estate INBOX was blind
+  to, per CONTRACT 10.9).
+- **Sent** = mail you sent.
+- **All** = everything delivered to you, both directions, unwindowed. Your own
+  external-only sends live under **Sent**, not here.
+- **\Seen** is per-recipient: marking a shared message read in your INBOX does not
+  mark it read for anyone else.
+
+**This is a VIEW tier, a deterrent, NOT mail privacy.** The door still reads the store
+with one estate-wide service token, so a determined login can still reach other mail
+through the raw API. Per-user credential enforcement (a real privacy boundary) is
+separate, later work (#351 / D-AUTH-2). It also only has teeth in the directory auth
+modes (`ldap`/`native`/`system`): in `token`/`fixed` mode the username is
+attacker-chosen free text, so V there is cosmetic.
+
+Flipping a live door from `estate` to `per_account` is an operator window: folder
+membership changes, so **bump `POSTERN_IMAP_UIDVALIDITY`** (RFC 3501) on the same roll
+so clients discard their cached estate view and resync into the per-account view.
 
 ## Run it
 
