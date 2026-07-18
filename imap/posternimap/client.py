@@ -388,6 +388,7 @@ class PosternClient:
         mode: Optional[str] = None,
         field: Optional[str] = None,
         direction: Optional[str] = None,
+        to: Optional[str] = None,
         cursor: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> Page:
@@ -407,6 +408,11 @@ class PosternClient:
             params["field"] = field
         if direction:
             params["direction"] = direction
+        # #357: a viewer-scoped search (to=V) applies the same recipient-relative
+        # predicate + effective seen the list path does (CONTRACT 10.9); estate
+        # searches pass to=None and are unchanged.
+        if to:
+            params["to"] = to
         if cursor:
             params["cursor"] = cursor
         if limit is not None:
@@ -433,7 +439,9 @@ class PosternClient:
         complete, paginated result set use search_page and loop its cursor."""
         return self.search_page(q, mode=mode, field=field, limit=limit).items
 
-    def set_seen(self, message_ids: list[str], seen: bool) -> int:
+    def set_seen(
+        self, message_ids: list[str], seen: bool, for_addr: Optional[str] = None
+    ) -> int:
         """Mark a set of messages (un)read via POST /api/messages/seen (#seen).
 
         Backs the IMAP \\Seen flag: the proxy's store() calls this when a client
@@ -441,10 +449,17 @@ class PosternClient:
         (idempotent; unknown ids are skipped server-side). An empty id list is a
         no-op that never hits the network. The endpoint is read-scoped, so a read-only
         token (the common IMAP credential) can persist read state.
+
+        `for_addr` (a bare address) makes the write per-recipient (#357): the worker
+        upserts a (id, for) override only, never touching row-level messages.seen
+        (CONTRACT 10.9). Omitted (estate callers) keeps the legacy row-level write.
         """
         if not message_ids:
             return 0
-        body = self._post("/api/messages/seen", {"ids": message_ids, "seen": seen})
+        payload: dict = {"ids": message_ids, "seen": seen}
+        if for_addr:
+            payload["for"] = for_addr
+        body = self._post("/api/messages/seen", payload)
         updated = body.get("updated", 0)
         return int(updated) if isinstance(updated, (int, float)) else 0
 

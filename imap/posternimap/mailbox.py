@@ -137,6 +137,8 @@ class PosternMailbox:
         *,
         direction: Optional[str] = None,
         to: Optional[str] = None,
+        from_addr: Optional[str] = None,
+        viewer: Optional[str] = None,
         special_use: Optional[List[str]] = None,
         list_view: bool = False,
         empty: bool = False,
@@ -165,7 +167,18 @@ class PosternMailbox:
         self._direction = direction
         # Envelope-membership filter (#178/#208): when set, list only messages whose
         # delivered set (falling back to to_addr for a v1 row) includes this address.
+        # In per-account mode (#357) this carries the viewer address V so INBOX/All
+        # read the recipient-relative lens (CONTRACT 10.9); estate mode leaves it None.
         self._to = to
+        # #357: sender filter for the per-account Sent lens (from=V, outbound). None in
+        # estate mode. A Sent search rides the snapshot intersection for its from=V
+        # scoping (the search API has no from=), so nothing else is required.
+        self._from = from_addr
+        # #357: the per-recipient seen address. When set, a \Seen STORE writes a
+        # per-recipient override (POST /api/messages/seen for=V) instead of the estate
+        # row-level flag. Set ONLY on to=V lenses (INBOX/All), never the from=V Sent
+        # lens, so the write side matches what the read side renders (CONTRACT 10.9).
+        self._viewer = viewer
         self._special_use = list(special_use or [])
         self._list_view = list_view
         self._empty = empty
@@ -238,6 +251,7 @@ class PosternMailbox:
                     page = self._client.list_messages(
                         direction=self._direction,
                         to=self._to,
+                        from_addr=self._from,
                         limit=self._page_size,
                         cursor=cursor,
                     )
@@ -312,6 +326,7 @@ class PosternMailbox:
             page = self._client.list_messages(
                 direction=self._direction,
                 to=self._to,
+                from_addr=self._from,
                 limit=self._page_size,
                 cursor=cursor,
             )
@@ -563,13 +578,19 @@ class PosternMailbox:
                 mode="substr",
                 field=field,
                 direction=self._direction,
+                to=self._to,
                 cursor=cursor,
                 limit=_SEARCH_PAGE_LIMIT,
             )
             for h in page.items:
                 seq = by_uid.get(h.uid)
                 if seq is None:
-                    continue  # outside this folder's snapshot / window: drop it
+                    # Outside this folder's snapshot / window: drop it. This is also
+                    # the per-account Sent from=V post-filter (#357): the search API
+                    # has no from=, so a Sent search returns estate outbound hits, and
+                    # this intersection with the from=V snapshot drops every row V did
+                    # not send. No other identity's outbound can surface here.
+                    continue
                 out.append(h.uid if uid else seq)
             cursor = page.cursor
             pages += 1
@@ -675,9 +696,9 @@ class PosternMailbox:
             if not t and self._summaries[s - 1].seen
         ]
         if to_read:
-            self._client.set_seen(to_read, True)
+            self._client.set_seen(to_read, True, for_addr=self._viewer)
         if to_unread:
-            self._client.set_seen(to_unread, False)
+            self._client.set_seen(to_unread, False, for_addr=self._viewer)
         for seq, target in seen_targets.items():
             self._summaries[seq - 1].seen = target
         for seq, target in deleted_targets.items():

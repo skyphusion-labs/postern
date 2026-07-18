@@ -46,6 +46,8 @@ export interface ReplyRequest {
   from?: string | EmailAddress;
   cc?: string | string[];
   bcc?: string | string[];
+  /** Same attachments shape as send (#363): base64 over JSON, worker-authoritative caps. */
+  attachments?: SendAttachment[];
 }
 
 export interface SendResult {
@@ -337,6 +339,7 @@ export async function reply(
   }
 
   const from = resolveFrom(env, req.from, identity);
+  const attachments = validateAttachments(req.attachments);
   const subject = original.subject.replace(/^\s*(re:\s*)+/i, "").trim();
   const replySubject = `Re: ${subject}`;
   rejectCRLF("subject", replySubject);
@@ -360,6 +363,7 @@ export async function reply(
     html: req.html,
     text: req.text,
     headers,
+    attachments,
     inReplyTo,
     references,
     forcedThreadId: original.threadId,

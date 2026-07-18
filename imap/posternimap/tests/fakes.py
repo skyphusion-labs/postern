@@ -63,6 +63,8 @@ class FakeTransport:
         self.body_fetches = 0
         self.attachment_fetches = 0
         self.last_headers: dict[str, str] = {}
+        # last decoded POST /api/messages/seen body (#357 per-recipient assert)
+        self.last_seen_payload: Optional[Dict[str, Any]] = None
 
     def __call__(self, req):
         self.calls.append(req.full_url)
@@ -149,10 +151,29 @@ class FakeTransport:
     def _list(self, params):
         direction = params.get("direction")
         to_filter = params.get("to")
-        rows = [m for m in self.messages if not direction or m["direction"] == direction]
-        if to_filter:
-            needle = f",{to_filter.strip().lower()},"
-            rows = [m for m in rows if needle in self._delivered_set(m)]
+        from_filter = params.get("from")
+        if to_filter and direction == "inbound":
+            # CONTRACT 10.9 recipient-relative INBOX: delivered to V AND (inbound OR
+            # (outbound AND from != V)). Same-domain sends surface in V's inbox lens.
+            v = to_filter.strip().lower()
+            needle = f",{v},"
+            rows = [
+                m
+                for m in self.messages
+                if needle in self._delivered_set(m)
+                and (
+                    m["direction"] == "inbound"
+                    or (m["direction"] == "outbound" and m.get("from", "").strip().lower() != v)
+                )
+            ]
+        else:
+            rows = [m for m in self.messages if not direction or m["direction"] == direction]
+            if to_filter:
+                needle = f",{to_filter.strip().lower()},"
+                rows = [m for m in rows if needle in self._delivered_set(m)]
+        if from_filter:
+            fv = from_filter.strip().lower()
+            rows = [m for m in rows if m.get("from", "").strip().lower() == fv]
         start = int(params.get("cursor", "0"))
         limit = int(params.get("limit", str(self.page_size)))
         chunk = rows[start : start + limit]
@@ -197,8 +218,12 @@ class FakeTransport:
 
     def _set_seen(self, req):
         """Mirror POST /api/messages/seen: flip `seen` on the seeded dicts and report
-        how many rows changed (unknown ids skipped), so store()'s round-trip is real."""
+        how many rows changed (unknown ids skipped), so store()'s round-trip is real.
+
+        Records the last decoded payload (#357) so a test can assert the per-recipient
+        `for` address is (or is not) sent."""
         payload = json.loads((req.data or b"{}").decode("utf-8"))
+        self.last_seen_payload = payload
         ids = set(payload.get("ids", []))
         seen = bool(payload.get("seen"))
         updated = 0
