@@ -6,7 +6,12 @@ import email
 import unittest
 
 from posternimap.client import Attachment, Message, MessageSummary
-from posternimap.rfc822 import envelope_headers, render_rfc822
+from posternimap.rfc822 import (
+    PROJECTION_VERSION,
+    envelope_headers,
+    project_rfc822_size,
+    render_rfc822,
+)
 
 
 def _msg(**over) -> Message:
@@ -405,6 +410,33 @@ class HtmlProjectionTest(unittest.TestCase):
         self.assertEqual(alt.get_content_type(), "multipart/alternative")
         self.assertEqual(alt.get_payload()[1].get_content_type(), "text/html")
         self.assertEqual(parsed.get_payload()[1].get_payload(decode=True), data)
+
+
+class ProjectedSizeTest(unittest.TestCase):
+    """#342: deterministic boundaries + placeholder SIZE matches live BODY[]."""
+
+    def test_boundaries_are_deterministic_for_message_id(self):
+        data = b"A" * 40
+        m = _msg(
+            message_id="mid-42",
+            attachments=[Attachment(filename="a.bin", mime="application/octet-stream", size=40)],
+        )
+        a = render_rfc822(m, attachment_bytes=[data])
+        b = render_rfc822(m, attachment_bytes=[b"B" * 40])
+        self.assertEqual(len(a), len(b))
+        ba = email.message_from_bytes(a).get_boundary()
+        bb = email.message_from_bytes(b).get_boundary()
+        self.assertEqual(ba, bb)
+        self.assertTrue(ba.startswith("b"))
+        self.assertEqual(len(ba), 33)
+
+    def test_project_size_matches_real_attachment_render(self):
+        data = b"%PDF-1.4\n" + bytes(range(256))
+        m = _msg(
+            attachments=[Attachment(filename="inv.pdf", mime="application/pdf", size=len(data))],
+        )
+        self.assertEqual(project_rfc822_size(m), len(render_rfc822(m, attachment_bytes=[data])))
+        self.assertEqual(PROJECTION_VERSION, 1)
 
 
 if __name__ == "__main__":
