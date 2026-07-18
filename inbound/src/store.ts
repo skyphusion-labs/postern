@@ -983,6 +983,7 @@ export async function deleteMessage(
   await deleteVectorIds(env, vectorIds);
   await env.DB.prepare("DELETE FROM vector_ledger WHERE message_id = ?").bind(messageId).run();
   await env.DB.prepare("DELETE FROM message_seen_by WHERE message_id = ?").bind(messageId).run();
+  await env.DB.prepare("DELETE FROM mailbox_placement WHERE message_id = ?").bind(messageId).run();
 
   const attRes = await env.DB.prepare("SELECT r2_key FROM attachments WHERE message_id = ?")
     .bind(messageId)
