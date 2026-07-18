@@ -93,6 +93,19 @@ describe("the page is XSS-conscious by construction", () => {
     // Must not list drafts via the read-token api() helper.
     expect(WEBMAIL_HTML).not.toContain('api("/api/drafts")');
   });
+  it("offers compose parity through durable drafts (#353)", () => {
+    expect(WEBMAIL_HTML).toContain('id: "cmpCc"');
+    expect(WEBMAIL_HTML).toContain('id: "cmpBcc"');
+    expect(WEBMAIL_HTML).toContain('contenteditable: "true"');
+    expect(WEBMAIL_HTML).toContain("document.execCommand");
+    expect(WEBMAIL_HTML).toContain('id: "cmpFiles"');
+    expect(WEBMAIL_HTML).toContain("xhr.upload.onprogress");
+    expect(WEBMAIL_HTML).toContain('composeFromMessage("Reply all", "replyAll")');
+    expect(WEBMAIL_HTML).toContain('composeFromMessage("Forward", "forward")');
+    expect(WEBMAIL_HTML).toContain('apiWrite("/api/drafts/" + encodeURIComponent(draftId) + "/send"');
+    expect(WEBMAIL_HTML).toContain("Draft preserved for retry.");
+    expect(WEBMAIL_HTML).toContain("function scheduleSave");
+  });
   it("never assigns innerHTML (all message content goes through text nodes)", () => {
     // A blunt but effective guard: the page script must not use innerHTML, which
     // is the one sink that would let stored message bytes execute. If a future

@@ -296,14 +296,16 @@ none touches D1 directly (#25, #26).
 | GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=` | search (fts + substr + semantic + hybrid) | M1 / M4 / M9 (#212) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
-| POST | `/api/reply` | reply to `{messageId, html?, text?, attachments?}`; core fills to / subject / In-Reply-To / References / thread, and carries attachments (#363) | M2 (done) |
+| POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
 | POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
 | POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
 | GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts; durable folders also return `uidValidity` | webmail v2 (#352) |
 | GET/POST | `/api/drafts` | list or create an identity-owned server-side draft | webmail v2 (#352) |
 | GET/PUT/DELETE | `/api/drafts/{id}` | read, optimistic-concurrency replace, or discard own draft | webmail v2 (#352) |
-| POST | `/api/drafts/{id}/send` | send through the one send core, then remove the draft | webmail v2 (#352) |
+| GET/POST | `/api/drafts/{id}/attachments` | list or stage raw attachment bytes for an identity-owned draft | webmail v2 (#353) |
+| DELETE | `/api/drafts/{id}/attachments/{attachmentId}` | remove one staged attachment and its R2 bytes | webmail v2 (#353) |
+| POST | `/api/drafts/{id}/send` | load staged attachments, send through the one send core, then remove the draft and staging only after success | webmail v2 (#352/#353) |
 | GET/POST/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity | webmail v2 (#352) |
 | POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it | webmail v2 (#352) |
 | DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope) | (#278/#352) |
@@ -353,6 +355,26 @@ defaults).
 `POST /send` (today's bare endpoint) stays as a back-compat alias of `/api/send`. All responses
 keep the current `{ ok, ... }` + `E_*` code shape from `INTEGRATION.md`, so existing callers
 (skyphusion-llm-public, the relay) do not break.
+
+**Compose parity (#353).** Caller-authored HTML is sanitized server-side at SEND
+by a zero-dependency closed allowlist (`sanitize-html.ts`). The same sanitized
+string is dispatched and persisted in the outbound Sent row's `body_html`; draft
+HTML remains authored state until send. Reply-all recipients come from stored
+Reply-To/From + To/Cc, are case-insensitively deduped, and exclude the resolved
+sending identity. Reply/forward quote text uses `body_text`, falling back through
+HTML-to-text when the original is HTML-only.
+
+Draft attachment staging is identity-bound metadata in `draft_attachments` plus
+R2 bytes under `drafts/<draft-id>/...`. It shares send's hard caps (20 parts,
+25 MiB decoded total). A failed draft send leaves the draft and staged bytes
+unchanged; deletion occurs only after dispatch and Sent-copy storage succeed.
+
+**Draft-send idempotency.** Delivery is at-least-once, not exactly-once. A
+confirmed success deletes the draft, so later retries do not resend; failures
+preserve it. A crash after provider acceptance but before draft deletion, or two
+concurrent sends racing before deletion, can still duplicate delivery. Clients
+must suppress concurrent submits. A durable send claim/general idempotency key is
+the separate C2 follow-up.
 
 The RPC entrypoint mirrors the read + write operations as typed methods (`list`, `get`,
 `thread`, `search`, `send`, `reply`) returning the same shapes, no HTTP envelope.

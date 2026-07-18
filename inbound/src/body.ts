@@ -17,15 +17,15 @@
 // legacy send worker).
 export class PayloadTooLargeError extends Error {}
 
-// Read the whole body as UTF-8 text, throwing PayloadTooLargeError as soon as
-// more than maxBytes have arrived. An absent body reads as "" (JSON.parse then
-// fails exactly like request.json() on an empty body did).
-export async function readBodyCapped(request: Request, maxBytes: number): Promise<string> {
+// Read the whole body as bytes, throwing PayloadTooLargeError as soon as more
+// than maxBytes have arrived. Used by binary draft-attachment uploads as well as
+// the UTF-8 JSON reader below.
+export async function readBytesCapped(request: Request, maxBytes: number): Promise<ArrayBuffer> {
   const declaredLen = Number(request.headers.get("content-length") ?? "");
   if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
     throw new PayloadTooLargeError("declared content-length over cap");
   }
-  if (!request.body) return "";
+  if (!request.body) return new ArrayBuffer(0);
 
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -51,5 +51,11 @@ export async function readBodyCapped(request: Request, maxBytes: number): Promis
     buf.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(buf);
+  return buf.buffer;
+}
+
+// Read the whole body as UTF-8 text. An absent body reads as "" (JSON.parse
+// then fails exactly like request.json() on an empty body did).
+export async function readBodyCapped(request: Request, maxBytes: number): Promise<string> {
+  return new TextDecoder().decode(await readBytesCapped(request, maxBytes));
 }

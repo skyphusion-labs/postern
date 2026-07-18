@@ -10,6 +10,7 @@ import * as store from "./store";
 import { htmlToText, cleanBody } from "./ingest";
 import { selectTransport, type OutboundMessage, type OutboundAttachment } from "./transport/index";
 import type { BoundIdentity } from "./sendidentity";
+import { sanitizeHtml } from "./sanitize-html";
 
 export interface EmailAddress {
   email: string;
@@ -35,6 +36,8 @@ export interface SendRequest {
   text?: string;
   headers?: Record<string, string>;
   attachments?: SendAttachment[];
+  /** Stored message to quote as a forward. Recipients remain caller-selected. */
+  forwardMessageId?: string;
 }
 
 export interface ReplyRequest {
@@ -46,6 +49,10 @@ export interface ReplyRequest {
   from?: string | EmailAddress;
   cc?: string | string[];
   bcc?: string | string[];
+  /** replyAll derives original To/Cc recipients server-side, excluding the sender. */
+  mode?: "reply" | "replyAll";
+  /** Append a server-built quote from stored state. */
+  quoteOriginal?: boolean;
   /** Same attachments shape as send (#363): base64 over JSON, worker-authoritative caps. */
   attachments?: SendAttachment[];
 }
@@ -76,8 +83,8 @@ const MAX_RECIPIENTS = 50;
 // near 25 MiB and throws E_CONTENT_TOO_LARGE past it; we reject early on the
 // decoded attachment total so a caller gets a clean 413 instead of a provider
 // error, and bound the count so a request cannot carry thousands of tiny parts.
-const MAX_ATTACHMENTS = 20;
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_ATTACHMENTS = 20;
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 // Defense in depth against header injection: any CR/LF in a single-line field
 // could smuggle extra headers or split the message. Reject outright.
 const CRLF_RE = /[\r\n]/;
@@ -220,6 +227,70 @@ function firstAddress(raw: string): string {
   return (raw.split(",")[0] ?? "").trim();
 }
 
+/** Bare addresses from a raw address-list header, preserving first-seen order. */
+function addresses(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  const angleRe = /<([^<>]+)>/g;
+  let match: RegExpExecArray | null;
+  while ((match = angleRe.exec(raw)) !== null) out.push(match[1].trim());
+  const remainder = raw.replace(/<[^<>]+>/g, "");
+  for (const part of remainder.split(",")) {
+    const bare = part.trim();
+    if (bare && EMAIL_RE.test(bare)) out.push(bare);
+  }
+  return dedupeRecipients(out);
+}
+
+function dedupeRecipients(list: string[], exclude: string[] = []): string[] {
+  const seen = new Set(exclude.map((a) => a.trim().toLowerCase()));
+  const out: string[] = [];
+  for (const raw of list) {
+    const value = raw.trim();
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+function quotedText(original: store.StoredMessage, forwarded = false): string {
+  const source = original.bodyText.trim() || htmlToText(original.bodyHtml ?? "").trim();
+  const lines = source.split(/\r?\n/).map((line) => `> ${line}`).join("\n");
+  if (forwarded) {
+    return [
+      "---------- Forwarded message ----------",
+      `From: ${original.from}`,
+      `Date: ${original.date}`,
+      `Subject: ${original.subject}`,
+      `To: ${original.to}`,
+      original.cc ? `Cc: ${original.cc}` : "",
+      "",
+      source,
+    ].filter((line, index) => line !== "" || index > 4).join("\n");
+  }
+  return `On ${original.date}, ${original.from} wrote:\n${lines}`;
+}
+
+function appendQuote(
+  original: store.StoredMessage,
+  html: string | undefined,
+  text: string | undefined,
+  forwarded = false,
+): { html?: string; text?: string } {
+  const quote = quotedText(original, forwarded);
+  if (html !== undefined) {
+    const safeQuote = escapeHtml(quote).replace(/\r?\n/g, "<br>");
+    return { html: `${html}<br><br><blockquote>${safeQuote}</blockquote>`, text };
+  }
+  return { html, text: `${text ?? ""}\n\n${quote}`.trim() };
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 // A Message-ID we generate for outbound mail so it dedups, threads, and stores
 // like any received message. Domain taken from the From so it is well-formed.
 function generateMessageId(fromEmail: string): string {
@@ -246,6 +317,14 @@ export async function send(
 ): Promise<SendResult> {
   if (!req || typeof req !== "object") {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be an object");
+  }
+  let original: store.StoredMessage | null = null;
+  if (req.forwardMessageId !== undefined) {
+    if (typeof req.forwardMessageId !== "string" || !req.forwardMessageId.trim()) {
+      throw new MailboxError("E_VALIDATION_ERROR", "forwardMessageId must be a message id");
+    }
+    original = await store.get(env, req.forwardMessageId.replace(/[<>]/g, "").trim());
+    if (!original) throw new MailboxError("E_NOT_FOUND", "forward source message not found", 404);
   }
   if (typeof req.subject !== "string" || req.subject.trim() === "") {
     throw new MailboxError("E_FIELD_MISSING", "subject is required");
@@ -282,6 +361,10 @@ export async function send(
   }
 
   const headers = validateHeaders(req.headers);
+  const body = original ? appendQuote(original, req.html, req.text, true) : { html: req.html, text: req.text };
+  const subject = original
+    ? `Fwd: ${original.subject.replace(/^\s*(?:(?:fwd?|fw):\s*)+/i, "").trim()}`
+    : req.subject;
 
   return dispatchAndStore(env, ctx, {
     to,
@@ -289,9 +372,9 @@ export async function send(
     bcc,
     from,
     replyTo,
-    subject: req.subject,
-    html: req.html,
-    text: req.text,
+    subject,
+    html: body.html,
+    text: body.text,
     headers,
     attachments,
     inReplyTo: headers["In-Reply-To"] ?? null,
@@ -327,18 +410,24 @@ export async function reply(
   // #189): list / role mail that sets Reply-To must not have replies mis-sent to
   // its From. Resolved from STORED state, never caller input. Extract the bare
   // address from the (possibly display-name-bearing, possibly multi-value) header.
-  // (Reply-all is a post-v1 enhancement.)
-  const to = [firstAddress(original.replyTo ?? original.from)];
+  const from = resolveFrom(env, req.from, identity);
+  const primary = firstAddress(original.replyTo ?? original.from);
+  const to = dedupeRecipients([primary], [from.email]);
+  const derived = req.mode === "replyAll"
+    ? [...addresses(original.to), ...addresses(original.cc)]
+    : [];
+  const cc = dedupeRecipients([...derived, ...asArray(req.cc)], [from.email, ...to]);
+  const bcc = dedupeRecipients(asArray(req.bcc), [from.email, ...to, ...cc]);
+  if (to.length === 0) {
+    throw new MailboxError("E_VALIDATION_ERROR", "reply has no recipient after excluding sender");
+  }
   validateRecipients("to", to);
-  const cc = asArray(req.cc);
-  const bcc = asArray(req.bcc);
   validateRecipients("cc", cc);
   validateRecipients("bcc", bcc);
   if (to.length + cc.length + bcc.length > MAX_RECIPIENTS) {
     throw new MailboxError("E_TOO_MANY_RECIPIENTS", `combined to/cc/bcc exceeds ${MAX_RECIPIENTS}`);
   }
 
-  const from = resolveFrom(env, req.from, identity);
   const attachments = validateAttachments(req.attachments);
   const subject = original.subject.replace(/^\s*(re:\s*)+/i, "").trim();
   const replySubject = `Re: ${subject}`;
@@ -354,14 +443,15 @@ export async function reply(
     References: references.map((r) => `<${r}>`).join(" "),
   };
 
+  const body = req.quoteOriginal ? appendQuote(original, req.html, req.text) : { html: req.html, text: req.text };
   return dispatchAndStore(env, ctx, {
     to,
     cc,
     bcc,
     from,
     subject: replySubject,
-    html: req.html,
-    text: req.text,
+    html: body.html,
+    text: body.text,
     headers,
     attachments,
     inReplyTo,
@@ -388,6 +478,10 @@ interface DispatchInput {
 
 async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInput): Promise<SendResult> {
   const messageId = generateMessageId(d.from.email);
+  const safeHtml = d.html === undefined ? undefined : sanitizeHtml(d.html);
+  if (!d.text && !safeHtml) {
+    throw new MailboxError("E_FIELD_MISSING", "message has no content after HTML sanitization");
+  }
   const outbound: OutboundMessage = {
     messageId,
     to: d.to,
@@ -397,7 +491,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
   if (d.cc.length) outbound.cc = d.cc;
   if (d.bcc.length) outbound.bcc = d.bcc;
   if (d.replyTo) outbound.replyTo = d.replyTo;
-  if (d.html) outbound.html = d.html;
+  if (safeHtml) outbound.html = safeHtml;
   if (d.text) outbound.text = d.text;
   if (d.attachments && d.attachments.length) outbound.attachments = d.attachments;
   // Stamp our generated Message-ID so the provider, the recipient, and our store
@@ -420,7 +514,8 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       date: new Date().toISOString(),
       inReplyTo: d.inReplyTo,
       references: d.references,
-      bodyText: deriveBodyText(d.html, d.text),
+      bodyText: deriveBodyText(safeHtml, d.text),
+      bodyHtml: safeHtml ?? null,
       auth: { spf: "none", dkim: "none", dmarc: "none" },
       trusted: true, // we sent it
       // Envelope fidelity v2 (#189): the sent copy carries the full recipient set

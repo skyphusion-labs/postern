@@ -59,6 +59,27 @@ describe("mailbox.send", () => {
     });
     expect(Date.now() - start).toBeLessThan(1000);
   });
+
+  it("sanitizes HTML once for dispatch and the stored Sent copy", async () => {
+    const { env, ctx, settle, sent, rows } = makeFakeEnv();
+    await send(env, {
+      to: "dev@example.com",
+      subject: "rich",
+      html: '<p onclick="steal()">Hello <strong>world</strong></p><script>alert(1)</script>',
+    }, ctx);
+    await settle();
+    expect(sent[0].html).toBe("<p>Hello <strong>world</strong></p>");
+    expect(rows[0].body_html).toBe("<p>Hello <strong>world</strong></p>");
+    expect(rows[0].body_text).toContain("Hello world");
+  });
+
+  it("rejects an HTML body that sanitizes to no content", async () => {
+    const { env, ctx, sent } = makeFakeEnv();
+    await expect(send(env, {
+      to: "dev@example.com", subject: "empty", html: "<script>alert(1)</script>",
+    }, ctx)).rejects.toMatchObject({ code: "E_FIELD_MISSING" });
+    expect(sent).toHaveLength(0);
+  });
 });
 
 describe("mailbox.reply (close the loop)", () => {
@@ -131,5 +152,68 @@ describe("mailbox.reply (close the loop)", () => {
     const refs = sent[sent.length - 1].headers?.["References"] ?? "";
     expect(refs).toContain(`<${firstReply.messageId}>`);
     expect(refs).toContain("<third@example.com>");
+  });
+
+  it("derives reply-all recipients, excluding and deduping the sending identity", async () => {
+    const { env, ctx, settle, sent } = makeFakeEnv();
+    await ingest(env, {
+      messageId: "all@example.com",
+      from: "Alice <alice@example.com>",
+      to: "conrad@skyphusion.org, Bob <bob@example.com>",
+      cc: "carol@example.com, CONRAD@skyphusion.org, bob@example.com",
+      replyTo: "list@example.com",
+      subject: "Group",
+      text: "hello",
+    }, ctx);
+    await settle();
+    await reply(env, {
+      messageId: "all@example.com",
+      mode: "replyAll",
+      text: "answer",
+    }, ctx, { from: "conrad@skyphusion.org" });
+    await settle();
+    expect(sent[0].to).toEqual(["list@example.com"]);
+    expect(sent[0].cc).toEqual(["bob@example.com", "carol@example.com"]);
+  });
+
+  it("quotes HTML-only originals through the text fallback", async () => {
+    const { env, ctx, settle, sent } = makeFakeEnv();
+    await ingest(env, {
+      messageId: "html-only@example.com",
+      from: "alice@example.com",
+      to: "conrad@skyphusion.org",
+      subject: "HTML only",
+      html: "<p>Visible <strong>HTML</strong> body</p>",
+    }, ctx);
+    await settle();
+    await reply(env, {
+      messageId: "html-only@example.com",
+      text: "answer",
+      quoteOriginal: true,
+    }, ctx);
+    await settle();
+    expect(sent[0].text).toContain("> Visible HTML body");
+  });
+
+  it("forwards with server-derived subject and stored quote", async () => {
+    const { env, ctx, settle, sent } = makeFakeEnv();
+    await ingest(env, {
+      messageId: "forward@example.com",
+      from: "alice@example.com",
+      to: "conrad@skyphusion.org",
+      subject: "Fwd: Status",
+      text: "original status",
+    }, ctx);
+    await settle();
+    await send(env, {
+      to: "other@example.com",
+      subject: "caller value is ignored",
+      text: "FYI",
+      forwardMessageId: "forward@example.com",
+    }, ctx);
+    await settle();
+    expect(sent[0].subject).toBe("Fwd: Status");
+    expect(sent[0].text).toContain("Forwarded message");
+    expect(sent[0].text).toContain("original status");
   });
 });

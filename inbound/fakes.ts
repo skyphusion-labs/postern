@@ -70,9 +70,22 @@ interface DraftRow {
   body_html: string | null;
   in_reply_to: string | null;
   thread_id: string | null;
+  compose_mode: string;
+  source_message_id: string | null;
   uid: number;
   created_at: string;
   updated_at: string;
+}
+
+interface DraftAttachmentRow {
+  id: string;
+  draft_id: string;
+  identity: string;
+  filename: string | null;
+  mime: string | null;
+  size: number;
+  r2_key: string;
+  created_at: string;
 }
 
 interface PlacementRow {
@@ -124,6 +137,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
   const messageSeenBy: SeenByRow[] = [];
   const sent: SentMessage[] = [];
   const drafts: DraftRow[] = [];
+  const draftAttachments: DraftAttachmentRow[] = [];
   const placements: PlacementRow[] = [];
   const counters = new Map<string, { next_uid: number; uidvalidity: number }>();
   // #350 effective seen: a viewer's per-recipient override wins over messages.seen;
@@ -280,25 +294,55 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         }
         if (/INSERT INTO drafts/i.test(sql)) {
           const [id, identity, to_addr, cc_addr, bcc_addr, subject, body_text, body_html,
-            in_reply_to, thread_id, uid, created_at, updated_at] = bound;
+            in_reply_to, thread_id, compose_mode, source_message_id, uid, created_at, updated_at] = bound;
           drafts.push({
             id: String(id), identity: String(identity), to_addr: to_addr as string | null,
             cc_addr: cc_addr as string | null, bcc_addr: bcc_addr as string | null,
             subject: subject as string | null, body_text: body_text as string | null,
             body_html: body_html as string | null, in_reply_to: in_reply_to as string | null,
-            thread_id: thread_id as string | null, uid: Number(uid),
+            thread_id: thread_id as string | null, compose_mode: String(compose_mode),
+            source_message_id: source_message_id as string | null, uid: Number(uid),
             created_at: String(created_at), updated_at: String(updated_at),
           });
           return { meta: { changes: 1 } };
         }
         if (/UPDATE drafts SET/i.test(sql)) {
-          const row = drafts.find((d) => d.id === String(bound[10]) && d.identity === String(bound[11]));
+          const row = drafts.find((d) => d.id === String(bound[12]) && d.identity === String(bound[13]));
           if (!row) return { meta: { changes: 0 } };
           [row.to_addr, row.cc_addr, row.bcc_addr, row.subject, row.body_text, row.body_html,
             row.in_reply_to, row.thread_id] = bound.slice(0, 8) as (string | null)[];
-          row.uid = Number(bound[8]);
-          row.updated_at = String(bound[9]);
+          row.compose_mode = String(bound[8]);
+          row.source_message_id = bound[9] as string | null;
+          row.uid = Number(bound[10]);
+          row.updated_at = String(bound[11]);
           return { meta: { changes: 1 } };
+        }
+        if (/INSERT INTO draft_attachments/i.test(sql)) {
+          const [id, draft_id, identity, filename, mime, size, r2_key, created_at] = bound;
+          draftAttachments.push({
+            id: String(id), draft_id: String(draft_id), identity: String(identity),
+            filename: filename as string | null, mime: mime as string | null,
+            size: Number(size), r2_key: String(r2_key), created_at: String(created_at),
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (/DELETE FROM draft_attachments WHERE id/i.test(sql)) {
+          const index = draftAttachments.findIndex((a) =>
+            a.id === String(bound[0]) && a.draft_id === String(bound[1]) && a.identity === String(bound[2]));
+          if (index < 0) return { meta: { changes: 0 } };
+          draftAttachments.splice(index, 1);
+          return { meta: { changes: 1 } };
+        }
+        if (/DELETE FROM draft_attachments WHERE draft_id/i.test(sql)) {
+          let changes = 0;
+          for (let i = draftAttachments.length - 1; i >= 0; i--) {
+            if (draftAttachments[i].draft_id === String(bound[0]) &&
+                draftAttachments[i].identity === String(bound[1])) {
+              draftAttachments.splice(i, 1);
+              changes++;
+            }
+          }
+          return { meta: { changes } };
         }
         if (/DELETE FROM drafts WHERE id/i.test(sql)) {
           const i = drafts.findIndex((d) => d.id === String(bound[0]) && d.identity === String(bound[1]));
@@ -329,6 +373,19 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/SELECT identity FROM drafts WHERE id = \?/i.test(sql)) {
           const row = drafts.find((d) => d.id === String(bound[0]));
           return (row ? { identity: row.identity } : null) as T | null;
+        }
+        if (/SELECT COUNT\(\*\) AS count, COALESCE\(SUM\(size\)/i.test(sql)) {
+          const matched = draftAttachments.filter((a) =>
+            a.draft_id === String(bound[0]) && a.identity === String(bound[1]));
+          return {
+            count: matched.length,
+            bytes: matched.reduce((sum, a) => sum + a.size, 0),
+          } as T;
+        }
+        if (/SELECT r2_key FROM draft_attachments WHERE id/i.test(sql)) {
+          const row = draftAttachments.find((a) =>
+            a.id === String(bound[0]) && a.draft_id === String(bound[1]) && a.identity === String(bound[2]));
+          return (row ? { r2_key: row.r2_key } : null) as T | null;
         }
         if (/SELECT message_id FROM messages WHERE message_id = \?/i.test(sql)) {
           const row = rows.find((r) => r.message_id === String(bound[0]));
@@ -393,6 +450,15 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             results: drafts.filter((d) => d.identity === String(bound[0]))
               .sort((a, b) => b.updated_at.localeCompare(a.updated_at)) as unknown as T[],
           };
+        }
+        if (/FROM draft_attachments/i.test(sql)) {
+          const matched = draftAttachments.filter((a) =>
+            a.draft_id === String(bound[0]) && a.identity === String(bound[1]))
+            .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+          if (/SELECT r2_key FROM/i.test(sql)) {
+            return { results: matched.map((a) => ({ r2_key: a.r2_key })) as unknown as T[] };
+          }
+          return { results: matched as unknown as T[] };
         }
         // M8 upsert (#178): INSERT ... ON CONFLICT(message_id) DO UPDATE ...
         // RETURNING thread_id, is_fresh. Faithful to store.put()'s single atomic
