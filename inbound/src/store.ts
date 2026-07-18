@@ -4,6 +4,7 @@
 // complete and the data model has a single owner.
 
 import { sha256hex, chunkText } from "./ingest";
+import { PROJECTION_VERSION, projectRfc822Size } from "./rfc822Project";
 
 /** A message row plus its attachment metadata. Column names are the field names. */
 export interface StoredMessage {
@@ -41,6 +42,10 @@ export interface StoredMessage {
   replyTo: string | null; // raw Reply-To header
   deliveredTo: string[]; // bare lower-cased delivered recipients; pre-v2 fallback [to_addr]
   wireSize: number | null; // raw RFC822 byte size at intake
+  /** Cached IMAP projection length (#342). Null on pre-0012 rows. */
+  projectedSize: number | null;
+  /** Renderer version that produced projectedSize; bump with UIDVALIDITY. */
+  projectionVersion: number | null;
   attachments: AttachmentMeta[];
 }
 
@@ -89,6 +94,9 @@ export interface StoredMessageSummary {
   replyTo: string | null;
   deliveredTo: string[];
   wireSize: number | null;
+  /** Cached IMAP projection length (#342). Prefer for RFC822.SIZE. */
+  projectedSize: number | null;
+  projectionVersion: number | null;
   attachmentCount: number;
   /** True when the store holds a non-empty HTML body (#220). List/search summaries
    *  carry this body-free so the IMAP door can project multipart/alternative (plain
@@ -296,12 +304,38 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
   // distinguish the three outcomes from this single statement via RETURNING
   // is_fresh = (delivered_to == the value we tried to INSERT): 1 only on a real
   // insert, since a merge rebuilds delivered_to from the EXISTING row and differs.
+  // #342: project SIZE from D1-known fields only (attachment sizes known before
+  // the waitUntil R2 write). storeAttachments refreshes if any part is skipped.
+  const attMeta: AttachmentMeta[] = (input.attachments ?? [])
+    .filter((a) => a.content && a.content.byteLength > 0)
+    .map((a) => ({
+      filename: a.filename ?? null,
+      mime: a.mimeType ?? null,
+      size: a.content.byteLength,
+    }));
+  const projectedSize = await projectRfc822Size({
+    messageId: input.messageId,
+    from: input.from,
+    to: input.to,
+    subject: input.subject,
+    date: input.date,
+    inReplyTo: input.inReplyTo ?? null,
+    cc: input.cc ?? null,
+    bcc: input.bcc ?? null,
+    sender: input.sender ?? null,
+    replyTo: input.replyTo ?? null,
+    bodyText: input.bodyText,
+    bodyHtml: input.bodyHtml ?? null,
+    attachments: attMeta,
+  });
+
   const res = await env.DB.prepare(
     `INSERT INTO messages
        (message_id, from_addr, to_addr, subject, date, in_reply_to,
         body_text, body_html, spf, dkim, dmarc, trusted, received_at, direction, thread_id,
-        delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size, seen)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
+        projected_size, projection_version, seen)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(message_id) DO UPDATE SET
        delivered_to = COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') || ? || ','
        WHERE COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') NOT LIKE '%,' || ? || ',%'
@@ -329,6 +363,8 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
       input.sender ?? null,
       input.replyTo ?? null,
       input.wireSize ?? null,
+      projectedSize,
+      PROJECTION_VERSION,
       // Inbound mail arrives UNREAD; the mailbox's own sent copies are stored read
       // (a human never wants their own Sent items flagged unread). Flipped later via
       // setSeen() (the IMAP \Seen flag). The ON CONFLICT merge below never touches
@@ -403,6 +439,35 @@ async function storeAttachments(
       console.error("attachment store failed", i, e);
     }
   }
+  // Refresh from the attachment rows that actually landed (skips/errors may differ
+  // from the pre-insert projection that assumed every non-empty part would store).
+  await refreshProjectedSize(env, messageId);
+}
+
+/** Recompute projected_size from D1 body + attachment metadata (no R2 reads). */
+export async function refreshProjectedSize(env: Env, messageId: string): Promise<void> {
+  const msg = await get(env, messageId);
+  if (!msg) return;
+  const size = await projectRfc822Size({
+    messageId: msg.messageId,
+    from: msg.from,
+    to: msg.to,
+    subject: msg.subject,
+    date: msg.date,
+    inReplyTo: msg.inReplyTo,
+    cc: msg.cc,
+    bcc: msg.bcc,
+    sender: msg.sender,
+    replyTo: msg.replyTo,
+    bodyText: msg.bodyText,
+    bodyHtml: msg.bodyHtml,
+    attachments: msg.attachments,
+  });
+  await env.DB.prepare(
+    "UPDATE messages SET projected_size = ?, projection_version = ? WHERE message_id = ?",
+  )
+    .bind(size, PROJECTION_VERSION, messageId)
+    .run();
 }
 
 // Chunking parameters: ONE place so the live index path and the backfill (#116
@@ -597,6 +662,8 @@ interface MessageRow {
   sender_addr: string | null;
   reply_to_addr: string | null;
   wire_size: number | null;
+  projected_size: number | null;
+  projection_version: number | null;
   flagged: number;
   answered: number;
   mailbox: string | null;
@@ -629,6 +696,8 @@ function rowToMessage(row: MessageRow, attachments: AttachmentMeta[]): StoredMes
     replyTo: row.reply_to_addr ?? null,
     deliveredTo: parseDeliveredTo(row.delivered_to, row.to_addr),
     wireSize: row.wire_size ?? null,
+    projectedSize: row.projected_size ?? null,
+    projectionVersion: row.projection_version ?? null,
     attachments,
   };
 }
@@ -1217,6 +1286,7 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
             delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
+            projected_size, projection_version,
             flagged, answered, mailbox, trashed_at
        FROM messages WHERE message_id = ? LIMIT 1`,
   )
@@ -1233,6 +1303,7 @@ export async function thread(env: Env, threadId: string, viewer?: string): Promi
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
             delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
+            projected_size, projection_version,
             flagged, answered, mailbox, trashed_at
        FROM messages WHERE thread_id = ? ${
          owner
@@ -1363,6 +1434,8 @@ interface SummaryRow {
   sender_addr: string | null;
   reply_to_addr: string | null;
   wire_size: number | null;
+  projected_size: number | null;
+  projection_version: number | null;
   has_html: number;
   attachment_count: number;
   flagged: number;
@@ -1392,6 +1465,8 @@ function rowToSummary(row: SummaryRow): StoredMessageSummary {
     replyTo: row.reply_to_addr ?? null,
     deliveredTo: parseDeliveredTo(row.delivered_to, row.to_addr),
     wireSize: row.wire_size ?? null,
+    projectedSize: row.projected_size ?? null,
+    projectionVersion: row.projection_version ?? null,
     attachmentCount: row.attachment_count,
     hasHtml: row.has_html === 1,
     flagged: row.flagged === 1,
@@ -1503,6 +1578,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            m.projected_size, m.projection_version,
             m.flagged, m.answered, m.mailbox, m.trashed_at,
             (SELECT mp.folder_uid FROM mailbox_placement mp WHERE mp.message_id=m.message_id AND mp.folder=m.mailbox) AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
@@ -1666,6 +1742,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            m.projected_size, m.projection_version,
             m.flagged, m.answered, m.mailbox, m.trashed_at, NULL AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
@@ -1785,6 +1862,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            m.projected_size, m.projection_version,
             m.flagged, m.answered, m.mailbox, m.trashed_at,
             (SELECT mp.folder_uid FROM mailbox_placement mp WHERE mp.message_id=m.message_id AND mp.folder=m.mailbox) AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
@@ -1861,6 +1939,7 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            m.projected_size, m.projection_version,
             m.flagged, m.answered, m.mailbox, m.trashed_at, NULL AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
