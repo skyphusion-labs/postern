@@ -127,6 +127,27 @@ export const WEBMAIL_HTML = `<!doctype html>
   .sendnote { color: var(--muted); font-size: 12px; }
   header .identity { color: var(--fg); font-size: 13px; font-weight: 600; }
 
+
+  /* Folder rail (#352) */
+  .folders {
+    width: 168px; border-right: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; padding: 8px 0; overflow-y: auto; flex-shrink: 0;
+  }
+  .folders button {
+    display: flex; justify-content: space-between; gap: 8px; width: 100%;
+    text-align: left; background: none; border: none; border-radius: 0;
+    padding: 8px 12px; color: var(--fg); font: inherit; cursor: pointer;
+  }
+  .folders button:hover { background: var(--panel-2); }
+  .folders button.active { background: var(--accent-dim); color: var(--accent); }
+  .folders .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .folders .fcount { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .folders .fcount.unread { color: var(--accent); font-weight: 600; }
+  .row-item.unread .from, .row-item.unread .subject { font-weight: 700; }
+  .row-item .star { color: var(--muted); margin-right: 4px; }
+  .row-item .star.on { color: #e5c07b; }
+  .msg-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
   /* Keyboard focus visibility (a11y foundation): a clear ring for keyboard users
      on every interactive control, without a persistent outline on mouse click. */
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -201,18 +222,14 @@ export const WEBMAIL_HTML = `<!doctype html>
 
 <!-- App -->
 <div id="app">
-  <div class="sidebar" role="navigation" aria-label="Mailbox">
+  <nav class="folders" id="folders" role="navigation" aria-label="Folders"></nav>
+  <div class="sidebar" aria-label="Mailbox">
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search (press Enter)" aria-label="Search mail">
       <select id="searchMode" class="mode" title="Search mode (applies when searching)" aria-label="Search mode">
         <option value="hybrid">Hybrid</option>
         <option value="fts">Keyword</option>
         <option value="semantic">Semantic</option>
-      </select>
-      <select id="folder" title="Folder" aria-label="Folder">
-        <option value="">All</option>
-        <option value="inbound">Inbox</option>
-        <option value="outbound">Sent</option>
       </select>
     </div>
     <div class="list" id="list" aria-label="Messages"></div>
@@ -256,7 +273,8 @@ export const WEBMAIL_HTML = `<!doctype html>
     token: SS.getItem("postern_token") || "",
     sendToken: SS.getItem("postern_send_token") || "",
     searchMode: normalizeSearchMode(SS.getItem("postern_search_mode") || "hybrid"),
-    folder: "", q: "", cursor: null, items: [], selected: null,
+    folder: "inbox", q: "", cursor: null, items: [], selected: null,
+    folders: [],
     // Auth mode: "token" = BYO Bearer token (operator/self-host path, sessionStorage);
     // "session" = the native cookie session (#351), same-origin HttpOnly cookie + CSRF.
     authMode: "token",
@@ -354,6 +372,51 @@ export const WEBMAIL_HTML = `<!doctype html>
             var e403 = new Error((j && (j.message || j.error)) || "requires send scope");
             e403.code = 403; throw e403;
           }
+          if (!r.ok || j.ok === false) {
+            var msg = (j && (j.message || j.error)) || ("HTTP " + r.status);
+            throw new Error(msg);
+          }
+          return j;
+        });
+    });
+  }
+
+
+  // Read-scoped organize writes (#352): seen/flags/move use the READ credential
+  // (session cookie + CSRF, or the BYO read Bearer). Not the send token.
+  function apiOrganize(path, body) {
+    var url = baseUrl() + path;
+    var opts;
+    if (state.authMode === "session") {
+      opts = {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "accept": "application/json",
+          "x-postern-csrf": csrfFromCookie()
+        },
+        body: JSON.stringify(body),
+        credentials: "include",
+        referrerPolicy: "no-referrer"
+      };
+    } else {
+      if (!state.token) throw new Error("read token not configured");
+      opts = {
+        method: "POST",
+        headers: {
+          "authorization": "Bearer " + state.token,
+          "content-type": "application/json",
+          "accept": "application/json"
+        },
+        body: JSON.stringify(body),
+        credentials: "omit",
+        referrerPolicy: "no-referrer"
+      };
+    }
+    return fetch(url, opts).then(function (r) {
+      return r.json().catch(function () { return { ok: false, error: "bad_json", status: r.status }; })
+        .then(function (j) {
+          if (r.status === 401) { var e = new Error("unauthorized"); e.code = 401; throw e; }
           if (!r.ok || j.ok === false) {
             var msg = (j && (j.message || j.error)) || ("HTTP " + r.status);
             throw new Error(msg);
@@ -763,20 +826,103 @@ export const WEBMAIL_HTML = `<!doctype html>
     showGate("Signed out. Your tokens were cleared from this browser.");
   }
 
-  // --- list ------------------------------------------------------------------
+  // --- folders + list (#352) -------------------------------------------------
+  function listParams() {
+    var p = { limit: 50, cursor: state.cursor };
+    if (state.folder === "inbox") p.direction = "inbound";
+    else if (state.folder === "sent") p.direction = "outbound";
+    else if (state.folder === "all") p.mailbox = "all";
+    else if (state.folder === "trash" || state.folder === "junk" || state.folder === "archive") {
+      p.mailbox = state.folder;
+    }
+    return p;
+  }
+
+  function renderFolderRail() {
+    var nav = $("folders");
+    if (!nav) return;
+    clear(nav);
+    var rows = state.folders.length ? state.folders : [
+      { id: "inbox", label: "Inbox", count: 0, unread: 0 },
+      { id: "sent", label: "Sent", count: 0, unread: 0 },
+      { id: "all", label: "All", count: 0, unread: 0 },
+      { id: "drafts", label: "Drafts", count: 0, unread: 0 },
+      { id: "trash", label: "Trash", count: 0, unread: 0 },
+      { id: "junk", label: "Junk", count: 0, unread: 0 },
+      { id: "archive", label: "Archive", count: 0, unread: 0 }
+    ];
+    rows.forEach(function (f) {
+      var countLabel = f.unread > 0 ? String(f.unread) : (f.count > 0 ? String(f.count) : "");
+      var btn = el("button", {
+        type: "button",
+        class: f.id === state.folder ? "active" : "",
+        "data-folder": f.id,
+        "aria-current": f.id === state.folder ? "page" : "false"
+      }, [
+        el("span", { class: "fname", text: f.label || f.id }),
+        el("span", { class: "fcount" + (f.unread > 0 ? " unread" : ""), text: countLabel })
+      ]);
+      btn.addEventListener("click", function () {
+        if (state.folder === f.id) return;
+        state.folder = f.id;
+        state.q = "";
+        $("search").value = "";
+        renderFolderRail();
+        resetAndLoad();
+      });
+      nav.appendChild(btn);
+    });
+  }
+
+  function refreshFolders() {
+    return api("/api/folders").then(function (body) {
+      state.folders = body.folders || [];
+      renderFolderRail();
+    }).catch(function () {
+      // Folder counts are best-effort; the rail still works from defaults.
+      renderFolderRail();
+    });
+  }
+
   function resetAndLoad() {
     state.cursor = null; state.items = [];
     clear($("list"));
+    renderFolderRail();
     loadMore();
+    refreshFolders();
   }
 
   function loadMore(fallbackFts) {
     var loading = el("div", { class: "loading", text: "Loading..." });
     $("list").appendChild(loading);
     var mode = fallbackFts ? "fts" : state.searchMode;
-    var req = state.q
-      ? api("/api/search", { q: state.q, mode: mode, limit: 50, cursor: state.cursor })
-      : api("/api/messages", { direction: state.folder, limit: 50, cursor: state.cursor });
+    var req;
+    if (state.folder === "drafts" && !state.q) {
+      req = api("/api/drafts").then(function (body) {
+        return { items: (body.drafts || []).map(function (d) {
+          return {
+            messageId: d.id,
+            isDraft: true,
+            direction: "outbound",
+            from: d.identity || "",
+            to: d.to || "",
+            subject: d.subject || "(no subject)",
+            date: d.updatedAt || d.createdAt || "",
+            bodyText: d.bodyText || "",
+            bodyHtml: d.bodyHtml || null,
+            seen: true,
+            flagged: false,
+            trusted: true,
+            attachmentCount: 0,
+            mailbox: null
+          };
+        }), cursor: null };
+      });
+    } else {
+      req = state.q
+        ? api("/api/search", { q: state.q, mode: mode, limit: 50, cursor: state.cursor })
+        : api("/api/messages", listParams());
+    }
     req.then(function (body) {
       $("list").removeChild(loading);
       // search returns SearchHit { message, ... }; list returns summaries.
@@ -815,10 +961,18 @@ export const WEBMAIL_HTML = `<!doctype html>
 
   function appendRow(m) {
     var tags = [];
+    if (m.flagged) tags.push(el("span", { class: "star on", text: "★", title: "Flagged" }));
     if (m.direction === "outbound") tags.push(el("span", { class: "tag out", text: "Sent" }));
-    tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
+    if (m.isDraft) tags.push(el("span", { class: "tag out", text: "Draft" }));
+    else tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
     var who = m.direction === "outbound" ? ("To: " + (m.to || "")) : (m.from || "");
-    var item = el("div", { class: "row-item", "data-id": m.messageId, role: "button", tabindex: "0", "aria-label": (m.subject || "(no subject)") + " from " + who }, [
+    var item = el("div", {
+      class: "row-item" + (m.seen === false ? " unread" : ""),
+      "data-id": m.messageId,
+      role: "button",
+      tabindex: "0",
+      "aria-label": (m.subject || "(no subject)") + " from " + who
+    }, [
       el("div", { class: "top" }, [
         el("div", { class: "from", text: who }),
         el("div", { class: "date", text: fmtDate(m.date || m.receivedAt) })
@@ -840,9 +994,26 @@ export const WEBMAIL_HTML = `<!doctype html>
     var prev = $("list").querySelector(".row-item.sel");
     if (prev) prev.classList.remove("sel");
     if (item) item.classList.add("sel");
+    // Drafts have no /api/messages/:id body; keep the list summary in the pane.
+    var draft = state.items.find(function (x) { return x.messageId === id && x.isDraft; });
+    if (draft) {
+      renderReading(draft);
+      return;
+    }
     renderLoadingReading();
     api("/api/messages/" + encodeURIComponent(id)).then(function (body) {
-      renderReading(body.message);
+      var m = body.message;
+      renderReading(m);
+      if (m && m.seen === false) {
+        apiOrganize("/api/messages/seen", { ids: [m.messageId], seen: true }).then(function () {
+          m.seen = true;
+          if (item) item.classList.remove("unread");
+          state.items.forEach(function (it) {
+            if (it.messageId === m.messageId) it.seen = true;
+          });
+          refreshFolders();
+        }).catch(function () { /* non-fatal */ });
+      }
     }).catch(function (e) {
       if (e.code === 401) { logout(); return; }
       renderError(e.message);
@@ -898,7 +1069,7 @@ export const WEBMAIL_HTML = `<!doctype html>
             text: text
           });
       req.then(function (res) {
-        state.folder = "outbound"; state.q = ""; $("search").value = ""; $("folder").value = "outbound";
+        state.folder = "sent"; state.q = ""; $("search").value = "";
         resetAndLoad();
         if (res.messageId) selectMessage(res.messageId, null);
         else renderReading(null);
@@ -938,7 +1109,54 @@ export const WEBMAIL_HTML = `<!doctype html>
         )
       ])
     ]);
-    if (state.sendCapable === true) {
+    var actions = [];
+    if (!m.isDraft) {
+      var starBtn = el("button", { text: m.flagged ? "Unstar" : "Star" });
+      starBtn.addEventListener("click", function () {
+        var next = !m.flagged;
+        starBtn.disabled = true;
+        apiOrganize("/api/messages/flags", { ids: [m.messageId], set: { flagged: next } }).then(function () {
+          m.flagged = next;
+          state.items.forEach(function (it) { if (it.messageId === m.messageId) it.flagged = next; });
+          renderReading(m);
+          refreshFolders();
+          clear($("list"));
+          state.items.forEach(appendRow);
+          var sel = $("list").querySelector('.row-item[data-id="' + m.messageId + '"]');
+          if (sel) sel.classList.add("sel");
+        }).catch(function (e) {
+          if (e.code === 401) { logout(); return; }
+          alert("Flag update failed: " + e.message);
+          starBtn.disabled = false;
+        });
+      });
+      actions.push(starBtn);
+
+      function moveTo(mailbox, label) {
+        var btn = el("button", { text: label });
+        btn.addEventListener("click", function () {
+          btn.disabled = true;
+          apiOrganize("/api/messages/move", { ids: [m.messageId], mailbox: mailbox }).then(function () {
+            state.selected = null;
+            resetAndLoad();
+            renderReading(null);
+          }).catch(function (e) {
+            if (e.code === 401) { logout(); return; }
+            alert("Move failed: " + e.message);
+            btn.disabled = false;
+          });
+        });
+        return btn;
+      }
+      if (m.mailbox === "trash" || m.mailbox === "junk" || m.mailbox === "archive") {
+        actions.push(moveTo(null, "Restore"));
+      } else {
+        actions.push(moveTo("archive", "Archive"));
+        actions.push(moveTo("trash", "Trash"));
+        actions.push(moveTo("junk", "Junk"));
+      }
+    }
+    if (state.sendCapable === true && !m.isDraft) {
       var replyBtn = el("button", { text: "Reply" });
       replyBtn.addEventListener("click", function () {
         var reSub = (m.subject || "").match(/^Re:/i) ? (m.subject || "") : ("Re: " + (m.subject || ""));
@@ -946,10 +1164,17 @@ export const WEBMAIL_HTML = `<!doctype html>
           replyTo: m.messageId,
           to: m.from || "",
           subject: reSub,
-          text: "\\n\\n---\\nOn " + (m.date ? new Date(m.date).toLocaleString() : "") + ", " + (m.from || "") + " wrote:\\n" + (m.bodyText || "")
+          text: "
+
+---
+On " + (m.date ? new Date(m.date).toLocaleString() : "") + ", " + (m.from || "") + " wrote:
+" + (m.bodyText || "")
         });
       });
-      head.appendChild(el("div", { class: "compose-actions" }, [replyBtn]));
+      actions.push(replyBtn);
+    }
+    if (actions.length) {
+      head.appendChild(el("div", { class: "msg-actions compose-actions" }, actions));
     }
     r.appendChild(head);
 
@@ -1011,10 +1236,6 @@ export const WEBMAIL_HTML = `<!doctype html>
     SS.setItem("postern_search_mode", state.searchMode);
     if (state.q) resetAndLoad();
   });
-  $("folder").addEventListener("change", function (e) {
-    state.folder = e.target.value; state.q = ""; $("search").value = ""; resetAndLoad();
-  });
-
   // --- boot: prefer a live native session, else BYO-token, else the right gate -----
   // GET /api/session (same-origin, cookie) tells us: a live session (restore it), or
   // the configured backend so we show the sign-in form (native) or token gate (off).

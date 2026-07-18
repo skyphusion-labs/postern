@@ -76,6 +76,15 @@ describe("the page is XSS-conscious by construction", () => {
     expect(WEBMAIL_HTML).toContain('id="searchMode"');
     expect(WEBMAIL_HTML).toContain("postern_search_mode");
   });
+  it("exposes folder rail + organize API client for durable mailbox ops (#352)", () => {
+    expect(WEBMAIL_HTML).toContain('id="folders"');
+    expect(WEBMAIL_HTML).toContain("function apiOrganize");
+    expect(WEBMAIL_HTML).toContain('"/api/folders"');
+    expect(WEBMAIL_HTML).toContain('"/api/messages/flags"');
+    expect(WEBMAIL_HTML).toContain('"/api/messages/move"');
+    expect(WEBMAIL_HTML).toContain('"/api/messages/seen"');
+    expect(WEBMAIL_HTML).toContain("p.mailbox");
+  });
   it("never assigns innerHTML (all message content goes through text nodes)", () => {
     // A blunt but effective guard: the page script must not use innerHTML, which
     // is the one sink that would let stored message bytes execute. If a future
