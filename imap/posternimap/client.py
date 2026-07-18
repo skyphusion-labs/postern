@@ -114,12 +114,29 @@ class MessageSummary:
     # Session-local \Deleted flag (#278): set by STORE, cleared on EXPUNGE or when the
     # message is removed from the snapshot. Not persisted in the Postern API until EXPUNGE.
     deleted: bool = False
+    # Durable organize flags (#352): \Flagged / \Answered via POST /api/messages/flags.
+    flagged: bool = False
+    answered: bool = False
+    # Durable folder placement (#352): None = direction-default INBOX/Sent view.
+    mailbox: Optional[str] = None
+    trashed_at: Optional[str] = None
+    # Per-folder IMAP UID for trash/junk/archive (#352 §2.6). When set, the IMAP door
+    # exposes this as the mailbox UID instead of messages.id.
+    folder_uid: Optional[int] = None
 
     @classmethod
-    def from_json(cls, d: dict[str, Any]) -> "MessageSummary":
+    def from_json(cls, d: dict[str, Any], *, use_folder_uid: bool = False) -> "MessageSummary":
         to_addr = d.get("to", "")
+        folder_uid = d.get("folderUid")
+        folder_uid_i = int(folder_uid) if folder_uid is not None else None
+        # Placed folders (trash/junk/archive) use folder_uid as the IMAP UID; arrival
+        # views keep messages.id. Fall back to messages.id when placement has no uid yet.
+        if use_folder_uid and folder_uid_i is not None and folder_uid_i > 0:
+            uid = folder_uid_i
+        else:
+            uid = int(d["uid"])
         return cls(
-            uid=int(d["uid"]),
+            uid=uid,
             message_id=d["messageId"],
             direction=d.get("direction", "inbound"),
             thread_id=d.get("threadId", d["messageId"]),
@@ -139,6 +156,11 @@ class MessageSummary:
             delivered_to=_delivered_to(d, to_addr),
             wire_size=_wire_size(d),
             has_html=bool(d.get("hasHtml", False)),
+            flagged=bool(d.get("flagged", False)),
+            answered=bool(d.get("answered", False)),
+            mailbox=d.get("mailbox"),
+            trashed_at=d.get("trashedAt"),
+            folder_uid=folder_uid_i,
         )
 
 
@@ -220,6 +242,63 @@ class Message:
 class Page:
     items: list[MessageSummary]
     cursor: Optional[str]
+
+
+@dataclass
+class Draft:
+    """Identity-owned server-side draft (CONTRACT /api/drafts, #352)."""
+
+    id: str
+    identity: str
+    uid: int
+    to_addr: Optional[str] = None
+    cc: Optional[str] = None
+    bcc: Optional[str] = None
+    subject: Optional[str] = None
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    in_reply_to: Optional[str] = None
+    thread_id: Optional[str] = None
+    created_at: str = ""
+    updated_at: str = ""
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> "Draft":
+        return cls(
+            id=d["id"],
+            identity=d.get("identity", ""),
+            uid=int(d["uid"]),
+            to_addr=d.get("to"),
+            cc=d.get("cc"),
+            bcc=d.get("bcc"),
+            subject=d.get("subject"),
+            body_text=d.get("bodyText"),
+            body_html=d.get("bodyHtml"),
+            in_reply_to=d.get("inReplyTo"),
+            thread_id=d.get("threadId"),
+            created_at=d.get("createdAt", ""),
+            updated_at=d.get("updatedAt", ""),
+        )
+
+    def as_summary(self) -> MessageSummary:
+        """Project a draft as a mailbox list row (IMAP Drafts folder)."""
+        return MessageSummary(
+            uid=self.uid,
+            message_id=self.id,
+            direction="outbound",
+            thread_id=self.thread_id or self.id,
+            from_addr=self.identity,
+            to_addr=self.to_addr or "",
+            subject=self.subject or "",
+            date=self.updated_at or self.created_at,
+            in_reply_to=self.in_reply_to,
+            trusted=True,
+            received_at=self.updated_at or self.created_at,
+            attachment_count=0,
+            seen=True,
+            has_html=bool(self.body_html and str(self.body_html).strip()),
+            mailbox="drafts",
+        )
 
 
 # The default transport: reuse ONE persistent HTTP(S) connection to the worker across
@@ -326,6 +405,7 @@ class PosternClient:
         from_addr: Optional[str] = None,
         thread: Optional[str] = None,
         direction: Optional[str] = None,
+        mailbox: Optional[str] = None,
         q: Optional[str] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
@@ -339,6 +419,10 @@ class PosternClient:
             params["thread"] = thread
         if direction:
             params["direction"] = direction
+        # #352: mailbox=archive|trash|junk|all scopes durable folder views; omit for
+        # direction-default INBOX/Sent (worker applies mailbox IS NULL).
+        if mailbox:
+            params["mailbox"] = mailbox
         if q:
             params["q"] = q
         if limit is not None:
@@ -346,8 +430,12 @@ class PosternClient:
         if cursor:
             params["cursor"] = cursor
         body = self._get("/api/messages", params)
+        use_folder_uid = mailbox in ("trash", "junk", "archive")
         return Page(
-            items=[MessageSummary.from_json(m) for m in body.get("items", [])],
+            items=[
+                MessageSummary.from_json(m, use_folder_uid=use_folder_uid)
+                for m in body.get("items", [])
+            ],
             cursor=body.get("cursor"),
         )
 
@@ -472,6 +560,97 @@ class PosternClient:
         path = "/api/messages/" + urllib.parse.quote(message_id, safe="")
         self._delete(path)
 
+    def set_flags(
+        self,
+        message_ids: list[str],
+        *,
+        flagged: Optional[bool] = None,
+        answered: Optional[bool] = None,
+    ) -> int:
+        """Set durable \\Flagged / \\Answered via POST /api/messages/flags (#352)."""
+        if not message_ids or (flagged is None and answered is None):
+            return 0
+        payload: dict[str, Any] = {"ids": message_ids, "set": {}}
+        if flagged is not None:
+            payload["set"]["flagged"] = flagged
+        if answered is not None:
+            payload["set"]["answered"] = answered
+        body = self._post("/api/messages/flags", payload)
+        updated = body.get("updated", 0)
+        return int(updated) if isinstance(updated, (int, float)) else 0
+
+    def move_messages(self, message_ids: list[str], mailbox: Optional[str]) -> int:
+        """Soft-move via POST /api/messages/move (#352).
+
+        mailbox is archive|trash|junk, or None to restore to the direction-default view.
+        Trash is soft-delete (trashed_at); EXPUNGE remains the hard delete.
+        """
+        if not message_ids:
+            return 0
+        body = self._post("/api/messages/move", {"ids": message_ids, "mailbox": mailbox})
+        updated = body.get("updated", 0)
+        return int(updated) if isinstance(updated, (int, float)) else 0
+
+    def list_drafts(self) -> list[Draft]:
+        """GET /api/drafts -- identity-owned drafts for the bound token (#352)."""
+        body = self._get("/api/drafts", {})
+        return [Draft.from_json(d) for d in body.get("drafts", [])]
+
+    def get_draft(self, draft_id: str) -> Optional[Draft]:
+        try:
+            body = self._get(f"/api/drafts/{urllib.parse.quote(draft_id, safe='')}", {})
+        except PosternError as e:
+            if e.status == 404:
+                return None
+            raise
+        draft = body.get("draft")
+        return Draft.from_json(draft) if draft else None
+
+    def create_draft(self, fields: dict[str, Any]) -> Draft:
+        """POST /api/drafts -- create a durable draft (APPEND Drafts)."""
+        body = self._post("/api/drafts", fields, expect_status=(200, 201))
+        draft = body.get("draft")
+        if not draft:
+            raise PosternError("draft create returned no draft")
+        return Draft.from_json(draft)
+
+    def update_draft(
+        self, draft_id: str, fields: dict[str, Any], *, updated_at: Optional[str] = None
+    ) -> Draft:
+        """PUT /api/drafts/{id} -- optimistic-concurrency draft replace."""
+        payload = dict(fields)
+        if updated_at is not None:
+            payload["updatedAt"] = updated_at
+        path = f"/api/drafts/{urllib.parse.quote(draft_id, safe='')}"
+        url = self._base + path
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="PUT")
+        req.add_header("Authorization", f"Bearer {self._token}")
+        req.add_header("Accept", "application/json")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", USER_AGENT)
+        with self._meter.timed("api_request", path=path) as span:
+            status, raw = self._transport(req)
+            span.set(status=status, bytes=len(raw))
+        if status == 401:
+            raise PosternAuthError("Postern API rejected the token", status=401)
+        if status == 409:
+            raise PosternError("draft conflict (stale updatedAt)", status=409)
+        if status >= 400:
+            raise PosternError(f"Postern API error (HTTP {status})", status=status)
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError) as e:
+            raise PosternError(f"invalid JSON from Postern API: {e}") from e
+        draft = body.get("draft")
+        if not draft:
+            raise PosternError("draft update returned no draft")
+        return Draft.from_json(draft)
+
+    def delete_draft(self, draft_id: str) -> None:
+        path = "/api/drafts/" + urllib.parse.quote(draft_id, safe="")
+        self._delete(path)
+
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""
         try:
@@ -521,8 +700,14 @@ class PosternClient:
         except (ValueError, UnicodeDecodeError) as e:
             raise PosternError(f"invalid JSON from Postern API: {e}") from e
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        # A JSON POST to the write half of the API (currently only the seen flag).
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        expect_status: Tuple[int, ...] = (200,),
+    ) -> dict[str, Any]:
+        # A JSON POST to the write half of the API (seen / flags / move / drafts).
         # Mirrors _get: Bearer auth, the real UA, measured round-trip, and the same
         # status -> PosternError mapping so a 401/5xx surfaces identically.
         url = self._base + path
@@ -537,7 +722,7 @@ class PosternClient:
             span.set(status=status, bytes=len(raw))
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
-        if status >= 400:
+        if status not in expect_status and status >= 400:
             raise PosternError(f"Postern API error (HTTP {status})", status=status)
         try:
             return json.loads(raw.decode("utf-8")) if raw else {}

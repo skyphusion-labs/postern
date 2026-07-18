@@ -65,6 +65,11 @@ class FakeTransport:
         self.last_headers: dict[str, str] = {}
         # last decoded POST /api/messages/seen body (#357 per-recipient assert)
         self.last_seen_payload: Optional[Dict[str, Any]] = None
+        # #352 durable folders: in-memory drafts + move/flags call log
+        self.drafts: List[Dict[str, Any]] = []
+        self.last_move_payload: Optional[Dict[str, Any]] = None
+        self.last_flags_payload: Optional[Dict[str, Any]] = None
+        self._draft_uid = 1
 
     def __call__(self, req):
         self.calls.append(req.full_url)
@@ -81,6 +86,13 @@ class FakeTransport:
         # before the single-message GET branch (and never counted as a body fetch).
         if path == "/api/messages/seen" and method == "POST":
             return self._set_seen(req)
+        if path == "/api/messages/flags" and method == "POST":
+            return self._set_flags(req)
+        if path == "/api/messages/move" and method == "POST":
+            return self._move(req)
+
+        if path == "/api/drafts" or path.startswith("/api/drafts/"):
+            return self._drafts(path, method, req)
 
         if method == "DELETE" and path.startswith("/api/messages/") and "/attachments/" not in path:
             return self._delete_message(path)
@@ -131,6 +143,16 @@ class FakeTransport:
         if "hasHtml" not in s:
             html = m.get("bodyHtml")
             s["hasHtml"] = bool(html and str(html).strip())
+        if "flagged" not in s:
+            s["flagged"] = bool(m.get("flagged", False))
+        if "answered" not in s:
+            s["answered"] = bool(m.get("answered", False))
+        if "mailbox" in m:
+            s["mailbox"] = m.get("mailbox")
+        if m.get("folderUid") is not None:
+            s["folderUid"] = m.get("folderUid")
+        if m.get("trashedAt") is not None:
+            s["trashedAt"] = m.get("trashedAt")
         return s
 
     def _delivered_set(self, m: Dict[str, Any]) -> str:
@@ -152,14 +174,22 @@ class FakeTransport:
         direction = params.get("direction")
         to_filter = params.get("to")
         from_filter = params.get("from")
+        mailbox = params.get("mailbox")
+        rows = list(self.messages)
+        # #352 placement filter: unset -> mailbox IS NULL; all -> no filter;
+        # trash|junk|archive -> exact match.
+        if mailbox == "all":
+            pass
+        elif mailbox in ("trash", "junk", "archive"):
+            rows = [m for m in rows if m.get("mailbox") == mailbox]
+        else:
+            rows = [m for m in rows if not m.get("mailbox")]
         if to_filter and direction == "inbound":
-            # CONTRACT 10.9 recipient-relative INBOX: delivered to V AND (inbound OR
-            # (outbound AND from != V)). Same-domain sends surface in V's inbox lens.
             v = to_filter.strip().lower()
             needle = f",{v},"
             rows = [
                 m
-                for m in self.messages
+                for m in rows
                 if needle in self._delivered_set(m)
                 and (
                     m["direction"] == "inbound"
@@ -167,7 +197,8 @@ class FakeTransport:
                 )
             ]
         else:
-            rows = [m for m in self.messages if not direction or m["direction"] == direction]
+            if direction:
+                rows = [m for m in rows if m["direction"] == direction]
             if to_filter:
                 needle = f",{to_filter.strip().lower()},"
                 rows = [m for m in rows if needle in self._delivered_set(m)]
@@ -232,6 +263,124 @@ class FakeTransport:
                 m["seen"] = seen
                 updated += 1
         return 200, json.dumps({"ok": True, "updated": updated}).encode()
+
+    def _set_flags(self, req):
+        payload = json.loads((req.data or b"{}").decode("utf-8"))
+        self.last_flags_payload = payload
+        ids = set(payload.get("ids", []))
+        sett = payload.get("set") or {}
+        updated = 0
+        for m in self.messages:
+            if m["messageId"] not in ids:
+                continue
+            if "flagged" in sett:
+                m["flagged"] = bool(sett["flagged"])
+            if "answered" in sett:
+                m["answered"] = bool(sett["answered"])
+            updated += 1
+        return 200, json.dumps({"ok": True, "updated": updated}).encode()
+
+    def _move(self, req):
+        payload = json.loads((req.data or b"{}").decode("utf-8"))
+        self.last_move_payload = payload
+        ids = set(payload.get("ids", []))
+        mailbox = payload.get("mailbox")
+        updated = 0
+        next_folder_uid = max(
+            (int(m.get("folderUid") or 0) for m in self.messages), default=0
+        ) + 1
+        for m in self.messages:
+            if m["messageId"] not in ids:
+                continue
+            m["mailbox"] = mailbox
+            if mailbox == "trash":
+                m["trashedAt"] = "2026-07-18T00:00:00Z"
+                m["folderUid"] = next_folder_uid
+                next_folder_uid += 1
+            elif mailbox in ("junk", "archive"):
+                m["trashedAt"] = None
+                m["folderUid"] = next_folder_uid
+                next_folder_uid += 1
+            else:
+                m["trashedAt"] = None
+                m["folderUid"] = None
+            updated += 1
+        return 200, json.dumps({"ok": True, "updated": updated}).encode()
+
+    def _drafts(self, path, method, req):
+        if path == "/api/drafts" and method == "GET":
+            return 200, json.dumps({"ok": True, "drafts": list(self.drafts)}).encode()
+        if path == "/api/drafts" and method == "POST":
+            payload = json.loads((req.data or b"{}").decode("utf-8"))
+            draft = {
+                "id": f"draft-{self._draft_uid}",
+                "identity": "agent@skyphusion.org",
+                "uid": self._draft_uid,
+                "to": payload.get("to"),
+                "cc": payload.get("cc"),
+                "bcc": payload.get("bcc"),
+                "subject": payload.get("subject"),
+                "bodyText": payload.get("bodyText"),
+                "bodyHtml": payload.get("bodyHtml"),
+                "inReplyTo": payload.get("inReplyTo"),
+                "threadId": payload.get("threadId"),
+                "createdAt": "2026-07-18T00:00:00Z",
+                "updatedAt": "2026-07-18T00:00:00Z",
+            }
+            self._draft_uid += 1
+            self.drafts.append(draft)
+            return 201, json.dumps({"ok": True, "id": draft["id"], "draft": draft}).encode()
+        # /api/drafts/{id}
+        draft_id = urllib.parse.unquote(path[len("/api/drafts/"):])
+        if method == "GET":
+            for d in self.drafts:
+                if d["id"] == draft_id:
+                    return 200, json.dumps({"ok": True, "draft": d}).encode()
+            return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
+        if method == "DELETE":
+            before = len(self.drafts)
+            self.drafts = [d for d in self.drafts if d["id"] != draft_id]
+            if len(self.drafts) == before:
+                return 404, json.dumps({"ok": False, "error": "E_NOT_FOUND"}).encode()
+            return 200, json.dumps({"ok": True, "deleted": draft_id}).encode()
+        if method == "PUT":
+            payload = json.loads((req.data or b"{}").decode("utf-8"))
+            for d in self.drafts:
+                if d["id"] != draft_id:
+                    continue
+                if payload.get("updatedAt") and payload["updatedAt"] != d["updatedAt"]:
+                    return 409, json.dumps({"ok": False, "error": "E_CONFLICT", "current": d}).encode()
+                for key, wire in (
+                    ("to", "to"),
+                    ("cc", "cc"),
+                    ("bcc", "bcc"),
+                    ("subject", "subject"),
+                    ("bodyText", "bodyText"),
+                    ("bodyHtml", "bodyHtml"),
+                    ("inReplyTo", "inReplyTo"),
+                    ("threadId", "threadId"),
+                ):
+                    if key in payload:
+                        d[wire] = payload[key]
+                d["uid"] = self._draft_uid
+                self._draft_uid += 1
+                d["updatedAt"] = "2026-07-18T00:00:01Z"
+                return 200, json.dumps({"ok": True, "draft": d}).encode()
+            # create via PUT
+            draft = {
+                "id": draft_id,
+                "identity": "agent@skyphusion.org",
+                "uid": self._draft_uid,
+                "to": payload.get("to"),
+                "subject": payload.get("subject"),
+                "bodyText": payload.get("bodyText"),
+                "createdAt": "2026-07-18T00:00:00Z",
+                "updatedAt": "2026-07-18T00:00:00Z",
+            }
+            self._draft_uid += 1
+            self.drafts.append(draft)
+            return 200, json.dumps({"ok": True, "draft": draft}).encode()
+        return 405, json.dumps({"ok": False, "error": "method_not_allowed"}).encode()
 
     def _delete_message(self, path: str):
         mid = urllib.parse.unquote(path[len("/api/messages/"):])

@@ -206,29 +206,28 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(mb.expunge(), [])
         self.assertEqual(mb.getMessageCount(), 2)
 
-    def test_trash_expunge_returns_sequence_numbers(self):
-        # Emptying Trash (Apple Mail) EXPUNGEs the staged summaries; the untagged
-        # responses must be sequence numbers (1..n, high-to-low), not the staged UIDs (#300).
-        from posternimap.client import MessageSummary
+    def test_trash_expunge_hard_deletes(self):
+        # EXPUNGE on Trash hard-deletes via DELETE /api/messages (#352 soft trash + EXPUNGE).
+        from twisted.mail.imap4 import MessageSet
         from posternimap.mailbox import PosternMailbox
 
-        def summary(uid, mid):
-            return MessageSummary(
-                uid=uid, message_id=mid, direction="inbound", thread_id=mid,
-                from_addr="a@b", to_addr="c@d", subject="s", date="2026-07-09T00:00:00Z",
-                in_reply_to=None, trusted=True, received_at="2026-07-09T00:00:01Z",
-                attachment_count=0,
-            )
-
-        staging = [summary(50, "x@x"), summary(60, "y@y")]
+        msgs = [
+            make_message("x@x", subject="x", uid=50, mailbox="trash", folderUid=1),
+            make_message("y@y", subject="y", uid=60, mailbox="trash", folderUid=2),
+        ]
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
         trash = PosternMailbox(
-            PosternClient("https://x", "t", transport=FakeTransport([], page_size=2)),
-            trash_sink=True,
-            trash_staging=staging,
+            PosternClient("https://x", "t", transport=transport),
+            mailbox_filter="trash",
+            delete_writable=True,
+            seen_writable=True,
+            flags_writable=True,
         )
-        self.assertEqual(trash.getMessageCount(), 2)
-        self.assertEqual(trash.expunge(), [2, 1])  # seq numbers, not [50, 60]
-        self.assertEqual(len(staging), 0)
+        trash.getMessageCount()
+        trash.store(MessageSet(1, 2), ["\\Deleted"], 1, uid=False)
+        self.assertEqual(trash.expunge(), [2, 1])
+        self.assertEqual(trash.getMessageCount(), 0)
+        self.assertEqual(len(transport.messages), 0)
 
     def test_delete_fetched_messages(self):
         from twisted.mail.imap4 import MessageSet
@@ -237,100 +236,104 @@ class MailboxTest(unittest.TestCase):
             make_message("keep@x", subject="keep", uid=10),
             make_message("drop@x", subject="drop", uid=20),
         ]
-        delete_transport = FakeTransport(msgs, expected_token="delete", page_size=2)
-        read_client = PosternClient(
-            "https://x", "read", transport=FakeTransport(msgs, expected_token="read", page_size=2)
-        )
-        delete_client = PosternClient("https://x", "delete", transport=delete_transport)
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
         from posternimap.mailbox import PosternMailbox
 
         mb = PosternMailbox(
-            read_client,
+            PosternClient("https://x", "t", transport=transport),
             page_size=2,
             delete_writable=True,
-            delete_client=delete_client,
+            seen_writable=True,
+            flags_writable=True,
         )
         mb.getMessageCount()
         fetched = mb.fetch(MessageSet(2, 2), uid=False)
         mb.delete_fetched_messages(fetched)
         self.assertEqual(mb.getMessageCount(), 1)
-        self.assertEqual(msgs[0]["messageId"], "keep@x")
-        self.assertTrue(any("drop%40x" in c for c in delete_transport.calls))
+        self.assertEqual(msgs[1].get("mailbox"), "trash")
+        self.assertTrue(any("/api/messages/move" in c for c in transport.calls))
 
-    def test_delete_fetched_messages_stages_trash(self):
+    def test_soft_move_to_trash_sets_mailbox(self):
         from twisted.mail.imap4 import MessageSet
         from posternimap.mailbox import PosternMailbox
 
         msgs = [make_message("drop@x", subject="drop", uid=20)]
-        staging: list = []
-        read_transport = FakeTransport(msgs, expected_token="read", page_size=2)
-        delete_transport = FakeTransport(msgs, expected_token="delete", page_size=2)
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
         mb = PosternMailbox(
-            PosternClient("https://x", "read", transport=read_transport),
+            PosternClient("https://x", "t", transport=transport),
             page_size=2,
             delete_writable=True,
-            delete_client=PosternClient("https://x", "delete", transport=delete_transport),
-            trash_staging_sink=staging,
+            seen_writable=True,
+            flags_writable=True,
         )
         mb.getMessageCount()
-        mb.delete_fetched_messages(mb.fetch(MessageSet(1, 1), uid=False))
-        self.assertEqual(len(staging), 1)
-        self.assertEqual(staging[0].message_id, "drop@x")
-
-    def test_trash_mailbox_loads_staging(self):
-        from posternimap.client import MessageSummary
-        from posternimap.mailbox import PosternMailbox
-
-        summary = MessageSummary(
-            uid=20,
-            message_id="drop@x",
-            direction="inbound",
-            thread_id="drop@x",
-            from_addr="a@b.com",
-            to_addr="c@d.com",
-            subject="drop",
-            date="2026-07-09T00:00:00Z",
-            in_reply_to=None,
-            trusted=True,
-            received_at="2026-07-09T00:00:01Z",
-            attachment_count=0,
-        )
-        staging = [summary]
+        mb.soft_move_fetched_messages(mb.fetch(MessageSet(1, 1), uid=False), "trash")
+        self.assertEqual(mb.getMessageCount(), 0)
+        self.assertEqual(msgs[0].get("mailbox"), "trash")
         trash = PosternMailbox(
-            PosternClient("https://x", "read", transport=FakeTransport([], page_size=2)),
-            trash_sink=True,
-            trash_staging=staging,
+            PosternClient("https://x", "t", transport=transport),
+            mailbox_filter="trash",
+            seen_writable=True,
+            delete_writable=True,
+            flags_writable=True,
         )
         self.assertEqual(trash.getMessageCount(), 1)
 
-    def test_append_is_noop_success(self):
-        # APPEND must NOT fail (a client copies its sent mail into Sent); it is a
-        # no-op that returns a fired Deferred, so the post-send copy succeeds.
+    def test_append_sent_matcher_hit(self):
+        # Sent APPEND matches a recent outbound copy -> OK (no silent drop, no double-store).
         from twisted.internet import defer
 
-        mb = self._mailbox(direction="outbound")
-        d = mb.addMessage(b"raw rfc822 bytes", flags=["\\Seen"], date=None)
-        self.assertIsInstance(d, defer.Deferred)
-        out = []
-        d.addCallback(out.append)
-        self.assertEqual(out, [None])  # already fired, no error
-
-    def test_append_to_drafts_is_noop_success(self):
-        # Apple Mail auto-saves mid-compose with APPEND Drafts. Drafts has no backing
-        # store, but this scoped compatibility path succeeds so the client keeps its
-        # local draft without displaying an error.
-        from twisted.internet import defer
-        from posternimap.mailbox import PosternMailbox
-
-        mb = PosternMailbox(self.client, empty=True, append_noop=True)
-        d = mb.addMessage(b"raw rfc822 bytes", flags=["\\Draft"], date=None)
+        msgs = [
+            make_message(
+                "core-id@postern",
+                direction="outbound",
+                **{
+                    "from": "a@example.com",
+                    "to": "b@example.com",
+                    "subject": "copy",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                },
+            )
+        ]
+        mb, _ = self._custom_mailbox(msgs, direction="outbound")
+        raw = (
+            b"From: a@example.com\r\nTo: b@example.com\r\nSubject: copy\r\n"
+            b"Date: Sat, 18 Jul 2026 12:00:05 +0000\r\n\r\nbody\r\n"
+        )
+        d = mb.addMessage(raw, flags=["\\Seen"], date=None)
         self.assertIsInstance(d, defer.Deferred)
         out = []
         d.addCallback(out.append)
         self.assertEqual(out, [None])
 
+    def test_append_sent_matcher_miss_refuses(self):
+        from twisted.internet import defer
+        from posternimap.mailbox import AppendRejectedError
+
+        mb, _ = self._custom_mailbox([], direction="outbound")
+        raw = b"From: a@example.com\r\nTo: b@example.com\r\nSubject: unique\r\n\r\nbody\r\n"
+        d = mb.addMessage(raw, flags=["\\Seen"], date=None)
+        errs = []
+        d.addErrback(errs.append)
+        self.assertEqual(len(errs), 1)
+        self.assertTrue(errs[0].check(AppendRejectedError))
+
+    def test_append_to_drafts_persists(self):
+        from twisted.internet import defer
+        from posternimap.mailbox import PosternMailbox
+
+        mb = PosternMailbox(self.client, mailbox_filter="drafts", delete_writable=True)
+        raw = b"From: a@example.com\r\nTo: b@example.com\r\nSubject: draft\r\n\r\nhello\r\n"
+        d = mb.addMessage(raw, flags=["\\Draft"], date=None)
+        out = []
+        d.addCallback(out.append)
+        self.assertEqual(out, [None])
+        self.assertEqual(len(self.transport.drafts), 1)
+        self.assertEqual(self.transport.drafts[0]["subject"], "draft")
+
     def test_append_to_other_placeholder_folder_is_rejected(self):
-        # #109 remains intact for placeholders without the Drafts exception.
+        # Notes stays a placeholder: APPEND is a loud NO (#109 / #352).
         from twisted.internet import defer
         from posternimap.mailbox import AppendRejectedError, PosternMailbox
 
@@ -338,7 +341,7 @@ class MailboxTest(unittest.TestCase):
         d = mb.addMessage(b"raw rfc822 bytes", flags=["\\Seen"], date=None)
         self.assertIsInstance(d, defer.Deferred)
         errs = []
-        d.addErrback(errs.append)  # consume the failure (no unhandled-error noise)
+        d.addErrback(errs.append)
         self.assertEqual(len(errs), 1)
         self.assertTrue(errs[0].check(AppendRejectedError))
 
@@ -1000,29 +1003,15 @@ class AccountTest(unittest.TestCase):
         self.assertIsNotNone(trash)
         self.assertTrue(trash.isWriteable())
 
-    def test_trash_staging_shared_across_account_instances(self):
-        from posternimap.account import PosternAccount, _shared_trash_staging
-        from posternimap.client import MessageSummary
+    def test_trash_is_durable_soft_folder(self):
+        # #352: Trash is a real mailbox=trash view (no in-memory staging).
+        from posternimap.account import PosternAccount
 
-        _shared_trash_staging("agent").clear()
-        summary = MessageSummary(
-            uid=20,
-            message_id="drop@x",
-            direction="inbound",
-            thread_id="drop@x",
-            from_addr="a@b.com",
-            to_addr="c@d.com",
-            subject="drop",
-            date="2026-07-09T00:00:00Z",
-            in_reply_to=None,
-            trusted=True,
-            received_at="2026-07-09T00:00:01Z",
-            attachment_count=0,
-        )
-        a1 = PosternAccount(self.cfg, "agent", "tok")
-        a2 = PosternAccount(self.cfg, "agent", "tok")
-        a1._trash_staging.append(summary)
-        self.assertEqual(len(a2._trash_staging), 1)
+        acct = PosternAccount(self.cfg_delete, "agent", "tok")
+        trash = acct.select("Trash")
+        self.assertTrue(trash.isWriteable())
+        self.assertEqual(trash._mailbox_filter, "trash")
+        self.assertNotEqual(trash.getUIDValidity(), acct.select("INBOX").getUIDValidity())
 
     def test_lists_special_use_folder_set(self):
         from posternimap.account import PosternAccount
@@ -1062,20 +1051,31 @@ class AccountTest(unittest.TestCase):
         sent = acct.select("Sent")
         self.assertEqual(
             set(sent.getFlags()),
-            {"\\Seen", "\\Deleted", "Trusted", "Untrusted", "Inbound", "Outbound"},
+            {
+                "\\Seen",
+                "\\Flagged",
+                "\\Answered",
+                "\\Deleted",
+                "Trusted",
+                "Untrusted",
+                "Inbound",
+                "Outbound",
+            },
         )
         # regression guard: the special-use LIST attribute must not leak into SELECT.
         self.assertNotIn("\\Sent", set(sent.getFlags()))
 
-    def test_placeholder_folders_are_empty_without_api_calls(self):
+    def test_notes_placeholder_empty_without_api_calls(self):
+        # #352: Drafts/Trash/Junk/Archive are durable views (may hit the API).
+        # Notes stays the empty placeholder with zero API cost.
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
-        for name in ("Drafts", "Trash", "Junk", "Archive", "Notes"):
+        self.assertEqual(acct.select("Notes").getMessageCount(), 0)
+        self.assertEqual(self.transport.calls, [])
+        for name in ("Drafts", "Trash", "Junk", "Archive"):
             box = acct.select(name)
             self.assertEqual(box.getMessageCount(), 0, name)
-        # An empty placeholder must not have touched the Postern API at all.
-        self.assertEqual(self.transport.calls, [])
 
     def test_subscribe_unsubscribe_are_noops(self):
         from posternimap.account import PosternAccount
@@ -1124,25 +1124,25 @@ class AccountTest(unittest.TestCase):
         # placeholders stay READ-ONLY.
         from posternimap.account import PosternAccount
 
-        acct = PosternAccount(self.cfg, "agent", "tok")
-        for name in ("INBOX", "Sent", "All", "Notes", "Trash"):
+        acct = PosternAccount(self.cfg_delete, "agent", "tok")
+        for name in ("INBOX", "Sent", "All", "Notes", "Trash", "Junk", "Archive", "Drafts"):
             self.assertTrue(acct.select(name).isWriteable(), name)
-        for name in ("Drafts", "Junk", "Archive"):
-            self.assertFalse(acct.select(name).isWriteable(), name)
 
     def test_permanent_flags_matrix(self):
-        # PERMANENTFLAGS reflect what each folder actually persists: (\Seen) for the
-        # real seen-writable views, the full writable set + \* for Notes (#218), and
-        # nothing for the read-only placeholders.
+        # PERMANENTFLAGS reflect what each folder actually persists (#352): \Seen +
+        # \Flagged + \Answered + \Deleted on durable message views; Notes keeps the
+        # writable-signal \* set (#218); Drafts are draft-backed (no message flags).
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg_delete, "agent", "tok")
-        for name in ("INBOX", "Sent", "All"):
-            self.assertEqual(acct.select(name).getPermanentFlags(), ["\\Seen", "\\Deleted"], name)
+        durable = ["\\Seen", "\\Flagged", "\\Answered", "\\Deleted"]
+        for name in ("INBOX", "Sent", "All", "Trash", "Junk", "Archive"):
+            self.assertEqual(acct.select(name).getPermanentFlags(), durable, name)
         self.assertIn("\\*", acct.select("Notes").getPermanentFlags())
-        self.assertIn("\\*", acct.select("Trash").getPermanentFlags())
-        for name in ("Drafts", "Junk", "Archive"):
-            self.assertEqual(acct.select(name).getPermanentFlags(), [], name)
+        self.assertEqual(
+            acct.select("Drafts").getPermanentFlags(),
+            ["\\Deleted", "\\Draft"],
+        )
 
     def test_appendability_classifies_folders(self):
         # #233: the server uses this to answer APPEND with no store read. Real backed
@@ -1150,12 +1150,16 @@ class AccountTest(unittest.TestCase):
         from posternimap.account import PosternAccount
 
         acct = PosternAccount(self.cfg, "agent", "tok")
-        for name in ("INBOX", "inbox", "Sent", "All"):
-            self.assertEqual(acct.appendability(name), "real", name)
-        self.assertEqual(acct.appendability("Drafts"), "noop")
-        for name in ("Trash", "Junk", "Archive", "Notes"):
-            self.assertEqual(acct.appendability(name), "placeholder", name)
-        self.assertEqual(acct.copyability("Trash"), "trash_delete")
+        self.assertEqual(acct.appendability("INBOX"), "refuse")
+        self.assertEqual(acct.appendability("inbox"), "refuse")
+        self.assertEqual(acct.appendability("All"), "refuse")
+        self.assertEqual(acct.appendability("Sent"), "sent")
+        self.assertEqual(acct.appendability("Drafts"), "drafts")
+        for name in ("Trash", "Junk", "Archive"):
+            self.assertEqual(acct.appendability(name), "placement", name)
+        self.assertEqual(acct.appendability("Notes"), "placeholder")
+        self.assertEqual(acct.copyability("Trash"), "soft_move")
+        self.assertEqual(acct.copyability("INBOX"), "restore")
         self.assertEqual(acct.copyability("Drafts"), "placeholder")
         self.assertEqual(acct.copyability("Nonexistent"), "unknown")
 
