@@ -36,6 +36,11 @@ load_secret() {
 # either service-token mode can be driven entirely from swarm secrets.
 load_secret POSTERN_API_TOKEN
 load_secret POSTERN_API_TOKEN_DELETE
+# The IMAP-service write token (#352): the least-privilege bearer for the worker's
+# /api/imap/drafts* and /api/imap/import seams (durable Drafts + APPEND-miss import).
+# config.py reads it as POSTERN_API_TOKEN_IMAP; without this line a *_FILE mount would
+# never reach the proxy and drafts/import would fail closed at the point of use.
+load_secret POSTERN_API_TOKEN_IMAP
 load_secret POSTERN_TRANSPORT_TOKEN
 
 exec "$@"
