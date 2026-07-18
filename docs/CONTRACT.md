@@ -919,8 +919,18 @@ calling `POST /api/messages/seen` WITHOUT `for` (bit-identical to before #350). 
 the door's INBOX has no viewer to trigger the viewer-relative predicate); such mail is
 visible in the door's **Sent** and **All** folders. This is unchanged behavior, not a
 regression #350 introduces. Per-recipient honesty lands in the viewer-scoped
-API/webmail/MCP callers that pass `to=V`, which is where fc#792 actually lived. Giving the
-door a per-account lens is a separate product decision, tracked as **#357** (Conrad-gated;
-RFC 3501 UIDVALIDITY discipline applies to any projection change).
+API/webmail/MCP callers that pass `to=V`, which is where fc#792 actually lived.
+
+**Per-account door mode (#357, opt-in).** The door gained a `POSTERN_IMAP_VIEWER_MODE`:
+`estate` (default) is byte-identical to the above; `per_account` scopes each login to a
+viewer address V derived from the authenticated username, turning the shared folders into
+viewer lenses: INBOX = `to=V` + `direction=inbound` (the recipient predicate above, so it
+now surfaces same-domain sends), Sent = `from=V` + `direction=outbound`, All = `to=V` both
+directions (unwindowed). `\Seen` STOREs on the `to=V` lenses carry `for=V` (per-recipient
+override); Sent keeps the estate flag, matching what a `from=V` read renders. This is a
+VIEW tier (a deterrent), NOT a credential boundary: the door still reads with an
+estate-wide token, so per-user privacy stays the later credential work (#351 / D-AUTH-2).
+Flipping a live door bumps `POSTERN_IMAP_UIDVALIDITY` on the same roll (folder membership
+changes; RFC 3501). See `imap/README.md`.
 
 `/api/folders` unread counts (#352) MUST use effective seen when they land.

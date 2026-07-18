@@ -33,11 +33,20 @@ as a no-op SUCCESS on the real views (INBOX/Sent/All) so a client's post-send
 client-compat exception: Apple Mail auto-saves mid-compose via APPEND, so it also
 gets a no-op SUCCESS. The draft remains local to the client; Postern still has no
 draft store. Trash/Junk/Archive/Notes reject APPEND with a tagged NO (#109).
+
+Per-account view scoping (#357, POSTERN_IMAP_VIEWER_MODE=per_account): the real views
+become viewer-relative to the authenticated login's address V. INBOX = mail delivered
+to V that V did not send (the CONTRACT 10.9 recipient predicate), Sent = mail from V,
+All = everything delivered to V (both directions, unwindowed; V's external-only sends
+live under Sent), and \\Seen is per-recipient (for=V) on the to=V lenses. This is a
+VIEW tier, a deterrent, NOT a credential boundary: the door still reads with an
+estate-wide token, so per-user privacy is the later credential work (#351 / D-AUTH-2).
+estate mode (the default) is byte-identical to the historical shared-mailbox door.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 from zope.interface import implementer
 
@@ -62,6 +71,9 @@ class _Folder:
         "delete_writable",
         "trash_sink",
         "append_noop",
+        "viewer_to",
+        "viewer_from",
+        "viewer_seen",
     )
 
     def __init__(
@@ -75,6 +87,9 @@ class _Folder:
         delete_writable: bool = False,
         trash_sink: bool = False,
         append_noop: bool = False,
+        viewer_to: bool = False,
+        viewer_from: bool = False,
+        viewer_seen: bool = False,
     ) -> None:
         self.direction = direction
         self.special_use = special_use
@@ -102,14 +117,21 @@ class _Folder:
         # accepting this as a no-op lets the client retain its local draft without
         # surfacing an error on every compose autosave.
         self.append_noop = append_noop
+        # #357 per-account scoping. viewer_to: pass to=V (INBOX/All, the recipient
+        # lens). viewer_from: pass from=V (Sent, the sender lens). viewer_seen: a
+        # \Seen STORE writes a per-recipient override (for=V) instead of the estate
+        # flag; set ONLY on the to=V lenses so the write matches the rendered read.
+        self.viewer_to = viewer_to
+        self.viewer_from = viewer_from
+        self.viewer_seen = viewer_seen
 
 
 # name (as the client sees it) -> folder description. INBOX/Sent/All are real
 # direction views; the rest are RFC 6154 special-use placeholders (empty in v1).
 _MAILBOXES: Dict[str, _Folder] = {
-    "INBOX": _Folder("inbound", [], False, windowed=True, seen_writable=True, delete_writable=True),
-    "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True, seen_writable=True, delete_writable=True),
-    "All": _Folder(None, ["\\All"], False, seen_writable=True, delete_writable=True),
+    "INBOX": _Folder("inbound", [], False, windowed=True, seen_writable=True, delete_writable=True, viewer_to=True, viewer_seen=True),
+    "Sent": _Folder("outbound", ["\\Sent"], False, windowed=True, seen_writable=True, delete_writable=True, viewer_from=True),
+    "All": _Folder(None, ["\\All"], False, seen_writable=True, delete_writable=True, viewer_to=True, viewer_seen=True),
     "Drafts": _Folder(None, ["\\Drafts"], True, append_noop=True),
     # Trash is empty in the store but accepts COPY/MOVE as delete-from-source (#278).
     "Trash": _Folder(None, ["\\Trash"], True, writable_signal=True, trash_sink=True),
@@ -144,6 +166,16 @@ class PosternAccount:
         self._cfg = cfg
         self._username = username
         self._token = token
+        # #357: viewer address V for per-account scoping (None in estate mode). When
+        # per_account is on but this login cannot derive a V (only when the local part
+        # is empty, e.g. a "@host" login), _viewer stays None and the account fails
+        # CLOSED (listMailboxes/select serve nothing + log), never open to the estate.
+        self._per_account = cfg.viewer_mode == "per_account"
+        self._viewer = (
+            derive_viewer(username, cfg.viewer_domain, cfg.viewer_map)
+            if self._per_account
+            else None
+        )
         # Trash staging (#278): COPY/MOVE to Trash hard-deletes from the API but
         # keeps summaries visible in Trash until EXPUNGE or reconnect. Shared across
         # connections for this username (see module note above).
@@ -170,9 +202,19 @@ class PosternAccount:
 
     def _mailbox(self, folder: _Folder, *, list_view: bool) -> PosternMailbox:
         delete_enabled = folder.delete_writable and self._cfg.service_delete_token is not None
+        # #357: estate mode -> all None (byte-identical to the historical door).
+        # per_account with a derived V -> INBOX/All read to=V, Sent reads from=V, and
+        # seen writes carry for=V on the to=V lenses only (CONTRACT 10.9).
+        scoped = self._per_account and self._viewer is not None
+        to = self._viewer if (scoped and folder.viewer_to) else None
+        from_addr = self._viewer if (scoped and folder.viewer_from) else None
+        viewer = self._viewer if (scoped and folder.viewer_seen) else None
         return PosternMailbox(
             self._client(),
             direction=folder.direction,
+            to=to,
+            from_addr=from_addr,
+            viewer=viewer,
             special_use=folder.special_use,
             empty=folder.empty,
             list_view=list_view,
@@ -196,6 +238,9 @@ class PosternAccount:
         # ref/wildcard filtering against the fixed name set with the standard
         # IMAP matcher. The boxes here are list-view, so getFlags() reports each
         # folder's RFC 6154 special-use attributes for the LIST response.
+        if self._per_account and self._viewer is None:
+            self._log_viewer_gap("LIST")
+            return []
         matcher = imap4.wildcardToRegexp(wildcard, "/")
         out: List[Tuple[str, imap4.IMailbox]] = []
         for name, folder in _MAILBOXES.items():
@@ -206,6 +251,9 @@ class PosternAccount:
         return out
 
     def select(self, name: str, rw: bool = True):
+        if self._per_account and self._viewer is None:
+            self._log_viewer_gap("SELECT")
+            return None
         folder = _MAILBOXES.get(_canonical(name))
         if folder is None:
             return None  # unknown mailbox -> client gets "no such mailbox"
@@ -276,6 +324,17 @@ class PosternAccount:
         # must not fail the client if it issues UNSUBSCRIBE.
         return None
 
+    def _log_viewer_gap(self, op: str) -> None:
+        # #357 fail-closed: per_account is on but this login has no derivable viewer
+        # address. Serve nothing and say so loudly (never fall back to the estate view).
+        from twisted.python import log
+
+        log.msg(
+            "postern-imap: per_account is on but login %r has no derivable viewer "
+            "address (empty local part); refusing %s, serving nothing (fail closed)."
+            % (self._username, op)
+        )
+
     # --- INamespacePresenter: advertise a real personal namespace (#218 round 6) ---
     # Twisted's do_NAMESPACE returns NIL for every class unless the account provides
     # INamespacePresenter. A NIL personal namespace under-reports what we actually
@@ -298,3 +357,30 @@ def _canonical(name: str) -> str:
     if name.upper() == "INBOX":
         return "INBOX"
     return name
+
+
+def derive_viewer(
+    login: str, domain: Optional[str], viewer_map: Mapping[str, str]
+) -> Optional[str]:
+    """Map an authenticated IMAP login to its viewer address V (#357).
+
+    An explicit override (POSTERN_IMAP_VIEWER_MAP) wins, matched on the full lowercased
+    login first, then on the bare local part; otherwise the rule V = localpart(login)
+    @ domain, where any domain the client typed on the username is stripped and
+    everything is lower-cased. So `conrad`, `conrad@example.org`, and `Conrad@EXAMPLE.ORG`
+    all map to `conrad@example.org` when domain is example.org.
+
+    Returns None ONLY when V is genuinely underivable (an empty local part, or the rule
+    with no domain), so the caller can fail closed rather than fall back to the estate.
+    Config guarantees a domain whenever per_account is set, so in practice None arises
+    only for a malformed login (e.g. "@host").
+    """
+    key = login.strip().lower()
+    local = key.split("@", 1)[0]
+    if key in viewer_map:
+        return viewer_map[key]
+    if local and local in viewer_map:
+        return viewer_map[local]
+    if not local or not domain:
+        return None
+    return "%s@%s" % (local, domain.lower())
