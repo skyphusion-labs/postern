@@ -47,6 +47,14 @@ interface LedgerRow {
   indexed_at: string;
 }
 
+// #350 per-recipient read overrides (message_seen_by): sparse, keyed by
+// (message_id, recipient); absent = fall back to the row-level messages.seen.
+interface SeenByRow {
+  message_id: string;
+  recipient: string;
+  seen: number;
+}
+
 export interface FakeEnvResult {
   env: Env;
   ctx: ExecutionContext;
@@ -56,6 +64,7 @@ export interface FakeEnvResult {
   r2: { key: string; bytes: ArrayBuffer }[];
   vectors: unknown[];
   vectorLedger: LedgerRow[];
+  messageSeenBy: SeenByRow[];
   sent: SentMessage[];
 }
 
@@ -85,7 +94,17 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
   const r2: { key: string; bytes: ArrayBuffer }[] = [];
   const vectors: unknown[] = [];
   const vectorLedger: LedgerRow[] = [];
+  const messageSeenBy: SeenByRow[] = [];
   const sent: SentMessage[] = [];
+  // #350 effective seen: a viewer's per-recipient override wins over messages.seen;
+  // no override (or no viewer) = the row-level flag.
+  const effSeen = (r: Row, viewer: string | null): number => {
+    if (viewer) {
+      const o = messageSeenBy.find((x) => x.message_id === r.message_id && x.recipient === viewer);
+      if (o) return o.seen;
+    }
+    return r.seen;
+  };
   let seq = 1;
   let attSeq = 1;
 
@@ -159,6 +178,45 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           }
           return { meta: { changes } };
         }
+        // #350: seed (VALUES (?, ?, 0) ON CONFLICT DO NOTHING) or scoped upsert
+        // (VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET seen = excluded.seen).
+        if (/INSERT INTO message_seen_by/i.test(sql)) {
+          const message_id = String(bound[0]);
+          const recipient = String(bound[1]);
+          const existing = messageSeenBy.find((x) => x.message_id === message_id && x.recipient === recipient);
+          if (/DO NOTHING/i.test(sql)) {
+            if (!existing) messageSeenBy.push({ message_id, recipient, seen: 0 });
+          } else {
+            const val = Number(bound[2]);
+            if (existing) existing.seen = val;
+            else messageSeenBy.push({ message_id, recipient, seen: val });
+          }
+          return { meta: { changes: 1 } };
+        }
+        // #350 legacy realign: UPDATE message_seen_by SET seen = ? WHERE message_id IN (...).
+        if (/UPDATE message_seen_by SET seen/i.test(sql)) {
+          const value = Number(bound[0]);
+          const ids = bound.slice(1).map((b) => String(b));
+          let changes = 0;
+          for (const x of messageSeenBy) {
+            if (ids.includes(x.message_id)) {
+              x.seen = value;
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
+        if (/DELETE FROM message_seen_by WHERE message_id/i.test(sql)) {
+          const message_id = String(bound[0]);
+          let changes = 0;
+          for (let i = messageSeenBy.length - 1; i >= 0; i--) {
+            if (messageSeenBy[i].message_id === message_id) {
+              messageSeenBy.splice(i, 1);
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
         return { meta: { changes: 0 } };
       },
       async first<T>() {
@@ -185,6 +243,14 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         return null as T | null;
       },
       async all<T>() {
+        // #350 scoped setSeen existence check: SELECT message_id FROM messages WHERE
+        // message_id IN (...). Distinct from summariesByIds (that uses the `m` alias).
+        if (/SELECT message_id FROM messages WHERE message_id IN/i.test(sql)) {
+          const ids = bound.map((b) => String(b));
+          return {
+            results: rows.filter((r) => ids.includes(r.message_id)).map((r) => ({ message_id: r.message_id })) as unknown as T[],
+          };
+        }
         // setSeen(): UPDATE messages SET seen = ? WHERE message_id IN (?, ...) RETURNING
         // message_id. Bind[0] is the new seen value, the rest are ids. RETURNING yields
         // one row per matched message row (mirrors the real query's count semantics).
@@ -313,7 +379,12 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         // summariesByIds(): FROM messages m WHERE m.message_id IN (?, ?, ...).
         // All binds are message ids; no ordering guarantee (caller re-orders).
         if (/FROM messages m WHERE m\.message_id IN \(/i.test(sql)) {
-          const ids = bound.map((b) => String(b));
+          let j = 0;
+          let seenViewer: string | null = null;
+          if (/COALESCE\(\(SELECT sb\.seen FROM message_seen_by/i.test(sql)) {
+            seenViewer = String(bound[j++]).toLowerCase();
+          }
+          const ids = bound.slice(j).map((b) => String(b));
           const matched = rows.filter((r) => ids.includes(r.message_id));
           const results = matched.map((r) => ({
             id: r.id,
@@ -327,7 +398,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             in_reply_to: r.in_reply_to,
             trusted: r.trusted,
             received_at: r.received_at,
-            seen: r.seen,
+            seen: effSeen(r, seenViewer),
             delivered_to: r.delivered_to,
             cc_addr: r.cc_addr,
             bcc_addr: r.bcc_addr,
@@ -346,6 +417,12 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/FROM messages m/i.test(sql)) {
           let i = 0;
           let work = rows.slice();
+          // #350: the effective-seen subquery binds the viewer recipient FIRST (it
+          // lives in the SELECT column list, ahead of every WHERE bind).
+          let seenViewer: string | null = null;
+          if (/COALESCE\(\(SELECT sb\.seen FROM message_seen_by/i.test(sql)) {
+            seenViewer = String(bound[i++]).toLowerCase();
+          }
           // substr search (#212): COALESCE(m.col,'') LIKE ? ESCAPE '\' OR ... .
           // Detect by the ESCAPE clause (the list from= filter is a bare LIKE ?,
           // never ESCAPE), pull the OR'd columns in order, consume one identical
@@ -390,7 +467,13 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             const v = String(bound[i++]);
             work = work.filter((r) => r.thread_id === v);
           }
-          if (/m\.direction = \?/i.test(sql)) {
+          if (/m\.direction = 'inbound' OR/i.test(sql)) {
+            // #350 viewer-relative INBOX: inbound OR (outbound AND from != viewer).
+            const notFrom = String(bound[i++]).toLowerCase();
+            work = work.filter(
+              (r) => r.direction === "inbound" || (r.direction === "outbound" && r.from_addr.toLowerCase() !== notFrom),
+            );
+          } else if (/m\.direction = \?/i.test(sql)) {
             const v = String(bound[i++]);
             work = work.filter((r) => r.direction === v);
           }
@@ -416,7 +499,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             in_reply_to: r.in_reply_to,
             trusted: r.trusted,
             received_at: r.received_at,
-            seen: r.seen,
+            seen: effSeen(r, seenViewer),
             delivered_to: r.delivered_to,
             cc_addr: r.cc_addr,
             bcc_addr: r.bcc_addr,
@@ -524,7 +607,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
     },
   } as unknown as ExecutionContext;
 
-  return { env, ctx, settle: () => Promise.all(pending), rows, atts, r2, vectors, vectorLedger, sent };
+  return { env, ctx, settle: () => Promise.all(pending), rows, atts, r2, vectors, vectorLedger, messageSeenBy, sent };
 }
 
 

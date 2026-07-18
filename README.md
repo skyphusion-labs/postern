@@ -219,6 +219,7 @@ Self-hosters, agent builders, and mail admins who want a mailbox they own on Clo
 ## Links
 
 - **Quickstart:** [DEPLOY.md](DEPLOY.md)
+- **Operations (backup, restore, monitoring):** [docs/OPERATIONS.md](docs/OPERATIONS.md)
 - **Skyphusion Labs:** https://skyphusion.org · **Org:** https://github.com/skyphusion-labs
 - **Related:** [prism](https://github.com/skyphusion-labs/prism) (AI playground), [search-mcp](https://github.com/skyphusion-labs/search-mcp)
 

@@ -156,9 +156,14 @@ session survives and only compose is withdrawn.
 
 - **Same-origin `/webmail` (the supported path):** no CSP change was needed for
   compose. `connect-src 'self'` already covers `POST` to the same origin, and compose
-  authors into a plain `<textarea>`, not an iframe. The served CSP remains
-  `default-src 'none'`, `connect-src 'self'`, `frame-src 'self'` (the sandboxed body
-  frame only), `frame-ancestors 'none'`.
+  authors into a plain `<textarea>`, not an iframe. The full served CSP is
+  `default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';
+  connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none';
+  form-action 'none'; frame-ancestors 'none'`. The two `'unsafe-inline'`
+  directives are unavoidable (one inline script + one inline style, no build step),
+  so the CSP is not the top-frame XSS control; the no-`innerHTML` discipline is.
+  `img-src 'self' data:` means remote images are always blocked (the srcdoc reading
+  pane inherits this policy); there is no remote-images opt-in (#343).
 - **Cross-origin static host:** the API must allow `POST` and the `Authorization`
   request header via CORS. Same requirement the read client's GETs already impose,
   widened by one method.

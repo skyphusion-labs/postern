@@ -843,3 +843,83 @@ Rules:
 
 `SearchQuery` gains `mode: "substr"` and an optional `field: "subject" | "body" |
 "text"` (default `text`; ignored by the other modes).
+
+### 10.9 Recipient-relative views: viewer-relative INBOX + per-recipient seen (#350)
+
+The store is ONE mailbox shared by many identities. Two facts that were row-global
+become **viewer-relative** the moment a read carries a viewer address (`to=V`): which
+direction-default view a message appears in, and whether it has been read. Both are
+additive; a read with no `to` is the estate lens and behaves exactly as before. The
+`message_id` stays the identity and `delivered_to` stays the semantics set (10.1);
+nothing forks a message into per-recipient copies.
+
+**Why:** a same-domain send (a@ALLOWED to b@ALLOWED) is stored ONCE, `direction=outbound`,
+`messages.seen=1` (the sender Sent copy, 10.4). So every new-mail lens the recipient has
+missed it: it is not `direction=inbound`, and it is not unseen. This is the fc#792 false
+"relay ate the mail" report; no mail was ever lost, it was invisible to the recipient
+lens. External recipients read through their own provider, never our lenses, so only
+same-domain recipients are in scope.
+
+**Viewer-relative INBOX (the direction lens).** `direction` stays the stored wire fact.
+The READ predicate changes ONLY when a query is viewer-scoped (`to=V`) AND asks for
+`direction=inbound`:
+
+```sql
+-- "INBOX for V" = mail delivered to V that V did not send
+COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || :V || ',%'
+AND (m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> :V))
+```
+
+Applied in ONE builder (`store.recipientWhere`) shared by `list`, `fts`, and `substr`
+search. Sent stays sender-based (`from=V`), not `to=V`. Unscoped queries (no `to`) are
+unchanged. **Edge (accepted, documented):** a true self-send (V to V only) stays
+Sent-only for V, born seen; correct, you wrote it.
+
+**Per-recipient seen (sparse override).** A new table (migration 0009):
+
+```sql
+CREATE TABLE message_seen_by (
+  message_id TEXT NOT NULL,
+  recipient  TEXT NOT NULL,   -- bare lower-cased address
+  seen       INTEGER NOT NULL,
+  PRIMARY KEY (message_id, recipient)
+);
+```
+
+Effective seen for viewer V = `COALESCE(override(id, V), messages.seen)`. `messages.seen`
+stays the row-level / legacy flag and the estate-lens truth. **No backfill:** an absent
+override renders as today, so nothing historical floods a recipient unread count. This is
+the per-mailbox state 10.7 named as the precondition for normalizing recipients; it
+layers beside message identity, it does not fork it.
+
+- **Write (seed):** a fresh same-domain outbound insert seeds `seen=0` overrides for
+  every `delivered_to` recipient on `ALLOWED_FROM_DOMAIN` except the sender
+  (`store.seedSameDomainSeen`). `messages.seen` stays 1 (Sent view unchanged). Inbound
+  seeds nothing (`messages.seen=0` is already honest for all recipients).
+- **Write (`POST /api/messages/seen`):** gains optional `for` (a bare address). With
+  `for`: upsert the `(id, for)` override only, never touching `messages.seen`; unknown
+  ids are skipped (as legacy). Without `for` (legacy callers): UPDATE `messages.seen`
+  AND realign any EXISTING override rows for those ids, so the estate lens stays
+  authoritative when used. Old callers keep working unchanged. `read`-scoped as before.
+- **Read:** viewer-scoped `list`/`search` (`to=V`) render effective seen via the
+  COALESCE join; unscoped reads render `messages.seen`. `/api/search` gains an optional
+  `to=` mirroring `/api/messages` across ALL modes: `fts` and `substr` push the
+  membership + effective-seen into SQL (the shared builder); `semantic` and `hybrid` are
+  score-ranked and the vector index is not recipient-keyed, so they enforce `to=` by
+  post-filtering the hydrated hits on delivered-set membership + the viewer-relative
+  direction rule (and hydrate effective seen). No mode silently ignores `to=`.
+- **Delete:** `deleteMessage` also purges `message_seen_by` rows for the id.
+
+**IMAP door (as-shipped): a shared estate view, unchanged by #350.** The door is a
+whole-estate shared mailbox (`INBOX` = `direction=inbound` with no `to=`; `Sent` =
+`direction=outbound` with no `from=`; `All` = both), so it reads the estate lens and keeps
+calling `POST /api/messages/seen` WITHOUT `for` (bit-identical to before #350). Concretely:
+**the door's INBOX stays BLIND to same-domain sends** (they are `direction=outbound`, and
+the door's INBOX has no viewer to trigger the viewer-relative predicate); such mail is
+visible in the door's **Sent** and **All** folders. This is unchanged behavior, not a
+regression #350 introduces. Per-recipient honesty lands in the viewer-scoped
+API/webmail/MCP callers that pass `to=V`, which is where fc#792 actually lived. Giving the
+door a per-account lens is a separate product decision, tracked as **#357** (Conrad-gated;
+RFC 3501 UIDVALIDITY discipline applies to any projection change).
+
+`/api/folders` unread counts (#352) MUST use effective seen when they land.
