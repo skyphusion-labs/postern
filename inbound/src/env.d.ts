@@ -148,4 +148,21 @@ interface Env {
   MTA_STS_MX?: string;
   /** MTA-STS policy cache lifetime in seconds (e.g. 86400 testing, 604800 enforce). Required when MTA_STS_MODE is set. */
   MTA_STS_MAX_AGE?: string;
+
+  // --- Webmail v2 session auth (#351, epic #338; docs/design/webmail-v2-contracts.md) ---
+  /**
+   * Webmail session backend selector. "native" mints a session by verifying a
+   * smtp_credentials login (the same PBKDF2 the submission relay uses); "off" (the
+   * DEFAULT when UNSET) exposes NO session endpoint -- BYO-token webmail only, exactly
+   * the current behavior. "ldap"/"system" (directory login, contract 1.9 / decision
+   * D-AUTH-2) are DEFERRED and Conrad-gated; they are treated as "off" until that phase.
+   * The default is deliberately "off" (not the contract-recommended "native") so that
+   * merging this feature changes nothing on a live shared store; a self-hoster sets
+   * WEBMAIL_AUTH_BACKEND=native to opt in. Config VAR, not a secret (holds no credential).
+   */
+  WEBMAIL_AUTH_BACKEND?: string;
+  /** Session idle window in seconds (sliding). Default 1800 (30 min). Config var. */
+  WEBMAIL_SESSION_IDLE_SECONDS?: string;
+  /** Session absolute lifetime cap in seconds. Default 43200 (12 h). Config var. */
+  WEBMAIL_SESSION_ABSOLUTE_SECONDS?: string;
 }

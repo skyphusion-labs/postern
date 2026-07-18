@@ -78,6 +78,41 @@ against the API before persisting it.
 There are **zero skyphusion-specific assumptions**: the API origin is whatever you
 type, no account, domain, or resource name is hardcoded.
 
+## Sign-in (session) mode (#351)
+
+For a hosted deployment, webmail also offers a **native sign-in**: a username and
+password (the SAME credential you configure for SMTP submission, `smtp_credentials`)
+that mints a short-lived server-side **session** instead of pasting a token. It is
+the default hosted experience; BYO-token stays as the advanced / self-host path (a
+"Use an API token instead" link switches between them).
+
+Why a session and not a token in the browser: the session lives in an **HttpOnly,
+Secure, SameSite, same-origin cookie** (`__Host-postern_session`), so an XSS through
+rendered email cannot read it (a `sessionStorage` bearer can). The cookie is an
+opaque handle to a server-side row, so **sign out revokes it instantly**. Writes
+carry a CSRF token (double-submit: a readable `__Host-postern_csrf` companion cookie
+echoed in `X-Postern-CSRF`, bound to the session). The browser can finally show
+**Sending as ...** because `GET /api/session` echoes the bound identity. Full design:
+[`docs/design/webmail-v2-contracts.md`](../docs/design/webmail-v2-contracts.md)
+section 1.
+
+**Enabling it (operator).** Session sign-in is OFF unless explicitly enabled, so
+enabling this feature changes nothing on an existing deployment:
+
+```
+# wrangler config "vars" (config, not a secret -- holds no credential):
+WEBMAIL_AUTH_BACKEND = "native"     # unset / "off" = BYO-token webmail only (default)
+# optional session windows (seconds):
+WEBMAIL_SESSION_IDLE_SECONDS      = "1800"    # sliding idle window (default 30 min)
+WEBMAIL_SESSION_ABSOLUTE_SECONDS  = "43200"   # absolute cap (default 12 h)
+```
+
+With `native`, a user signs in with the username + secret you provisioned via
+`POST /api/admin/smtp-credentials`. A native session is granted `read` + `send`
+(browse, compose, reply); hard delete stays operator-only for now. Directory
+(`ldap`/`system`) sign-in is designed but deferred and out of this phase; those
+deployments keep using BYO-token webmail.
+
 ## Run it
 
 The page is served by the inbound (core) worker at **`/webmail`** on the same
@@ -185,8 +220,8 @@ and security headers; opening the standalone file directly does not.
 - **Compose extras:** `cc` / `bcc`, attachments, HTML bodies, and drafts. The API
   supports them; the compose UI is plain-text only for now ([`COMPOSE.md`](COMPOSE.md)
   section 4).
-- **"Sending as ..." identity display.** The page cannot introspect its own send
-  identity (a send token gets `403` on every GET), so it shows no identity rather
-  than guessing one; needs a send-scoped echo on the worker side
-  ([`COMPOSE.md`](COMPOSE.md) section 3).
+- **"Sending as ..." identity display** is delivered in **session mode** (#351):
+  `GET /api/session` echoes the bound identity, so the header shows it. In BYO-token
+  mode the page still cannot introspect a send token's identity (a send token gets
+  `403` on every GET), so it shows none there rather than guessing.
 - **Keyset pagination polish** (search mode selector shipped in #282).

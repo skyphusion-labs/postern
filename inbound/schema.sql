@@ -111,6 +111,26 @@ CREATE TABLE IF NOT EXISTS vector_ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_vector_ledger_message ON vector_ledger(message_id);
 
+-- Webmail v2 session store (#351, migration 0010). A short-lived, server-side
+-- capability grant with HttpOnly-cookie custody and instant revocation; minted by
+-- verifying an existing credential (native mode: smtp_credentials, same PBKDF2 as
+-- the submission relay) and resolving to the same { caps, bound identity } shape a
+-- Bearer token does. Stores the HASH of the opaque cookie value, never the raw id,
+-- so a read of this table yields no usable cookie. See
+-- docs/design/webmail-v2-contracts.md section 1.5.2 and inbound/src/session.ts.
+CREATE TABLE IF NOT EXISTS webmail_sessions (
+  id_hash      TEXT PRIMARY KEY,
+  identity     TEXT NOT NULL,
+  display_name TEXT,
+  caps         TEXT NOT NULL,
+  csrf_hash    TEXT NOT NULL,
+  issued_at    TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  expires_at   TEXT NOT NULL,
+  revoked      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_identity ON webmail_sessions(identity);
+
 -- Per-recipient read state (#350, migration 0009). Effective seen for viewer V =
 -- COALESCE(override(message_id, V), messages.seen); a sparse override layered over
 -- the row-level messages.seen so a same-domain send is unread for its recipient
