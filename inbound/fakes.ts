@@ -591,7 +591,15 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           // delivered set (falling back to a v1 row's to_addr), delimiter-safe.
           if (/COALESCE\(m\.delivered_to/i.test(sql)) {
             const v = String(bound[i++]).toLowerCase();
-            work = work.filter((r) => (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`));
+            if (/OR lower\(m\.from_addr\) = \?/i.test(sql)) {
+              const from = String(bound[i++]).toLowerCase();
+              work = work.filter((r) =>
+                (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`) ||
+                r.from_addr.toLowerCase() === from,
+              );
+            } else {
+              work = work.filter((r) => (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`));
+            }
           }
           if (/lower\(m\.from_addr\) LIKE \?/i.test(sql)) {
             const v = String(bound[i++]).replace(/%/g, "").toLowerCase();
@@ -610,6 +618,9 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           } else if (/m\.direction = \?/i.test(sql)) {
             const v = String(bound[i++]);
             work = work.filter((r) => r.direction === v);
+          } else if (/(?:WHERE|AND) lower\(m\.from_addr\) = \?/i.test(sql)) {
+            const v = String(bound[i++]).toLowerCase();
+            work = work.filter((r) => r.from_addr.toLowerCase() === v);
           }
           if (/m\.mailbox IS NULL/i.test(sql)) work = work.filter((r) => r.mailbox === null);
           else if (/m\.mailbox = \?/i.test(sql)) {

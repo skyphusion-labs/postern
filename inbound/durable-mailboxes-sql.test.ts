@@ -66,6 +66,45 @@ async function seed(env: Env, ctx: ExecutionContext, id: string, to: string) {
 }
 
 describe("durable mailbox production SQL (#352)", () => {
+  it("keeps bound-session list and search reads inside the account boundary", async () => {
+    const { env, ctx } = realEnv();
+    await seed(env, ctx, "mine-in@example.com", "conrad@skyphusion.org");
+    await seed(env, ctx, "other-in@example.com", "other@skyphusion.org");
+    await store.put(env, {
+      messageId: "mine-out@example.com",
+      direction: "outbound",
+      from: "conrad@skyphusion.org",
+      to: "external@example.com",
+      deliveredTo: ["external@example.com"],
+      subject: "subject",
+      date: "2026-07-18T01:00:00.000Z",
+      bodyText: "body",
+      auth: { spf: "none", dkim: "none", dmarc: "none" },
+      trusted: true,
+    }, ctx);
+
+    const all = await store.list(env, { viewer: "conrad@skyphusion.org", mailbox: "all" });
+    expect(all.items.map((m) => m.messageId).sort()).toEqual([
+      "mine-in@example.com",
+      "mine-out@example.com",
+    ]);
+    const inbox = await store.list(env, {
+      viewer: "conrad@skyphusion.org", direction: "inbound",
+    });
+    expect(inbox.items.map((m) => m.messageId)).toEqual(["mine-in@example.com"]);
+    const sent = await store.list(env, {
+      viewer: "conrad@skyphusion.org", direction: "outbound",
+    });
+    expect(sent.items.map((m) => m.messageId)).toEqual(["mine-out@example.com"]);
+    const search = await store.search(env, {
+      viewer: "conrad@skyphusion.org", q: "subject", mode: "fts",
+    });
+    expect(search.items.map((h) => h.message.messageId).sort()).toEqual([
+      "mine-in@example.com",
+      "mine-out@example.com",
+    ]);
+  });
+
   it("round-trips flags, placement UID, Trash restore, and folder counts", async () => {
     const { env, ctx } = realEnv();
     await seed(env, ctx, "one@example.com", "conrad@skyphusion.org");

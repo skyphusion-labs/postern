@@ -258,7 +258,9 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
 
     // --- read: list / filter ---
     if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
-      const page = await store.list(env, parseListQuery(url));
+      const query = parseListQuery(url);
+      if (resolution.viaSession && resolution.identity) query.viewer = resolution.identity.from;
+      const page = await store.list(env, query);
       return json({ ok: true, ...page });
     }
 
@@ -363,6 +365,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // Viewer scope (#350): recipient-relative INBOX + effective seen, mirroring
         // /api/messages?to=. Unvalidated like list's `to` (a bare address filter).
         to: url.searchParams.get("to") ?? undefined,
+        viewer: resolution.viaSession ? resolution.identity?.from : undefined,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });
@@ -378,6 +381,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (attMatch) {
       const id = decodeURIComponent(attMatch[1]);
       const index = Number(attMatch[2]);
+      if (resolution.viaSession && resolution.identity &&
+          !(await store.messageAccessible(env, id, resolution.identity.from))) {
+        return json({ ok: false, error: "E_NOT_FOUND", message: "attachment not found" }, 404);
+      }
       const att = await store.getAttachment(env, id, index);
       if (!att) return json({ ok: false, error: "E_NOT_FOUND", message: "attachment not found" }, 404);
       // Force a download with a sanitized filename; never echo the raw filename
@@ -413,6 +420,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && path.startsWith("/api/messages/")) {
       const id = decodeURIComponent(path.slice("/api/messages/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "message id required" }, 400);
+      if (resolution.viaSession && resolution.identity &&
+          !(await store.messageAccessible(env, id, resolution.identity.from))) {
+        return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
+      }
       const msg = await store.get(env, id);
       if (!msg) return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
       return json({ ok: true, message: msg });
@@ -422,7 +433,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && path.startsWith("/api/threads/")) {
       const id = decodeURIComponent(path.slice("/api/threads/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "thread id required" }, 400);
-      const messages = await store.thread(env, id);
+      const messages = await store.thread(
+        env,
+        id,
+        resolution.viaSession ? resolution.identity?.from : undefined,
+      );
       return json({ ok: true, threadId: id, messages });
     }
 

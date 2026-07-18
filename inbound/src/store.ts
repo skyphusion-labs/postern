@@ -102,6 +102,10 @@ export interface ListQuery {
   thread?: string;
   direction?: "inbound" | "outbound";
   mailbox?: MailboxFilter;
+  /** Internal account boundary for a bound webmail session. Unlike public `to`,
+   * this includes the viewer's authored Sent rows in All while keeping Inbox
+   * recipient-relative. Never accepted directly from a query parameter. */
+  viewer?: string;
   q?: string; // FTS over subject + body
   limit?: number; // default 50, max 200
   cursor?: string; // opaque; encodes (date, id) of the last row
@@ -122,6 +126,8 @@ export interface SearchQuery {
   // Viewer address for recipient-scoped search (#350): delivered-set membership +
   // viewer-relative INBOX + effective (per-recipient) seen, same as ListQuery.to.
   to?: string;
+  /** Internal bound-session account boundary; never caller-controlled. */
+  viewer?: string;
   limit?: number;
   cursor?: string;
 }
@@ -1018,15 +1024,20 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
 }
 
 /** All messages in a thread, oldest first. */
-export async function thread(env: Env, threadId: string): Promise<StoredMessage[]> {
+export async function thread(env: Env, threadId: string, viewer?: string): Promise<StoredMessage[]> {
+  const owner = viewer?.trim().toLowerCase();
   const res = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
             delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
             flagged, answered, mailbox, trashed_at
-       FROM messages WHERE thread_id = ? ORDER BY date, id`,
+       FROM messages WHERE thread_id = ? ${
+         owner
+           ? "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
+           : ""
+       } ORDER BY date, id`,
   )
-    .bind(threadId)
+    .bind(threadId, ...(owner ? [owner, owner] : []))
     .all<MessageRow>();
   const rows = res.results ?? [];
   const out: StoredMessage[] = [];
@@ -1090,6 +1101,36 @@ function recipientWhere(
     }
   }
   return out;
+}
+
+/** Account-owned view for a bound webmail session. */
+function accountWhere(
+  viewer: string,
+  direction: "inbound" | "outbound" | undefined,
+): { membership: string | null; membershipBinds: unknown[]; direction: string | null; directionBinds: unknown[] } {
+  const delivered = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
+  if (direction === "inbound") {
+    return {
+      membership: delivered,
+      membershipBinds: [viewer],
+      direction: "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))",
+      directionBinds: [viewer],
+    };
+  }
+  if (direction === "outbound") {
+    return {
+      membership: null,
+      membershipBinds: [],
+      direction: "lower(m.from_addr) = ?",
+      directionBinds: [viewer],
+    };
+  }
+  return {
+    membership: `(${delivered} OR lower(m.from_addr) = ?)`,
+    membershipBinds: [viewer, viewer],
+    direction: null,
+    directionBinds: [],
+  };
 }
 
 // --- List / search (CONTRACT section 1 / section 4) ---
@@ -1198,8 +1239,9 @@ function toFtsQuery(q: string): string {
  */
 export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSummary>> {
   const limit = clampLimit(q.limit);
-  const viewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(viewer);
+  const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
+  const recipientViewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(accountViewer ?? recipientViewer);
   const seenExpr = sp.expr;
   const where: string[] = [];
   const binds: unknown[] = [...sp.binds];
@@ -1218,7 +1260,9 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   // Recipient view (#178 delivered-set membership) at the `to` slot; the direction
   // predicate (viewer-relative INBOX for #350) is appended AFTER from/thread so the
   // bind order stays stable. ONE builder for list, fts, and substr search.
-  const rv = recipientWhere(viewer, q.direction);
+  const rv = accountViewer
+    ? accountWhere(accountViewer, q.direction)
+    : recipientWhere(recipientViewer, q.direction);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -1365,8 +1409,9 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const ftsExpr = toFtsQuery(q.q ?? "");
   if (!ftsExpr) return { items: [], cursor: null };
 
-  const viewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(viewer);
+  const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
+  const recipientViewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(accountViewer ?? recipientViewer);
   const seenExpr = sp.expr;
   // Seen bind (SELECT column) first, then the FTS match bind, then recipient/cursor.
   const binds: unknown[] = [...sp.binds, ftsExpr];
@@ -1374,7 +1419,9 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
 
   // Recipient view + viewer-relative INBOX (#350/#178); membership then direction,
   // the same order list/substr use, so fts shares the one "INBOX for V" builder.
-  const rv = recipientWhere(viewer, q.direction);
+  const rv = accountViewer
+    ? accountWhere(accountViewer, q.direction)
+    : recipientWhere(recipientViewer, q.direction);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -1463,8 +1510,9 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const cols = substrColumns(q.field ?? "text");
   const pattern = escapeLikePattern(raw);
 
-  const viewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(viewer);
+  const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
+  const recipientViewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(accountViewer ?? recipientViewer);
   const seenExpr = sp.expr;
 
   // Case-insensitivity is SQLite LIKE's native ASCII folding (CONTRACT 10.8);
@@ -1476,7 +1524,9 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const where: string[] = [`(${orClause})`];
 
   // Recipient view + viewer-relative INBOX (#350/#178).
-  const rv = recipientWhere(viewer, q.direction);
+  const rv = accountViewer
+    ? accountWhere(accountViewer, q.direction)
+    : recipientWhere(recipientViewer, q.direction);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -1593,7 +1643,19 @@ function passesViewerScope(
   m: StoredMessageSummary,
   viewer: string | undefined,
   direction: "inbound" | "outbound" | undefined,
+  _fromFilter?: string,
+  accountViewer?: string,
 ): boolean {
+  if (accountViewer) {
+    const from = (parseRecipients(m.from)[0] ?? "").toLowerCase();
+    const delivered = m.deliveredTo.map((a) => a.toLowerCase());
+    if (direction === "outbound") return from === accountViewer;
+    if (direction === "inbound") {
+      return delivered.includes(accountViewer) &&
+        (m.direction === "inbound" || (m.direction === "outbound" && from !== accountViewer));
+    }
+    return delivered.includes(accountViewer) || from === accountViewer;
+  }
   if (!viewer) return !direction || m.direction === direction;
   const delivered = m.deliveredTo.map((a) => a.toLowerCase());
   if (!delivered.includes(viewer)) return false;
@@ -1611,18 +1673,19 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   if (!text) return { items: [], cursor: null };
 
   const viewer = q.to?.trim().toLowerCase() || undefined;
+  const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const queryVec = await embedQuery(env, text);
   if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
 
   const ranked = await nearestMessageIds(env, queryVec, limit);
-  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), viewer);
+  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), accountViewer ?? viewer);
   const items: SearchHit[] = [];
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
     if (!message) continue;
     // Viewer scope + direction restriction (#350/#128): the vector index is neither
     // recipient- nor direction-keyed, so scope the hydrated summaries (at most `limit`).
-    if (!passesViewerScope(message, viewer, q.direction)) continue;
+    if (!passesViewerScope(message, viewer, q.direction, undefined, accountViewer)) continue;
     items.push({ message, score: r.score });
   }
   // Score-ranked: single page, no date cursor.
@@ -1633,8 +1696,8 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const limit = clampLimit(q.limit);
   // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
   const [ftsPage, semPage] = await Promise.all([
-    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction, to: q.to }),
-    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction, to: q.to }),
+    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction, to: q.to, viewer: q.viewer }),
+    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction, to: q.to, viewer: q.viewer }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();
