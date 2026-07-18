@@ -218,6 +218,12 @@ class PosternIMAPMessage:
             flags.append("\\Seen")
         if self._summary.deleted:
             flags.append("\\Deleted")
+        if getattr(self._summary, "flagged", False):
+            flags.append("\\Flagged")
+        if getattr(self._summary, "answered", False):
+            flags.append("\\Answered")
+        if getattr(self._summary, "mailbox", None) == "drafts":
+            flags.append("\\Draft")
         flags.append("Trusted" if self._summary.trusted else "Untrusted")
         flags.append(self._summary.direction.capitalize())  # Inbound / Outbound
         return flags
