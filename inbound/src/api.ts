@@ -500,6 +500,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const explicit = (url.searchParams.get("viewer") ?? url.searchParams.get("to") ?? "")
         .trim()
         .toLowerCase();
+      if (explicit && !EMAIL_RE.test(explicit)) {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "viewer must be an email address" },
+          400,
+        );
+      }
       const identity = bound || explicit;
       if (!identity) {
         return json(

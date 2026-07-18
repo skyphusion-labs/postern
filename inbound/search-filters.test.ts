@@ -135,6 +135,13 @@ describe("search filters (#354)", () => {
     );
     expect(missing.status).toBe(400);
 
+    const invalid = await handleApi(
+      new Request("https://x/api/recipients/recent?viewer=not-an-email", { headers: auth(env) }),
+      env,
+      CTX,
+    );
+    expect(invalid.status).toBe(400);
+
     const ok = await handleApi(
       new Request("https://x/api/recipients/recent?viewer=alice@skyphusion.org", { headers: auth(env) }),
       env,
