@@ -266,3 +266,9 @@ mapping, and client notes: [imap/README.md](imap/README.md) and
 listener and POSTs to the worker API. It is entirely optional and off the default
 path; skip it unless you have an SMTP-only producer. Never bind it to a public
 interface (it sends as your domain). Bring-up: [relay/README.md](relay/README.md).
+
+## 6. Operating it: backup, restore, monitoring
+
+A deployed mailbox needs a durability and health story: how to back up the D1
+store and R2 attachment bytes, restore into a fresh store, and monitor that mail
+keeps flowing. That is its own guide: [docs/OPERATIONS.md](docs/OPERATIONS.md).

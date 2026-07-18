@@ -53,6 +53,7 @@ When a change touches one of these areas, update the matching doc.
 - `docs/INTEGRATION.md` -- caller setup (service-binding RPC + REST).
 - `docs/MTA-STS.md` -- inbound TLS policy (MTA-STS + TLSRPT); staged, Conrad-supervised deploy.
 - `docs/IMAP-APPLE-MAIL.md` -- Apple Mail IMAP handoff (delete token, Trash, attachments).
+- `docs/OPERATIONS.md` -- backup, restore, and monitoring for a self-hosted mailbox (D1 export/Time Travel, R2, restore drill, health/logs, failure modes).
 - Production cutover runbook: maintained out-of-tree in the operator private infrastructure repository (not in this product tree).
 - `DEPLOY.md` -- clean-install quickstart from a fresh clone.
 
