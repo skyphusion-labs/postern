@@ -63,12 +63,12 @@ function posInt(raw: string | undefined, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
-// The native session capability set (design-conformance note D2). Phase 2 has only
-// read/send/both; a webmail user gets read+send but NOT admin (never reindex or
-// credential provisioning) and NOT the delete scope (that scope arrives with the
-// durable-mailbox phase #352, which will add "delete" here). Carried as a SET so the
+// The native session capability set (design-conformance note D2, contract 4). A
+// normal hosted account gets read + send + delete (delete meaning empty-its-own-Trash
+// within the one shared mailbox, #352) but NOT admin (never reindex or credential
+// provisioning; admin is held only by a `both` token). Carried as a SET so the
 // authorization gate checks membership rather than collapsing to the single Scope enum.
-const NATIVE_SESSION_CAPS = ["read", "send"];
+const NATIVE_SESSION_CAPS = ["read", "send", "delete"];
 
 export interface SessionResolution {
   identity: BoundIdentity;   // the bound From (authoritative sender for this session)

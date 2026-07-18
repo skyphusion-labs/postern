@@ -1,135 +1,126 @@
-"""Twisted IMailbox over the Postern read API (read-only, v1).
+"""Twisted IMailbox over the Postern mailbox API.
 
-A SELECT snapshots the mailbox: we pull the message summaries from the API
+A SELECT snapshots the mailbox: we pull message summaries from the API
 (paging through cursors, body-free), order them oldest-first (IMAP sequence
 numbers are 1-based and ascending by arrival), and present a window of them.
 fetch() wraps each in a PosternIMAPMessage that hydrates its body ONLY on demand
-(#102): ENVELOPE / FLAGS / INTERNALDATE / header-field scans are served straight
-from the list summary, so a "FETCH 1:* ENVELOPE" over a large mailbox costs zero
-per-message body GETs instead of one each.
+(#102).
 
 Windowing (#102 Stage 1): INBOX/Sent are capped to the most-recent W messages
-(POSTERN_IMAP_WINDOW); the All folder is unbounded for archival access. The window
-is a SELECT-time floor: during a session it only GROWS at the high end (new mail
-appends; EXISTS rises), it never slides, so existing sequence numbers and UIDs stay
-stable mid-session (the IMAP invariant). Older-than-window mail is reachable via
-All or by raising the window; IMAP cannot grow a folder downward mid-session, so
-there is no in-folder scroll-back, by design.
+(POSTERN_IMAP_WINDOW); All is unbounded. Live refresh polls while selected.
 
-Live refresh (#102 Stage 1): while selected, a poll (POSTERN_IMAP_POLL_SECONDS)
-re-reads the recent end of the store and pushes an untagged EXISTS to listeners
-when new mail arrives, so NOOP/poll clients AND IDLE both see new mail mid-session.
-The poll is summary-only (no bodies) and reads only as far back as the previous
-newest message, so its cost tracks new-mail volume, not mailbox size. D1 is the
-source of truth for the fresh window; nothing here caches or gates arrival.
+UID model: INBOX/Sent/All use messages.id under the config UIDVALIDITY. Durable
+folders (Trash/Junk/Archive/Drafts) use per-folder UIDs (#352 section 2.6).
 
-Read-only for APPEND and mailbox create/rename/delete (#12): humans send through
-the structured API. \\Seen and (on real views) \\Deleted + EXPUNGE are persisted
-via the mailbox API (#seen, #278).
-
-UID model (#102 / fault F9, DURABLE): the mailbox is ordered by the store's
-monotonic insertion key (StoredMessageSummary.uid == messages.id, the D1
-AUTOINCREMENT rowid) and exposes that key AS the IMAP UID under a constant
-UIDVALIDITY. This is RFC 3501's model: UIDs are strictly ascending in arrival
-order and stable within a UIDVALIDITY. The read API returns rows newest-first by
-(date DESC, id DESC), so we SORT the collected summaries by `uid` ascending -- not
-a plain reverse, which would order by `date` and reintroduce the F9 shift. A
-backdated arrival (a new message carrying an OLD Date header) simply takes the
-next-highest uid and appears LAST; it never inserts mid-order, so no existing UID
-shifts. uid is contract-guaranteed present and > 0 on every row (#103), populated
-for ALL rows at insert (it is the rowid; the Vectorize backfill writes vectors
-only and never touches messages.id), so no null-fallback path is needed.
-
-Never-reuse note (migration 0005): SQLite can reuse the highest rowid after that
-row is deleted UNLESS the column is AUTOINCREMENT; migration 0005 adds AUTOINCREMENT
-to make never-reuse-after-delete total. EXPUNGE (#278) hard-deletes via the API;
-AUTOINCREMENT keeps UIDs never-reused. Bump UIDVALIDITY only when projection semantics
-change, not on every delete.
+#352 durable mailbox ops: APPEND persists or refuses (never silent OK+drop);
+COPY/MOVE to Trash/Junk/Archive soft-places via POST /api/messages/move;
+EXPUNGE hard-deletes; \\Flagged/\\Answered via POST /api/messages/flags.
+Notes stays an empty placeholder.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List, Optional
+import email
+import email.utils
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
+from email.message import Message as PyMessage
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 from zope.interface import implementer
 
 from twisted.mail import imap4
 
-from .client import MessageSummary, PosternClient, PosternError
+from .client import Draft, Message, MessageSummary, PosternClient, PosternError
 from .measure import Meter
 from .message import PosternIMAPMessage
 
-if TYPE_CHECKING:  # annotation only; the runtime import stays lazy (see _maybe_start_poll)
+if TYPE_CHECKING:
     from twisted.internet.task import LoopingCall
 
-# Stable across the life of a proxy process (and across reconnects). The mailbox
-# UID is the store's never-reused insertion key (the rowid), so a message's UID is
-# identical in every snapshot and we never need to bump this. (If pre-0005 hard
-# deletes are ever added on the store side, bump it so clients re-sync -- see the
-# module docstring's never-reuse note.)
 _UID_VALIDITY = 1
-
-# Per-page size and the cursor-loop bound for the server-side SEARCH pushdown (#148).
-# We request the worker's max page (200) to minimize round-trips, and cap the loop so
-# a pathological non-terminating cursor cannot spin forever. In-folder hits that
-# survive the snapshot intersection are bounded by the window and the store returns
-# newest-first (recent = in-window matches sort early), so a few window-widths of
-# pages covers a real folder; the cap breach is logged LOUDLY (never a silent
-# truncation). With no window (0 = unbounded snapshot) a large fixed cap applies.
 _SEARCH_PAGE_LIMIT = 200
 _SEARCH_MAX_PAGES_UNBOUNDED = 1000
+_SENT_MATCH_WINDOW = timedelta(minutes=10)
+# #352 §2.4.1: how long a same (to, subject) draft is treated as "the same logical
+# draft, being autosaved again" rather than a genuinely new one. Generous compared
+# to _SENT_MATCH_WINDOW: an editing session (pauses included) can run much longer
+# than a submit-then-APPEND-copy race.
+_DRAFT_REVISION_WINDOW = timedelta(hours=12)
 
 
 class ReadOnlyError(imap4.MailboxException):
-    """Raised for any write operation; the proxy is a read-only view in v1."""
+    """Raised for any write operation the mailbox refuses."""
 
 
 class AppendRejectedError(imap4.MailboxException):
-    """APPEND into a folder that has no backing store (placeholder folders, #109).
-
-    A MailboxException so the server maps it to a tagged NO (see server.py): the
-    client learns the save did not persist instead of the message being silently
-    dropped with a fake OK (RFC 3501 / audit F11)."""
+    """APPEND refused: no honest persist path (RFC 3501 tagged NO, never silent drop)."""
 
 
 class MailboxLoadError(imap4.MailboxException):
-    """The mailbox snapshot could not be loaded from the Postern read API (#144).
+    """The mailbox snapshot could not be loaded from the Postern read API (#144)."""
 
-    Raised when the lazy SELECT/STATUS load (`_ensure_loaded`) hits an upstream
-    failure -- a 401 (stale read token), a 5xx, or a transport error. Carried as a
-    MailboxException so the server maps it to a clean tagged IMAP NO with a transient
-    [UNAVAILABLE] hint (see server.py), instead of letting the raw PosternError
-    propagate through Twisted's SELECT/STATUS callbacks as an unhandled error -- a
-    client-facing BAD 'Server error' plus a logged traceback (#143/#144). The text
-    is generic and transient (never the token or internal detail), and the snapshot
-    stays unloaded so a later command re-attempts the load: the failure is transient,
-    not sticky. Distinct from 'no such mailbox' (that path returns None in select)."""
+
+def _read_message_bytes(message) -> bytes:
+    if isinstance(message, (bytes, bytearray)):
+        return bytes(message)
+    if hasattr(message, "read"):
+        data = message.read()
+        if isinstance(data, str):
+            return data.encode("utf-8", "replace")
+        return bytes(data or b"")
+    return b""
+
+
+def _parse_rfc822(raw: bytes) -> PyMessage:
+    return email.message_from_bytes(raw)
+
+
+def _header_addrs(msg: PyMessage, name: str) -> str:
+    return (msg.get(name, "") or "").strip()
+
+
+def _bare_addr(value: str) -> str:
+    if not value:
+        return ""
+    _name, addr = email.utils.parseaddr(value)
+    return (addr or value).strip().lower()
+
+
+def _norm_subject(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def _message_id_header(msg: PyMessage) -> Optional[str]:
+    mid = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
+    if not mid:
+        return None
+    if mid.startswith("<") and mid.endswith(">"):
+        mid = mid[1:-1]
+    return mid or None
+
+
+def _body_text(msg: PyMessage) -> str:
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    charset = part.get_content_charset() or "utf-8"
+                    return payload.decode(charset, "replace")
+        return ""
+    payload = msg.get_payload(decode=True)
+    if isinstance(payload, bytes):
+        charset = msg.get_content_charset() or "utf-8"
+        return payload.decode(charset, "replace")
+    text = msg.get_payload(decode=False)
+    return text if isinstance(text, str) else ""
 
 
 @implementer(imap4.IMailbox)
 class PosternMailbox:
-    """A read-only IMAP view of the Postern mailbox, scoped by an optional filter.
-
-    `direction` (None | "inbound" | "outbound") selects which slice the mailbox
-    shows, so INBOX, Sent, and All are direction-filtered views over one store.
-
-    `special_use` are the RFC 6154 attributes for this mailbox (e.g. ["\\Sent"]).
-    Twisted reads getFlags() off the listMailboxes() instance for the LIST mailbox
-    attributes, but off the select() instance for the SELECT message-FLAGS line, so
-    `list_view` disambiguates: a list-view box reports its special-use + structural
-    attributes; a selected box reports the message flags. The two instances never
-    cross, so one getFlags() correctly serves both call sites.
-
-    `empty` marks a present-but-empty placeholder (Drafts/Trash/Junk/Archive):
-    selectable with zero messages and NO API hit, so a client (Thunderbird) maps
-    its special-use folders to ours and never tries to CREATE them.
-
-    `append_noop` lets Drafts acknowledge Apple Mail autosaves without persisting
-    bytes. The draft remains client-local; other placeholders still reject APPEND.
-
-    `window` caps the snapshot to the most-recent N messages (0 = unlimited).
-    `poll_seconds` enables a live-refresh poll while selected (0 = disabled).
-    """
+    """An IMAP view of the Postern mailbox, scoped by direction and/or mailbox=."""
 
     def __init__(
         self,
@@ -151,33 +142,32 @@ class PosternMailbox:
         writable_signal: bool = False,
         seen_writable: bool = False,
         delete_writable: bool = False,
+        flags_writable: bool = False,
         delete_client: Optional[PosternClient] = None,
-        trash_sink: bool = False,
-        append_noop: bool = False,
-        trash_staging: Optional[list] = None,
-        trash_staging_sink: Optional[list] = None,
+        mailbox_filter: Optional[str] = None,
+        imap_client: Optional[PosternClient] = None,
+        identity: Optional[str] = None,
+        draft_revisions: Optional[set] = None,
     ) -> None:
         self._client = client
-        # EXPUNGE uses delete_client when set (#278 dual-token); falls back to the read
-        # client only in tests that omit the split.
         self._delete_client = delete_client
-        # A disabled Meter by default: measurement hooks are no-ops unless an enabled
-        # meter is injected (POSTERN_IMAP_MEASURE, threaded in from the account).
+        # #352 core unblocker 1/2/3: the least-privilege client + asserted identity
+        # for /api/imap/drafts* and /api/imap/import. None when the operator has not
+        # configured POSTERN_API_TOKEN_IMAP or no identity could be derived --
+        # Drafts/import then fail closed (AppendRejectedError) rather than guess.
+        self._imap_client = imap_client
+        self._identity = identity
+        # Shared across every Drafts mailbox instance the account constructs (see
+        # PosternAccount._draft_revisions); a fresh local set when unset (e.g. a
+        # test constructing PosternMailbox directly) so the code path is uniform.
+        self._draft_revisions: set = draft_revisions if draft_revisions is not None else set()
         self._meter = meter or Meter(False)
         self._direction = direction
-        # Envelope-membership filter (#178/#208): when set, list only messages whose
-        # delivered set (falling back to to_addr for a v1 row) includes this address.
-        # In per-account mode (#357) this carries the viewer address V so INBOX/All
-        # read the recipient-relative lens (CONTRACT 10.9); estate mode leaves it None.
         self._to = to
         # #357/#366: sender filter for the per-account Sent lens (from=V, outbound).
         # None in estate mode. SEARCH passes from=V to /api/search (#366); the snapshot
         # intersection below is only for window/folder membership, not from= scoping.
         self._from = from_addr
-        # #357: the per-recipient seen address. When set, a \Seen STORE writes a
-        # per-recipient override (POST /api/messages/seen for=V) instead of the estate
-        # row-level flag. Set ONLY on to=V lenses (INBOX/All), never the from=V Sent
-        # lens, so the write side matches what the read side renders (CONTRACT 10.9).
         self._viewer = viewer
         self._special_use = list(special_use or [])
         self._list_view = list_view
@@ -186,94 +176,43 @@ class PosternMailbox:
         self._window = window
         self._poll_seconds = poll_seconds
         self._uidvalidity = uidvalidity
-        # #218 Experiment A: report SELECT as READ-WRITE for this folder (the
-        # writability SIGNAL iOS Notes needs to provision), while every actual
-        # write (addMessage/store/expunge) stays honestly refused with a tagged
-        # NO. A SIGNAL, not a storage promise -- see server._cbSelectWork.
         self._writable_signal = writable_signal
-        # #seen: this folder persists the \Seen flag (a STORE round-trips to POST
-        # /api/messages/seen). True for the real backed views (INBOX/Sent/All), so a
-        # SELECT reports READ-WRITE + PERMANENTFLAGS (\Seen) and a client's mark-read
-        # sticks across sessions. Distinct from writable_signal (the Notes-only #218
-        # signal): a seen-writable folder ONLY accepts \Seen, still refusing APPEND of
-        # a new message and every other flag.
         self._seen_writable = seen_writable
-        # #278: STORE \\Deleted + EXPUNGE on the real views. EXPUNGE calls DELETE
-        # /api/messages/{id} (admin-scoped token required).
         self._delete_writable = delete_writable
-        # Trash sink: no messages stored here; COPY/MOVE is handled server-side as delete.
-        self._trash_sink = trash_sink
-        # Drafts compatibility: acknowledge Apple Mail's mid-compose APPEND without
-        # pretending Postern has a server-side draft store.
-        self._append_noop = append_noop
-        # Trash SELECT reads staged summaries (see account._trash_staging).
-        self._trash_staging = trash_staging
-        # Real views stage summaries here on COPY-to-Trash delete.
-        self._trash_staging_sink = trash_staging_sink
+        self._flags_writable = flags_writable
+        self._mailbox_filter = mailbox_filter
+        self._is_drafts = mailbox_filter == "drafts"
         self._summaries: List[MessageSummary] = []
         self._loaded = False
-        # Highest UID (== store rowid) currently in the snapshot. UIDNEXT is this
-        # + 1 (the next arrival takes the next-highest rowid). 0 until loaded/empty.
         self._newest_uid = 0
-        # message_id of the highest-uid (newest-arrival) message; the poll boundary.
         self._newest_id: Optional[str] = None
         self._listeners: list = []
         self._poll: Optional["LoopingCall"] = None
-        # Injectable for tests (twisted.internet.task.Clock); None uses the reactor.
         self._clock: Optional[Any] = clock
-
-    # --- snapshot ---
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
-        if self._trash_sink:
-            staged = self._trash_staging or []
-            self._summaries = list(staged)
-            self._newest_uid = self._summaries[-1].uid if self._summaries else 0
-            self._newest_id = self._summaries[-1].message_id if self._summaries else None
-            self._loaded = True
-            return
         if self._empty:
-            # Placeholder folder (e.g. Drafts/Trash): always empty, never hit the API.
             self._summaries = []
             self._loaded = True
             return
-        # Measure the cold sync: how many pages/summaries a SELECT pulls and how often
-        # the window cap truncates a real mailbox (validates POSTERN_IMAP_WINDOW=500 as
-        # a "measurement-informed" floor). Counts/sizes only, never message content.
         try:
-            with self._meter.timed("cold_sync", direction=self._direction or "all") as span:
-                items: List[MessageSummary] = []
-                cursor: Optional[str] = None
-                pages = 0
-                while True:
-                    page = self._client.list_messages(
-                        direction=self._direction,
-                        to=self._to,
-                        from_addr=self._from,
-                        limit=self._page_size,
-                        cursor=cursor,
-                    )
-                    items.extend(page.items)
-                    pages += 1
-                    cursor = page.cursor
-                    if not cursor:
-                        break
-                # The API returns newest-first by (date DESC, id DESC). IMAP UIDs must ascend
-                # with ARRIVAL, which is the store's insertion key (uid == rowid), NOT date:
-                # sort by uid ascending so a backdated arrival lands LAST instead of shifting
-                # every higher UID (fault F9). Treating uid as a stable, never-reused UID is
-                # safe while the proxy is read-only (no deletes free a rowid); migration 0005
-                # (AUTOINCREMENT) makes never-reuse total -- see the module docstring.
+            with self._meter.timed(
+                "cold_sync",
+                direction=self._mailbox_filter or self._direction or "all",
+            ) as span:
+                if self._is_drafts:
+                    items = self._load_drafts()
+                    pages = 1
+                else:
+                    items, pages = self._load_messages()
                 items.sort(key=lambda s: s.uid)
                 n = len(items)
                 self._newest_uid = items[-1].uid if items else 0
                 self._newest_id = items[-1].message_id if items else None
                 if self._window and n > self._window:
-                    # Show only the most-recent window (the highest uids); older mail stays
-                    # reachable via All or by raising the window.
-                    self._summaries = items[n - self._window:]
+                    self._summaries = items[n - self._window :]
                 else:
                     self._summaries = items
                 self._loaded = True
@@ -286,36 +225,44 @@ class PosternMailbox:
                     newest_uid=self._newest_uid,
                 )
         except PosternError as exc:
-            # An upstream store/auth failure (401 stale read token, 5xx, or a transport
-            # error) must degrade to a clean tagged IMAP NO, not propagate unhandled as
-            # a BAD 'Server error' + traceback (#144). Re-raise as a MailboxException the
-            # server maps to NO; the snapshot stays unloaded (nothing above was assigned
-            # before the raise), so a later command re-attempts the load. The text is
-            # generic and transient -- never the token or any internal detail.
+            if self._is_drafts and exc.status in (401, 403):
+                self._summaries = []
+                self._loaded = True
+                return
             raise MailboxLoadError(
                 "mailbox temporarily unavailable; please retry"
             ) from exc
 
+    def _load_drafts(self) -> List[MessageSummary]:
+        if self._imap_client is None or not self._identity:
+            # No IMAP-service seam configured / no derivable identity: fail closed
+            # to an empty Drafts view rather than 401/403-ing the whole SELECT.
+            return []
+        return [d.as_summary() for d in self._imap_client.list_imap_drafts(self._identity)]
+
+    def _load_messages(self) -> tuple[List[MessageSummary], int]:
+        items: List[MessageSummary] = []
+        cursor: Optional[str] = None
+        pages = 0
+        while True:
+            page = self._client.list_messages(
+                direction=self._direction,
+                to=self._to,
+                from_addr=self._from,
+                mailbox=self._mailbox_filter,
+                limit=self._page_size,
+                cursor=cursor,
+            )
+            items.extend(page.items)
+            pages += 1
+            cursor = page.cursor
+            if not cursor:
+                break
+        return items, pages
+
     def _refresh(self) -> int:
-        """Append any new arrivals to the snapshot; return how many were added.
-
-        Reads the store newest-first only as far back as the message we already
-        treat as newest (the highest-uid message, our poll boundary), so the work
-        tracks new-mail volume, not mailbox size, and never re-fetches bodies. A new
-        arrival has a higher insertion key (uid > the current max), so we collect by
-        that test and the snapshot stays strictly uid-ascending after a re-sort; the
-        uid filter also means nothing already present is re-added (no duplicates).
-        New arrivals grow EXISTS at the high end; existing sequence numbers and UIDs
-        are untouched. If the boundary message is not found (deletion/reorder -- not
-        expected in an append-only store), we skip the append rather than risk a bad
-        merge; the next SELECT re-snapshots cleanly.
-
-        A backdated NEW arrival (high uid, old Date) sits below the boundary in the
-        date-ordered stream, so this bounded poll may not see it until the next
-        SELECT re-snapshots; that is acceptable for the live-refresh path and never
-        produces a wrong or shifted UID (the re-snapshot orders it correctly by uid).
-        """
-        if self._empty or not self._loaded:
+        """Append any new arrivals to the snapshot; return how many were added."""
+        if self._empty or not self._loaded or self._is_drafts:
             return 0
         boundary = self._newest_id
         max_uid = self._newest_uid
@@ -327,46 +274,41 @@ class PosternMailbox:
                 direction=self._direction,
                 to=self._to,
                 from_addr=self._from,
+                mailbox=self._mailbox_filter,
                 limit=self._page_size,
                 cursor=cursor,
             )
-            for item in page.items:  # newest-first by (date DESC, id DESC)
-                if boundary is not None and item.message_id == boundary:
+            for s in page.items:
+                if boundary is not None and s.message_id == boundary:
                     found = True
                     break
-                if item.uid > max_uid:  # a genuine new arrival (higher insertion key)
-                    new_items.append(item)
-            cursor = page.cursor
-            if found or not cursor:
+                if s.uid > max_uid:
+                    new_items.append(s)
+            if found or not page.cursor:
                 break
-        if boundary is not None and not found:
-            # Inconsistent view (boundary gone); do not blindly append. Stay safe.
+            cursor = page.cursor
+        if boundary is not None and not found and not new_items:
             return 0
         if not new_items:
             return 0
-        # Merge in UID order. New arrivals carry higher uids than everything present
-        # (the uid > max_uid filter guarantees it), so the sort settles them at the
-        # high end and keeps the snapshot strictly ascending even if a batch arrived
-        # out of date order.
+        new_items.sort(key=lambda s: s.uid)
         self._summaries.extend(new_items)
         self._summaries.sort(key=lambda s: s.uid)
         self._newest_uid = self._summaries[-1].uid
         self._newest_id = self._summaries[-1].message_id
         return len(new_items)
 
-    # --- IMailbox: metadata ---
+
+    # --- IMailbox: identity / status ---
 
     def getUIDValidity(self) -> int:
         return self._uidvalidity
 
     def getUIDNext(self) -> int:
         self._ensure_loaded()
-        # The next arrival takes the next rowid above the current highest UID.
         return self._newest_uid + 1
 
     def getUID(self, message: int) -> int:
-        # `message` is a 1-based sequence number; its UID is the store insertion key
-        # (the rowid), read straight off the summary -- no positional arithmetic.
         self._ensure_loaded()
         return self._summaries[message - 1].uid
 
@@ -375,24 +317,13 @@ class PosternMailbox:
         return len(self._summaries)
 
     def getRecentCount(self) -> int:
-        return 0  # we do not track \\Recent in a read-only view
+        return 0
 
     def getUnseenCount(self) -> int:
-        # #seen: how many messages in the snapshot are unread (\Seen absent). Drives a
-        # client's unread badge (via STATUS UNSEEN, requestStatus below). Body-free.
-        if self._empty:
-            return 0
         self._ensure_loaded()
         return sum(1 for s in self._summaries if not s.seen)
 
     def firstUnseen(self) -> int:
-        """The 1-based sequence number of the first unread message, or 0 if none.
-
-        The SELECT response's OK [UNSEEN n] hint (RFC 3501 6.3.1): it points a client
-        at where its unread mail begins. Snapshot is uid-ascending == arrival order,
-        so the first unseen in sequence order is the earliest-arrived unread message."""
-        if self._empty:
-            return 0
         self._ensure_loaded()
         for i, s in enumerate(self._summaries):
             if not s.seen:
@@ -400,59 +331,43 @@ class PosternMailbox:
         return 0
 
     def getPermanentFlags(self) -> List[str]:
-        """The flags a client may PERSIST in this mailbox (SELECT PERMANENTFLAGS).
-
-        Notes (#218 writable_signal): the standard writable set + \\* (the provisioning
-        signal iOS needs). A seen-writable real folder: \\Seen, and \\Deleted when
-        delete_writable (#278). Everything else: empty (read-only)."""
         if self._writable_signal:
             return ["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft", "\\*"]
+        flags: List[str] = []
         if self._seen_writable:
-            flags = ["\\Seen"]
-            if self._delete_writable:
+            flags.append("\\Seen")
+        if self._flags_writable:
+            flags.extend(["\\Flagged", "\\Answered"])
+        if self._delete_writable:
+            flags.append("\\Deleted")
+        if self._is_drafts:
+            flags.append("\\Draft")
+            if self._delete_writable and "\\Deleted" not in flags:
                 flags.append("\\Deleted")
-            return flags
-        return []
+        return flags
 
     def isWriteable(self) -> bool:
-        # SELECT reports READ-WRITE when the mailbox accepts SOME persistable write:
-        #   * seen_writable (#seen): the real views (INBOX/Sent/All) persist \Seen, so a
-        #     client's mark-read sticks -- the whole point of the read/unread feature.
-        #   * writable_signal (#218 Experiment A): the Notes placeholder signals
-        #     READ-WRITE so iOS can provision its Notes account.
-        # It does NOT make the store fully writable: addMessage (APPEND of a NEW message)
-        # still returns AppendRejectedError on placeholders; store() persists only \\Seen
-        # and (when delete_writable) \\Deleted; destroy() still raises. EXAMINE stays
-        # READ-ONLY for every folder (server enforces).
-        return self._writable_signal or self._seen_writable
+        return (
+            self._writable_signal
+            or self._seen_writable
+            or self._flags_writable
+            or (self._delete_writable and (not self._empty or self._is_drafts))
+            or self._is_drafts
+        )
 
     def getHierarchicalDelimiter(self) -> str:
         return "/"
 
     def getFlags(self) -> List[str]:
-        # In a LIST (list_view), report the RFC 6154 special-use + structural
-        # attributes so a client auto-maps its folders. In a SELECT, report the
-        # message flags settable in this (read-only) mailbox. Twisted calls this on
-        # distinct instances for the two cases (see the class docstring).
         if self._list_view:
             return self._special_use + ["\\HasNoChildren"]
         if self._writable_signal:
-            # Notes (#218 Experiment A + round-6 FLAGS/PF coherence): a
-            # writable-signalling placeholder that stores NO messages, so it can never
-            # actually return the trust/direction keywords on a FETCH. Advertise the
-            # standard system FLAGS set instead -- coherent with the writable
-            # PERMANENTFLAGS the SELECT sends (\\Answered \\Flagged \\Deleted \\Seen
-            # \\Draft \\*) and exactly what a normal writable folder (Dovecot)
-            # advertises -- so a strict client (iOS Notes) never balks on a FLAGS/PF
-            # mismatch. The incoherent keyword FLAGS was the one remaining anomaly in
-            # the SELECT Notes response after Experiment A served READ-WRITE.
             return ["\\Answered", "\\Flagged", "\\Deleted", "\\Seen", "\\Draft"]
-        # SELECT view: announce every flag/keyword a FETCH on this mailbox can
-        # return, so a client is never handed an unadvertised keyword (#218). A
-        # message's getFlags() returns \\Seen, optional \\Deleted, plus trust/direction;
-        # the mailbox FLAGS line must be their union. PERMANENTFLAGS lists only the
-        # persistable subset (\\Seen, \\Deleted when enabled).
+        if self._is_drafts:
+            return ["\\Draft", "\\Seen", "\\Deleted"]
         flags = ["\\Seen", "Trusted", "Untrusted", "Inbound", "Outbound"]
+        if self._flags_writable:
+            flags[1:1] = ["\\Flagged", "\\Answered"]
         if self._delete_writable:
             flags.insert(1, "\\Deleted")
         return flags
@@ -467,64 +382,60 @@ class PosternMailbox:
             "RECENT": 0,
             "UIDNEXT": self._newest_uid + 1,
             "UIDVALIDITY": self._uidvalidity,
-            # #seen: real unread count so a client's STATUS-driven badge is correct.
             "UNSEEN": sum(1 for s in self._summaries if not s.seen),
         }
         return {name: data[name] for name in names if name in data}
-
-    # --- IMailbox: read ---
 
     def _wrap(self, seq: int):
         idx0 = seq - 1
         summary = self._summaries[idx0]
         mid = summary.message_id
-        # hydrate is bound per message (its own scope), so there is no late-binding
-        # capture bug; the body GET happens only if the client opens the message.
+
         def fetch_attachment(index: int, message_id: str = mid) -> bytes:
             return self._client.get_attachment(message_id, index).body
+
+        def hydrate():
+            if self._is_drafts:
+                if self._imap_client is None or not self._identity:
+                    return None
+                draft = self._imap_client.get_imap_draft(self._identity, mid)
+                if draft is None:
+                    return None
+                return Message(
+                    message_id=draft.id,
+                    direction="outbound",
+                    thread_id=draft.thread_id or draft.id,
+                    from_addr=draft.identity,
+                    to_addr=draft.to_addr or "",
+                    subject=draft.subject or "",
+                    date=draft.updated_at or draft.created_at,
+                    in_reply_to=draft.in_reply_to,
+                    body_text=draft.body_text or "",
+                    body_html=draft.body_html,
+                    trusted=True,
+                    received_at=draft.updated_at or draft.created_at,
+                    attachments=[],
+                )
+            return self._client.get_message(mid)
 
         return seq, PosternIMAPMessage(
             summary,
             uid=summary.uid,
             seq=seq,
-            hydrate=lambda: self._client.get_message(mid),
+            hydrate=hydrate,
             fetch_attachment=fetch_attachment,
             meter=self._meter,
         )
 
     def fetch(self, messages, uid):
-        """Return a list of (sequenceNumber, PosternIMAPMessage) for the requested set.
-
-        `messages` is a twisted MessageSet. When uid is true the set is in UIDs (the
-        store rowids -- sparse and not derivable from the sequence number), so we map
-        each requested UID back to its sequence number via the snapshot. Otherwise
-        the set is in sequence numbers. The untagged FETCH always keys on the
-        sequence number (Twisted adds the UID as a data item via getUID); bodies
-        hydrate lazily per message.
-
-        This MUST return a materialized list, not a generator: Twisted's IMAP4Server
-        consumes IMailbox.fetch in two incompatible ways. do_FETCH wraps the result in
-        iter() before pulling with next(), so a generator is fine there; but because
-        this mailbox is not ISearchableMailbox, do_SEARCH takes the manual-search
-        fallback __cbManualSearch, whose first line subscripts the result
-        (result[-1][0]) and which later slices it (result[5:]). A generator cannot be
-        subscripted ('generator' object is not subscriptable), which surfaces to the
-        client as `BAD [SEARCH failed: ...]`. A list satisfies both paths. Materializing
-        only builds the lazy message wrappers (see _wrap); it fires no body GETs, so an
-        ENVELOPE-only scan stays body-free.
-        """
         return list(self._iter_fetch(messages, uid))
 
     def _iter_fetch(self, messages, uid):
-        """The fetch body as a generator; fetch() materializes it (see fetch docstring)."""
         self._ensure_loaded()
         n = len(self._summaries)
         if n == 0:
             return
         if uid:
-            # UIDs are not contiguous (rowids), so resolve via a uid -> seq map.
-            # '*' resolves to the highest UID present (the snapshot is uid-ascending,
-            # so that is the last summary).
             by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
             messages.last = self._summaries[-1].uid
             for num in messages:
@@ -542,36 +453,15 @@ class PosternMailbox:
                 yield self._wrap(num)
 
     def search_substr(self, field: str, term: str, uid: bool) -> List[int]:
-        """Server-side IMAP SEARCH pushdown for one SUBJECT/BODY/TEXT key (#148).
-
-        The stock path (PosternMailbox is deliberately NOT ISearchableMailbox, so
-        do_SEARCH falls back to Twisted's __cbManualSearch) re-scans the whole
-        snapshot in Python. For a plain single-term SUBJECT/BODY/TEXT search the
-        server (PosternIMAP4Server.do_SEARCH) instead calls this: we delegate the
-        substring match to the API (mode=substr, field=..., #212/#216) and then
-        intersect the GLOBAL hits with THIS folder's current snapshot BY UID. A hit
-        whose uid is not in the snapshot (a different folder, or older than the
-        window cap) is dropped, so the result is folder- and window-scoped exactly
-        like the manual fallback would be -- identical substring semantics, just
-        matched in the store instead of in the proxy.
-
-        Returns snapshot sequence numbers, or the UIDs when `uid` is set (UID
-        SEARCH), ascending (RFC 3501 does not require order; ascending is
-        conventional and matches the uid-ascending snapshot). Body-free: the API
-        returns summaries, so no message body is hydrated.
-        """
         self._ensure_loaded()
-        if not self._summaries:
+        if not self._summaries or self._is_drafts:
+            # Drafts: no search API; fall through empty (manual path unused for drafts).
             return []
-        # uid -> 1-based sequence number over the uid-ascending snapshot (the same
-        # mapping _iter_fetch builds for UID FETCH).
         by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
         out: List[int] = []
         cursor: Optional[str] = None
         pages = 0
         max_pages = self._search_max_pages()
-        # RFC 3501 SEARCH returns EVERY match; the API pages, so we MUST follow the
-        # cursor to exhaustion rather than keep only the first page (a silent cap).
         while True:
             page = self._client.search_page(
                 term,
@@ -580,6 +470,7 @@ class PosternMailbox:
                 direction=self._direction,
                 to=self._to,
                 from_addr=self._from,
+                mailbox=self._mailbox_filter,
                 cursor=cursor,
                 limit=_SEARCH_PAGE_LIMIT,
             )
@@ -596,8 +487,6 @@ class PosternMailbox:
             if not cursor:
                 break
             if pages >= max_pages:
-                # Never silently truncate a SEARCH. If the cursor loop hits its bound
-                # with pages still pending, say so LOUDLY so an operator sees it.
                 from twisted.python import log
 
                 log.msg(
@@ -611,46 +500,39 @@ class PosternMailbox:
         return out
 
     def _search_max_pages(self) -> int:
-        """Bound the SEARCH cursor loop (see the module constants). A window caps the
-        useful hits, so a few window-widths of pages suffices; without a window a large
-        fixed cap guards against a non-terminating cursor."""
         if self._window and self._window > 0:
-            # ceil(window / page) + 1, without importing math.
             return max(2, (self._window + _SEARCH_PAGE_LIMIT - 1) // _SEARCH_PAGE_LIMIT + 1)
         return _SEARCH_MAX_PAGES_UNBOUNDED
 
-    # --- IMailbox: write (all rejected: read-only proxy) ---
-
     def store(self, messages, flags, mode, uid):
-        """Persist \\Seen (#seen) and session-local \\Deleted (#278); refuse other flags.
-
-        \\Seen round-trips to POST /api/messages/seen. \\Deleted is held on the
-        snapshot until EXPUNGE calls DELETE /api/messages/{id}. Every other flag is
-        read-only (trust/direction are derived).
-
-        Returns the RFC 3501 {seq: [flags]} map (post-update flags) the server sends
-        back as an untagged FETCH FLAGS, unless the client asked for .SILENT.
-        """
+        """Persist \\Seen / \\Flagged / \\Answered and session-local \\Deleted."""
         self._ensure_loaded()
         if self._empty:
             raise ReadOnlyError("this folder stores no messages; flags are not settable")
-        if not self._seen_writable and not self._delete_writable:
+        if not (
+            self._seen_writable or self._delete_writable or self._flags_writable or self._is_drafts
+        ):
             raise ReadOnlyError("postern-imap is read-only; flags are not stored")
 
         norm = {str(f).lower() for f in (flags or [])}
         allowed = set()
         if self._seen_writable:
             allowed.add("\\seen")
-        if self._delete_writable:
+        if self._flags_writable:
+            allowed.update({"\\flagged", "\\answered"})
+        if self._delete_writable or self._is_drafts:
             allowed.add("\\deleted")
+        if self._is_drafts:
+            allowed.add("\\draft")  # informational; always present on drafts
         if norm - allowed:
             raise ReadOnlyError(
-                "postern-imap only persists \\Seen"
-                + (" and \\Deleted" if self._delete_writable else "")
-                + "; other flags are read-only",
+                "postern-imap only persists allowed permanent flags; other flags are read-only"
             )
+
         wants_seen = "\\seen" in norm
         wants_deleted = "\\deleted" in norm
+        wants_flagged = "\\flagged" in norm
+        wants_answered = "\\answered" in norm
 
         if uid:
             by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
@@ -663,26 +545,28 @@ class PosternMailbox:
         if not seqs:
             return {}
 
+        def apply_bool(current: bool, wants: bool) -> bool:
+            if mode == 0:
+                return wants
+            if mode == 1:
+                return True if wants else current
+            return False if wants else current
+
         seen_targets: dict[int, bool] = {}
         deleted_targets: dict[int, bool] = {}
+        flagged_targets: dict[int, bool] = {}
+        answered_targets: dict[int, bool] = {}
         for seq in seqs:
             summary = self._summaries[seq - 1]
-            current_seen = summary.seen
-            current_deleted = summary.deleted
             if self._seen_writable:
-                if mode == 0:
-                    seen_targets[seq] = wants_seen
-                elif mode == 1:
-                    seen_targets[seq] = True if wants_seen else current_seen
-                else:
-                    seen_targets[seq] = False if wants_seen else current_seen
-            if self._delete_writable:
-                if mode == 0:
-                    deleted_targets[seq] = wants_deleted
-                elif mode == 1:
-                    deleted_targets[seq] = True if wants_deleted else current_deleted
-                else:
-                    deleted_targets[seq] = False if wants_deleted else current_deleted
+                seen_targets[seq] = apply_bool(summary.seen, wants_seen)
+            if self._delete_writable or self._is_drafts:
+                deleted_targets[seq] = apply_bool(summary.deleted, wants_deleted)
+            if self._flags_writable:
+                if mode == 0 or "\\flagged" in norm:
+                    flagged_targets[seq] = apply_bool(summary.flagged, wants_flagged)
+                if mode == 0 or "\\answered" in norm:
+                    answered_targets[seq] = apply_bool(summary.answered, wants_answered)
 
         to_read = [
             self._summaries[s - 1].message_id
@@ -703,74 +587,257 @@ class PosternMailbox:
         for seq, target in deleted_targets.items():
             self._summaries[seq - 1].deleted = target
 
+        # Batch flag writes by target state.
+        for want_flagged in (True, False):
+            ids = [
+                self._summaries[s - 1].message_id
+                for s, t in flagged_targets.items()
+                if t is want_flagged and self._summaries[s - 1].flagged is not want_flagged
+            ]
+            if ids:
+                self._client.set_flags(ids, flagged=want_flagged)
+                for s, t in flagged_targets.items():
+                    if t is want_flagged:
+                        self._summaries[s - 1].flagged = want_flagged
+        for want_answered in (True, False):
+            ids = [
+                self._summaries[s - 1].message_id
+                for s, t in answered_targets.items()
+                if t is want_answered and self._summaries[s - 1].answered is not want_answered
+            ]
+            if ids:
+                self._client.set_flags(ids, answered=want_answered)
+                for s, t in answered_targets.items():
+                    if t is want_answered:
+                        self._summaries[s - 1].answered = want_answered
+
         return {seq: list(self._wrap(seq)[1].getFlags()) for seq in seqs}
 
     def addMessage(self, message, flags=(), date=None):
-        # do_APPEND calls this WITHOUT maybeDeferred, so we must return a Deferred
-        # (never raise synchronously, which Twisted would report as a server BAD).
+        """APPEND persist-or-refuse (#352 section 3.2). Never silent OK+drop."""
         from twisted.internet import defer
 
         if self._empty:
-            if self._trash_sink or self._append_noop:
-                # Trash never stores bytes; COPY addMessage is a no-op success if the
-                # stock Twisted path runs. Server-side COPY-to-Trash deletes at source.
-                # Drafts also accepts APPEND as a no-op for Apple Mail autosave.
-                return defer.succeed(None)
-            # Placeholder folders (Junk/Archive/Notes) have no backing store
-            # in v1; the pre-#109 behaviour fake-acked the APPEND with OK and then
-            # DROPPED the message -> silent data loss (RFC 3501 / audit F11). Reject
-            # with a failed Deferred so the server returns a tagged NO and a client
-            # doing server-side drafts learns the save did not persist.
             return defer.fail(
                 AppendRejectedError(
                     "this folder does not store messages; APPEND is not supported"
                 )
             )
-        # Real views (INBOX/Sent/All): accept as a NO-OP success. A mail client
-        # (Thunderbird) APPENDs its own copy of a sent message into Sent after
-        # submission; the Postern submission path already recorded that outbound
-        # message, so persisting the APPEND would double-store. Acknowledging it lets
-        # the post-send copy succeed while the sent mail still appears exactly once
-        # (via the store on the next SELECT).
+        try:
+            raw = _read_message_bytes(message)
+            parsed = _parse_rfc822(raw)
+            if self._is_drafts:
+                self._append_draft(parsed)
+            elif self._mailbox_filter in ("trash", "junk", "archive"):
+                self._append_placement(parsed, raw, self._mailbox_filter)
+            elif self._direction == "outbound" and self._mailbox_filter is None:
+                self._append_sent(parsed, raw)
+            else:
+                # INBOX / All: refuse -- no honest home for a genuine new APPEND.
+                return defer.fail(
+                    AppendRejectedError(
+                        "APPEND into this folder is not supported; "
+                        "use Sent for outbound copies or a durable folder"
+                    )
+                )
+        except AppendRejectedError as exc:
+            return defer.fail(exc)
+        except PosternError as exc:
+            return defer.fail(
+                AppendRejectedError(f"APPEND failed: {exc}")
+            )
+        except Exception as exc:
+            return defer.fail(AppendRejectedError(f"APPEND failed: {exc}"))
         return defer.succeed(None)
 
-    def expunge(self):
-        """Remove messages marked \\Deleted; return their message SEQUENCE numbers.
+    def _append_draft(self, parsed: PyMessage) -> None:
+        if self._imap_client is None or not self._identity:
+            raise AppendRejectedError(
+                "Drafts APPEND requires POSTERN_API_TOKEN_IMAP and a bound identity"
+            )
+        fields = {
+            "to": _header_addrs(parsed, "To") or None,
+            "cc": _header_addrs(parsed, "Cc") or None,
+            "bcc": _header_addrs(parsed, "Bcc") or None,
+            "subject": (parsed.get("Subject") or "") or None,
+            "bodyText": _body_text(parsed) or None,
+            "inReplyTo": _message_id_header(parsed) and (parsed.get("In-Reply-To") or None),
+        }
+        # Normalize empty strings to None for the API.
+        clean = {k: (v if v else None) for k, v in fields.items()}
+        try:
+            revision = self._find_draft_revision_target(clean)
+            if revision is not None:
+                self._imap_client.update_imap_draft(
+                    self._identity,
+                    revision.id,
+                    clean,
+                    updated_at=revision.updated_at or None,
+                )
+                # #352 §2.4.1: this draft id's OLD (pre-revision) uid, still sitting
+                # in some session's live snapshot marked \Deleted, must NOT be
+                # hard-deleted when that session's EXPUNGE reaches it -- the PUT
+                # above already rewrote the SAME row under a new, higher uid.
+                self._draft_revisions.add(revision.id)
+            else:
+                self._imap_client.create_imap_draft(self._identity, clean)
+        except PosternError as exc:
+            if exc.status in (401, 403):
+                raise AppendRejectedError(
+                    "Drafts APPEND requires a bound identity (POSTERN_API_TOKEN_IMAP scope)"
+                ) from exc
+            raise
 
-        RFC 3501 7.4.1: the untagged EXPUNGE response carries the message SEQUENCE
-        number (not the UID), and Twisted's __cbExpunge emits every element of this
-        return list verbatim as `<n> EXPUNGE`. We return the 1-based sequence numbers
-        HIGH-TO-LOW so no running decrement is needed (removing the highest first
-        leaves every lower sequence number still valid).
+    def _find_draft_revision_target(self, fields: dict) -> Optional[Draft]:
+        """Contract §2.4.1: an autosave revision of an existing draft mints a NEW,
+        higher UID for the SAME draft id instead of piling up a second draft.
 
-        Trash is session-staged only: EXPUNGE clears the staging list (the API delete
-        already ran on COPY-to-Trash). Real views hard-delete via DELETE /api/messages.
+        do_APPEND always selects a fresh, unloaded PosternMailbox for the target
+        folder (see server.py), so there is no session-local \\Deleted snapshot to
+        correlate against at this point -- match against SERVER-side truth instead:
+        the most recent draft for this identity with the same (to, subject), within
+        a generous recency window. Mirrors the fallback-matcher pattern
+        _append_sent already uses for Sent (same idea, applied to Drafts).
         """
+        to = fields.get("to") or ""
+        subject = fields.get("subject") or ""
+        if not to and not subject:
+            return None
+        if self._imap_client is None or not self._identity:
+            return None
+        try:
+            drafts = self._imap_client.list_imap_drafts(self._identity)
+        except PosternError:
+            return None
+        now = datetime.now(timezone.utc)
+        best: Optional[Tuple[datetime, Draft]] = None
+        for d in drafts:
+            if _bare_addr(d.to_addr or "") != _bare_addr(to):
+                continue
+            if _norm_subject(d.subject or "") != _norm_subject(subject):
+                continue
+            src = d.updated_at or d.created_at
+            try:
+                ts = datetime.fromisoformat(src.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if abs(now - ts) > _DRAFT_REVISION_WINDOW:
+                continue
+            if best is None or ts > best[0]:
+                best = (ts, d)
+        return best[1] if best else None
+
+    def _append_placement(self, parsed: PyMessage, raw: bytes, mailbox: str) -> None:
+        mid = _message_id_header(parsed)
+        if mid:
+            existing = self._client.get_message(mid)
+            if existing is not None:
+                self._client.move_messages([mid], mailbox)
+                return
+        # #352 core unblocker 3: a genuine new Trash/Junk/Archive APPEND (no
+        # matching existing message) is now PERSISTED via the IMAP-service import
+        # seam instead of refused -- never silently dropped.
+        self._import_or_reject(raw, mailbox)
+
+    def _append_sent(self, parsed: PyMessage, raw: bytes) -> None:
+        """Sent APPEND: fallback matcher (#352 section 3.2). Hit -> OK; miss ->
+        persist via the IMAP-service import seam (core unblocker 3), never refuse.
+
+        The submission path already stored outbound copies with a core-minted
+        Message-ID, so a client APPEND carries a different id. Matching recent
+        outbound by from+to+subject within a short window avoids the copy-failed
+        regression without a spurious second row on a genuine hit.
+        """
+        mid = _message_id_header(parsed)
+        if mid:
+            existing = self._client.get_message(mid)
+            if existing is not None and existing.direction == "outbound":
+                return
+        from_addr = _bare_addr(_header_addrs(parsed, "From"))
+        to_addr = _bare_addr(_header_addrs(parsed, "To"))
+        subject = _norm_subject(parsed.get("Subject") or "")
+        now = datetime.now(timezone.utc)
+        date_hdr = parsed.get("Date")
+        try:
+            msg_dt = email.utils.parsedate_to_datetime(date_hdr) if date_hdr else now
+            if msg_dt.tzinfo is None:
+                msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError, IndexError):
+            msg_dt = now
+        page = self._client.list_messages(direction="outbound", limit=50)
+        for s in page.items:
+            if _bare_addr(s.from_addr) != from_addr:
+                continue
+            if _bare_addr(s.to_addr) != to_addr:
+                continue
+            if _norm_subject(s.subject) != subject:
+                continue
+            # received_at / date within window of the APPEND's Date (or now).
+            src = s.received_at or s.date
+            try:
+                stored_dt = datetime.fromisoformat(src.replace("Z", "+00:00"))
+                if stored_dt.tzinfo is None:
+                    stored_dt = stored_dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if abs(stored_dt - msg_dt) <= _SENT_MATCH_WINDOW or abs(stored_dt - now) <= _SENT_MATCH_WINDOW:
+                return
+        self._import_or_reject(raw, "sent")
+
+    def _import_or_reject(self, raw: bytes, folder: str) -> None:
+        """POST /api/imap/import (#352 core unblocker 3), or an honest refusal.
+
+        Fails closed -- never silently drops -- when the IMAP-service seam is not
+        configured or no identity could be derived; a live 401/403 from the worker
+        (token present but lacking `imap` scope) maps to the same clean refusal.
+        """
+        if self._imap_client is None or not self._identity:
+            raise AppendRejectedError(
+                "APPEND of a new message into this folder requires "
+                "POSTERN_API_TOKEN_IMAP and a bound identity; refusing rather "
+                "than silently discarding"
+            )
+        try:
+            self._imap_client.import_message(self._identity, folder, raw)
+        except PosternError as exc:
+            if exc.status in (401, 403):
+                raise AppendRejectedError(
+                    "APPEND import requires the POSTERN_API_TOKEN_IMAP scope"
+                ) from exc
+            raise AppendRejectedError(f"APPEND import failed: {exc}") from exc
+
+    def expunge(self):
+        """Hard-delete messages marked \\Deleted; return sequence numbers high-to-low."""
         self._ensure_loaded()
-        if self._trash_sink:
-            # Every staged summary is expunged; emit its 1-based sequence number,
-            # high-to-low, then clear the shared staging.
-            seqs = list(range(len(self._summaries), 0, -1))
-            if self._trash_staging is not None:
-                self._trash_staging.clear()
-            self._summaries = []
-            return seqs
         if self._empty:
             return []
-        if not self._delete_writable:
-            # A seen-writable-only mailbox (single read-token deploy) reports
-            # isWriteable() True, so do_CLOSE calls expunge() on it. No message can be
-            # flagged \\Deleted without a delete token (store() refuses it), so EXPUNGE
-            # is a clean no-op OK here (RFC 3501 6.4.3) -- raising broke CLOSE.
+        if not self._delete_writable and not self._is_drafts:
             return []
 
         remove_at: List[int] = []
         for i, summary in enumerate(self._summaries):
             if not summary.deleted:
                 continue
-            delete_client = self._delete_client or self._client
             try:
-                delete_client.delete_message(summary.message_id)
+                if self._is_drafts:
+                    if summary.message_id in self._draft_revisions:
+                        # #352 §2.4.1: already superseded in place by an autosave
+                        # PUT (see _append_draft) -- the row is NOT gone, it was
+                        # rewritten under a new uid; deleting it now would destroy
+                        # the just-saved revision. Just drop the stale local row.
+                        self._draft_revisions.discard(summary.message_id)
+                    elif self._imap_client is not None and self._identity:
+                        self._imap_client.delete_imap_draft(self._identity, summary.message_id)
+                    else:
+                        raise ReadOnlyError(
+                            "EXPUNGE of a draft requires POSTERN_API_TOKEN_IMAP "
+                            "and a bound identity"
+                        )
+                else:
+                    delete_client = self._delete_client or self._client
+                    delete_client.delete_message(summary.message_id)
             except PosternError as exc:
                 if exc.status in (401, 403):
                     raise ReadOnlyError(
@@ -779,50 +846,90 @@ class PosternMailbox:
                 raise ReadOnlyError(f"EXPUNGE failed: {exc}") from exc
             remove_at.append(i)
 
-        # RFC 3501 7.4.1: return message SEQUENCE numbers (1-based), high-to-low so the
-        # untagged EXPUNGE responses need no running decrement. remove_at is ascending
-        # 0-based indices into the pre-deletion snapshot.
         expunged_seqs = [i + 1 for i in reversed(remove_at)]
         for i in reversed(remove_at):
             del self._summaries[i]
         return expunged_seqs
 
-    def delete_fetched_messages(self, fetched) -> None:
-        """Hard-delete messages just fetched (COPY-to-Trash / move-to-trash clients).
+    def _matches_own_filter(self, mailbox_value: Optional[str]) -> bool:
+        """Would a row with this `mailbox` placement still appear in THIS view?
 
-        Apple Mail deletes by COPY/MOVE to the \\Trash mailbox rather than STORE
-        \\Deleted + EXPUNGE in place. Postern has no Trash store; accepting the COPY
-        means DELETE /api/messages/{id} on the source snapshot.
+        Mirrors the server-side predicate list_messages(mailbox=self._mailbox_filter)
+        applies: "all" sees every placement; trash/junk/archive see only their own
+        exact placement; the direction-default views (INBOX/Sent, mailbox_filter is
+        None) see only unplaced (mailbox IS NULL) rows. Used after a soft-move to
+        decide whether the row genuinely LEFT this session's snapshot (#352 review:
+        COPY/MOVE from All to Trash must not strip a row All still owns).
+        """
+        if self._mailbox_filter == "all":
+            return True
+        if self._mailbox_filter in ("trash", "junk", "archive"):
+            return mailbox_value == self._mailbox_filter
+        return mailbox_value is None
+
+    def soft_move_fetched_messages(
+        self,
+        fetched,
+        mailbox: Optional[str],
+        *,
+        required_direction: Optional[str] = None,
+    ) -> List[int]:
+        """Soft-move fetched messages via POST /api/messages/move (#352).
+
+        mailbox is archive|trash|junk, or None to restore to the direction-default
+        view. `required_direction` (#352 core unblocker 5) rejects a restore whose
+        source messages do not match the destination's direction (e.g. an outbound
+        Sent copy restored to INBOX, or an inbound message restored to Sent) --
+        checked BEFORE the move so a mixed batch fails atomically, never partially.
+
+        Returns the 1-based sequence numbers (descending) that were actually
+        REMOVED from this view's live snapshot -- i.e. rows that no longer match
+        this mailbox's own filter after the move (see _matches_own_filter). The
+        caller (server._cbSoftMove) emits an untagged EXPUNGE for exactly these,
+        for BOTH COPY and MOVE: this mailbox mutates the SAME exclusive placement
+        either way (there is no real dual-membership COPY here), so a client that
+        is not told via EXPUNGE would hold a stale, now-wrong sequence mapping
+        regardless of which verb it used (the bug locked in by the old
+        test_copy_emits_no_untagged_expunge).
         """
         self._ensure_loaded()
-        if self._empty or not self._delete_writable:
-            raise ReadOnlyError("delete is not enabled on this mailbox")
+        if self._empty or self._is_drafts:
+            raise ReadOnlyError("move is not enabled on this mailbox")
+        items = [(seq, msg._summary) for seq, msg in fetched]
+        if not items:
+            return []
+        if required_direction is not None:
+            bad = [s.message_id for _seq, s in items if s.direction != required_direction]
+            if bad:
+                raise ReadOnlyError(
+                    f"cannot restore {required_direction!r}-incompatible message(s) "
+                    "to this folder"
+                )
+        ids = [s.message_id for _seq, s in items]
+        try:
+            self._client.move_messages(ids, mailbox)
+        except PosternError as exc:
+            raise ReadOnlyError(f"move failed: {exc}") from exc
+        moved_ids = set(ids)
+        remove_at: List[int] = []
+        for i, s in enumerate(self._summaries):
+            if s.message_id not in moved_ids:
+                continue
+            s.mailbox = mailbox
+            if not self._matches_own_filter(mailbox):
+                remove_at.append(i)
+        removed_seqs = sorted((i + 1 for i in remove_at), reverse=True)
+        for i in reversed(remove_at):
+            del self._summaries[i]
+        return removed_seqs
 
-        ids = {msg._summary.message_id for _seq, msg in fetched}
-        if not ids:
-            return
-
-        if self._trash_staging_sink is not None:
-            staged_ids = {s.message_id for s in self._trash_staging_sink}
-            for _seq, msg in fetched:
-                if msg._summary.message_id not in staged_ids:
-                    self._trash_staging_sink.append(msg._summary)
-
-        delete_client = self._delete_client or self._client
-        for mid in ids:
-            try:
-                delete_client.delete_message(mid)
-            except PosternError as exc:
-                if exc.status in (401, 403):
-                    raise ReadOnlyError(
-                        "COPY to Trash requires POSTERN_API_TOKEN_DELETE (both scope)",
-                    ) from exc
-                raise ReadOnlyError(f"delete failed: {exc}") from exc
-
-        self._summaries = [s for s in self._summaries if s.message_id not in ids]
+    def delete_fetched_messages(self, fetched) -> List[int]:
+        """Back-compat alias: soft-move to trash (prefer soft_move_fetched_messages)."""
+        return self.soft_move_fetched_messages(fetched, "trash")
 
     def destroy(self):
         raise ReadOnlyError("postern-imap is read-only; mailboxes cannot be destroyed")
+
 
     # --- IMailbox: listeners (live refresh via a poll while selected) ---
 

@@ -289,7 +289,7 @@ none touches D1 directly (#25, #26).
 
 | Method | Route | Purpose | Milestone |
 |---|---|---|---|
-| GET | `/api/messages?to=&from=&thread=&direction=&q=&limit=&cursor=` | list / filter (`q` = FTS) | M1 (done) |
+| GET | `/api/messages?to=&from=&thread=&direction=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `mailbox=archive\|trash\|junk\|all`, unset = direction-default views) | M1 / webmail v2 (#352) |
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
@@ -298,7 +298,15 @@ none touches D1 directly (#25, #26).
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, html?, text?, attachments?}`; core fills to / subject / In-Reply-To / References / thread, and carries attachments (#363) | M2 (done) |
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
-| DELETE | `/api/messages/{messageId}` | hard-delete message + attachments + Vectorize tombstone (admin / `both`-scoped, #278) | (#278) |
+| POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
+| POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
+| GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts; durable folders also return `uidValidity` | webmail v2 (#352) |
+| GET/POST | `/api/drafts` | list or create an identity-owned server-side draft | webmail v2 (#352) |
+| GET/PUT/DELETE | `/api/drafts/{id}` | read, optimistic-concurrency replace, or discard own draft | webmail v2 (#352) |
+| POST | `/api/drafts/{id}/send` | send through the one send core, then remove the draft | webmail v2 (#352) |
+| GET/POST/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity | webmail v2 (#352) |
+| POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it | webmail v2 (#352) |
+| DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope) | (#278/#352) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
 | DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
@@ -324,8 +332,8 @@ returns `{ ok, updated }` (rows actually changed; unknown ids are skipped, an em
 It is **`read`-scoped**, not send/admin: marking mail read is a side effect of READING it, and the IMAP
 read door commonly holds only a read token, so a read token must be able to persist its own read state.
 It backs the IMAP `\Seen` flag (`postern-imap` STOREs it) and the webmail unread view. Inbound mail is
-stored unread; outbound sent copies are stored read. IMAP `\Deleted` + `EXPUNGE` on INBOX/Sent/All
-call this route (requires a `both`-scoped token; read-only IMAP creds can still mark `\Seen`).
+stored unread; outbound sent copies are stored read. IMAP hard delete uses a dedicated `delete`
+token; read-only IMAP credentials can still mark `\Seen`.
 stored unread and outbound sent copies read (`store.put`); the column DEFAULT is `read` so migration
 0007 backfills existing rows without resurfacing the whole historical mailbox as unread.
 
@@ -357,8 +365,10 @@ The RPC entrypoint mirrors the read + write operations as typed methods (`list`,
 - **Everyone else:** `Authorization: Bearer <token>`, **constant-time** compare. Keep the
   existing `timingSafeEqual`; do not switch to `===`. Length may leak (tokens are high-entropy);
   the byte contents must not.
-- The API secret is `POSTERN_API_TOKEN`.
-- Scoped / multi tokens are a post-v1 enhancement: noted, not built.
+- `POSTERN_API_TOKEN` is the back-compatible `both` secret. Optional comma-set slots
+  `POSTERN_API_TOKEN_READ`, `POSTERN_API_TOKEN_SEND`, `POSTERN_API_TOKEN_DELETE`, and
+  `POSTERN_API_TOKEN_IMAP`
+  grant only their named function. `both` alone preserves the single-key posture.
 
 `POST /ingest` and `dispatch`-to-relay are infra seams, not API clients. They use a
 **separate** transport token (`POSTERN_TRANSPORT_TOKEN`), not the API token, so an API

@@ -197,6 +197,20 @@ class AccountScopingTest(unittest.TestCase):
         self.assertEqual(mb._viewer, "conrad@example.org")
         self.assertIsNone(mb._direction)  # both directions
 
+    def test_per_account_trash_junk_archive_are_to_v_lens(self):
+        # #352 review: Trash/Junk/Archive MUST scope to the viewer exactly like
+        # INBOX/All (viewer_to + viewer_seen) -- the placement filter (mailbox=X)
+        # alone is estate-wide, so without this a viewer boundary layered on top
+        # would be missing and user A could see user B's trash/junk/archive.
+        acct = self._account(
+            POSTERN_IMAP_VIEWER_MODE="per_account", POSTERN_IMAP_VIEWER_DOMAIN="example.org"
+        )
+        for name in ("Trash", "Junk", "Archive"):
+            mb = acct.select(name)
+            self.assertEqual(mb._to, "conrad@example.org", name)
+            self.assertIsNone(mb._from, name)
+            self.assertEqual(mb._viewer, "conrad@example.org", name)
+
     def test_map_override_applies(self):
         from posternimap.account import PosternAccount
 
@@ -316,6 +330,63 @@ class InboxLensIntegrationTest(unittest.TestCase):
         msgs[0]["deliveredTo"] = ["someone@external.test"]
         mb, _ = self._account_mb("INBOX", msgs)
         self.assertEqual(mb.getMessageCount(), 0)
+
+    def _account_for(self, login, msgs):
+        from posternimap.account import PosternAccount
+
+        cfg = _cfg(
+            POSTERN_IMAP_VIEWER_MODE="per_account", POSTERN_IMAP_VIEWER_DOMAIN="example.org"
+        )
+        transport = FakeTransport(msgs, expected_token="tok", page_size=50)
+        acct = PosternAccount(cfg, login, "tok")
+        acct._client = lambda: PosternClient("https://x", "tok", transport=transport)
+        return acct, transport
+
+    def test_user_a_cannot_list_user_bs_trash(self):
+        # #352 review: two viewers, two messages each placed in trash by their own
+        # delivered-set membership; A's Trash view must show only A's row, never B's.
+        a_trashed = make_message("ta", subject="a's trash", mailbox="trash", folderUid=1)
+        a_trashed["to"] = "alice@example.org"
+        a_trashed["deliveredTo"] = ["alice@example.org"]
+        b_trashed = make_message("tb", subject="b's trash", mailbox="trash", folderUid=2)
+        b_trashed["to"] = "bob@example.org"
+        b_trashed["deliveredTo"] = ["bob@example.org"]
+        msgs = [a_trashed, b_trashed]
+
+        acct_a, _ = self._account_for("alice", msgs)
+        trash_a = acct_a.select("Trash")
+        self.assertEqual(trash_a.getMessageCount(), 1)
+
+        acct_b, _ = self._account_for("bob", msgs)
+        trash_b = acct_b.select("Trash")
+        self.assertEqual(trash_b.getMessageCount(), 1)
+
+    def test_user_a_cannot_move_or_expunge_user_bs_trash(self):
+        # A's live snapshot never contains B's row in the first place (the viewer
+        # filter above), so a MOVE/EXPUNGE issued by A's session -- which only ever
+        # operates on fetched rows from A's OWN snapshot -- cannot target it.
+        from twisted.mail.imap4 import MessageSet
+
+        a_trashed = make_message("ta", subject="a's trash", mailbox="trash", folderUid=1)
+        a_trashed["to"] = "alice@example.org"
+        a_trashed["deliveredTo"] = ["alice@example.org"]
+        b_trashed = make_message("tb", subject="b's trash", mailbox="trash", folderUid=2)
+        b_trashed["to"] = "bob@example.org"
+        b_trashed["deliveredTo"] = ["bob@example.org"]
+        msgs = [a_trashed, b_trashed]
+
+        acct_a, transport = self._account_for("alice", msgs)
+        trash_a = acct_a.select("Trash")
+        trash_a.getMessageCount()
+        self.assertEqual(trash_a.getMessageCount(), 1)
+        # A's only fetchable sequence is her own row -- there is no sequence number
+        # that could resolve to B's message_id "tb".
+        fetched = list(trash_a.fetch(MessageSet(1, 1), uid=False))
+        self.assertEqual(len(fetched), 1)
+        self.assertEqual(fetched[0][1]._summary.message_id, "ta")
+        trash_a.soft_move_fetched_messages(fetched, None)
+        self.assertEqual(b_trashed.get("mailbox"), "trash")  # untouched
+        self.assertIsNone(a_trashed.get("mailbox"))  # restored (soft-moved to null)
 
 
 if __name__ == "__main__":

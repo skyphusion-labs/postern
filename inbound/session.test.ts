@@ -160,14 +160,14 @@ describe("mintNativeSession + resolveSession", () => {
     const minted = await mintNativeSession(env, "conrad@skyphusion.org", "hunter2hunter2");
     expect(minted).not.toBeNull();
     expect(minted!.identity.from).toBe("conrad@skyphusion.org");
-    expect(minted!.caps).toEqual(["read", "send"]);
+    expect(minted!.caps).toEqual(["read", "send", "delete"]);
     // The stored row holds only the HASH of the id, never the raw cookie value.
     expect(sessions.length).toBe(1);
     expect(sessions[0].id_hash).not.toBe(minted!.rawId);
     const resolved = await resolveSession(env, minted!.rawId);
     expect(resolved).not.toBeNull();
     expect(resolved!.identity.from).toBe("conrad@skyphusion.org");
-    expect(resolved!.caps).toEqual(["read", "send"]);
+    expect(resolved!.caps).toEqual(["read", "send", "delete"]);
   });
 
   it("does not resolve an unknown, revoked, or expired cookie", async () => {
@@ -254,7 +254,7 @@ describe("POST /api/session", () => {
     };
     expect(body.ok).toBe(true);
     expect(body.identity.from).toBe("conrad@skyphusion.org");
-    expect(body.capabilities).toEqual(["read", "send"]);
+    expect(body.capabilities).toEqual(["read", "send", "delete"]);
     expect(typeof body.csrfToken).toBe("string");
     const cookies = setCookies(res);
     const sessionCk = cookies.find((c) => c.startsWith(SESSION_COOKIE + "="));
@@ -287,7 +287,7 @@ describe("GET /api/session (whoami / restore)", () => {
     const body = (await res.json()) as { ok: boolean; identity: { from: string }; capabilities: string[]; csrfToken: string };
     expect(body.ok).toBe(true);
     expect(body.identity.from).toBe("conrad@skyphusion.org");
-    expect(body.capabilities).toEqual(["read", "send"]);
+    expect(body.capabilities).toEqual(["read", "send", "delete"]);
     expect(body.csrfToken).toBe(minted!.csrfToken);
     expect(setCookies(res).some((c) => c.startsWith(SESSION_COOKIE + "="))).toBe(true);
   });
@@ -355,7 +355,7 @@ describe("a session cookie authorizes API calls (contract 1.8)", () => {
     expect(await res.json()).toMatchObject({ error: "E_VALIDATION_ERROR" });
   });
 
-  it("delete cap: a session (read+send, NO admin) is 403 on hard-delete (delete scope arrives in #352)", async () => {
+  it("delete cap reaches hard-delete but cannot disclose another account's message", async () => {
     const { env } = makeEnv([await seededCred()]);
     const minted = await mintNativeSession(env, "conrad@skyphusion.org", "hunter2hunter2");
     const cookie = `${SESSION_COOKIE}=${minted!.rawId}; ${CSRF_COOKIE}=${minted!.csrfToken}`;
@@ -365,8 +365,8 @@ describe("a session cookie authorizes API calls (contract 1.8)", () => {
       env,
       CTX,
     );
-    expect(res.status).toBe(403);
-    expect(await res.json()).toMatchObject({ error: "forbidden" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "E_NOT_FOUND" });
   });
 
   it("an explicit Bearer WINS over an ambient session cookie (contract 1.8)", async () => {
