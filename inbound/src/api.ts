@@ -463,6 +463,24 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
+      const after = url.searchParams.get("after") ?? undefined;
+      const before = url.searchParams.get("before") ?? undefined;
+      const hasAttParam = url.searchParams.get("hasAttachment");
+      if (hasAttParam !== null && hasAttParam !== "0" && hasAttParam !== "1" &&
+          hasAttParam !== "true" && hasAttParam !== "false") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "hasAttachment must be 0|1|true|false" },
+          400,
+        );
+      }
+      const seenParam = url.searchParams.get("seen");
+      if (seenParam !== null && seenParam !== "0" && seenParam !== "1" &&
+          seenParam !== "true" && seenParam !== "false") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "seen must be 0|1|true|false" },
+          400,
+        );
+      }
       const page = await store.search(env, {
         q,
         mode: modeParam as "fts" | "substr" | "semantic" | "hybrid" | undefined,
@@ -473,13 +491,46 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         to: url.searchParams.get("to") ?? undefined,
         // Sender filter (#366): same lower(from_addr) LIKE as /api/messages?from=.
         from: url.searchParams.get("from") ?? undefined,
-        // Durable-folder scope (#352 review), same values as /api/messages?mailbox=.
+        // Durable-folder scope (#352/#354), same values as /api/messages?mailbox=.
         mailbox: url.searchParams.get("mailbox") ?? undefined,
+        after,
+        before,
+        hasAttachment: hasAttParam === null ? undefined : hasAttParam === "1" || hasAttParam === "true",
+        seen: seenParam === null ? undefined : seenParam === "1" || seenParam === "true",
         viewer: resolution.viaSession ? resolution.identity?.from : undefined,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });
       return json({ ok: true, ...page });
+    }
+
+    // --- read: recent recipients (D-CONTACTS-1 / #354) ---
+    // Bound identity (session or per-identity token) wins. Unbound BYO must pass
+    // an explicit viewer=; omitting it is a 400, never an estate-wide dump.
+    if (request.method === "GET" && path === "/api/recipients/recent") {
+      const bound = resolution.identity?.from?.trim().toLowerCase() || "";
+      const explicit = (url.searchParams.get("viewer") ?? url.searchParams.get("to") ?? "")
+        .trim()
+        .toLowerCase();
+      if (explicit && !EMAIL_RE.test(explicit)) {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "viewer must be an email address" },
+          400,
+        );
+      }
+      const identity = bound || explicit;
+      if (!identity) {
+        return json(
+          {
+            ok: false,
+            error: "E_IDENTITY_REQUIRED",
+            message: "recent recipients require a bound identity or viewer=",
+          },
+          400,
+        );
+      }
+      const recipients = await store.recentRecipients(env, identity, parseLimit(url) ?? 25);
+      return json({ ok: true, recipients });
     }
 
     // --- read: attachment bytes ---
@@ -1043,6 +1094,7 @@ function requiredScope(method: string, path: string): RouteScope | null {
   if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
   if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
   if (method === "GET" && path === "/api/search") return "read";
+  if (method === "GET" && path === "/api/recipients/recent") return "read";
   if (method === "GET" && path === "/api/folders") return "read";
   if (method === "GET" && path === "/api/mobileconfig") return "read";
   // Single message and the /attachments/{i} sub-route both live under here.

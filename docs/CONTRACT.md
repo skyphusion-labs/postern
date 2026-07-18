@@ -293,7 +293,8 @@ none touches D1 directly (#25, #26).
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
-| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=` | search (fts + substr + semantic + hybrid) | M1 / M4 / M9 (#212) |
+| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354) | M1 / M4 / M9 / webmail v2 (#212/#354) |
+| GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
@@ -826,12 +827,32 @@ submission side. The in-Worker driver already stores postal-mime's full attachme
 `E_VALIDATION_ERROR`), passing it into `store.search()` exactly as `/api/messages` already
 does. Additive; the param was previously ignored.
 
+### 10.6b Search filters + recent recipients (#354)
+
+Common filters apply in **every** search mode (fts / substr / semantic / hybrid), not only
+substr:
+
+- `mailbox=` -- same folder lens as `/api/messages` (`archive` / `trash` / `junk` / `all`, or
+  unset for the direction-default views)
+- `after=` / `before=` -- ISO-8601 inclusive bounds on `messages.date`
+- `hasAttachment=0|1` -- EXISTS / NOT EXISTS over `attachments` for the message
+- `seen=0|1` -- effective per-viewer seen (same COALESCE path as list)
+
+`GET /api/recipients/recent` is D-CONTACTS-1: a read-only scan of recent outbound
+`to` / `cc` / `bcc` for **one** identity. Session mode uses the bound identity; BYO requires
+explicit `viewer=` (or `to=`). Unbound BYO without a viewer returns validation error -- never
+an estate-wide contact dump. No recipients table; see 10.7.
+
+Thread search vs thread panel: `/api/search` finds matching messages; `GET /api/threads/{id}`
+still returns every stored sibling for the viewer (filter chips do not trim the thread panel).
+
 ### 10.7 What v2 deliberately does NOT do
 
 - No recipients TABLE. The delimiter-set column + `LIKE` predicate serves every current
   view; a normalized table buys nothing until a per-recipient STATE (read/flagged per
   mailbox) exists, and it would fork the message identity today. Revisit only with that
-  feature.
+  feature. `GET /api/recipients/recent` (#354) is a query over outbound columns, not a
+  contacts store.
 - No backfill/rewrite of old rows (NULLs render as today; `COALESCE` carries them), no
   destructive migration, no supervised window: 0006 is ALTER-ADD only.
 - No raw-wire (RFC822 blob) storage. `wire_size` fixes SIZE honestly; storing full raw
