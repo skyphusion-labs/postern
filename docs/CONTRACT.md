@@ -296,7 +296,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=` | search (fts + substr + semantic + hybrid) | M1 / M4 / M9 (#212) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
-| POST | `/api/reply` | reply to `{messageId, html?, text?}`; core fills to / subject / In-Reply-To / References / thread | M2 (done) |
+| POST | `/api/reply` | reply to `{messageId, html?, text?, attachments?}`; core fills to / subject / In-Reply-To / References / thread, and carries attachments (#363) | M2 (done) |
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
 | DELETE | `/api/messages/{messageId}` | hard-delete message + attachments + Vectorize tombstone (admin / `both`-scoped, #278) | (#278) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
@@ -458,8 +458,9 @@ All M1 contract decisions are locked. The list below is authoritative; build aga
   identity = the mail attribute read from the user's own entry. **system**: local Unix accounts via PAM,
   a cgo build-tagged (`-tags pam`) extra excluded from the default static binary; bound identity =
   `<user>@<configured-domain>`. From-enforcement is identical for every backend.
-- **Submission attachments (DECIDED, #68 + #70, DONE):** `/api/send` carries attachments as
-  `SendRequest.attachments?: { filename?; mimeType?; content }[]`, where `content` is standard base64
+- **Submission attachments (DECIDED, #68 + #70 + #363, DONE):** `/api/send` AND `/api/reply` carry attachments as
+  `SendRequest.attachments?: { filename?; mimeType?; content }[]` (reply takes the SAME shape and validation,
+  #363), where `content` is standard base64
   over JSON (the same shape as inbound `ParsedInbound.attachments`). The submission daemon maps the
   parsed MIME parts (attachments, inline, and other non-body parts) to that shape and forwards them; the
   worker hands them to the Cloudflare Email Sending binding, which builds the multipart MIME itself, so
