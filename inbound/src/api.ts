@@ -12,8 +12,10 @@
 // the whole surface behaves exactly as before. Credential-admin routes are the
 // most privileged and are reachable ONLY by a `both` token.
 
+import PostalMime from "postal-mime";
 import * as store from "./store";
-import { ingest, type ParsedInbound } from "./ingest";
+import { cleanBody, htmlToText, ingest, sha256hex, type ParsedInbound } from "./ingest";
+import { toArrayBuffer } from "./headers";
 import { send, reply, MailboxError, type SendRequest, type ReplyRequest } from "./mailbox";
 import { serveWebmail } from "./webmail";
 import {
@@ -271,6 +273,15 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return json({ ok: true, folders: await store.folders(env, viewer) });
     }
 
+    // Dedicated IMAP-service write seam. The `imap` token authenticates the door;
+    // the door asserts the already-authenticated account identity explicitly.
+    if (path === "/api/imap/drafts" || path.startsWith("/api/imap/drafts/")) {
+      return await handleImapDrafts(request, url, path, env);
+    }
+    if (request.method === "POST" && path === "/api/imap/import") {
+      return await handleImapImport(request, env, ctx);
+    }
+
     // Server-side drafts are identity-owned. Static operator tokens are deliberately
     // insufficient because no trustworthy owner can be derived from them.
     if (path === "/api/drafts" || path.startsWith("/api/drafts/")) {
@@ -489,6 +500,128 @@ function draftInput(body: Record<string, unknown>): store.DraftInput {
     inReplyTo: text("inReplyTo"),
     threadId: text("threadId"),
   };
+}
+
+function requireImapIdentity(value: unknown, env: Env): string {
+  if (typeof value !== "string") throw new MailboxError("E_FIELD_MISSING", "identity is required");
+  const identity = value.trim().toLowerCase();
+  const allowed = (env.ALLOWED_FROM_DOMAIN || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(identity) || (allowed && identity.split("@")[1] !== allowed)) {
+    throw new MailboxError("E_IDENTITY_NOT_ALLOWED", "identity is not allowed", 403);
+  }
+  return identity;
+}
+
+async function handleImapDrafts(request: Request, url: URL, path: string, env: Env): Promise<Response> {
+  const suffix = path.slice("/api/imap/drafts".length);
+  if (request.method === "GET") {
+    const identity = requireImapIdentity(url.searchParams.get("identity"), env);
+    if (suffix === "") return json({ ok: true, drafts: await store.listDrafts(env, identity) });
+    const match = /^\/([^/]+)$/.exec(suffix);
+    if (match) {
+      const draft = await store.getDraft(env, decodeURIComponent(match[1]), identity);
+      return draft
+        ? json({ ok: true, draft })
+        : json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
+    }
+  }
+  if (request.method === "POST" && suffix === "") {
+    const body = await readJson<Record<string, unknown>>(request);
+    const identity = requireImapIdentity(body.identity, env);
+    const id = typeof body.id === "string" && body.id.trim() ? body.id.trim() : crypto.randomUUID();
+    const result = await store.putDraft(env, id, identity, draftInput(body));
+    return json({ ok: true, id, draft: result.draft }, 201);
+  }
+  const match = /^\/([^/]+)$/.exec(suffix);
+  if (match && request.method === "DELETE") {
+    const identity = requireImapIdentity(url.searchParams.get("identity"), env);
+    const id = decodeURIComponent(match[1]);
+    return (await store.deleteDraft(env, id, identity))
+      ? json({ ok: true, deleted: id })
+      : json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
+  }
+  return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
+}
+
+async function handleImapImport(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const identity = requireImapIdentity(body.identity, env);
+  const folder = body.folder;
+  if (folder !== "sent" && folder !== "archive" && folder !== "trash" && folder !== "junk") {
+    throw new MailboxError("E_VALIDATION_ERROR", "folder must be sent, archive, trash, or junk");
+  }
+  if (typeof body.rawMime !== "string" || !body.rawMime) {
+    throw new MailboxError("E_FIELD_MISSING", "rawMime base64 is required");
+  }
+  let raw: ArrayBuffer;
+  try {
+    raw = base64ToArrayBuffer(body.rawMime);
+  } catch {
+    throw new MailboxError("E_VALIDATION_ERROR", "rawMime is not valid base64");
+  }
+  const parsed = await new PostalMime().parse(raw);
+  const header = (name: string): string =>
+    parsed.headers.find((h) => h.key.toLowerCase() === name)?.value ?? "";
+  const from = header("from").trim();
+  const fromAddress = bareAddress(from);
+  const outbound = folder === "sent" || fromAddress === identity;
+  if (folder === "sent" && fromAddress !== identity) {
+    throw new MailboxError("E_IDENTITY_MISMATCH", "Sent APPEND From must equal identity", 403);
+  }
+  const toHeader = header("to").trim();
+  const cc = header("cc").trim();
+  const bcc = header("bcc").trim();
+  const deliveredTo = outbound
+    ? [...store.parseRecipients(toHeader), ...store.parseRecipients(cc), ...store.parseRecipients(bcc)]
+    : [identity];
+  if (outbound && deliveredTo.length === 0) {
+    throw new MailboxError("E_FIELD_MISSING", "outbound APPEND requires a recipient");
+  }
+  const rawId = (parsed.messageId ?? "").replace(/[<>]/g, "") || crypto.randomUUID();
+  const messageId = rawId.length > 64 ? await sha256hex(rawId) : rawId;
+  const parsedDate = parsed.date ? new Date(parsed.date) : new Date();
+  const date = Number.isNaN(parsedDate.getTime()) ? new Date().toISOString() : parsedDate.toISOString();
+  const attachments: NonNullable<store.StoreInput["attachments"]> = [];
+  for (const attachment of parsed.attachments ?? []) {
+    const content = toArrayBuffer(attachment.content);
+    if (!content) continue;
+    attachments.push({
+      filename: attachment.filename || undefined,
+      mimeType: attachment.mimeType || undefined,
+      content,
+    });
+  }
+  const result = await store.put(env, {
+    messageId,
+    direction: outbound ? "outbound" : "inbound",
+    from: from || identity,
+    to: toHeader || identity,
+    subject: parsed.subject ?? "",
+    date,
+    inReplyTo: parsed.inReplyTo ?? null,
+    bodyText: cleanBody(parsed.text ?? htmlToText(parsed.html ?? "")).slice(0, 32_000),
+    bodyHtml: parsed.html ? parsed.html.slice(0, 512_000) : null,
+    auth: { spf: "none", dkim: "none", dmarc: "none" },
+    trusted: outbound,
+    attachments,
+    deliveredTo,
+    cc: cc || null,
+    bcc: outbound ? bcc || null : null,
+    replyTo: header("reply-to") || null,
+    wireSize: raw.byteLength,
+  }, ctx);
+  const mailbox = folder === "sent" ? null : folder;
+  if (mailbox) await store.moveMessages(env, [messageId], mailbox);
+  return json({ ok: true, ...result, mailbox }, result.stored ? 201 : 200);
+}
+
+function bareAddress(value: string): string {
+  const angle = /<([^<>]+)>/.exec(value);
+  return (angle?.[1] ?? value.split(",")[0] ?? "").trim().toLowerCase();
 }
 
 // Email shape check (linear, no ReDoS) mirroring mailbox.ts, used to validate a
@@ -727,7 +860,7 @@ function transportAuthorized(request: Request, env: Env): boolean {
 
 // The scope a route/method demands. `admin` (credential provisioning) is strictly
 // more privileged than send and is satisfied ONLY by a `both` token.
-type RouteScope = "read" | "send" | "delete" | "admin";
+type RouteScope = "read" | "send" | "delete" | "imap" | "admin";
 
 // Map the method+path to the scope it requires, mirroring the route table in
 // handleApi exactly. Returns null for any path with no API handler, so (once the
@@ -740,6 +873,8 @@ function requiredScope(method: string, path: string): RouteScope | null {
   if (method === "POST" && path === "/api/messages/seen") return "read";
   if (method === "POST" && (path === "/api/messages/flags" || path === "/api/messages/move")) return "read";
   if (path === "/api/drafts" || path.startsWith("/api/drafts/")) return "send";
+  if (path === "/api/imap/drafts" || path.startsWith("/api/imap/drafts/")) return "imap";
+  if (method === "POST" && path === "/api/imap/import") return "imap";
   if (method === "POST" && path === "/api/admin/smtp-credentials") return "admin";
   if (method === "DELETE" && /^\/api\/admin\/smtp-credentials\/(.+)$/.test(path)) return "admin";
   // Reindex/backfill is the most privileged: a new /api/admin/* path is NOT
@@ -768,6 +903,7 @@ function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (need === "read") return have === "read";
   if (need === "send") return have === "send";
   if (need === "delete") return have === "delete";
+  if (need === "imap") return have === "imap";
   return false; // admin: only `both`
 }
 
@@ -855,6 +991,7 @@ async function resolveToken(request: Request, env: Env): Promise<AuthResolution 
     ["read", tokenSet(env.POSTERN_API_TOKEN_READ)],
     ["send", tokenSet(env.POSTERN_API_TOKEN_SEND)],
     ["delete", tokenSet(env.POSTERN_API_TOKEN_DELETE)],
+    ["imap", tokenSet(env.POSTERN_API_TOKEN_IMAP)],
   ];
 
   let matched: Scope | null = null;

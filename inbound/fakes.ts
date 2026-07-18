@@ -315,6 +315,10 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           const uid = row.next_uid++;
           return { uid, uidvalidity: row.uidvalidity } as T;
         }
+        if (/SELECT next_uid, uidvalidity FROM mailbox_uid_counter/i.test(sql)) {
+          const row = counters.get(String(bound[0]));
+          return (row ? { next_uid: row.next_uid, uidvalidity: row.uidvalidity } : null) as T | null;
+        }
         if (/SELECT mailbox FROM messages WHERE message_id/i.test(sql)) {
           const row = rows.find((r) => r.message_id === String(bound[0]));
           return (row ? { mailbox: row.mailbox } : null) as T | null;

@@ -757,12 +757,23 @@ export async function setFlags(
   return (res.results ?? []).length;
 }
 
-async function allocateFolderUid(env: Env, folder: string): Promise<{ uid: number; uidvalidity: number }> {
+async function ensureFolderCounter(env: Env, folder: string): Promise<{ nextUid: number; uidvalidity: number }> {
   await env.DB.prepare(
     "INSERT OR IGNORE INTO mailbox_uid_counter (folder, next_uid, uidvalidity) VALUES (?, 1, ?)",
   )
     .bind(folder, Math.floor(Date.now() / 1000))
     .run();
+  const current = await env.DB.prepare(
+    "SELECT next_uid, uidvalidity FROM mailbox_uid_counter WHERE folder = ?",
+  )
+    .bind(folder)
+    .first<{ next_uid: number; uidvalidity: number }>();
+  if (!current) throw new Error(`failed to initialize UID counter for ${folder}`);
+  return { nextUid: current.next_uid, uidvalidity: current.uidvalidity };
+}
+
+async function allocateFolderUid(env: Env, folder: string): Promise<{ uid: number; uidvalidity: number }> {
+  await ensureFolderCounter(env, folder);
   const row = await env.DB.prepare(
     "UPDATE mailbox_uid_counter SET next_uid = next_uid + 1 WHERE folder = ? " +
       "RETURNING next_uid - 1 AS uid, uidvalidity",
@@ -1325,6 +1336,8 @@ export interface FolderSummary {
   label: string;
   count: number;
   unread: number;
+  /** Authoritative durable-folder UIDVALIDITY; absent on arrival views. */
+  uidValidity?: number;
 }
 
 /** Server-authoritative folder counts using the same placement predicates as list. */
@@ -1361,14 +1374,30 @@ export async function folders(env: Env, viewer?: string): Promise<FolderSummary[
     )
       .bind(...seen.binds, ...binds)
       .first<{ count: number; unread: number | null }>();
-    result.push({ id, label, count: Number(row?.count ?? 0), unread: Number(row?.unread ?? 0) });
+    const durable = id === "trash" || id === "junk" || id === "archive"
+      ? await ensureFolderCounter(env, id)
+      : null;
+    result.push({
+      id,
+      label,
+      count: Number(row?.count ?? 0),
+      unread: Number(row?.unread ?? 0),
+      ...(durable ? { uidValidity: durable.uidvalidity } : {}),
+    });
   }
+  const draftCounter = await ensureFolderCounter(env, "drafts");
   const draftRow = identity
     ? await env.DB.prepare("SELECT COUNT(*) AS count FROM drafts WHERE identity = ?")
         .bind(identity)
         .first<{ count: number }>()
     : { count: 0 };
-  result.splice(3, 0, { id: "drafts", label: "Drafts", count: Number(draftRow?.count ?? 0), unread: 0 });
+  result.splice(3, 0, {
+    id: "drafts",
+    label: "Drafts",
+    count: Number(draftRow?.count ?? 0),
+    unread: 0,
+    uidValidity: draftCounter.uidvalidity,
+  });
   return result;
 }
 

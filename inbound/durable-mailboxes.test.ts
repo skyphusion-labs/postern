@@ -73,6 +73,56 @@ describe("durable mailbox operations (#352)", () => {
     expect((await handleApi(request("POST", "/api/admin/reindex", "delete-token", {}), env, ctx)).status).toBe(403);
   });
 
+  it("bounds the IMAP service token to identity-asserted draft/import routes", async () => {
+    const { env, ctx, rows } = makeFakeEnv({
+      POSTERN_API_TOKEN: "both-token",
+      POSTERN_API_TOKEN_IMAP: "imap-token",
+    });
+    expect((await handleApi(request("GET", "/api/messages", "imap-token"), env, ctx)).status).toBe(403);
+    expect((await handleApi(request("POST", "/api/send", "imap-token", {
+      to: "a@example.com", subject: "x", text: "x",
+    }), env, ctx)).status).toBe(403);
+    expect((await handleApi(request("DELETE", "/api/messages/x", "imap-token"), env, ctx)).status).toBe(403);
+
+    const draft = await handleApi(request("POST", "/api/imap/drafts", "imap-token", {
+      identity: "conrad@skyphusion.org",
+      to: "friend@example.com",
+      subject: "draft",
+      bodyText: "body",
+    }), env, ctx);
+    expect(draft.status).toBe(201);
+    const listed = await handleApi(
+      request("GET", "/api/imap/drafts?identity=conrad%40skyphusion.org", "imap-token"),
+      env,
+      ctx,
+    );
+    expect((await listed.json()) as { drafts: store.Draft[] }).toMatchObject({
+      drafts: [{ identity: "conrad@skyphusion.org", subject: "draft" }],
+    });
+
+    const raw = [
+      "From: Conrad <conrad@skyphusion.org>",
+      "To: Friend <friend@example.com>",
+      "Subject: imported sent copy",
+      "Message-ID: <imap-sent@example.com>",
+      "Date: Sat, 18 Jul 2026 00:00:00 +0000",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "sent body",
+    ].join("\r\n");
+    const imported = await handleApi(request("POST", "/api/imap/import", "imap-token", {
+      identity: "conrad@skyphusion.org",
+      folder: "sent",
+      rawMime: btoa(raw),
+    }), env, ctx);
+    expect(imported.status).toBe(201);
+    expect(rows.find((r) => r.message_id === "imap-sent@example.com")).toMatchObject({
+      direction: "outbound",
+      from_addr: "Conrad <conrad@skyphusion.org>",
+      mailbox: null,
+    });
+  });
+
   it("creates identity-owned drafts, rejects stale autosaves, and mints a new UID per revision", async () => {
     const token = "identity-token";
     const { env, ctx } = makeFakeEnv({

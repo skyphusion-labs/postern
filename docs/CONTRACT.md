@@ -300,10 +300,12 @@ none touches D1 directly (#25, #26).
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
 | POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
 | POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
-| GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts | webmail v2 (#352) |
+| GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts; durable folders also return `uidValidity` | webmail v2 (#352) |
 | GET/POST | `/api/drafts` | list or create an identity-owned server-side draft | webmail v2 (#352) |
 | GET/PUT/DELETE | `/api/drafts/{id}` | read, optimistic-concurrency replace, or discard own draft | webmail v2 (#352) |
 | POST | `/api/drafts/{id}/send` | send through the one send core, then remove the draft | webmail v2 (#352) |
+| GET/POST/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity | webmail v2 (#352) |
+| POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it | webmail v2 (#352) |
 | DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope) | (#278/#352) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
@@ -364,7 +366,8 @@ The RPC entrypoint mirrors the read + write operations as typed methods (`list`,
   existing `timingSafeEqual`; do not switch to `===`. Length may leak (tokens are high-entropy);
   the byte contents must not.
 - `POSTERN_API_TOKEN` is the back-compatible `both` secret. Optional comma-set slots
-  `POSTERN_API_TOKEN_READ`, `POSTERN_API_TOKEN_SEND`, and `POSTERN_API_TOKEN_DELETE`
+  `POSTERN_API_TOKEN_READ`, `POSTERN_API_TOKEN_SEND`, `POSTERN_API_TOKEN_DELETE`, and
+  `POSTERN_API_TOKEN_IMAP`
   grant only their named function. `both` alone preserves the single-key posture.
 
 `POST /ingest` and `dispatch`-to-relay are infra seams, not API clients. They use a

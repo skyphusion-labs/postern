@@ -329,6 +329,7 @@ Presence-check with `${VAR:+SET}` only.
 | `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | submission door (587/465) | crew-secrets -> `/etc/postern-submission.env` 0600 | exists; holds a `send`-scoped value once provisioned (worker `POSTERN_API_TOKEN_SEND`, #85) |
 | `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store (`/api/messages`, `/search`) in `ldap`/`pam` mode | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | exists; holds a `read`-scoped value once provisioned (worker `POSTERN_API_TOKEN_READ`, #85) |
 | `POSTERN_API_TOKEN_DELETE` (store-delete) | IMAP proxy EXPUNGE only (`DELETE /api/messages/{id}`) | postern-imap | crew-secrets minter tier -> swarm `postern_imap_delete_token` | dedicated worker `delete`-scope slot (#352); NOT read or `both` |
+| `POSTERN_API_TOKEN_IMAP` (service write) | identity-asserted Drafts + genuine APPEND import (`/api/imap/*`) | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | dedicated `imap` scope; cannot read, send, hard-delete, or administer |
 | ~~`POSTERN_LDAP_BIND_PASSWORD`~~ | **RETIRED** -- direct-bind (Option A, section 5b) uses no service account, so there is no search-bind password to hold. | -- | -- | -- |
 | `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname (587 STARTTLS + 465 implicit share it) | submission door (587/465) | crew-secrets / cert store (staged) | **gated** (exposure) |
 
@@ -342,10 +343,11 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
 | `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
+| `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import` only; the authenticated door asserts the account identity |
 | `POSTERN_SEND_IDENTITIES` (registry, #28; a config VAR, not a secret -- #335) | `send` + bound From | send/reply and own-draft CRUD as the token's OWN identity |
 
-The four STATIC slots (`POSTERN_API_TOKEN`, `POSTERN_API_TOKEN_READ`,
-`POSTERN_API_TOKEN_SEND`, `POSTERN_API_TOKEN_DELETE`) each hold a
+The five STATIC slots (`POSTERN_API_TOKEN`, `POSTERN_API_TOKEN_READ`,
+`POSTERN_API_TOKEN_SEND`, `POSTERN_API_TOKEN_DELETE`, `POSTERN_API_TOKEN_IMAP`) each hold a
 **comma-separated SET of tokens** (#154):
 entries are trimmed, empty entries (stray commas, whitespace) are ignored, and a
 bearer matching ANY member resolves to that slot's scope. A single bare value (no

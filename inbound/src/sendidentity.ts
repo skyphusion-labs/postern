@@ -18,7 +18,7 @@
  *  `delete` is the #352 (C4) hard-delete scope: DELETE /api/messages/{id} accepts a
  *  `delete` token OR `both`, so the IMAP EXPUNGE credential drops from full-admin
  *  `both` to delete-only least privilege. `both` = read + send + delete + admin. */
-export type Scope = "read" | "send" | "delete" | "both";
+export type Scope = "read" | "send" | "delete" | "imap" | "both";
 
 /**
  * A sender identity bound to a registry token. `from` is AUTHORITATIVE: the worker

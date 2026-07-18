@@ -366,7 +366,7 @@ is driven by these routes:
 |---|---|---|---|
 | POST | `/api/messages/move` | body `{ ids: string[], mailbox: "archive"\|"trash"\|"junk"\|null }`; moves/restores placement; `null` restores to the direction-default view; a move to `trash` also stamps `trashed_at` | `read` (organize; D-DELETE-1) |
 | GET | `/api/messages?...&mailbox=` | the existing list route gains a `?mailbox=` filter (`archive`\|`trash`\|`junk`, or unset = the direction-default INBOX/Sent view); `all` selects the union view | `read` |
-| GET | `/api/folders` | returns `[{ id, label, count, unread }]` for INBOX, Sent, All, Drafts, Trash, Junk, Archive; the server-side projection that delivers the epic's folder counts | `read` |
+| GET | `/api/folders` | returns `[{ id, label, count, unread, uidValidity? }]` for INBOX, Sent, All, Drafts, Trash, Junk, Archive; durable folders carry the authoritative counter-row UIDVALIDITY | `read` |
 | DELETE | `/api/messages/{id}` | hard delete / empty-Trash (existing route, now `delete`-scoped, section 4) | `delete` |
 
 `GET /api/folders` counts project the same predicates the IMAP door uses (2.3 / 3.1), so
@@ -597,6 +597,16 @@ nowhere it should not. Flagged for the mailbox-operations phase.
 The principle: an APPEND either PERSISTS honestly or is REFUSED loudly; it never returns
 OK while dropping the message. This retires the D5 silent-loss class for real views.
 
+**IMAP service write seam (implementation amendment).** The door's estate read token
+cannot honestly satisfy identity-owned Drafts, and giving it `send` would also authorize
+mail transmission. `POSTERN_API_TOKEN_IMAP` is therefore a separate comma-set `imap`
+scope, accepted only by `/api/imap/drafts*` and `/api/imap/import`. The door first
+authenticates the human, then asserts that bound identity on this service-only seam.
+`/api/imap/import` accepts raw MIME, parses it in the Worker with the same MIME dependency
+as inbound transport, stores attachments and envelope fields, and never transmits it.
+This lets Sent-matcher misses and genuinely new placement APPENDs preserve bytes without
+turning a read credential into send/admin authority.
+
 ### 3.3 Trash with a real recovery window (retires D6)
 
 Per 2.5: IMAP COPY/MOVE to Trash sets `mailbox='trash'` + `trashed_at` (soft), it does NOT
@@ -656,6 +666,7 @@ default, unchanged).
 | `read` | GET messages/search/threads/attachments; AND the organize mutations that are side effects of reading: `POST /api/messages/seen`, `POST /api/messages/flags`, move-to-folder, soft-delete-to-Trash | read door, webmail read |
 | `send` | `POST /api/send` / `/api/reply`; drafts CRUD (own identity) | send door, webmail compose, registry tokens |
 | `delete` | hard delete / empty Trash: `DELETE /api/messages/{id}` | IMAP EXPUNGE credential, webmail Empty Trash |
+| `imap` | identity-asserted Drafts and raw-MIME APPEND import only | IMAP service credential |
 | `both` | all of the above + credential-admin + reindex/reconcile | operator/crew minter tier only |
 
 Mapping to worker secrets: `POSTERN_API_TOKEN_DELETE` (the env name the IMAP door already

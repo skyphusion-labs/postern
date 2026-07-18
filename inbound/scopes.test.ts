@@ -15,6 +15,7 @@ function scopedEnv() {
     POSTERN_API_TOKEN_READ: "read-token",
     POSTERN_API_TOKEN_SEND: "send-token",
     POSTERN_API_TOKEN_DELETE: "delete-token",
+    POSTERN_API_TOKEN_IMAP: "imap-token",
   });
 }
 
@@ -177,6 +178,23 @@ describe("per-function token scopes (#85)", () => {
         token: "delete-token", body: { ids: [], set: { flagged: true } },
       }), env, ctx)).status).toBe(403);
       expect((await handleApi(req("POST", "/api/admin/reindex", { token: "delete-token", body: {} }), env, ctx)).status).toBe(403);
+    });
+  });
+
+  describe("imap-service token (#352)", () => {
+    it("reaches only identity-asserted Drafts/import service routes", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("GET", "/api/messages", { token: "imap-token" }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("POST", "/api/send", {
+        token: "imap-token", body: SEND_BODY,
+      }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("DELETE", "/api/messages/x", { token: "imap-token" }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("GET", "/api/imap/drafts?identity=user%40skyphusion.org", {
+        token: "imap-token",
+      }), env, ctx)).status).toBe(200);
+      expect((await handleApi(req("POST", "/api/admin/reindex", {
+        token: "imap-token", body: {},
+      }), env, ctx)).status).toBe(403);
     });
   });
 

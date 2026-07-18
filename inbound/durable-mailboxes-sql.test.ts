@@ -120,6 +120,10 @@ describe("durable mailbox production SQL (#352)", () => {
     expect(trash.items[0].folderUid).toBe(1);
     const counts = await store.folders(env, "conrad@skyphusion.org");
     expect(counts.find((f) => f.id === "trash")).toMatchObject({ count: 1, unread: 1 });
+    const firstValidity = counts.find((f) => f.id === "trash")?.uidValidity;
+    expect(firstValidity).toBeGreaterThan(0);
+    expect((await store.folders(env, "conrad@skyphusion.org"))
+      .find((f) => f.id === "trash")?.uidValidity).toBe(firstValidity);
 
     expect(await store.moveMessages(env, ["one@example.com"], null)).toBe(1);
     expect((await store.list(env, {})).items[0]).toMatchObject({ mailbox: null, trashedAt: null });
