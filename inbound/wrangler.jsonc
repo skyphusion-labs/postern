@@ -11,6 +11,17 @@
   // depth; fleet-chezmoi#46).
   "workers_dev": false,
 
+  // Production door: serve the mailbox API on your own hostname (walkthrough in
+  // DEPLOY.md, "Production door"). With workers_dev:false this route is the ONLY
+  // public door, so the constant-time Bearer gate on /api/* is the whole
+  // perimeter. Uncomment ONE form, set your own hostname + zone, and deploy:
+  //   a) Custom Domain: Cloudflare auto-creates the proxied DNS record and the
+  //      edge cert, so there is no manual DNS step. Simplest for a fresh install.
+  // "routes": [ { "pattern": "mail.example.com", "custom_domain": true } ],
+  //   b) Zone route: use this when you already manage a proxied (orange-cloud)
+  //      DNS record at this hostname in the named zone.
+  // "routes": [ { "pattern": "mail.example.com/*", "zone_name": "example.com" } ],
+
   // D1 database for message storage. The store (D1 + R2 + Vectorize) is the
   // heart of Postern, so this binding is required.
   //   Create once:  wrangler d1 create postern
