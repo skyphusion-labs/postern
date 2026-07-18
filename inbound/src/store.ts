@@ -109,6 +109,9 @@ export interface SearchQuery {
   // Viewer address for recipient-scoped search (#350): delivered-set membership +
   // viewer-relative INBOX + effective (per-recipient) seen, same as ListQuery.to.
   to?: string;
+  // Sender filter (#366): same lower(from_addr) LIKE semantics as ListQuery.from,
+  // so the IMAP Sent lens can push from=V server-side.
+  from?: string;
   limit?: number;
   cursor?: string;
 }
@@ -1060,6 +1063,10 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
   }
+  if (q.from) {
+    where.push("lower(m.from_addr) LIKE ?");
+    binds.push(`%${q.from.toLowerCase()}%`);
+  }
   if (rv.direction) {
     where.push(rv.direction);
     binds.push(...rv.directionBinds);
@@ -1160,6 +1167,10 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
+  }
+  if (q.from) {
+    where.push("lower(m.from_addr) LIKE ?");
+    binds.push(`%${q.from.toLowerCase()}%`);
   }
   if (rv.direction) {
     where.push(rv.direction);
@@ -1266,12 +1277,18 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
  *    lead caught), then the same viewer-relative INBOX rule list/fts use when
  *    direction=inbound (inbound OR outbound-not-authored-by-V), else the plain
  *    direction filter.
+ *  - from= (#366): same lower(from_addr) substring match as list/fts/substr.
  */
 function passesViewerScope(
   m: StoredMessageSummary,
   viewer: string | undefined,
   direction: "inbound" | "outbound" | undefined,
+  fromFilter?: string,
 ): boolean {
+  if (fromFilter) {
+    const needle = fromFilter.toLowerCase();
+    if (!m.from.toLowerCase().includes(needle)) return false;
+  }
   if (!viewer) return !direction || m.direction === direction;
   const delivered = m.deliveredTo.map((a) => a.toLowerCase());
   if (!delivered.includes(viewer)) return false;
@@ -1289,6 +1306,7 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   if (!text) return { items: [], cursor: null };
 
   const viewer = q.to?.trim().toLowerCase() || undefined;
+  const fromFilter = q.from?.trim() || undefined;
   const queryVec = await embedQuery(env, text);
   if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
 
@@ -1298,9 +1316,9 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
     if (!message) continue;
-    // Viewer scope + direction restriction (#350/#128): the vector index is neither
-    // recipient- nor direction-keyed, so scope the hydrated summaries (at most `limit`).
-    if (!passesViewerScope(message, viewer, q.direction)) continue;
+    // Viewer scope + direction + from= (#350/#128/#366): the vector index is neither
+    // recipient-, sender-, nor direction-keyed, so scope the hydrated summaries.
+    if (!passesViewerScope(message, viewer, q.direction, fromFilter)) continue;
     items.push({ message, score: r.score });
   }
   // Score-ranked: single page, no date cursor.
@@ -1311,8 +1329,15 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const limit = clampLimit(q.limit);
   // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
   const [ftsPage, semPage] = await Promise.all([
-    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction, to: q.to }),
-    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction, to: q.to }),
+    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction, to: q.to, from: q.from }),
+    semanticSearch(env, {
+      q: q.q,
+      mode: "semantic",
+      limit,
+      direction: q.direction,
+      to: q.to,
+      from: q.from,
+    }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();

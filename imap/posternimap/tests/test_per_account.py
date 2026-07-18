@@ -106,6 +106,16 @@ class ClientViewerParamTest(unittest.TestCase):
         c.search_page("hello", mode="substr")
         self.assertFalse(any("to=" in u for u in t.calls))
 
+    def test_search_page_sends_from(self):
+        c, t = self._client()
+        c.search_page("hello", mode="substr", from_addr="v@example.org")
+        self.assertTrue(any("from=v%40example.org" in u for u in t.calls))
+
+    def test_search_page_omits_from_by_default(self):
+        c, t = self._client()
+        c.search_page("hello", mode="substr")
+        self.assertFalse(any("from=" in u for u in t.calls))
+
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class DeriveViewerTest(unittest.TestCase):
@@ -246,6 +256,22 @@ class SeenForRoutingTest(unittest.TestCase):
         self.assertEqual(mb.getMessageCount(), 1)
         mb.store(MessageSet(1, 1), ["\\Seen"], 1, uid=False)
         self.assertNotIn("for", t.last_seen_payload)
+
+    def test_sent_search_pushes_from_server_side(self):
+        # #366: Sent SEARCH must pass from=V to /api/search (not rely on door-side
+        # snapshot intersection alone for sender scoping).
+        sent = make_message("s1", direction="outbound", subject="hello widget")
+        sent["from"] = "conrad@example.org"
+        mb, t = self._mailbox(
+            [sent],
+            direction="outbound",
+            from_addr="conrad@example.org",
+        )
+        mb.getMessageCount()
+        mb.search_substr("subject", "widget", uid=False)
+        substr = [u for u in t.calls if "mode=substr" in u]
+        self.assertTrue(substr, t.calls)
+        self.assertTrue(any("from=conrad%40example.org" in u for u in substr), substr)
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")

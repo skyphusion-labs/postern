@@ -253,6 +253,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // Viewer scope (#350): recipient-relative INBOX + effective seen, mirroring
         // /api/messages?to=. Unvalidated like list's `to` (a bare address filter).
         to: url.searchParams.get("to") ?? undefined,
+        // Sender filter (#366): same lower(from_addr) LIKE as /api/messages?from=.
+        from: url.searchParams.get("from") ?? undefined,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });

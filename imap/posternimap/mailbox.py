@@ -170,9 +170,9 @@ class PosternMailbox:
         # In per-account mode (#357) this carries the viewer address V so INBOX/All
         # read the recipient-relative lens (CONTRACT 10.9); estate mode leaves it None.
         self._to = to
-        # #357: sender filter for the per-account Sent lens (from=V, outbound). None in
-        # estate mode. A Sent search rides the snapshot intersection for its from=V
-        # scoping (the search API has no from=), so nothing else is required.
+        # #357/#366: sender filter for the per-account Sent lens (from=V, outbound).
+        # None in estate mode. SEARCH passes from=V to /api/search (#366); the snapshot
+        # intersection below is only for window/folder membership, not from= scoping.
         self._from = from_addr
         # #357: the per-recipient seen address. When set, a \Seen STORE writes a
         # per-recipient override (POST /api/messages/seen for=V) instead of the estate
@@ -579,17 +579,16 @@ class PosternMailbox:
                 field=field,
                 direction=self._direction,
                 to=self._to,
+                from_addr=self._from,
                 cursor=cursor,
                 limit=_SEARCH_PAGE_LIMIT,
             )
             for h in page.items:
                 seq = by_uid.get(h.uid)
                 if seq is None:
-                    # Outside this folder's snapshot / window: drop it. This is also
-                    # the per-account Sent from=V post-filter (#357): the search API
-                    # has no from=, so a Sent search returns estate outbound hits, and
-                    # this intersection with the from=V snapshot drops every row V did
-                    # not send. No other identity's outbound can surface here.
+                    # Outside this folder's snapshot / window: drop it. Sent from=V
+                    # scoping is server-side via from= (#366); this intersection is
+                    # only the window/folder membership filter.
                     continue
                 out.append(h.uid if uid else seq)
             cursor = page.cursor

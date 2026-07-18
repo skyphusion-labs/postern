@@ -389,6 +389,7 @@ class PosternClient:
         field: Optional[str] = None,
         direction: Optional[str] = None,
         to: Optional[str] = None,
+        from_addr: Optional[str] = None,
         cursor: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> Page:
@@ -413,6 +414,9 @@ class PosternClient:
         # searches pass to=None and are unchanged.
         if to:
             params["to"] = to
+        # #366: Sent lens pushes from=V server-side (same semantics as /api/messages).
+        if from_addr:
+            params["from"] = from_addr
         if cursor:
             params["cursor"] = cursor
         if limit is not None:
