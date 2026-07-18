@@ -176,7 +176,7 @@ POST /api/session          (same-origin; no Authorization header)
 #### 1.5.2 The session record (server-side, D1)
 
 ```sql
--- migration 0009 (additive: CREATE TABLE only; auto-applies through the #112 gate)
+-- migration 0010 (additive: CREATE TABLE only; auto-applies through the #112 gate)
 CREATE TABLE IF NOT EXISTS webmail_sessions (
   id_hash      TEXT PRIMARY KEY,   -- sha256hex of the opaque cookie value; RAW id never stored
   identity     TEXT NOT NULL,      -- bound From address (authoritative sender for this session)
@@ -297,12 +297,16 @@ Full webmail needs durable **folder placement**, **flags beyond \Seen**, and
 ### 2.2 Flags beyond \Seen (additive columns)
 
 ```sql
--- migration 0009 (additive ALTER ADD COLUMN; auto-applies, no backfill, DEFAULT carries old rows)
+-- migration 0010 (additive ALTER ADD COLUMN; auto-applies, no backfill, DEFAULT carries old rows)
 ALTER TABLE messages ADD COLUMN flagged  INTEGER NOT NULL DEFAULT 0;  -- \Flagged / starred
 ALTER TABLE messages ADD COLUMN answered INTEGER NOT NULL DEFAULT 0;  -- \Answered
 ```
 
-`\Seen` stays `messages.seen`. `\Draft` is NOT a flag on `messages` (a draft is not a
+`\Seen` stays `messages.seen` as the row-level/estate flag; #350 layers a per-recipient
+override (`message_seen_by`) beside it, so effective seen for a viewer V is
+`COALESCE(override(id, V), messages.seen)` (migration 0009; see `CONTRACT.md` 10.9). The
+row-level flag and the override are the SAME durable-`\Seen` model, not a second store.
+`\Draft` is NOT a flag on `messages` (a draft is not a
 stored message; see 2.4). `\Deleted` stays session-local until EXPUNGE (RFC 3501), it is
 not a durable column. Old rows default to not-flagged/not-answered, rendering as today
 (the #seen `DEFAULT` precedent). These back the webmail star/answered UI and the IMAP
@@ -320,7 +324,7 @@ A message has ONE mutable system-box placement. INBOX/Sent are the arrival-defau
 Archive/Trash/Junk are placements a message MOVES into.
 
 ```sql
--- migration 0009 (additive)
+-- migration 0010 (additive)
 ALTER TABLE messages ADD COLUMN mailbox    TEXT;  -- NULL | 'archive' | 'trash' | 'junk'
 ALTER TABLE messages ADD COLUMN trashed_at TEXT;  -- soft-delete timestamp; drives Trash recovery window + purge
 ```
@@ -365,7 +369,7 @@ churn never touches the message store, its FTS, or its Vectorize index (C-class 
 stay off the mail store).
 
 ```sql
--- migration 0009 (additive: CREATE TABLE only)
+-- migration 0010 (additive: CREATE TABLE only)
 CREATE TABLE IF NOT EXISTS drafts (
   id           TEXT PRIMARY KEY,   -- server-minted uuid; the draft handle
   identity     TEXT NOT NULL,      -- owning account (bound From); IDOR boundary
@@ -477,7 +481,7 @@ UID, so INBOX/Sent stay conformant with `messages.id` and their existing UIDVALI
 preserved. Only the folders that gain messages out of order need the placement UID.
 
 ```sql
--- migration 0009 (additive: CREATE TABLE only). Backs per-folder UID assignment for
+-- migration 0010 (additive: CREATE TABLE only). Backs per-folder UID assignment for
 -- the re-populated folders. INBOX/Sent/All do NOT use this (they keep messages.id).
 CREATE TABLE IF NOT EXISTS mailbox_placement (
   message_id  TEXT NOT NULL,
@@ -507,13 +511,13 @@ Everything in section 2 is `CREATE TABLE IF NOT EXISTS` or `ALTER TABLE ... ADD 
 with a `DEFAULT`. That is the ADDITIVE class the `d1-migration-gate.mjs` auto-applies
 (section 0 principle 3). There is **no** `UPDATE`/backfill: old rows carry NULL `mailbox`
 (render in their direction-default view), `0` flags, no placement rows, and behave exactly
-as today. So migration `0009` needs no `postern:allow-destructive` marker and no
+as today. So migration `0010` needs no `postern:allow-destructive` marker and no
 supervised window; it ships with the code and applies online safely, the same discipline
 0006 and 0007 followed. `schema.sql` gains the same columns/tables for a fresh DB.
 
 If the implementation later needs to seed `mailbox_placement` for INBOX/Sent to unify the
 model, note that INBOX/Sent deliberately do NOT use the placement table (they keep
-`messages.id`), so no seed and no backfill is required, which keeps 0009 additive.
+`messages.id`), so no seed and no backfill is required, which keeps 0010 additive.
 
 ---
 
@@ -702,7 +706,7 @@ Each has a recommendation; none is unilaterally settled in this doc.
 
 - No second store: sessions, drafts, folders, flags all live in the one core store; the
   account model derives from the existing auth seams.
-- No non-additive migration: 0009 is `CREATE`/`ALTER ADD` only, gate-clean, no marker.
+- No non-additive migration: 0010 is `CREATE`/`ALTER ADD` only, gate-clean, no marker.
 - No UIDVALIDITY bump on INBOX/Sent/All: existing clients are not force-resynced.
 - No framework/build-step decision: this is contract + schema; vanilla stays until a
   separate, evidence-backed escalation to the lead says otherwise.

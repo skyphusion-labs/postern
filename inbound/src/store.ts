@@ -106,6 +106,9 @@ export interface SearchQuery {
   field?: SearchField;
   // Restrict to one direction (#128); undefined = both. Validated at the API edge.
   direction?: "inbound" | "outbound";
+  // Viewer address for recipient-scoped search (#350): delivered-set membership +
+  // viewer-relative INBOX + effective (per-recipient) seen, same as ListQuery.to.
+  to?: string;
   limit?: number;
   cursor?: string;
 }
@@ -214,6 +217,35 @@ function stripAngle(s: string): string {
  * triggers stay in sync automatically. Attachments (R2) and opt-in Vectorize run
  * via ctx.waitUntil (best-effort) ONLY on a first insert (PutResult.stored).
  */
+/** Seed per-recipient unread overrides for a same-domain outbound send (#350).
+ *  A message from a@ALLOWED to b@ALLOWED is stored once, direction=outbound,
+ *  messages.seen=1 (the sender Sent view). Without this, b every new-mail lens
+ *  misses it. We write a seen=0 override for each delivered recipient on
+ *  ALLOWED_FROM_DOMAIN except the sender, so b viewer-scoped lens (to=b) shows it
+ *  unread while a Sent view stays seen. External recipients never read through our
+ *  lenses, so they get no override (keeps the table small). Runs only on a fresh
+ *  outbound insert; ON CONFLICT DO NOTHING keeps it idempotent. */
+async function seedSameDomainSeen(
+  env: Env,
+  messageId: string,
+  from: string,
+  deliveredList: string[],
+): Promise<void> {
+  const domain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  const sender = (parseRecipients(from)[0] || "").toLowerCase();
+  const targets = deliveredList.filter(
+    (r) => r.includes("@") && r !== sender && r.slice(r.lastIndexOf("@") + 1) === domain,
+  );
+  for (const r of targets) {
+    await env.DB.prepare(
+      "INSERT INTO message_seen_by (message_id, recipient, seen) VALUES (?, ?, 0) " +
+        "ON CONFLICT(message_id, recipient) DO NOTHING",
+    )
+      .bind(messageId, r)
+      .run();
+  }
+}
+
 export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): Promise<PutResult> {
   const receivedAt = new Date().toISOString();
   const threadId = await resolveThreadId(env.DB, input.messageId, input.inReplyTo, input.references);
@@ -306,6 +338,12 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
 
   if (input.vectorize && input.bodyText.length > 0) {
     ctx.waitUntil(indexVectors(env, input));
+  }
+
+  // Same-domain outbound (#350): seed per-recipient unread overrides so the
+  // recipient new-mail lens surfaces it while the sender Sent view stays seen.
+  if (input.direction === "outbound") {
+    await seedSameDomainSeen(env, input.messageId, input.from, deliveredList);
   }
 
   return { messageId: input.messageId, stored: true, merged: false, threadId: rowThreadId };
@@ -604,18 +642,55 @@ export async function getAttachment(
  * is a no-op (SQLite reports 0 changes). Unknown ids are silently skipped (they simply
  * match no row). An empty id list is a no-op that never touches D1.
  */
-export async function setSeen(env: Env, messageIds: string[], seen: boolean): Promise<number> {
+export async function setSeen(
+  env: Env,
+  messageIds: string[],
+  seen: boolean,
+  forRecipient?: string,
+): Promise<number> {
   if (messageIds.length === 0) return 0;
   const placeholders = messageIds.map(() => "?").join(", ");
-  // RETURNING (not meta.changes): the AFTER UPDATE FTS trigger fires per row and its
-  // shadow-table writes inflate meta.changes, so it is not a reliable count of message
-  // rows touched. RETURNING yields exactly one row per matched message row (trigger
-  // rows never appear), so results.length is the true count of existing ids updated.
+
+  // Scoped (#350): mark read/unread for ONE recipient -- upsert a sparse override
+  // in message_seen_by, never touching messages.seen (the estate/legacy flag).
+  // Only existing messages get an override (unknown ids are skipped, as legacy
+  // does), so a scoped mark never seeds junk for a message that is not stored.
+  if (forRecipient) {
+    const recipient = forRecipient.trim().toLowerCase();
+    const existing = await env.DB.prepare(
+      `SELECT message_id FROM messages WHERE message_id IN (${placeholders})`,
+    )
+      .bind(...messageIds)
+      .all<{ message_id: string }>();
+    const ids = (existing.results ?? []).map((r) => r.message_id);
+    for (const id of ids) {
+      await env.DB.prepare(
+        "INSERT INTO message_seen_by (message_id, recipient, seen) VALUES (?, ?, ?) " +
+          "ON CONFLICT(message_id, recipient) DO UPDATE SET seen = excluded.seen",
+      )
+        .bind(id, recipient, seen ? 1 : 0)
+        .run();
+    }
+    return ids.length;
+  }
+
+  // Legacy/estate (no recipient): set the row-level flag AND realign any EXISTING
+  // per-recipient overrides for those ids, so the estate lens stays authoritative
+  // when a caller uses it (#350). RETURNING (not meta.changes): the AFTER UPDATE FTS
+  // trigger fires per row and its shadow-table writes inflate meta.changes, so it is
+  // not a reliable count of message rows touched. RETURNING yields exactly one row
+  // per matched message row (trigger rows never appear), so results.length is the
+  // true count of existing ids updated.
   const res = await env.DB.prepare(
     `UPDATE messages SET seen = ? WHERE message_id IN (${placeholders}) RETURNING message_id`,
   )
     .bind(seen ? 1 : 0, ...messageIds)
     .all<{ message_id: string }>();
+  await env.DB.prepare(
+    `UPDATE message_seen_by SET seen = ? WHERE message_id IN (${placeholders})`,
+  )
+    .bind(seen ? 1 : 0, ...messageIds)
+    .run();
   return (res.results ?? []).length;
 }
 
@@ -663,6 +738,7 @@ export async function deleteMessage(
   const vectorIds = await vectorIdsForDelete(env, messageId, row.body_text);
   await deleteVectorIds(env, vectorIds);
   await env.DB.prepare("DELETE FROM vector_ledger WHERE message_id = ?").bind(messageId).run();
+  await env.DB.prepare("DELETE FROM message_seen_by WHERE message_id = ?").bind(messageId).run();
 
   const attRes = await env.DB.prepare("SELECT r2_key FROM attachments WHERE message_id = ?")
     .bind(messageId)
@@ -709,6 +785,62 @@ export async function thread(env: Env, threadId: string): Promise<StoredMessage[
   const out: StoredMessage[] = [];
   for (const row of rows) {
     out.push(rowToMessage(row, await attachmentsFor(env.DB, row.message_id)));
+  }
+  return out;
+}
+
+// --- Recipient-relative views (#350) --------------------------------------
+//
+// Two things that used to be row-global become viewer-relative when a query
+// carries a viewer address (to=V): which direction-default view a message appears
+// in, and whether it has been read. Both are additive: a query with no `to` keeps
+// the estate lens (stored direction, messages.seen) exactly as before.
+
+/** The `seen` projection for a read. With a viewer, effective seen is the sparse
+ *  per-recipient override (message_seen_by) COALESCEd over the row-level
+ *  messages.seen; without a viewer, the row-level flag as today. The bound `?`
+ *  lives in the SELECT column list, so its bind MUST precede the WHERE binds. */
+function seenProjection(viewer: string | undefined): { expr: string; binds: unknown[] } {
+  if (!viewer) return { expr: "m.seen", binds: [] };
+  return {
+    expr:
+      "COALESCE((SELECT sb.seen FROM message_seen_by sb " +
+      "WHERE sb.message_id = m.message_id AND sb.recipient = ?), m.seen)",
+    binds: [viewer],
+  };
+}
+
+/** The (to + direction) WHERE fragments shared by list, fts, and substr search.
+ *  - to=V: delivered-set membership (#178), COALESCE fallback to a v1 to_addr.
+ *  - direction=inbound WITH to=V: viewer-relative INBOX (#350) -- inbound mail for
+ *    V PLUS same-store outbound NOT authored by V, so a same-domain send lands in
+ *    the recipient INBOX, not only the sender Sent. A true self-send (from=V)
+ *    stays Sent-only (correct: you wrote it).
+ *  - direction=outbound, or no viewer: the stored direction fact, unchanged.
+ *  Outbound from_addr is a bare address by construction (mailbox.send), so the
+ *  lower() compare is exact; the branch only inspects outbound rows anyway. */
+function recipientWhere(
+  viewer: string | undefined,
+  direction: "inbound" | "outbound" | undefined,
+): { membership: string | null; membershipBinds: unknown[]; direction: string | null; directionBinds: unknown[] } {
+  const out = {
+    membership: null as string | null,
+    membershipBinds: [] as unknown[],
+    direction: null as string | null,
+    directionBinds: [] as unknown[],
+  };
+  if (viewer) {
+    out.membership = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
+    out.membershipBinds = [viewer];
+  }
+  if (direction === "inbound" || direction === "outbound") {
+    if (viewer && direction === "inbound") {
+      out.direction = "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))";
+      out.directionBinds = [viewer];
+    } else {
+      out.direction = "m.direction = ?";
+      out.directionBinds = [direction];
+    }
   }
   return out;
 }
@@ -809,8 +941,11 @@ function toFtsQuery(q: string): string {
  */
 export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSummary>> {
   const limit = clampLimit(q.limit);
+  const viewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(viewer);
+  const seenExpr = sp.expr;
   const where: string[] = [];
-  const binds: unknown[] = [];
+  const binds: unknown[] = [...sp.binds];
 
   const useFts = typeof q.q === "string" && q.q.trim().length > 0;
   const ftsExpr = useFts ? toFtsQuery(q.q as string) : "";
@@ -823,14 +958,13 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     return { items: [], cursor: null };
   }
 
-  if (q.to) {
-    // Envelope-membership filter (#178/#189): "mail for X" matches the delivered
-    // set, falling back to a pre-v2 row's to_addr via COALESCE, so a message to
-    // support@ AND security@ shows in BOTH views. Bind the bare lower-cased
-    // address; the leading/trailing commas make it a delimiter-safe membership
-    // test (no substring false-positives, no string surgery).
-    where.push("COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'");
-    binds.push(q.to.trim().toLowerCase());
+  // Recipient view (#178 delivered-set membership) at the `to` slot; the direction
+  // predicate (viewer-relative INBOX for #350) is appended AFTER from/thread so the
+  // bind order stays stable. ONE builder for list, fts, and substr search.
+  const rv = recipientWhere(viewer, q.direction);
+  if (rv.membership) {
+    where.push(rv.membership);
+    binds.push(...rv.membershipBinds);
   }
   if (q.from) {
     where.push("lower(m.from_addr) LIKE ?");
@@ -840,9 +974,9 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     where.push("m.thread_id = ?");
     binds.push(q.thread);
   }
-  if (q.direction === "inbound" || q.direction === "outbound") {
-    where.push("m.direction = ?");
-    binds.push(q.direction);
+  if (rv.direction) {
+    where.push(rv.direction);
+    binds.push(...rv.directionBinds);
   }
 
   const cur = decodeCursor(q.cursor);
@@ -855,7 +989,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
+            m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
@@ -912,14 +1046,23 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const ftsExpr = toFtsQuery(q.q ?? "");
   if (!ftsExpr) return { items: [], cursor: null };
 
-  const binds: unknown[] = [ftsExpr];
+  const viewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(viewer);
+  const seenExpr = sp.expr;
+  // Seen bind (SELECT column) first, then the FTS match bind, then recipient/cursor.
+  const binds: unknown[] = [...sp.binds, ftsExpr];
   const where: string[] = ["m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"];
 
-  // Optional direction restriction (#128). Bound after the FTS expr, before the
-  // cursor tuple, so the keyset order the fake interprets stays consistent.
-  if (q.direction === "inbound" || q.direction === "outbound") {
-    where.push("m.direction = ?");
-    binds.push(q.direction);
+  // Recipient view + viewer-relative INBOX (#350/#178); membership then direction,
+  // the same order list/substr use, so fts shares the one "INBOX for V" builder.
+  const rv = recipientWhere(viewer, q.direction);
+  if (rv.membership) {
+    where.push(rv.membership);
+    binds.push(...rv.membershipBinds);
+  }
+  if (rv.direction) {
+    where.push(rv.direction);
+    binds.push(...rv.directionBinds);
   }
 
   const cur = decodeCursor(q.cursor);
@@ -930,7 +1073,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
 
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
+            m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
@@ -1000,18 +1143,27 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const cols = substrColumns(q.field ?? "text");
   const pattern = escapeLikePattern(raw);
 
+  const viewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(viewer);
+  const seenExpr = sp.expr;
+
   // Case-insensitivity is SQLite LIKE's native ASCII folding (CONTRACT 10.8);
-  // COALESCE(col,'') keeps a NULL header column from nulling the OR. One bind of
-  // the same pattern per column, bound BEFORE direction/cursor so the fake's
-  // in-order bind walk stays consistent with the live query.
-  const binds: unknown[] = [];
+  // COALESCE(col,'') keeps a NULL header column from nulling the OR. Seen bind
+  // (SELECT column) first, then one pattern bind per column, then recipient/cursor.
+  const binds: unknown[] = [...sp.binds];
   const orClause = cols.map((c) => `COALESCE(m.${c},'') LIKE ? ESCAPE '\\'`).join(" OR ");
   for (let k = 0; k < cols.length; k++) binds.push(pattern);
   const where: string[] = [`(${orClause})`];
 
-  if (q.direction === "inbound" || q.direction === "outbound") {
-    where.push("m.direction = ?");
-    binds.push(q.direction);
+  // Recipient view + viewer-relative INBOX (#350/#178).
+  const rv = recipientWhere(viewer, q.direction);
+  if (rv.membership) {
+    where.push(rv.membership);
+    binds.push(...rv.membershipBinds);
+  }
+  if (rv.direction) {
+    where.push(rv.direction);
+    binds.push(...rv.directionBinds);
   }
 
   const cur = decodeCursor(q.cursor);
@@ -1022,7 +1174,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
 
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
+            m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
@@ -1086,20 +1238,49 @@ async function nearestMessageIds(
 
 // Hydrate summaries for a set of message ids in one query, returned as a map so
 // callers can preserve their own (score) ordering. Ids are bound params.
-async function summariesByIds(env: Env, ids: string[]): Promise<Map<string, StoredMessageSummary>> {
+async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise<Map<string, StoredMessageSummary>> {
   const out = new Map<string, StoredMessageSummary>();
   if (ids.length === 0) return out;
   const placeholders = ids.map(() => "?").join(", ");
+  // #350: render effective seen for the viewer (semantic/hybrid to=V). The seen
+  // subquery bind lives in the SELECT column list, so it precedes the id binds.
+  const sp = seenProjection(viewer);
+  const seenExpr = sp.expr;
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at, m.seen,
+            m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE m.message_id IN (${placeholders})`;
-  const res = await env.DB.prepare(sql).bind(...ids).all<SummaryRow>();
+  const res = await env.DB.prepare(sql).bind(...sp.binds, ...ids).all<SummaryRow>();
   for (const row of res.results ?? []) out.set(row.message_id, rowToSummary(row));
   return out;
+}
+
+/**
+ * Post-hydrate viewer scope for the score-ranked modes (#350), which cannot push a
+ * WHERE to Vectorize. Mirrors /api/messages semantics on a hydrated summary:
+ *  - no viewer: the optional direction filter only (#128), as before.
+ *  - to=V: delivered-set membership (drop anything NOT delivered to V -- the leak the
+ *    lead caught), then the same viewer-relative INBOX rule list/fts use when
+ *    direction=inbound (inbound OR outbound-not-authored-by-V), else the plain
+ *    direction filter.
+ */
+function passesViewerScope(
+  m: StoredMessageSummary,
+  viewer: string | undefined,
+  direction: "inbound" | "outbound" | undefined,
+): boolean {
+  if (!viewer) return !direction || m.direction === direction;
+  const delivered = m.deliveredTo.map((a) => a.toLowerCase());
+  if (!delivered.includes(viewer)) return false;
+  if (direction === "inbound") {
+    const bareFrom = (parseRecipients(m.from)[0] ?? "").toLowerCase();
+    return m.direction === "inbound" || (m.direction === "outbound" && bareFrom !== viewer);
+  }
+  if (direction === "outbound") return m.direction === "outbound";
+  return true;
 }
 
 async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
@@ -1107,18 +1288,19 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   const text = (q.q ?? "").trim();
   if (!text) return { items: [], cursor: null };
 
+  const viewer = q.to?.trim().toLowerCase() || undefined;
   const queryVec = await embedQuery(env, text);
   if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
 
   const ranked = await nearestMessageIds(env, queryVec, limit);
-  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId));
+  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), viewer);
   const items: SearchHit[] = [];
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
     if (!message) continue;
-    // Direction restriction (#128): the vector index is not direction-keyed, so
-    // filter the hydrated summaries (cheap: at most `limit` of them).
-    if (q.direction && message.direction !== q.direction) continue;
+    // Viewer scope + direction restriction (#350/#128): the vector index is neither
+    // recipient- nor direction-keyed, so scope the hydrated summaries (at most `limit`).
+    if (!passesViewerScope(message, viewer, q.direction)) continue;
     items.push({ message, score: r.score });
   }
   // Score-ranked: single page, no date cursor.
@@ -1129,8 +1311,8 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const limit = clampLimit(q.limit);
   // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
   const [ftsPage, semPage] = await Promise.all([
-    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction }),
-    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction }),
+    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction, to: q.to }),
+    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction, to: q.to }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();

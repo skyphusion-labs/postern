@@ -110,3 +110,16 @@ CREATE TABLE IF NOT EXISTS vector_ledger (
   indexed_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_vector_ledger_message ON vector_ledger(message_id);
+
+-- Per-recipient read state (#350, migration 0009). Effective seen for viewer V =
+-- COALESCE(override(message_id, V), messages.seen); a sparse override layered over
+-- the row-level messages.seen so a same-domain send is unread for its recipient
+-- while staying seen in the sender Sent view. recipient = bare lower-cased address.
+-- Written forward-only (seed at same-domain outbound insert; POST /api/messages/seen
+-- with `for`); no backfill. The composite PK is the effective-seen lookup index.
+CREATE TABLE IF NOT EXISTS message_seen_by (
+  message_id TEXT NOT NULL,
+  recipient  TEXT NOT NULL,
+  seen       INTEGER NOT NULL,
+  PRIMARY KEY (message_id, recipient)
+);
