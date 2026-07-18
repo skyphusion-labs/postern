@@ -27,17 +27,18 @@ flowchart LR
 
 | Tool | What it does | Wraps |
 |---|---|---|
-| `mailbox_search` | Search subject + body, newest-first. `mode` defaults to `hybrid` (semantic + keyword). Optional `direction` (`inbound`/`outbound`), `limit`, `cursor`. **The primary tool.** | `GET /api/search` |
+| `mailbox_search` | Search subject + body, newest-first. `mode` defaults to `hybrid` (semantic + keyword); other modes: `fts`, `semantic`, `substr` (literal substring; pair with `field` = `subject`/`body`/`text`). Optional `direction` (`inbound`/`outbound`), `limit`, `cursor`. **The primary tool.** | `GET /api/search` |
 | `mailbox_list` | Browse/filter by `to` / `from` / `direction` / `thread`, paginated via `cursor`. | `GET /api/messages` |
 | `mailbox_get` | Fetch one full message (headers + body text + attachment metadata) by `message_id`. | `GET /api/messages/{id}` |
+| `mailbox_get_attachment` | Fetch one attachment as base64 **bytes** by `message_id` + zero-based `index` (the index into the `mailbox_get` attachment metadata). Returns `filename`, `mimeType`, `size`, `content` (base64). Oversize attachments are **refused with a clear error, never truncated** (cap: `POSTERN_MCP_MAX_ATTACHMENT_BYTES`, default 5 MiB). | `GET /api/messages/{id}/attachments/{i}` |
 | `mailbox_thread` | Fetch every message in a thread by `thread_id`. | `GET /api/threads/{id}` |
 
 ### Send (scope `send`, opt-in)
 
 | Tool | What it does | Wraps |
 |---|---|---|
-| `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`. With a per-identity token the worker stamps `From` to the bound identity; any caller `from` is discarded. | `POST /api/send` |
-| `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`. | `POST /api/reply` |
+| `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`, and `attachments` (each `content` base64 + optional `filename`, `mime_type`). The worker caps attachment count and total size and rejects an oversize set with a clear error. With a per-identity token the worker stamps `From` to the bound identity; any caller `from` is discarded. | `POST /api/send` |
+| `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`. **No attachments:** `/api/reply` does not carry them today (the worker `reply()` path ignores an `attachments` field), so the tool omits it rather than silently drop files; attach on `mailbox_send` instead. | `POST /api/reply` |
 
 Send tools are **MUTATING**: they deliver mail. They register only when a send token
 is present (see below). The server owns From-enforcement, DKIM signing, threading, and
@@ -126,6 +127,7 @@ For production, use `"command": "npx", "args": ["-y", "@skyphusion/postern-mcp"]
 | `POSTERN_API_TOKEN` | yes | -- | a **read-scoped** API token, sent as `Authorization: Bearer` on read tools |
 | `POSTERN_SEND_TOKEN` | no | (unset) | a **send-scoped** API token. When set, the send tools register and use it. With a **per-identity** token the worker binds the From to that token's identity. **Mutating; opt-in.** |
 | `POSTERN_API_TIMEOUT_MS` | no | `15000` | per-request timeout (ms) |
+| `POSTERN_MCP_MAX_ATTACHMENT_BYTES` | no | `5242880` (5 MiB) | max bytes `mailbox_get_attachment` will return; a larger attachment is **refused with a clear error, never truncated**. Raise it (up to the API-side 25 MiB ceiling) for hosts that tolerate bigger tool results. |
 
 Every request carries a custom `User-Agent` (`postern-mcp ...`). The API sits behind
 Cloudflare, which 403s default bot user-agents ("error 1010"), so this is mandatory.
@@ -205,7 +207,7 @@ npm run build && npm run smoke   # boots the built server over stdio and asserts
 ```
 
 `npm run smoke` proves the opt-in gate end to end at the process level: a read-only
-env exposes exactly the four read tools, and adding `POSTERN_SEND_TOKEN` adds
+env exposes exactly the five read tools, and adding `POSTERN_SEND_TOKEN` adds
 `mailbox_send` + `mailbox_reply`. Live request scope-gating (a read token gets `403` on
 send, a send token `403` on read) and the per-identity From-binding are enforced by the
 worker (#85, #138); the end-to-end proof is in

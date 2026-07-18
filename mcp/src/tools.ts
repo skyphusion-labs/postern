@@ -7,7 +7,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PosternClient, PosternError } from "./client.js";
-import type { SearchMode } from "./types.js";
+import type { SearchField, SearchMode } from "./types.js";
 
 export type Scope = "read" | "send";
 
@@ -32,10 +32,44 @@ function fail(err: unknown): TextResult {
 }
 
 const DIRECTION = z.enum(["inbound", "outbound"]);
-const MODE = z.enum(["fts", "semantic", "hybrid"]);
+const MODE = z.enum(["fts", "substr", "semantic", "hybrid"]);
+// Which column(s) the "substr" mode matches (worker /api/search field param);
+// ignored by the other modes.
+const FIELD = z.enum(["subject", "body", "text"]);
 // A recipient field accepts one address or a list; the worker validates each
 // against its address rule and enforces the recipient cap.
 const ADDRESSES = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
+
+// One outbound attachment: base64 content (required) + optional filename/mimeType.
+// The worker owns the real limits (count, decoded size) and returns a clean error;
+// we forward the shape and let it be the authority (no duplicated caps to drift).
+const ATTACHMENT = z.object({
+  content: z.string().min(1).describe("the file bytes as standard base64 (no line wrapping)"),
+  filename: z.string().optional().describe("suggested filename, e.g. report.pdf"),
+  mime_type: z.string().optional().describe("MIME type, e.g. application/pdf; the transport fills a default if omitted"),
+});
+
+// Cap on the bytes a single mailbox_get_attachment may return, so a large file
+// cannot blow past the MCP client tool-result / context limits. Refused (never
+// truncated) past this. Default 5 MiB; operators raise it via the env override up
+// to the API own 25 MiB ceiling. Read per-call so a test/operator can vary it.
+const DEFAULT_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+export function maxAttachmentBytes(): number {
+  const raw = (process.env.POSTERN_MCP_MAX_ATTACHMENT_BYTES ?? "").trim();
+  const n = Number(raw);
+  if (raw && Number.isFinite(n) && n > 0) return Math.floor(n);
+  return DEFAULT_MAX_ATTACHMENT_BYTES;
+}
+
+// Map the tool snake_case attachment input to the worker SendAttachment shape
+// (content + optional filename/mimeType). Returns undefined when there are none, so
+// the send request stays byte-for-byte the no-attachment request.
+function mapAttachments(
+  input: { content: string; filename?: string; mime_type?: string }[] | undefined,
+): { content: string; filename?: string; mimeType?: string }[] | undefined {
+  if (!input || input.length === 0) return undefined;
+  return input.map((x) => ({ content: x.content, filename: x.filename, mimeType: x.mime_type }));
+}
 
 export const READ_TOOLS: ToolDef[] = [
   {
@@ -48,15 +82,17 @@ export const READ_TOOLS: ToolDef[] = [
       "finding mail by topic.",
     inputSchema: {
       query: z.string().min(1).describe("the search text"),
-      mode: MODE.optional().describe("search mode; defaults to hybrid"),
+      mode: MODE.optional().describe("search mode; defaults to hybrid. substr is a literal substring match (use with field)"),
+      field: FIELD.optional().describe("for mode substr only: which column to match (subject/body/text); ignored by other modes"),
       limit: z.number().int().positive().max(200).optional().describe("max results (default server-side ~50)"),
       direction: DIRECTION.optional().describe("filter to received (inbound) or sent (outbound) mail"),
       cursor: z.string().optional().describe("opaque pagination cursor from a previous page"),
     },
     handler: async (client, a) => {
       const mode: SearchMode = a.mode ?? "hybrid";
-      const page = await client.search({ q: a.query, mode, limit: a.limit, cursor: a.cursor, direction: a.direction });
-      return { query: a.query, mode, direction: a.direction ?? null, count: page.items.length, cursor: page.cursor, results: page.items };
+      const field: SearchField | undefined = a.field;
+      const page = await client.search({ q: a.query, mode, field, limit: a.limit, cursor: a.cursor, direction: a.direction });
+      return { query: a.query, mode, field: field ?? null, direction: a.direction ?? null, count: page.items.length, cursor: page.cursor, results: page.items };
     },
   },
   {
@@ -104,6 +140,55 @@ export const READ_TOOLS: ToolDef[] = [
       return { threadId: a.thread_id, count: messages.length, messages };
     },
   },
+  {
+    name: "mailbox_get_attachment",
+    scope: "read",
+    description:
+      "Fetch the BYTES of one attachment on a message, returned as base64. Provide the " +
+      "message id and the zero-based attachment index (from mailbox_get's attachment " +
+      "metadata, in order). Returns filename, mimeType, size, and base64 content. Large " +
+      "attachments are REFUSED with a clear error (never truncated); the cap is " +
+      "POSTERN_MCP_MAX_ATTACHMENT_BYTES (default 5 MiB). Use mailbox_get first to see how " +
+      "many attachments a message has and their names/sizes.",
+    inputSchema: {
+      message_id: z.string().min(1).describe("the message id (as returned by search/list/get)"),
+      index: z.number().int().nonnegative().describe("zero-based attachment index (from mailbox_get's attachments array)"),
+    },
+    handler: async (client, a) => {
+      const max = maxAttachmentBytes();
+      // Read the message first for the TRUE filename + declared mime + size (the
+      // bytes endpoint sanitizes the filename in its header). This also gives an
+      // exact out-of-range error and lets us refuse an oversize file before any
+      // download (cheap), keeping the byte fetch as a second, capped step.
+      const msg = await client.get(a.message_id);
+      if (!msg) return { found: false, messageId: a.message_id };
+      const list = Array.isArray(msg.attachments) ? msg.attachments : [];
+      const idx: number = a.index;
+      if (idx < 0 || idx >= list.length) {
+        throw new PosternError(
+          `attachment index ${idx} out of range: message has ${list.length} attachment${list.length === 1 ? "" : "s"}`,
+        );
+      }
+      const meta = list[idx];
+      if (typeof meta.size === "number" && meta.size > max) {
+        throw new PosternError(
+          `attachment ${idx} is ${meta.size} bytes, over the ${max}-byte limit; raise POSTERN_MCP_MAX_ATTACHMENT_BYTES to fetch it`,
+        );
+      }
+      const fetched = await client.getAttachmentBytes(a.message_id, idx, max);
+      if (!fetched) return { found: false, messageId: a.message_id, index: idx };
+      return {
+        found: true,
+        messageId: a.message_id,
+        index: idx,
+        filename: meta.filename ?? null,
+        mimeType: meta.mime ?? fetched.contentType ?? null,
+        size: fetched.size,
+        encoding: "base64",
+        content: fetched.base64,
+      };
+    },
+  },
 ];
 
 // v1.1 send tools (scope "send"). MUTATING: they actually send mail as the estate,
@@ -129,6 +214,10 @@ export const SEND_TOOLS: ToolDef[] = [
       bcc: ADDRESSES.optional().describe("bcc address, or a list"),
       from: z.string().optional().describe("optional From override; must be on the allowed From domain, else the server rejects it"),
       reply_to: z.string().optional().describe("optional Reply-To address"),
+      attachments: z.array(ATTACHMENT).optional().describe(
+        "optional files to attach, each with base64 content (+ optional filename, mime_type). " +
+        "The server caps the count and total size and rejects an oversize set with a clear error.",
+      ),
     },
     handler: async (client, a) => {
       if (!a.text && !a.html) {
@@ -143,6 +232,7 @@ export const SEND_TOOLS: ToolDef[] = [
         bcc: a.bcc,
         from: a.from,
         replyTo: a.reply_to,
+        attachments: mapAttachments(a.attachments),
       });
       return { sent: true, messageId: result.messageId, threadId: result.threadId, providerMessageId: result.providerMessageId ?? null };
     },

@@ -56,21 +56,21 @@ is a boot/registration check.
 Boot WITHOUT a send token (`POSTERN_SEND_TOKEN` unset/empty):
 
 ```
-postern-mcp: ready (4 tools: mailbox_search, mailbox_list, mailbox_get, mailbox_thread) -> https://example.invalid
+postern-mcp: ready (5 tools: mailbox_search, mailbox_list, mailbox_get, mailbox_get_attachment, mailbox_thread) -> https://example.invalid
 ```
 
 Boot WITH a send token (`POSTERN_SEND_TOKEN=send-dummy`):
 
 ```
 postern-mcp: send tools ENABLED (POSTERN_SEND_TOKEN present) -- mutating mail capability is live
-postern-mcp: ready (6 tools: mailbox_search, mailbox_list, mailbox_get, mailbox_thread, mailbox_send, mailbox_reply) -> https://example.invalid
+postern-mcp: ready (7 tools: mailbox_search, mailbox_list, mailbox_get, mailbox_get_attachment, mailbox_thread, mailbox_send, mailbox_reply) -> https://example.invalid
 ```
 
 `npm run smoke` result:
 
 ```
-ok   read-only server exposes exactly the read tools: ["mailbox_get","mailbox_list","mailbox_search","mailbox_thread"]
-ok   send-enabled server exposes read + send tools: ["mailbox_get","mailbox_list","mailbox_reply","mailbox_search","mailbox_send","mailbox_thread"]
+ok   read-only server exposes exactly the read tools: ["mailbox_get","mailbox_get_attachment","mailbox_list","mailbox_search","mailbox_thread"]
+ok   send-enabled server exposes read + send tools: ["mailbox_get","mailbox_get_attachment","mailbox_list","mailbox_reply","mailbox_search","mailbox_send","mailbox_thread"]
 ok   startup notice: 'send tools ENABLED' present on stderr
 SMOKE PASSED
 ```

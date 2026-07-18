@@ -30,7 +30,7 @@ async function main(): Promise<void> {
 
   const readClient = new PosternClient(apiUrl, token, { timeoutMs });
 
-  const server = new McpServer({ name: "postern-mcp", version: "1.1.0" });
+  const server = new McpServer({ name: "postern-mcp", version: "1.2.0" });
 
   // Read tools always register (read-scoped POSTERN_API_TOKEN, #85).
   const registered = registerTools(server, readClient, new Set<Scope>(["read"]), READ_TOOLS);

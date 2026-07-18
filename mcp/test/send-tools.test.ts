@@ -36,7 +36,7 @@ describe("scope gate (the default-OFF send seam)", () => {
   it("a read-scoped server still registers all read tools (read MCP unchanged)", () => {
     const { server } = fakeServer();
     const names = registerTools(server, {} as any, new Set<Scope>(["read"]), READ_TOOLS);
-    expect(names.sort()).toEqual(["mailbox_get", "mailbox_list", "mailbox_search", "mailbox_thread"]);
+    expect(names.sort()).toEqual(["mailbox_get", "mailbox_get_attachment", "mailbox_list", "mailbox_search", "mailbox_thread"]);
   });
 });
 
@@ -111,5 +111,31 @@ describe("end-to-end through a registered send handler", () => {
     const res = await handlers.get("mailbox_send")!({ to: "a@b.com", subject: "s", text: "b" });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain("requires send scope");
+  });
+});
+
+describe("mailbox_send attachments", () => {
+  it("maps snake_case attachments to the worker content/filename/mimeType shape", async () => {
+    const client: any = { send: vi.fn().mockResolvedValue({ messageId: "m1", threadId: "t1" }) };
+    const t = SEND_TOOLS.find((x) => x.name === "mailbox_send")!;
+    await t.handler(client, {
+      to: "a@b.com",
+      subject: "with file",
+      text: "see attached",
+      attachments: [{ content: "QUJD", filename: "a.txt", mime_type: "text/plain" }],
+    });
+    expect(client.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [{ content: "QUJD", filename: "a.txt", mimeType: "text/plain" }],
+      }),
+    );
+  });
+
+  it("sends no attachments field when none are given (unchanged no-attachment path)", async () => {
+    const client: any = { send: vi.fn().mockResolvedValue({ messageId: "m1", threadId: "t1" }) };
+    const t = SEND_TOOLS.find((x) => x.name === "mailbox_send")!;
+    await t.handler(client, { to: "a@b.com", subject: "plain", text: "hi" });
+    const arg = client.send.mock.calls[0][0];
+    expect(arg.attachments).toBeUndefined();
   });
 });
