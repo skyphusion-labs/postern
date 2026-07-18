@@ -36,6 +36,7 @@ load_secret() {
 # either service-token mode can be driven entirely from swarm secrets.
 load_secret POSTERN_API_TOKEN
 load_secret POSTERN_API_TOKEN_DELETE
+load_secret POSTERN_API_TOKEN_IMAP
 load_secret POSTERN_TRANSPORT_TOKEN
 
 exec "$@"
