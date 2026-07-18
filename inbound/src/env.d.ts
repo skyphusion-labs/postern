@@ -103,6 +103,25 @@ interface Env {
    */
   POSTERN_API_TOKEN_SEND?: string;
   /**
+   * Optional per-function DELETE-scoped mailbox token slot (#352, contract section 4,
+   * the C4 fix). Holds a comma-separated SET of tokens (#154, same format as the READ
+   * and SEND slots): a caller presenting ANY member reaches ONLY the hard-delete door
+   * (DELETE /api/messages/{id}, empty-Trash / IMAP EXPUNGE) and cannot read, send, or
+   * touch admin routes. This lets the IMAP door's EXPUNGE credential drop from a
+   * full-admin `both` token to delete-only least privilege. `both` still satisfies
+   * delete too. Independent of POSTERN_API_TOKEN. wrangler secret put
+   * POSTERN_API_TOKEN_DELETE. Leave unset to keep the single-token (`both`) posture.
+   */
+  POSTERN_API_TOKEN_DELETE?: string;
+  /**
+   * Optional IMAP-service write token (#352). This is a comma-set static slot
+   * used only by /api/imap/* for service-asserted, authenticated identities:
+   * durable Drafts and APPEND import. It cannot read the estate, send mail,
+   * hard-delete, or reach admin routes. Keep separate from the read and delete
+   * tokens projected to the IMAP door.
+   */
+  POSTERN_API_TOKEN_IMAP?: string;
+  /**
    * Optional per-identity SEND registry (#28). A JSON object mapping the sha256 HEX
    * of a send token -> its bound sender identity { from, displayName? }. MANY tokens,
    * each the SAME send scope but a DISTINCT, authoritative From, so crew + released

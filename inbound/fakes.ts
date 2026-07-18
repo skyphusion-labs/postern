@@ -28,6 +28,10 @@ interface Row {
   sender_addr: string | null;
   reply_to_addr: string | null;
   wire_size: number | null;
+  flagged: number;
+  answered: number;
+  mailbox: string | null;
+  trashed_at: string | null;
 }
 
 interface AttRow {
@@ -53,6 +57,29 @@ interface SeenByRow {
   message_id: string;
   recipient: string;
   seen: number;
+}
+
+interface DraftRow {
+  id: string;
+  identity: string;
+  to_addr: string | null;
+  cc_addr: string | null;
+  bcc_addr: string | null;
+  subject: string | null;
+  body_text: string | null;
+  body_html: string | null;
+  in_reply_to: string | null;
+  thread_id: string | null;
+  uid: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PlacementRow {
+  message_id: string;
+  folder: string;
+  folder_uid: number;
+  added_at: string;
 }
 
 export interface FakeEnvResult {
@@ -96,6 +123,9 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
   const vectorLedger: LedgerRow[] = [];
   const messageSeenBy: SeenByRow[] = [];
   const sent: SentMessage[] = [];
+  const drafts: DraftRow[] = [];
+  const placements: PlacementRow[] = [];
+  const counters = new Map<string, { next_uid: number; uidvalidity: number }>();
   // #350 effective seen: a viewer's per-recipient override wins over messages.seen;
   // no override (or no viewer) = the row-level flag.
   const effSeen = (r: Row, viewer: string | null): number => {
@@ -127,6 +157,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           rows.push({
             id: seq++, message_id, from_addr, to_addr, subject, date, in_reply_to,
             body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen: 1, direction, thread_id,
+            flagged: 0, answered: 0, mailbox: null, trashed_at: null,
           } as Row);
           return { meta: { changes: 1 } };
         }
@@ -217,9 +248,92 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           }
           return { meta: { changes } };
         }
+        if (/INSERT OR IGNORE INTO mailbox_uid_counter/i.test(sql)) {
+          const folder = String(bound[0]);
+          if (!counters.has(folder)) counters.set(folder, { next_uid: 1, uidvalidity: Number(bound[1]) });
+          return { meta: { changes: 1 } };
+        }
+        if (/UPDATE messages SET mailbox = \?, trashed_at = \?/i.test(sql)) {
+          const row = rows.find((r) => r.message_id === String(bound[2]));
+          if (!row) return { meta: { changes: 0 } };
+          row.mailbox = bound[0] === null ? null : String(bound[0]);
+          row.trashed_at = bound[1] === null ? null : String(bound[1]);
+          return { meta: { changes: 1 } };
+        }
+        if (/DELETE FROM mailbox_placement WHERE message_id/i.test(sql)) {
+          const id = String(bound[0]);
+          let changes = 0;
+          for (let i = placements.length - 1; i >= 0; i--) {
+            if (placements[i].message_id === id) {
+              placements.splice(i, 1);
+              changes++;
+            }
+          }
+          return { meta: { changes } };
+        }
+        if (/INSERT INTO mailbox_placement/i.test(sql)) {
+          placements.push({
+            message_id: String(bound[0]), folder: String(bound[1]),
+            folder_uid: Number(bound[2]), added_at: String(bound[3]),
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (/INSERT INTO drafts/i.test(sql)) {
+          const [id, identity, to_addr, cc_addr, bcc_addr, subject, body_text, body_html,
+            in_reply_to, thread_id, uid, created_at, updated_at] = bound;
+          drafts.push({
+            id: String(id), identity: String(identity), to_addr: to_addr as string | null,
+            cc_addr: cc_addr as string | null, bcc_addr: bcc_addr as string | null,
+            subject: subject as string | null, body_text: body_text as string | null,
+            body_html: body_html as string | null, in_reply_to: in_reply_to as string | null,
+            thread_id: thread_id as string | null, uid: Number(uid),
+            created_at: String(created_at), updated_at: String(updated_at),
+          });
+          return { meta: { changes: 1 } };
+        }
+        if (/UPDATE drafts SET/i.test(sql)) {
+          const row = drafts.find((d) => d.id === String(bound[10]) && d.identity === String(bound[11]));
+          if (!row) return { meta: { changes: 0 } };
+          [row.to_addr, row.cc_addr, row.bcc_addr, row.subject, row.body_text, row.body_html,
+            row.in_reply_to, row.thread_id] = bound.slice(0, 8) as (string | null)[];
+          row.uid = Number(bound[8]);
+          row.updated_at = String(bound[9]);
+          return { meta: { changes: 1 } };
+        }
+        if (/DELETE FROM drafts WHERE id/i.test(sql)) {
+          const i = drafts.findIndex((d) => d.id === String(bound[0]) && d.identity === String(bound[1]));
+          if (i < 0) return { meta: { changes: 0 } };
+          drafts.splice(i, 1);
+          return { meta: { changes: 1 } };
+        }
         return { meta: { changes: 0 } };
       },
       async first<T>() {
+        if (/UPDATE mailbox_uid_counter SET next_uid/i.test(sql)) {
+          const row = counters.get(String(bound[0]));
+          if (!row) return null as T | null;
+          const uid = row.next_uid++;
+          return { uid, uidvalidity: row.uidvalidity } as T;
+        }
+        if (/SELECT next_uid, uidvalidity FROM mailbox_uid_counter/i.test(sql)) {
+          const row = counters.get(String(bound[0]));
+          return (row ? { next_uid: row.next_uid, uidvalidity: row.uidvalidity } : null) as T | null;
+        }
+        if (/SELECT mailbox FROM messages WHERE message_id/i.test(sql)) {
+          const row = rows.find((r) => r.message_id === String(bound[0]));
+          return (row ? { mailbox: row.mailbox } : null) as T | null;
+        }
+        if (/FROM drafts WHERE id = \? AND identity = \?/i.test(sql)) {
+          return (drafts.find((d) => d.id === String(bound[0]) && d.identity === String(bound[1])) ?? null) as T | null;
+        }
+        if (/SELECT identity FROM drafts WHERE id = \?/i.test(sql)) {
+          const row = drafts.find((d) => d.id === String(bound[0]));
+          return (row ? { identity: row.identity } : null) as T | null;
+        }
+        if (/SELECT message_id FROM messages WHERE message_id = \?/i.test(sql)) {
+          const row = rows.find((r) => r.message_id === String(bound[0]));
+          return (row ? { message_id: row.message_id } : null) as T | null;
+        }
         if (/SELECT COUNT\(\*\) AS n FROM messages/i.test(sql)) {
           return { n: rows.length } as unknown as T;
         }
@@ -261,6 +375,25 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           for (const r of matched) r.seen = value;
           return { results: matched.map((r) => ({ message_id: r.message_id })) as unknown as T[] };
         }
+        if (/UPDATE messages SET .* WHERE message_id IN/i.test(sql) && /RETURNING message_id/i.test(sql)) {
+          let i = 0;
+          const flagged = /flagged = \?/i.test(sql) ? Number(bound[i++]) : undefined;
+          const answered = /answered = \?/i.test(sql) ? Number(bound[i++]) : undefined;
+          const idCount = (sql.match(/\?/g) ?? []).length - i;
+          const ids = bound.slice(i, i + idCount).map(String);
+          const matched = rows.filter((r) => ids.includes(r.message_id));
+          for (const row of matched) {
+            if (flagged !== undefined) row.flagged = flagged;
+            if (answered !== undefined) row.answered = answered;
+          }
+          return { results: matched.map((r) => ({ message_id: r.message_id })) as unknown as T[] };
+        }
+        if (/FROM drafts WHERE identity = \?/i.test(sql)) {
+          return {
+            results: drafts.filter((d) => d.identity === String(bound[0]))
+              .sort((a, b) => b.updated_at.localeCompare(a.updated_at)) as unknown as T[],
+          };
+        }
         // M8 upsert (#178): INSERT ... ON CONFLICT(message_id) DO UPDATE ...
         // RETURNING thread_id, is_fresh. Faithful to store.put()'s single atomic
         // statement -- fresh insert (is_fresh=1), merge-append (is_fresh=0), or a
@@ -299,6 +432,10 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
               reply_to_addr: b[19] as string | null,
               wire_size: b[20] as number | null,
               seen: b[21] as number,
+              flagged: 0,
+              answered: 0,
+              mailbox: null,
+              trashed_at: null,
             });
             return { results: [{ thread_id: b[14] as string | null, is_fresh: 1 }] as unknown as T[] };
           }
@@ -407,6 +544,11 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             wire_size: r.wire_size,
             has_html: r.body_html && String(r.body_html).trim() ? 1 : 0,
             attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
+            flagged: r.flagged,
+            answered: r.answered,
+            mailbox: r.mailbox,
+            trashed_at: r.trashed_at,
+            folder_uid: placements.find((p) => p.message_id === r.message_id && p.folder === r.mailbox)?.folder_uid ?? null,
           }));
           return { results: results as unknown as T[] };
         }
@@ -457,7 +599,15 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           // delivered set (falling back to a v1 row's to_addr), delimiter-safe.
           if (/COALESCE\(m\.delivered_to/i.test(sql)) {
             const v = String(bound[i++]).toLowerCase();
-            work = work.filter((r) => (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`));
+            if (/OR lower\(m\.from_addr\) = \?/i.test(sql)) {
+              const from = String(bound[i++]).toLowerCase();
+              work = work.filter((r) =>
+                (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`) ||
+                r.from_addr.toLowerCase() === from,
+              );
+            } else {
+              work = work.filter((r) => (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`));
+            }
           }
           if (/lower\(m\.from_addr\) LIKE \?/i.test(sql)) {
             const v = String(bound[i++]).replace(/%/g, "").toLowerCase();
@@ -476,6 +626,14 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           } else if (/m\.direction = \?/i.test(sql)) {
             const v = String(bound[i++]);
             work = work.filter((r) => r.direction === v);
+          } else if (/(?:WHERE|AND) lower\(m\.from_addr\) = \?/i.test(sql)) {
+            const v = String(bound[i++]).toLowerCase();
+            work = work.filter((r) => r.from_addr.toLowerCase() === v);
+          }
+          if (/m\.mailbox IS NULL/i.test(sql)) work = work.filter((r) => r.mailbox === null);
+          else if (/m\.mailbox = \?/i.test(sql)) {
+            const mailbox = String(bound[i++]);
+            work = work.filter((r) => r.mailbox === mailbox);
           }
           if (/m\.date < \?/i.test(sql)) {
             const d = String(bound[i++]);
@@ -508,6 +666,11 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             wire_size: r.wire_size,
             has_html: r.body_html && String(r.body_html).trim() ? 1 : 0,
             attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
+            flagged: r.flagged,
+            answered: r.answered,
+            mailbox: r.mailbox,
+            trashed_at: r.trashed_at,
+            folder_uid: placements.find((p) => p.message_id === r.message_id && p.folder === r.mailbox)?.folder_uid ?? null,
           }));
           return { results: results as unknown as T[] };
         }
@@ -523,7 +686,10 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
     DEFAULT_FROM: "noreply@skyphusion.org",
     DEFAULT_FROM_NAME: "Skyphusion",
     POSTERN_API_TOKEN: "test-token",
-    DB: { prepare: (sql: string) => makeStmt(sql) },
+    DB: {
+      prepare: (sql: string) => makeStmt(sql),
+      batch: async (statements: Array<{ run: () => Promise<unknown> }>) => Promise.all(statements.map((s) => s.run())),
+    },
     ATTACHMENTS: {
       async put(key: string, bytes: ArrayBuffer) {
         r2.push({ key, bytes });

@@ -7,13 +7,15 @@ import { describe, it, expect } from "vitest";
 import { handleApi } from "./src/api";
 import { makeFakeEnv } from "./fakes";
 
-// A fake env carrying all three tokens at once: the egalitarian `both` token plus
-// the two optional scoped tokens an operator may provision.
+// A fake env carrying all four static tokens at once: the egalitarian `both`
+// token plus the optional read/send/delete scoped slots (#85/#352).
 function scopedEnv() {
   return makeFakeEnv({
     POSTERN_API_TOKEN: "both-token",
     POSTERN_API_TOKEN_READ: "read-token",
     POSTERN_API_TOKEN_SEND: "send-token",
+    POSTERN_API_TOKEN_DELETE: "delete-token",
+    POSTERN_API_TOKEN_IMAP: "imap-token",
   });
 }
 
@@ -71,6 +73,17 @@ describe("per-function token scopes (#85)", () => {
       expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
     });
 
+    it("can organize (flags / move / folders are read-scoped, #352)", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("POST", "/api/messages/flags", {
+        token: "read-token", body: { ids: [], set: { flagged: true } },
+      }), env, ctx)).status).toBe(200);
+      expect((await handleApi(req("POST", "/api/messages/move", {
+        token: "read-token", body: { ids: [], mailbox: "trash" },
+      }), env, ctx)).status).toBe(200);
+      expect((await handleApi(req("GET", "/api/folders", { token: "read-token" }), env, ctx)).status).toBe(200);
+    });
+
     it("cannot touch credential-admin routes (-> 403)", async () => {
       const { env, ctx } = scopedEnv();
       expect((await handleApi(req("POST", "/api/admin/smtp-credentials", { token: "read-token", body: ADMIN_BODY }), env, ctx)).status).toBe(403);
@@ -82,7 +95,7 @@ describe("per-function token scopes (#85)", () => {
       expect((await handleApi(req("POST", "/api/admin/reindex", { token: "read-token", body: {} }), env, ctx)).status).toBe(403);
     });
 
-    it("cannot delete messages (-> 403, #278)", async () => {
+    it("cannot hard-delete messages (-> 403; delete is its own scope, #352)", async () => {
       const { env, ctx } = scopedEnv();
       expect((await handleApi(req("DELETE", "/api/messages/a@example.com", { token: "read-token" }), env, ctx)).status).toBe(403);
     });
@@ -148,10 +161,40 @@ describe("per-function token scopes (#85)", () => {
       expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
     });
 
-    it("can delete a message (DELETE /api/messages/{id} is admin-scoped, #278)", async () => {
+    it("can hard-delete a message (DELETE /api/messages/{id} is delete-scoped; both includes delete, #352)", async () => {
       const { env, ctx } = scopedEnv();
-      // Scope gate only: message absent -> 404 proves admin scope was accepted.
+      // Scope gate only: message absent -> 404 proves delete scope was accepted.
       expect((await handleApi(req("DELETE", "/api/messages/nope@example.com", { token: "both-token" }), env, ctx)).status).toBe(404);
+    });
+  });
+
+  describe("delete-scoped token (#352 / C4)", () => {
+    it("reaches only irreversible DELETE /api/messages/{id}", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("DELETE", "/api/messages/nope@example.com", { token: "delete-token" }), env, ctx)).status).toBe(404);
+      expect((await handleApi(req("GET", "/api/messages", { token: "delete-token" }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("POST", "/api/send", { token: "delete-token", body: SEND_BODY }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("POST", "/api/messages/flags", {
+        token: "delete-token", body: { ids: [], set: { flagged: true } },
+      }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("POST", "/api/admin/reindex", { token: "delete-token", body: {} }), env, ctx)).status).toBe(403);
+    });
+  });
+
+  describe("imap-service token (#352)", () => {
+    it("reaches only identity-asserted Drafts/import service routes", async () => {
+      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("GET", "/api/messages", { token: "imap-token" }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("POST", "/api/send", {
+        token: "imap-token", body: SEND_BODY,
+      }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("DELETE", "/api/messages/x", { token: "imap-token" }), env, ctx)).status).toBe(403);
+      expect((await handleApi(req("GET", "/api/imap/drafts?identity=user%40skyphusion.org", {
+        token: "imap-token",
+      }), env, ctx)).status).toBe(200);
+      expect((await handleApi(req("POST", "/api/admin/reindex", {
+        token: "imap-token", body: {},
+      }), env, ctx)).status).toBe(403);
     });
   });
 

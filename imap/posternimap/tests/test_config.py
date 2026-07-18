@@ -63,6 +63,16 @@ class ConfigTest(unittest.TestCase):
                 {"POSTERN_API_URL": "https://x", "POSTERN_IMAP_UIDVALIDITY": str(0x100000000)}
             )
 
+    def test_imap_token_defaults_none(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x"})
+        self.assertIsNone(cfg.service_imap_token)
+
+    def test_imap_token_parses_env(self):
+        cfg = Config.from_env(
+            {"POSTERN_API_URL": "https://x", "POSTERN_API_TOKEN_IMAP": "imap-secret"}
+        )
+        self.assertEqual(cfg.service_imap_token, "imap-secret")
+
     def test_partial_tls_errors(self):
         with self.assertRaises(ConfigError):
             Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_IMAP_TLS_CERT": "/c.pem"})

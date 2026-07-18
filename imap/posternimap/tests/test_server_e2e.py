@@ -59,6 +59,15 @@ def _patched_factory(cfg, transport):
         return PosternClient(self._cfg.api_url, tok, transport=transport)
 
     account_mod.PosternAccount._delete_client = fake_delete_client
+    orig_imap_client = account_mod.PosternAccount._imap_client
+
+    def fake_imap_client(self):
+        tok = self._cfg.service_imap_token
+        if not tok:
+            return None
+        return PosternClient(self._cfg.api_url, tok, transport=transport)
+
+    account_mod.PosternAccount._imap_client = fake_imap_client
 
     factory = PosternIMAPFactory.__new__(PosternIMAPFactory)
     factory._cfg = cfg
@@ -69,21 +78,21 @@ def _patched_factory(cfg, transport):
         orig_client,
         "_delete_client",
         orig_delete_client,
+        "_imap_client",
+        orig_imap_client,
     )
 
 
 def _restore_account(restore):
-    cls, attr1, orig1, attr2, orig2 = restore
+    cls, attr1, orig1, attr2, orig2, attr3, orig3 = restore
     setattr(cls, attr1, orig1)
     setattr(cls, attr2, orig2)
+    setattr(cls, attr3, orig3)
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class ServerE2ETest(twisted_unittest.TestCase):
     def setUp(self):
-        from posternimap.account import _shared_trash_staging
-
-        _shared_trash_staging("agent").clear()
         self.msgs = [
             make_message("m3", direction="outbound", subject="sent note"),
             make_message("m2", subject="meeting tuesday", body="lunch?"),
@@ -250,10 +259,15 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.login(b"agent", b"tok")
             info = yield proto.select(b"INBOX")
             self.assertIn("PERMANENTFLAGS", info)
-            self.assertEqual(list(info["PERMANENTFLAGS"]), ["\\Seen"])
+            pf = list(info["PERMANENTFLAGS"])
+            self.assertIn("\\Seen", pf)
+            self.assertIn("\\Flagged", pf)
+            self.assertIn("\\Answered", pf)
+            self.assertNotIn("\\Deleted", pf)
             self.assertTrue(info["READ-WRITE"], info)
             flags = set(info["FLAGS"])
             self.assertIn("\\Seen", flags)
+            self.assertIn("\\Flagged", flags)
             self.assertNotIn("\\Deleted", flags)
             self.assertTrue({"Trusted", "Untrusted", "Inbound", "Outbound"} & flags, flags)
             self.assertNotIn("\\Sent", flags)  # special-use LIST attr must not leak
@@ -278,7 +292,10 @@ class ServerE2ETest(twisted_unittest.TestCase):
             try:
                 yield proto.login(b"agent", b"tok")
                 info = yield proto.select(b"INBOX")
-                self.assertEqual(list(info["PERMANENTFLAGS"]), ["\\Seen", "\\Deleted"])
+                pf = list(info["PERMANENTFLAGS"])
+                self.assertIn("\\Seen", pf)
+                self.assertIn("\\Flagged", pf)
+                self.assertIn("\\Deleted", pf)
                 self.assertIn("\\Deleted", set(info["FLAGS"]))
             finally:
                 yield proto.logout()
@@ -316,9 +333,11 @@ class ServerE2ETest(twisted_unittest.TestCase):
                 trash = yield proto.select(b"Trash")
                 self.assertEqual(trash["EXISTS"], 1)
                 self.assertTrue(
-                    any("m2" in c or "m2%40" in c for c in self.transport.calls),
-                    "expected delete API for m2",
+                    any("/api/messages/move" in c for c in self.transport.calls),
+                    "expected soft-move API for m2",
                 )
+                self.assertEqual(self.transport.last_move_payload.get("mailbox"), "trash")
+
             finally:
                 yield proto.logout()
         finally:
@@ -350,15 +369,31 @@ class ServerE2ETest(twisted_unittest.TestCase):
     @defer.inlineCallbacks
     def test_append_to_sent_succeeds(self):
         # Thunderbird APPENDs its own copy of a sent message into Sent after
-        # submission; this must succeed (no-op), not error.
+        # submission; the fallback matcher (#352) treats a recent outbound with
+        # matching from+to+subject as already-stored and returns OK.
         import io
 
+        self.transport.messages.insert(
+            0,
+            make_message(
+                "core-sent",
+                direction="outbound",
+                **{
+                    "from": "a@example.com",
+                    "to": "b@example.com",
+                    "subject": "copy",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                },
+            ),
+        )
         proto = yield self._client()
         try:
             yield proto.login(b"agent", b"tok")
-            msg = io.BytesIO(b"From: a@example.com\r\nSubject: copy\r\n\r\nbody\r\n")
-            # IMAP4Client.append returns a Deferred that fires on a positive tagged
-            # response; assertFailure is NOT expected here -- it must succeed.
+            msg = io.BytesIO(
+                b"From: a@example.com\r\nTo: b@example.com\r\nSubject: copy\r\n"
+                b"Date: Sat, 18 Jul 2026 12:00:05 +0000\r\n\r\nbody\r\n"
+            )
             yield proto.append("Sent", msg, ("\\Seen",))
         finally:
             yield proto.logout()
@@ -389,10 +424,10 @@ class ServerE2ETest(twisted_unittest.TestCase):
             )
             self.assertNotIn("Trusted", flags)
             self.assertTrue(flags <= pf, (flags, pf))
-            # scoping regression: a sibling placeholder stays read-only + empty PF.
+            # Drafts is durable (#352): READ-WRITE with \Draft + \Deleted.
             info2 = yield proto.select(b"Drafts")
-            self.assertFalse(info2["READ-WRITE"], info2)
-            self.assertEqual(list(info2["PERMANENTFLAGS"]), [])
+            self.assertTrue(info2["READ-WRITE"], info2)
+            self.assertIn("\\Draft", info2["PERMANENTFLAGS"])
             # the READ-WRITE signal does NOT make Notes writable: APPEND is still NO.
             msg = io.BytesIO(b"From: a@example.com\r\nSubject: note\r\n\r\nbody\r\n")
             d = proto.append("Notes", msg, ("\\Seen",))
@@ -402,19 +437,37 @@ class ServerE2ETest(twisted_unittest.TestCase):
 
 
     @defer.inlineCallbacks
-    def test_append_to_drafts_succeeds_as_noop(self):
-        # Apple Mail auto-saves mid-compose via APPEND Drafts. A positive response
-        # keeps the draft client-local and avoids an error dialog; Postern stores no
-        # bytes and Drafts remains empty.
+    def test_append_to_drafts_succeeds_as_persist(self):
+        # Apple Mail auto-saves mid-compose via APPEND Drafts; #352 persists it via
+        # the least-privilege POSTERN_API_TOKEN_IMAP seam (core unblocker 1), with
+        # identity derived from the (email-shaped) login.
         import io
 
-        proto = yield self._client()
+        cfg = Config(
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            service_imap_token="tok",
+        )
+        factory, restore = _patched_factory(cfg, self.transport)
+        port = reactor.listenTCP(0, factory, interface="127.0.0.1")
+        addr = port.getHost()
         try:
-            yield proto.login(b"agent", b"tok")
-            msg = io.BytesIO(b"From: a@example.com\r\nSubject: draft\r\n\r\nbody\r\n")
-            yield proto.append("Drafts", msg, ("\\Draft",))
+            cc = ClientCreator(reactor, imap4.IMAP4Client)
+            proto = yield cc.connectTCP("127.0.0.1", addr.port)
+            try:
+                yield proto.login(b"agent@skyphusion.org", b"tok")
+                msg = io.BytesIO(b"From: a@example.com\r\nSubject: draft\r\n\r\nbody\r\n")
+                yield proto.append("Drafts", msg, ("\\Draft",))
+                self.assertEqual(len(self.transport.drafts), 1)
+                info = yield proto.select(b"Drafts")
+                self.assertEqual(info["EXISTS"], 1)
+            finally:
+                yield proto.logout()
         finally:
-            yield proto.logout()
+            _restore_account(restore)
+            yield port.stopListening()
 
     @defer.inlineCallbacks
     def test_append_to_other_placeholder_folder_is_rejected(self):
@@ -427,7 +480,10 @@ class ServerE2ETest(twisted_unittest.TestCase):
             msg = io.BytesIO(b"From: a@example.com\r\nSubject: junk\r\n\r\nbody\r\n")
             d = proto.append("Junk", msg, ("\\Seen",))
             exc = yield self.assertFailure(d, imap4.IMAP4Exception)
-            self.assertIn("does not store", str(exc))
+            self.assertTrue(
+                "Message-ID" in str(exc) or "not supported" in str(exc) or "APPEND" in str(exc),
+                str(exc),
+            )
         finally:
             yield proto.logout()
 
@@ -714,10 +770,14 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
     return a clean tagged NO (no server-side TypeError, no unhandled traceback), not a
     BAD 'Server error' or a str/bytes crash in __ebStatus."""
 
-    def _spin(self, status):
+    def _spin(self, status, *, service_imap_token=None):
         transport = ErrorTransport(status=status)
         cfg = Config(
-            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            service_imap_token=service_imap_token,
         )
         factory, restore = _patched_factory(cfg, transport)
         port = reactor.listenTCP(0, factory, interface="127.0.0.1")
@@ -796,13 +856,9 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
             yield proto.transport.loseConnection()
 
     @defer.inlineCallbacks
-    def test_append_to_sent_succeeds_even_when_the_store_read_fails(self):
-        # #233: the client's post-send Sent copy must NOT fail just because the store is
-        # unreachable. Stock do_APPEND read getMessageCount() (a full Sent load) to emit
-        # EXISTS, so an upstream 5xx turned APPEND into a client error ("Server error
-        # encountered while opening mailbox"). Our override answers OK with zero store I/O,
-        # so APPEND to Sent succeeds even under a hard store failure. ErrorTransport makes
-        # EVERY API call 503; the fact that APPEND still returns OK proves it touches no store.
+    def test_append_to_sent_refuses_when_store_unreachable(self):
+        # #352: Sent APPEND runs the fallback matcher (needs a store read). Under a
+        # hard store failure the door refuses with NO -- never silent OK+drop.
         import io
 
         addr, transport = self._spin(503)
@@ -810,29 +866,30 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
         try:
             yield proto.login(b"agent", b"tok")
             msg = io.BytesIO(b"From: conrad@skyphusion.org\r\nSubject: External Submission Test\r\n\r\nbody\r\n")
-            # append() fires its Deferred only on a positive tagged response; if the
-            # server had errored this would raise and fail the test.
-            yield proto.append("Sent", msg, ("\\Seen",))
-            # Not a single API call was needed to accept the Sent copy.
-            self.assertEqual(transport.calls, [])
+            d = proto.append("Sent", msg, ("\\Seen",))
+            yield self.assertFailure(d, imap4.IMAP4Exception)
+            self.assertTrue(len(transport.calls) > 0)
         finally:
             yield proto.transport.loseConnection()
+
 
     @defer.inlineCallbacks
-    def test_append_to_drafts_succeeds_without_a_store_read(self):
-        # Drafts no-op compatibility must not depend on the store. ErrorTransport
-        # makes every API call fail; success proves APPEND touched no API.
+    def test_append_to_drafts_refuses_when_store_unreachable(self):
+        # Drafts APPEND persists via /api/imap/drafts (#352 core unblocker 2); a
+        # store failure is a loud NO, never a silent drop.
         import io
 
-        addr, transport = self._spin(503)
+        addr, transport = self._spin(503, service_imap_token="tok")
         proto = yield self._client(addr)
         try:
-            yield proto.login(b"agent", b"tok")
+            yield proto.login(b"agent@skyphusion.org", b"tok")
             msg = io.BytesIO(b"From: a@b.com\r\nSubject: draft\r\n\r\nx\r\n")
-            yield proto.append("Drafts", msg, ("\\Draft",))
-            self.assertEqual(transport.calls, [])
+            d = proto.append("Drafts", msg, ("\\Draft",))
+            yield self.assertFailure(d, imap4.IMAP4Exception)
+            self.assertTrue(any("/api/imap/drafts" in c for c in transport.calls))
         finally:
             yield proto.transport.loseConnection()
+
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
@@ -1490,9 +1547,15 @@ class IDCommandSelectAndTraceTest(unittest.TestCase):
 class MoveUntaggedSequencingTest(unittest.TestCase):
     """RFC 6851 sec 3 + RFC 3501 7.4.1 (#304): a MOVE to the Trash delete sink emits an
     untagged EXPUNGE per moved message, carrying the 1-based message SEQUENCE number
-    (never the UID), high-to-low, BEFORE the tagged OK. COPY emits none. Deterministic
-    StringTransport; the response callback is driven directly with a UID != seq fixture
-    so a sequence/UID mix-up cannot hide behind uid == seq (the #300 class)."""
+    (never the UID), high-to-low, BEFORE the tagged OK.
+
+    #352 review: COPY mutates the SAME exclusive placement as MOVE (there is no real
+    dual-membership copy in this model), so it emits the identical untagged EXPUNGE for
+    whichever source rows the mailbox's soft_move_fetched_messages reports as actually
+    removed from THIS view -- fixing the old, unsafe test_copy_emits_no_untagged_expunge
+    that locked in a silently FETCH-stale COPY. Deterministic StringTransport; the
+    response callback is driven directly with a UID != seq fixture so a sequence/UID
+    mix-up cannot hide behind uid == seq (the #300 class)."""
 
     def _server(self):
         from twisted.internet.testing import StringTransport
@@ -1518,19 +1581,26 @@ class MoveUntaggedSequencingTest(unittest.TestCase):
 
         return [(1, _M(101, "a")), (3, _M(103, "c"))]
 
-    def _mbox(self, deleted):
+    def _mbox(self, moved, *, removed=None):
+        """A minimal soft_move_fetched_messages double: records the moved seqs and
+        returns `removed` (defaulting to "everything moved left this view", the
+        common case for a filtered folder like Trash) -- mirrors the real
+        PosternMailbox contract (#352 review)."""
+
         class _Mbox:
             _delete_writable = True
 
-            def delete_fetched_messages(self, fetched):
-                deleted.append([seq for seq, _m in fetched])
+            def soft_move_fetched_messages(self, fetched, mailbox, *, required_direction=None):
+                seqs = [seq for seq, _m in fetched]
+                moved.append(seqs)
+                return sorted(seqs, reverse=True) if removed is None else removed
 
         return _Mbox()
 
     def test_move_emits_untagged_expunge_sequence_numbers_high_to_low(self):
         srv = self._server()
-        deleted = []
-        srv.mbox = self._mbox(deleted)
+        moved = []
+        srv.mbox = self._mbox(moved)
         srv.transport.clear()
         srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t1", is_move=True)
         out = srv.transport.value()
@@ -1542,16 +1612,37 @@ class MoveUntaggedSequencingTest(unittest.TestCase):
         # the UIDs (101/103) must never surface as EXPUNGE sequence ids
         self.assertNotIn(b"101 EXPUNGE", out)
         self.assertNotIn(b"103 EXPUNGE", out)
-        self.assertEqual(deleted, [[1, 3]])
+        self.assertEqual(moved, [[1, 3]])
 
-    def test_copy_emits_no_untagged_expunge(self):
+    def test_copy_emits_untagged_expunge_for_removed_source_rows(self):
+        # #352 review fix: COPY (soft-move under the hood) removes the source rows
+        # from THIS view exactly like MOVE does, so it must emit the same untagged
+        # EXPUNGE -- a client that isn't told would hold a stale sequence mapping.
         srv = self._server()
-        srv.mbox = self._mbox([])
+        moved = []
+        srv.mbox = self._mbox(moved)
         srv.transport.clear()
         srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t2", is_move=False)
         out = srv.transport.value()
+        self.assertIn(b"* 3 EXPUNGE\r\n", out)
+        self.assertIn(b"* 1 EXPUNGE\r\n", out)
+        self.assertLess(out.index(b"* 3 EXPUNGE"), out.index(b"* 1 EXPUNGE"))
+        self.assertLess(out.index(b"* 1 EXPUNGE"), out.index(b"t2 OK COPY completed"))
+        self.assertEqual(moved, [[1, 3]])
+
+    def test_copy_from_all_view_emits_no_expunge_when_row_still_owned(self):
+        # #352 review: when the source view is "All" (owns every placement), the
+        # mailbox reports nothing removed -- COPY correctly stays FETCH-stable here,
+        # unlike the filtered-view case above.
+        srv = self._server()
+        moved = []
+        srv.mbox = self._mbox(moved, removed=[])
+        srv.transport.clear()
+        srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t3", is_move=False)
+        out = srv.transport.value()
         self.assertNotIn(b"EXPUNGE", out)
-        self.assertIn(b"t2 OK COPY completed", out)
+        self.assertIn(b"t3 OK COPY completed", out)
+        self.assertEqual(moved, [[1, 3]])
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
@@ -1562,9 +1653,6 @@ class ServerMoveRFC6851E2ETest(twisted_unittest.TestCase):
     move set cannot pass (the #300 class)."""
 
     def setUp(self):
-        from posternimap.account import _shared_trash_staging
-
-        _shared_trash_staging("agent").clear()
         # Two inbound messages, pinned uids 101/102 (seq 1/2) so uid != seq.
         self.msgs = [
             make_message("mb", subject="second", body="two", uid=102),
@@ -1617,8 +1705,8 @@ class ServerMoveRFC6851E2ETest(twisted_unittest.TestCase):
             info = yield proto.select(b"INBOX")
             self.assertEqual(info["EXISTS"], 1)
             self.assertTrue(
-                any("mb" in c for c in self.transport.calls),
-                "expected delete API for the moved message mb",
+                any("/api/messages/move" in c for c in self.transport.calls),
+                "expected soft-move API for the moved message mb",
             )
         finally:
             yield proto.logout()

@@ -156,5 +156,82 @@ class ClientTest(unittest.TestCase):
             c.list_messages()
 
 
+class ScopeFaithfulFakeTest(unittest.TestCase):
+    """#352 core unblocker 6: the fake models imap vs read vs send vs delete token
+    scopes (mirroring inbound/src/api.ts requiredScope()), so a test using the WRONG
+    token for a route gets the SAME 403 the real worker would give -- catching a
+    client wired to the wrong service token, not just a wrong-token 401."""
+
+    def setUp(self):
+        from posternimap.tests.fakes import FakeTransport
+
+        self.msgs = [make_message("m1", subject="hello")]
+        self.transport = FakeTransport(
+            self.msgs,
+            expected_token=None,
+            page_size=10,
+            token_scopes={
+                "read-tok": "read",
+                "delete-tok": "delete",
+                "imap-tok": "imap",
+                "both-tok": "both",
+            },
+        )
+
+    def _client(self, token):
+        return PosternClient("https://x", token, transport=self.transport)
+
+    def test_read_scoped_token_403s_on_imap_drafts(self):
+        c = self._client("read-tok")
+        with self.assertRaises(PosternError) as ctx:
+            c.list_imap_drafts("a@example.com")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_read_scoped_token_403s_on_imap_import(self):
+        c = self._client("read-tok")
+        with self.assertRaises(PosternError) as ctx:
+            c.import_message("a@example.com", "trash", b"From: a@x\r\n\r\nbody\r\n")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_imap_scoped_token_403s_on_delete(self):
+        c = self._client("imap-tok")
+        with self.assertRaises(PosternError) as ctx:
+            c.delete_message("m1")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_imap_scoped_token_403s_on_read_list(self):
+        c = self._client("imap-tok")
+        with self.assertRaises(PosternError) as ctx:
+            c.list_messages(limit=10)
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_delete_scoped_token_403s_on_read_list(self):
+        c = self._client("delete-tok")
+        with self.assertRaises(PosternError) as ctx:
+            c.list_messages(limit=10)
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_delete_scoped_token_succeeds_on_delete(self):
+        c = self._client("delete-tok")
+        c.delete_message("m1")  # must not raise
+
+    def test_imap_scoped_token_succeeds_on_drafts_and_import(self):
+        c = self._client("imap-tok")
+        draft = c.create_imap_draft("a@example.com", {"subject": "hi"})
+        self.assertEqual(draft.identity, "a@example.com")
+        c.import_message("a@example.com", "trash", b"From: a@x\r\n\r\nbody\r\n")
+
+    def test_read_scoped_token_succeeds_on_list_and_search(self):
+        c = self._client("read-tok")
+        self.assertEqual([m.message_id for m in c.list_messages(limit=10).items], ["m1"])
+        c.get_folders()
+
+    def test_both_scope_token_succeeds_everywhere(self):
+        c = self._client("both-tok")
+        c.list_messages(limit=10)
+        c.create_imap_draft("a@example.com", {"subject": "hi"})
+        c.import_message("a@example.com", "trash", b"From: a@x\r\n\r\nbody\r\n")
+
+
 if __name__ == "__main__":
     unittest.main()

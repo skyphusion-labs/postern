@@ -300,32 +300,15 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     logout_NOOP = unauth_NOOP  # type: ignore[assignment]
 
     def do_APPEND(self, tag, mailbox, flags, date, message):
-        """Answer APPEND WITHOUT touching the store (#233).
+        """APPEND persist-or-refuse (#352 section 3.2); never silent OK+drop.
 
-        macOS Mail (and Thunderbird) copy the just-sent message into Sent via APPEND
-        right after SMTP submission. The Postern submission path already recorded that
-        outbound message, so we must not double-store -- but we also must not FAIL the
-        client's Sent-copy save. Twisted's stock do_APPEND opens the target mailbox
-        (`account.select`) and then calls `mbox.getMessageCount()` to emit an untagged
-        EXISTS; on the live store the Sent folder is full of outbound copies, so that
-        getMessageCount is a full D1 page-through, and ANY transient failure there turned
-        the client's save into `NO APPEND failed` / `BAD Server error encountered while
-        opening mailbox` (the macOS Mail error in #233). Our APPEND is a declared no-op,
-        so it must not depend on a store read at all.
+        Classifies via account.appendability, then either refuses with a tagged NO
+        or routes into the mailbox addMessage path (Drafts persist, Sent matcher,
+        Trash/Junk/Archive placement). EXISTS is omitted on success (RFC 3501
+        optional) so Sent APPEND does not force a full Sent SELECT (#233).
+        """
+        from twisted.internet.defer import maybeDeferred
 
-        We short-circuit on the mailbox classification (account.appendability), with no
-        store I/O:
-          * real view (INBOX/Sent/All) -> tagged OK. EXISTS is optional on APPEND (RFC
-            3501 7.4.1), and the copy is not actually stored, so we omit it; the client
-            re-syncs Sent on its next poll/SELECT.
-          * noop (Drafts) -> tagged OK for Apple Mail mid-compose autosave. Postern
-            stores no draft bytes; the client retains its local draft.
-          * placeholder (Trash/Junk/Archive/Notes) -> tagged NO (no backing store,
-            #109: fail honestly rather than fake-ack and drop the message).
-          * unknown mailbox -> NO [TRYCREATE], matching the stock behavior.
-        The message literal is already fully read by the APPEND arg parser (arg_literal),
-        so there is nothing to drain. Falls back to the stock machinery if the avatar is
-        not a PosternAccount (defensive; keeps a non-standard account working)."""
         name = imap4._parseMbox(mailbox)
         classify = getattr(self.account, "appendability", None)
         if classify is None:
@@ -334,14 +317,28 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         kind = classify(name)
         if kind == "unknown":
             self.sendNegativeResponse(tag, b"[TRYCREATE] No such mailbox")
-        elif kind == "placeholder":
+            return
+        if kind == "placeholder":
             self.sendNegativeResponse(
                 tag, b"APPEND failed: this folder does not store messages; APPEND is not supported"
             )
-        elif kind in ("real", "noop"):
-            self.sendPositiveResponse(tag, b"APPEND complete")
-        else:
-            self.sendBadResponse(tag, b"APPEND failed: unsupported mailbox classification")
+            return
+        if kind == "refuse":
+            self.sendNegativeResponse(
+                tag,
+                b"APPEND failed: this folder does not accept new messages; "
+                b"APPEND is not supported",
+            )
+            return
+        # sent / drafts / placement: select the mailbox object without emitting
+        # EXISTS from a cold load in the stock path -- call addMessage directly.
+        mbox = self.account.select(name)
+        if mbox is None:
+            self.sendNegativeResponse(tag, b"[TRYCREATE] No such mailbox")
+            return
+        d = maybeDeferred(mbox.addMessage, message, flags or (), date)
+        d.addCallback(lambda _r: self.sendPositiveResponse(tag, b"APPEND complete"))
+        d.addErrback(self._IMAP4Server__ebAppend, tag)
 
     # Route APPEND through the override in both states it is valid (authenticated +
     # selected). dispatchCommand reads the class tuple, not getattr(self, "do_APPEND");
@@ -357,31 +354,11 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     select_APPEND = auth_APPEND  # type: ignore[assignment]
 
     def do_COPY(self, tag, messages, mailbox, uid=0):
-        """Answer COPY; Trash is a delete sink for Apple Mail (#278).
-
-        macOS Mail (and some other clients) delete by COPY/MOVE to the \\Trash
-        mailbox, not STORE \\Deleted + EXPUNGE in the current folder. Trash has no
-        backing store in Postern, so COPY-to-Trash hard-deletes from the selected
-        mailbox via DELETE /api/messages/{id}. Trash SELECT reports READ-WRITE so the
-        client does not reject the destination up front. COPY does NOT emit untagged
-        EXPUNGE for the source (RFC 3501 semantics); the client re-syncs the source
-        mailbox on its next poll (the documented COPY-to-Trash client-view gap, see
-        docs/IMAP-APPLE-MAIL.md). MOVE (do_MOVE) closes that gap."""
+        """Answer COPY; durable folders use soft-move (#352)."""
         self._copy_or_move_to_mailbox(tag, messages, mailbox, uid, is_move=False)
 
     def do_MOVE(self, tag, messages, mailbox, uid=0):
-        """RFC 6851 MOVE, advertised in CAPABILITY (#304).
-
-        MOVE = COPY + mark \\Deleted + EXPUNGE, atomically. For the Trash delete sink
-        this is the same source hard-delete as COPY, but MOVE additionally emits an
-        untagged EXPUNGE for every moved message BEFORE the tagged OK (RFC 6851 sec 3),
-        so the client's source view updates in the same round-trip instead of going
-        stale until re-sync. Sequence numbers, high-to-low, per RFC 3501 7.4.1 and the
-        #300/#301 EXPUNGE fix (untagged EXPUNGE carries 1-based SEQUENCE numbers, never
-        UIDs). COPYUID (RFC 6851 sec 4.3) is deliberately NOT emitted: it is a UIDPLUS
-        (RFC 4315) response code and we neither advertise UIDPLUS nor give Trash a
-        backing store with persistent destination UIDs, so a COPYUID would fabricate
-        UIDs that do not exist."""
+        """RFC 6851 MOVE with soft-move for Trash/Junk/Archive (#352)."""
         self._copy_or_move_to_mailbox(tag, messages, mailbox, uid, is_move=True)
 
     def _copy_or_move_to_mailbox(self, tag, messages, mailbox, uid=0, is_move=False):
@@ -393,14 +370,26 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             imap4.IMAP4Server.do_COPY(self, tag, messages, mailbox, uid)
             return
         kind = classify(dest)
-        if kind == "trash_delete":
-            if not getattr(src, "_delete_writable", False):
-                self.sendNegativeResponse(
-                    tag, verb + b" failed: delete is not enabled on this account"
-                )
-                return
+        if kind in ("soft_move", "restore"):
+            placement = None
+            required_direction = None
+            if kind == "soft_move":
+                placement = getattr(self.account, "placement_mailbox", lambda _n: None)(dest)
+                if placement is None:
+                    self.sendNegativeResponse(
+                        tag, verb + b" failed: unknown durable destination"
+                    )
+                    return
+            else:
+                # #352 core unblocker 5: restoring TO INBOX/Sent/All must reject a
+                # direction-incompatible source (inbound can't restore to Sent,
+                # outbound can't restore to INBOX) -- checked here, before the
+                # move, so the whole batch fails atomically on a mismatch.
+                required_direction = getattr(
+                    self.account, "restore_direction", lambda _n: None
+                )(dest)
             maybeDeferred(src.fetch, messages, uid).addCallback(
-                self._cbCopyToTrashDelete, tag, is_move
+                self._cbSoftMove, tag, is_move, placement, required_direction
             ).addErrback(self._ebCopyToTrashDelete, tag, verb)
             return
         if kind == "placeholder":
@@ -410,29 +399,36 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             return
         imap4.IMAP4Server.do_COPY(self, tag, messages, mailbox, uid)
 
-    def _cbCopyToTrashDelete(self, fetched, tag, is_move=False):
+    def _cbSoftMove(self, fetched, tag, is_move=False, mailbox=None, required_direction=None):
         src = getattr(self, "mbox", None)
         verb = b"MOVE" if is_move else b"COPY"
         if src is None:
             self.sendNegativeResponse(tag, verb + b" failed: no mailbox selected")
             return
-        # RFC 6851 sec 3: MOVE emits an untagged EXPUNGE per moved message. Capture the
-        # source SEQUENCE numbers from the pre-delete snapshot and emit them high-to-low
-        # so no running decrement is needed (removing the highest first leaves every
-        # lower sequence number valid), the same rule as PosternMailbox.expunge()
-        # (#300/#301). COPY emits none (see do_COPY).
-        moved_seqs = sorted((seq for seq, _msg in fetched), reverse=True)
         try:
-            src.delete_fetched_messages(fetched)
+            mover = getattr(src, "soft_move_fetched_messages", None)
+            if callable(mover):
+                removed_seqs = mover(fetched, mailbox, required_direction=required_direction)
+            else:
+                removed_seqs = src.delete_fetched_messages(fetched)
         except imap4.MailboxException as exc:
             self.sendNegativeResponse(tag, verb + b" failed: " + networkString(str(exc)))
         except Exception as exc:
             self.sendBadResponse(tag, verb + b" failed: " + networkString(str(exc)))
         else:
-            if is_move:
-                for seq in moved_seqs:
+            # #352 review: emit untagged EXPUNGE for whichever source rows the
+            # move ACTUALLY removed from this view's live snapshot -- for BOTH
+            # COPY and MOVE (there is no true dual-membership copy in this
+            # exclusive-placement model; a client not told would hold a stale
+            # sequence mapping regardless of verb). This replaces the old
+            # is_move-only gate that left COPY silently FETCH-unstable.
+            if removed_seqs:
+                for seq in removed_seqs:
                     self.sendUntaggedResponse(b"%d EXPUNGE" % (seq,))
             self.sendPositiveResponse(tag, verb + b" completed")
+
+    # Back-compat alias for unit tests that call the pre-#352 callback name.
+    _cbCopyToTrashDelete = _cbSoftMove
 
     def _ebCopyToTrashDelete(self, failure, tag, verb=b"COPY"):
         self.sendBadResponse(tag, verb + b" failed: " + networkString(str(failure.value)))

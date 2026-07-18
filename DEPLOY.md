@@ -76,7 +76,10 @@ INSERT INTO d1_migrations (name) VALUES
   ('0005_messages_autoincrement_uid.sql'),
   ('0006_envelope_v2.sql'),
   ('0007_seen.sql'),
-  ('0008_vector_ledger.sql');
+  ('0008_vector_ledger.sql'),
+  ('0009_seen_by_recipient.sql'),
+  ('0010_webmail_sessions.sql'),
+  ('0011_durable_mailboxes.sql');
 "
 ```
 
@@ -89,7 +92,7 @@ npx wrangler d1 migrations list postern --remote
 **Greenfield alternative:** skip `schema.sql` and apply migrations directly
 (`npx wrangler d1 migrations apply postern --remote`). Migration
 `0000_base_schema.sql` creates the base `messages` table, so the full chain
-(`0000` through `0008`) bootstraps an empty store on its own; wrangler creates
+(`0000` through `0011`) bootstraps an empty store on its own; wrangler creates
 `d1_migrations` and records each file as it runs, and CI then no-ops until a new
 migration lands. Use this OR the `schema.sql` + baseline-seed path above, never
 both. (`0000` is `CREATE TABLE IF NOT EXISTS`, so it is also a harmless no-op on
@@ -248,8 +251,9 @@ explicit config var (a plain `vars` entry, not a secret; it holds no credential)
 ```
 
 With `native`, users sign in with the username + secret you minted via
-`POST /api/admin/smtp-credentials`; the session grants read + send (browse,
-compose, reply), and sign-out revokes it instantly server-side. Directory
+`POST /api/admin/smtp-credentials`; the session grants read + send + delete
+(browse, compose, organize, and empty its own Trash), and sign-out revokes it
+instantly server-side. Directory
 (`ldap`/`system`) sign-in is designed but deferred, so those deployments keep using
 BYO-token webmail. Details: [webmail/README.md](webmail/README.md).
 

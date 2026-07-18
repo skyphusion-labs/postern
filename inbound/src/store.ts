@@ -27,6 +27,10 @@ export interface StoredMessage {
    *  by POST /api/messages/seen (the IMAP \Seen flag / a webmail "mark read"). The
    *  human doors surface it as unread; agents can ignore it. */
   seen: boolean;
+  flagged: boolean;
+  answered: boolean;
+  mailbox: MailboxPlacement;
+  trashedAt: string | null;
   // --- M8 envelope fidelity v2 (#189). All nullable: absent = a pre-v2 row that
   //     renders exactly as before. Header-fidelity fields are the raw RFC 5322
   //     headers as they arrived (display names and all); deliveredTo is the
@@ -72,6 +76,11 @@ export interface StoredMessageSummary {
   /** Read state (#seen): false = unread. Mirrors StoredMessage.seen so a list/search
    *  summary drives the unread view without a per-message body fetch. */
   seen: boolean;
+  flagged: boolean;
+  answered: boolean;
+  mailbox: MailboxPlacement;
+  trashedAt: string | null;
+  folderUid: number | null;
   // M8 (#189): same envelope-fidelity fields as StoredMessage, so a list/search
   // summary can render Cc/Reply-To and answer "mail for X" on the delivered set.
   cc: string | null;
@@ -92,10 +101,18 @@ export interface ListQuery {
   from?: string;
   thread?: string;
   direction?: "inbound" | "outbound";
+  mailbox?: MailboxFilter;
+  /** Internal account boundary for a bound webmail session. Unlike public `to`,
+   * this includes the viewer's authored Sent rows in All while keeping Inbox
+   * recipient-relative. Never accepted directly from a query parameter. */
+  viewer?: string;
   q?: string; // FTS over subject + body
   limit?: number; // default 50, max 200
   cursor?: string; // opaque; encodes (date, id) of the last row
 }
+
+export type MailboxPlacement = "archive" | "trash" | "junk" | null;
+export type MailboxFilter = MailboxPlacement | "all";
 
 export type SearchField = "subject" | "body" | "text";
 
@@ -109,6 +126,14 @@ export interface SearchQuery {
   // Viewer address for recipient-scoped search (#350): delivered-set membership +
   // viewer-relative INBOX + effective (per-recipient) seen, same as ListQuery.to.
   to?: string;
+  // Durable-folder scope (#352), same semantics as ListQuery.mailbox: "all" = every
+  // placement, archive|trash|junk = that placement only, undefined = mailbox IS NULL
+  // (the direction-default INBOX/Sent view). Substr-only for now (the IMAP door's
+  // SEARCH path); fts/semantic/hybrid are unfiltered here (pre-existing, unrelated
+  // to #352 -- a folder-scoped IMAP SEARCH only ever calls mode=substr).
+  mailbox?: string;
+  /** Internal bound-session account boundary; never caller-controlled. */
+  viewer?: string;
   limit?: number;
   cursor?: string;
 }
@@ -569,6 +594,10 @@ interface MessageRow {
   sender_addr: string | null;
   reply_to_addr: string | null;
   wire_size: number | null;
+  flagged: number;
+  answered: number;
+  mailbox: string | null;
+  trashed_at: string | null;
 }
 
 function rowToMessage(row: MessageRow, attachments: AttachmentMeta[]): StoredMessage {
@@ -587,6 +616,10 @@ function rowToMessage(row: MessageRow, attachments: AttachmentMeta[]): StoredMes
     trusted: row.trusted === 1,
     receivedAt: row.received_at,
     seen: row.seen === 1,
+    flagged: row.flagged === 1,
+    answered: row.answered === 1,
+    mailbox: normalizeMailbox(row.mailbox),
+    trashedAt: row.trashed_at ?? null,
     cc: row.cc_addr ?? null,
     bcc: row.bcc_addr ?? null,
     sender: row.sender_addr ?? null,
@@ -595,6 +628,10 @@ function rowToMessage(row: MessageRow, attachments: AttachmentMeta[]): StoredMes
     wireSize: row.wire_size ?? null,
     attachments,
   };
+}
+
+function normalizeMailbox(value: string | null): MailboxPlacement {
+  return value === "archive" || value === "trash" || value === "junk" ? value : null;
 }
 
 async function attachmentsFor(db: D1Database, messageId: string): Promise<AttachmentMeta[]> {
@@ -694,6 +731,244 @@ export async function setSeen(
   return (res.results ?? []).length;
 }
 
+/** Persist \Flagged / \Answered beside the existing durable \Seen flag. */
+export async function setFlags(
+  env: Env,
+  messageIds: string[],
+  set: { flagged?: boolean; answered?: boolean },
+  viewer?: string,
+): Promise<number> {
+  if (messageIds.length === 0 || (set.flagged === undefined && set.answered === undefined)) return 0;
+  const assignments: string[] = [];
+  const binds: unknown[] = [];
+  if (set.flagged !== undefined) {
+    assignments.push("flagged = ?");
+    binds.push(set.flagged ? 1 : 0);
+  }
+  if (set.answered !== undefined) {
+    assignments.push("answered = ?");
+    binds.push(set.answered ? 1 : 0);
+  }
+  const placeholders = messageIds.map(() => "?").join(", ");
+  let access = "";
+  if (viewer) {
+    access =
+      " AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)";
+  }
+  const res = await env.DB.prepare(
+    `UPDATE messages SET ${assignments.join(", ")} WHERE message_id IN (${placeholders})${access} RETURNING message_id`,
+  )
+    .bind(...binds, ...messageIds, ...(viewer ? [viewer.toLowerCase(), viewer.toLowerCase()] : []))
+    .all<{ message_id: string }>();
+  return (res.results ?? []).length;
+}
+
+async function ensureFolderCounter(env: Env, folder: string): Promise<{ nextUid: number; uidvalidity: number }> {
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO mailbox_uid_counter (folder, next_uid, uidvalidity) VALUES (?, 1, ?)",
+  )
+    .bind(folder, Math.floor(Date.now() / 1000))
+    .run();
+  const current = await env.DB.prepare(
+    "SELECT next_uid, uidvalidity FROM mailbox_uid_counter WHERE folder = ?",
+  )
+    .bind(folder)
+    .first<{ next_uid: number; uidvalidity: number }>();
+  if (!current) throw new Error(`failed to initialize UID counter for ${folder}`);
+  return { nextUid: current.next_uid, uidvalidity: current.uidvalidity };
+}
+
+async function allocateFolderUid(env: Env, folder: string): Promise<{ uid: number; uidvalidity: number }> {
+  await ensureFolderCounter(env, folder);
+  const row = await env.DB.prepare(
+    "UPDATE mailbox_uid_counter SET next_uid = next_uid + 1 WHERE folder = ? " +
+      "RETURNING next_uid - 1 AS uid, uidvalidity",
+  )
+    .bind(folder)
+    .first<{ uid: number; uidvalidity: number }>();
+  if (!row) throw new Error(`failed to allocate UID for ${folder}`);
+  return row;
+}
+
+/** Move messages between the mutually-exclusive durable system boxes. */
+export async function moveMessages(
+  env: Env,
+  messageIds: string[],
+  mailbox: MailboxPlacement,
+  viewer?: string,
+): Promise<number> {
+  let updated = 0;
+  for (const id of messageIds) {
+    const row = await env.DB.prepare(
+      "SELECT mailbox FROM messages WHERE message_id = ? " +
+        (viewer
+          ? "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
+          : ""),
+    )
+      .bind(id, ...(viewer ? [viewer.toLowerCase(), viewer.toLowerCase()] : []))
+      .first<{ mailbox: string | null }>();
+    if (!row || normalizeMailbox(row.mailbox) === mailbox) continue;
+
+    const placement = mailbox ? await allocateFolderUid(env, mailbox) : null;
+    const now = new Date().toISOString();
+    const statements = [
+      env.DB.prepare(
+        "UPDATE messages SET mailbox = ?, trashed_at = ? WHERE message_id = ?",
+      ).bind(mailbox, mailbox === "trash" ? now : null, id),
+      env.DB.prepare("DELETE FROM mailbox_placement WHERE message_id = ?").bind(id),
+    ];
+    if (mailbox && placement) {
+      statements.push(
+        env.DB.prepare(
+          "INSERT INTO mailbox_placement (message_id, folder, folder_uid, added_at) VALUES (?, ?, ?, ?)",
+        ).bind(id, mailbox, placement.uid, now),
+      );
+    }
+    await env.DB.batch(statements);
+    updated++;
+  }
+  return updated;
+}
+
+export interface Draft {
+  id: string;
+  identity: string;
+  to: string | null;
+  cc: string | null;
+  bcc: string | null;
+  subject: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+  inReplyTo: string | null;
+  threadId: string | null;
+  uid: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface DraftRow {
+  id: string;
+  identity: string;
+  to_addr: string | null;
+  cc_addr: string | null;
+  bcc_addr: string | null;
+  subject: string | null;
+  body_text: string | null;
+  body_html: string | null;
+  in_reply_to: string | null;
+  thread_id: string | null;
+  uid: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToDraft(row: DraftRow): Draft {
+  return {
+    id: row.id,
+    identity: row.identity,
+    to: row.to_addr,
+    cc: row.cc_addr,
+    bcc: row.bcc_addr,
+    subject: row.subject,
+    bodyText: row.body_text,
+    bodyHtml: row.body_html,
+    inReplyTo: row.in_reply_to,
+    threadId: row.thread_id,
+    uid: row.uid,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export type DraftInput = Pick<Draft, "to" | "cc" | "bcc" | "subject" | "bodyText" | "bodyHtml" | "inReplyTo" | "threadId">;
+
+const DRAFT_COLUMNS =
+  "id, identity, to_addr, cc_addr, bcc_addr, subject, body_text, body_html, in_reply_to, thread_id, uid, created_at, updated_at";
+
+export async function listDrafts(env: Env, identity: string): Promise<Draft[]> {
+  const res = await env.DB.prepare(
+    `SELECT ${DRAFT_COLUMNS} FROM drafts WHERE identity = ? ORDER BY updated_at DESC`,
+  )
+    .bind(identity.toLowerCase())
+    .all<DraftRow>();
+  return (res.results ?? []).map(rowToDraft);
+}
+
+export async function getDraft(env: Env, id: string, identity: string): Promise<Draft | null> {
+  const row = await env.DB.prepare(
+    `SELECT ${DRAFT_COLUMNS} FROM drafts WHERE id = ? AND identity = ? LIMIT 1`,
+  )
+    .bind(id, identity.toLowerCase())
+    .first<DraftRow>();
+  return row ? rowToDraft(row) : null;
+}
+
+/** Owning identity of a draft id, regardless of caller identity, or null if it doesn't exist. */
+export async function getDraftOwner(env: Env, id: string): Promise<string | null> {
+  const row = await env.DB.prepare("SELECT identity FROM drafts WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<{ identity: string }>();
+  return row ? row.identity : null;
+}
+
+export async function putDraft(
+  env: Env,
+  id: string,
+  identity: string,
+  input: DraftInput,
+  expectedUpdatedAt?: string,
+): Promise<{ draft: Draft; conflict: boolean }> {
+  const owner = identity.toLowerCase();
+  const current = await getDraft(env, id, owner);
+  if (current && expectedUpdatedAt !== current.updatedAt) return { draft: current, conflict: true };
+  const { uid } = await allocateFolderUid(env, "drafts");
+  const nowDate = new Date();
+  if (current && nowDate.toISOString() <= current.updatedAt) nowDate.setTime(Date.parse(current.updatedAt) + 1);
+  const now = nowDate.toISOString();
+  if (current) {
+    await env.DB.prepare(
+      "UPDATE drafts SET to_addr=?, cc_addr=?, bcc_addr=?, subject=?, body_text=?, body_html=?, " +
+        "in_reply_to=?, thread_id=?, uid=?, updated_at=? WHERE id=? AND identity=?",
+    )
+      .bind(input.to, input.cc, input.bcc, input.subject, input.bodyText, input.bodyHtml,
+        input.inReplyTo, input.threadId, uid, now, id, owner)
+      .run();
+  } else {
+    await env.DB.prepare(
+      "INSERT INTO drafts (id, identity, to_addr, cc_addr, bcc_addr, subject, body_text, body_html, " +
+        "in_reply_to, thread_id, uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+      .bind(id, owner, input.to, input.cc, input.bcc, input.subject, input.bodyText, input.bodyHtml,
+        input.inReplyTo, input.threadId, uid, now, now)
+      .run();
+  }
+  return { draft: (await getDraft(env, id, owner))!, conflict: false };
+}
+
+export async function deleteDraft(env: Env, id: string, identity: string): Promise<boolean> {
+  const res = await env.DB.prepare("DELETE FROM drafts WHERE id = ? AND identity = ?")
+    .bind(id, identity.toLowerCase())
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+export async function messageAccessible(
+  env: Env,
+  id: string,
+  identity: string,
+  requireTrash = false,
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT message_id FROM messages WHERE message_id = ? " +
+      "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?) " +
+      (requireTrash ? "AND mailbox = 'trash' " : "") +
+      "LIMIT 1",
+  )
+    .bind(id, identity.toLowerCase(), identity.toLowerCase())
+    .first<{ message_id: string }>();
+  return !!row;
+}
+
 /** Batch-delete Vectorize ids (20/call cap matches getByIds). */
 async function deleteVectorIds(env: Env, ids: string[]): Promise<void> {
   if (!env.VECTORIZE || ids.length === 0) return;
@@ -739,6 +1014,7 @@ export async function deleteMessage(
   await deleteVectorIds(env, vectorIds);
   await env.DB.prepare("DELETE FROM vector_ledger WHERE message_id = ?").bind(messageId).run();
   await env.DB.prepare("DELETE FROM message_seen_by WHERE message_id = ?").bind(messageId).run();
+  await env.DB.prepare("DELETE FROM mailbox_placement WHERE message_id = ?").bind(messageId).run();
 
   const attRes = await env.DB.prepare("SELECT r2_key FROM attachments WHERE message_id = ?")
     .bind(messageId)
@@ -762,7 +1038,8 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
   const row = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
-            delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size
+            delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
+            flagged, answered, mailbox, trashed_at
        FROM messages WHERE message_id = ? LIMIT 1`,
   )
     .bind(messageId)
@@ -772,14 +1049,20 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
 }
 
 /** All messages in a thread, oldest first. */
-export async function thread(env: Env, threadId: string): Promise<StoredMessage[]> {
+export async function thread(env: Env, threadId: string, viewer?: string): Promise<StoredMessage[]> {
+  const owner = viewer?.trim().toLowerCase();
   const res = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
-            delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size
-       FROM messages WHERE thread_id = ? ORDER BY date, id`,
+            delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
+            flagged, answered, mailbox, trashed_at
+       FROM messages WHERE thread_id = ? ${
+         owner
+           ? "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
+           : ""
+       } ORDER BY date, id`,
   )
-    .bind(threadId)
+    .bind(threadId, ...(owner ? [owner, owner] : []))
     .all<MessageRow>();
   const rows = res.results ?? [];
   const out: StoredMessage[] = [];
@@ -845,6 +1128,36 @@ function recipientWhere(
   return out;
 }
 
+/** Account-owned view for a bound webmail session. */
+function accountWhere(
+  viewer: string,
+  direction: "inbound" | "outbound" | undefined,
+): { membership: string | null; membershipBinds: unknown[]; direction: string | null; directionBinds: unknown[] } {
+  const delivered = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
+  if (direction === "inbound") {
+    return {
+      membership: delivered,
+      membershipBinds: [viewer],
+      direction: "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))",
+      directionBinds: [viewer],
+    };
+  }
+  if (direction === "outbound") {
+    return {
+      membership: null,
+      membershipBinds: [],
+      direction: "lower(m.from_addr) = ?",
+      directionBinds: [viewer],
+    };
+  }
+  return {
+    membership: `(${delivered} OR lower(m.from_addr) = ?)`,
+    membershipBinds: [viewer, viewer],
+    direction: null,
+    directionBinds: [],
+  };
+}
+
 // --- List / search (CONTRACT section 1 / section 4) ---
 
 // Summary rows carry the rowid for keyset pagination + attachment/hasHtml flags, but
@@ -874,6 +1187,11 @@ interface SummaryRow {
   wire_size: number | null;
   has_html: number;
   attachment_count: number;
+  flagged: number;
+  answered: number;
+  mailbox: string | null;
+  trashed_at: string | null;
+  folder_uid: number | null;
 }
 
 function rowToSummary(row: SummaryRow): StoredMessageSummary {
@@ -898,6 +1216,11 @@ function rowToSummary(row: SummaryRow): StoredMessageSummary {
     wireSize: row.wire_size ?? null,
     attachmentCount: row.attachment_count,
     hasHtml: row.has_html === 1,
+    flagged: row.flagged === 1,
+    answered: row.answered === 1,
+    mailbox: normalizeMailbox(row.mailbox),
+    trashedAt: row.trashed_at ?? null,
+    folderUid: row.folder_uid ?? null,
   };
 }
 
@@ -941,8 +1264,9 @@ function toFtsQuery(q: string): string {
  */
 export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSummary>> {
   const limit = clampLimit(q.limit);
-  const viewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(viewer);
+  const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
+  const recipientViewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(accountViewer ?? recipientViewer);
   const seenExpr = sp.expr;
   const where: string[] = [];
   const binds: unknown[] = [...sp.binds];
@@ -961,7 +1285,9 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   // Recipient view (#178 delivered-set membership) at the `to` slot; the direction
   // predicate (viewer-relative INBOX for #350) is appended AFTER from/thread so the
   // bind order stays stable. ONE builder for list, fts, and substr search.
-  const rv = recipientWhere(viewer, q.direction);
+  const rv = accountViewer
+    ? accountWhere(accountViewer, q.direction)
+    : recipientWhere(recipientViewer, q.direction);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -978,6 +1304,14 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     where.push(rv.direction);
     binds.push(...rv.directionBinds);
   }
+  if (q.mailbox !== "all") {
+    if (q.mailbox) {
+      where.push("m.mailbox = ?");
+      binds.push(q.mailbox);
+    } else {
+      where.push("m.mailbox IS NULL");
+    }
+  }
 
   const cur = decodeCursor(q.cursor);
   if (cur) {
@@ -991,6 +1325,8 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            m.flagged, m.answered, m.mailbox, m.trashed_at,
+            (SELECT mp.folder_uid FROM mailbox_placement mp WHERE mp.message_id=m.message_id AND mp.folder=m.mailbox) AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m ${whereSql}
@@ -1007,6 +1343,76 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   const last = page[page.length - 1];
   const cursor = hasMore && last ? encodeCursor(last.date, last.id) : null;
   return { items, cursor };
+}
+
+export interface FolderSummary {
+  id: "inbox" | "sent" | "all" | "drafts" | "trash" | "junk" | "archive";
+  label: string;
+  count: number;
+  unread: number;
+  /** Authoritative durable-folder UIDVALIDITY; absent on arrival views. */
+  uidValidity?: number;
+}
+
+/** Server-authoritative folder counts using the same placement predicates as list. */
+export async function folders(env: Env, viewer?: string): Promise<FolderSummary[]> {
+  const identity = viewer?.trim().toLowerCase() || undefined;
+  const access = identity
+    ? "(COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%' OR lower(m.from_addr) = ?)"
+    : "1=1";
+  const definitions: Array<[FolderSummary["id"], string, string]> = [
+    ["inbox", "Inbox", identity
+      ? "m.mailbox IS NULL AND " + access +
+        " AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))"
+      : "m.mailbox IS NULL AND m.direction='inbound'"],
+    ["sent", "Sent", identity
+      ? "m.mailbox IS NULL AND lower(m.from_addr) = ?"
+      : "m.mailbox IS NULL AND m.direction='outbound'"],
+    ["all", "All", access],
+    ["trash", "Trash", `m.mailbox='trash' AND ${access}`],
+    ["junk", "Junk", `m.mailbox='junk' AND ${access}`],
+    ["archive", "Archive", `m.mailbox='archive' AND ${access}`],
+  ];
+  const result: FolderSummary[] = [];
+  for (const [id, label, predicate] of definitions) {
+    const binds: unknown[] = [];
+    if (identity) {
+      if (id === "sent") binds.push(identity);
+      else if (id === "inbox") binds.push(identity, identity, identity);
+      else binds.push(identity, identity);
+    }
+    const seen = seenProjection(identity);
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS count, SUM(CASE WHEN ${seen.expr}=0 THEN 1 ELSE 0 END) AS unread ` +
+        `FROM messages m WHERE ${predicate}`,
+    )
+      .bind(...seen.binds, ...binds)
+      .first<{ count: number; unread: number | null }>();
+    const durable = id === "trash" || id === "junk" || id === "archive"
+      ? await ensureFolderCounter(env, id)
+      : null;
+    result.push({
+      id,
+      label,
+      count: Number(row?.count ?? 0),
+      unread: Number(row?.unread ?? 0),
+      ...(durable ? { uidValidity: durable.uidvalidity } : {}),
+    });
+  }
+  const draftCounter = await ensureFolderCounter(env, "drafts");
+  const draftRow = identity
+    ? await env.DB.prepare("SELECT COUNT(*) AS count FROM drafts WHERE identity = ?")
+        .bind(identity)
+        .first<{ count: number }>()
+    : { count: 0 };
+  result.splice(3, 0, {
+    id: "drafts",
+    label: "Drafts",
+    count: Number(draftRow?.count ?? 0),
+    unread: 0,
+    uidValidity: draftCounter.uidvalidity,
+  });
+  return result;
 }
 
 /**
@@ -1046,8 +1452,9 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const ftsExpr = toFtsQuery(q.q ?? "");
   if (!ftsExpr) return { items: [], cursor: null };
 
-  const viewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(viewer);
+  const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
+  const recipientViewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(accountViewer ?? recipientViewer);
   const seenExpr = sp.expr;
   // Seen bind (SELECT column) first, then the FTS match bind, then recipient/cursor.
   const binds: unknown[] = [...sp.binds, ftsExpr];
@@ -1055,7 +1462,9 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
 
   // Recipient view + viewer-relative INBOX (#350/#178); membership then direction,
   // the same order list/substr use, so fts shares the one "INBOX for V" builder.
-  const rv = recipientWhere(viewer, q.direction);
+  const rv = accountViewer
+    ? accountWhere(accountViewer, q.direction)
+    : recipientWhere(recipientViewer, q.direction);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -1075,6 +1484,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            m.flagged, m.answered, m.mailbox, m.trashed_at, NULL AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE ${where.join(" AND ")}
@@ -1143,8 +1553,9 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const cols = substrColumns(q.field ?? "text");
   const pattern = escapeLikePattern(raw);
 
-  const viewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(viewer);
+  const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
+  const recipientViewer = q.to?.trim().toLowerCase() || undefined;
+  const sp = seenProjection(accountViewer ?? recipientViewer);
   const seenExpr = sp.expr;
 
   // Case-insensitivity is SQLite LIKE's native ASCII folding (CONTRACT 10.8);
@@ -1156,7 +1567,9 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const where: string[] = [`(${orClause})`];
 
   // Recipient view + viewer-relative INBOX (#350/#178).
-  const rv = recipientWhere(viewer, q.direction);
+  const rv = accountViewer
+    ? accountWhere(accountViewer, q.direction)
+    : recipientWhere(recipientViewer, q.direction);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -1164,6 +1577,16 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   if (rv.direction) {
     where.push(rv.direction);
     binds.push(...rv.directionBinds);
+  }
+  // Durable-folder scope (#352 review: SEARCH must pass mailbox=, not silently
+  // search the whole estate). "all" = every placement (no filter, mirrors list()).
+  if (q.mailbox !== "all") {
+    if (q.mailbox) {
+      where.push("m.mailbox = ?");
+      binds.push(q.mailbox);
+    } else {
+      where.push("m.mailbox IS NULL");
+    }
   }
 
   const cur = decodeCursor(q.cursor);
@@ -1176,6 +1599,8 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            m.flagged, m.answered, m.mailbox, m.trashed_at,
+            (SELECT mp.folder_uid FROM mailbox_placement mp WHERE mp.message_id=m.message_id AND mp.folder=m.mailbox) AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE ${where.join(" AND ")}
@@ -1250,6 +1675,7 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
+            m.flagged, m.answered, m.mailbox, m.trashed_at, NULL AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE m.message_id IN (${placeholders})`;
@@ -1271,7 +1697,19 @@ function passesViewerScope(
   m: StoredMessageSummary,
   viewer: string | undefined,
   direction: "inbound" | "outbound" | undefined,
+  _fromFilter?: string,
+  accountViewer?: string,
 ): boolean {
+  if (accountViewer) {
+    const from = (parseRecipients(m.from)[0] ?? "").toLowerCase();
+    const delivered = m.deliveredTo.map((a) => a.toLowerCase());
+    if (direction === "outbound") return from === accountViewer;
+    if (direction === "inbound") {
+      return delivered.includes(accountViewer) &&
+        (m.direction === "inbound" || (m.direction === "outbound" && from !== accountViewer));
+    }
+    return delivered.includes(accountViewer) || from === accountViewer;
+  }
   if (!viewer) return !direction || m.direction === direction;
   const delivered = m.deliveredTo.map((a) => a.toLowerCase());
   if (!delivered.includes(viewer)) return false;
@@ -1289,18 +1727,19 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   if (!text) return { items: [], cursor: null };
 
   const viewer = q.to?.trim().toLowerCase() || undefined;
+  const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const queryVec = await embedQuery(env, text);
   if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
 
   const ranked = await nearestMessageIds(env, queryVec, limit);
-  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), viewer);
+  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), accountViewer ?? viewer);
   const items: SearchHit[] = [];
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
     if (!message) continue;
     // Viewer scope + direction restriction (#350/#128): the vector index is neither
     // recipient- nor direction-keyed, so scope the hydrated summaries (at most `limit`).
-    if (!passesViewerScope(message, viewer, q.direction)) continue;
+    if (!passesViewerScope(message, viewer, q.direction, undefined, accountViewer)) continue;
     items.push({ message, score: r.score });
   }
   // Score-ranked: single page, no date cursor.
@@ -1311,8 +1750,8 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const limit = clampLimit(q.limit);
   // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
   const [ftsPage, semPage] = await Promise.all([
-    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction, to: q.to }),
-    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction, to: q.to }),
+    ftsSearch(env, { q: q.q, mode: "fts", limit, direction: q.direction, to: q.to, viewer: q.viewer }),
+    semanticSearch(env, { q: q.q, mode: "semantic", limit, direction: q.direction, to: q.to, viewer: q.viewer }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();

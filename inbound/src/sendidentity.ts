@@ -14,8 +14,11 @@
 // indexes the map by that hash (an index on a hash of a high-entropy secret, so
 // the non-constant-time Map lookup does not leak the token).
 
-/** The scope a presented mailbox token carries (canonical home for the #85 type). */
-export type Scope = "read" | "send" | "both";
+/** The scope a presented mailbox token carries (canonical home for the #85 type).
+ *  `delete` is the #352 (C4) hard-delete scope: DELETE /api/messages/{id} accepts a
+ *  `delete` token OR `both`, so the IMAP EXPUNGE credential drops from full-admin
+ *  `both` to delete-only least privilege. `both` = read + send + delete + admin. */
+export type Scope = "read" | "send" | "delete" | "imap" | "both";
 
 /**
  * A sender identity bound to a registry token. `from` is AUTHORITATIVE: the worker
