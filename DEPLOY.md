@@ -79,7 +79,9 @@ INSERT INTO d1_migrations (name) VALUES
   ('0008_vector_ledger.sql'),
   ('0009_seen_by_recipient.sql'),
   ('0010_webmail_sessions.sql'),
-  ('0011_durable_mailboxes.sql');
+  ('0011_durable_mailboxes.sql'),
+  ('0012_projected_size.sql'),
+  ('0013_draft_attachments.sql');
 "
 ```
 
@@ -92,7 +94,7 @@ npx wrangler d1 migrations list postern --remote
 **Greenfield alternative:** skip `schema.sql` and apply migrations directly
 (`npx wrangler d1 migrations apply postern --remote`). Migration
 `0000_base_schema.sql` creates the base `messages` table, so the full chain
-(`0000` through `0011`) bootstraps an empty store on its own; wrangler creates
+(`0000` through `0013`) bootstraps an empty store on its own; wrangler creates
 `d1_migrations` and records each file as it runs, and CI then no-ops until a new
 migration lands. Use this OR the `schema.sql` + baseline-seed path above, never
 both. (`0000` is `CREATE TABLE IF NOT EXISTS`, so it is also a harmless no-op on

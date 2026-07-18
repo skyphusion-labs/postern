@@ -15,12 +15,13 @@ import re
 from datetime import datetime, timezone
 from html import escape as _html_escape
 from typing import Optional, Sequence
-from email.header import Header
-from email.utils import format_datetime, formataddr, parseaddr, parsedate_to_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 
 from .client import Message, MessageSummary
 
-PROJECTION_VERSION = 1
+# v2: hand-rolled RFC 2047 B-encoding (no email.header.Header Q/fold) + B-encoded
+# non-ASCII filenames. Must stay byte-length identical to inbound/src/rfc822Project.ts.
+PROJECTION_VERSION = 2
 
 # Collapses RFC 5322 header folding (a CRLF/LF followed by leading whitespace) back
 # to a single space, so a value handed to the IMAP ENVELOPE serializer is one line:
@@ -58,14 +59,19 @@ def _hdr(value: str) -> str:
     return value.replace("\r", " ").replace("\n", " ")
 
 
+def _b64_word(value: str) -> str:
+    """One RFC 2047 encoded-word using UTF-8 Base64 (matches rfc822Project.ts)."""
+    return "=?utf-8?b?" + base64.b64encode(value.encode("utf-8")).decode("ascii") + "?="
+
+
 def _encode_header_value(value: str) -> str:
-    """RFC 2047-encode a unstructured header when it is non-ASCII."""
+    """RFC 2047-encode an unstructured header when it is non-ASCII."""
     v = _hdr(value)
     try:
         v.encode("ascii")
         return v
     except UnicodeEncodeError:
-        return Header(v, "utf-8").encode()
+        return _b64_word(v)
 
 
 def _encode_address_header(value: str) -> str:
@@ -75,11 +81,15 @@ def _encode_address_header(value: str) -> str:
         v.encode("ascii")
         return v
     except UnicodeEncodeError:
-        name, addr = parseaddr(v)
-        if addr:
-            enc_name = Header(name, "utf-8").encode() if name else ""
-            return formataddr((enc_name, addr)) if enc_name else addr
-        return Header(v, "utf-8").encode()
+        # Same shape as inbound/src/rfc822Project.ts encodeAddressHeader.
+        m = re.match(r"^(.*)<([^<>]+)>\s*$", v)
+        if m:
+            name = m.group(1).strip().strip('"')
+            addr = m.group(2).strip()
+            if not name:
+                return addr
+            return f"{_b64_word(name)} <{addr}>"
+        return _b64_word(v)
 
 
 def _to_wire(value: str) -> str:
@@ -136,7 +146,14 @@ def _mime_from_filename(filename: Optional[str]) -> Optional[str]:
 
 
 def _quote_filename(name: str) -> str:
-    return _hdr(name).replace("\\", "\\\\").replace('"', '\\"')
+    """Quote a Content-Disposition/Type filename; B-encode when non-ASCII."""
+    v = _hdr(name)
+    try:
+        v.encode("ascii")
+        encoded = v
+    except UnicodeEncodeError:
+        encoded = _b64_word(v)
+    return encoded.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _ensure_trailing_nl(text: str) -> str:
@@ -187,7 +204,8 @@ def _envelope_lines(msg: Message) -> list[str]:
 
 
 def _part(headers: list[str], body: bytes) -> bytes:
-    return ("\n".join(headers) + "\n\n").encode("ascii", "replace") + body
+    # Headers are ASCII after RFC 2047 encoding; fail loud if a bug leaks Unicode.
+    return ("\n".join(headers) + "\n\n").encode("ascii") + body
 
 
 def _text_body(text: str) -> bytes:
@@ -278,7 +296,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
     if not atts and not html_part:
         env.append('Content-Type: text/plain; charset="utf-8"')
         env.append("Content-Transfer-Encoding: 8bit")
-        return ("\n".join(env) + "\n\n").encode("ascii", "replace") + _text_body(plain)
+        return ("\n".join(env) + "\n\n").encode("ascii") + _text_body(plain)
 
     if not atts and html_part:
         boundary = _boundary_token(mid, "0")
@@ -300,7 +318,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
                 _text_body(html_part),
             ),
         ]
-        return ("\n".join(env) + "\n\n").encode("ascii", "replace") + _wrap_multipart(
+        return ("\n".join(env) + "\n\n").encode("ascii") + _wrap_multipart(
             boundary, parts
         )
 
@@ -320,7 +338,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
     parts = [first]
     for att, data in zip(msg.attachments, attachment_bytes):
         parts.append(_attachment_part(att.filename, att.mime, data))
-    return ("\n".join(env) + "\n\n").encode("ascii", "replace") + _wrap_multipart(
+    return ("\n".join(env) + "\n\n").encode("ascii") + _wrap_multipart(
         boundary, parts
     )
 

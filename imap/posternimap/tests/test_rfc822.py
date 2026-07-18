@@ -436,7 +436,51 @@ class ProjectedSizeTest(unittest.TestCase):
             attachments=[Attachment(filename="inv.pdf", mime="application/pdf", size=len(data))],
         )
         self.assertEqual(project_rfc822_size(m), len(render_rfc822(m, attachment_bytes=[data])))
-        self.assertEqual(PROJECTION_VERSION, 1)
+        self.assertEqual(PROJECTION_VERSION, 2)
+
+    def test_unicode_projection_sizes_match_worker_goldens(self):
+        # Lockstep with inbound/projected-size.test.ts (projection v2).
+        cases = [
+            (
+                _msg(message_id="u1", subject="café", body_text="hi"),
+                230,
+            ),
+            (
+                _msg(
+                    message_id="u2",
+                    from_addr="José <jose@example.com>",
+                    subject="Hello",
+                    body_text="hi",
+                ),
+                237,
+            ),
+            (
+                _msg(
+                    message_id="u3",
+                    subject="Hello",
+                    body_text="hi",
+                    attachments=[Attachment(filename="résumé.pdf", mime="application/pdf", size=10)],
+                ),
+                612,
+            ),
+            (
+                _msg(message_id="u4", subject=("Long " * 40) + "café", body_text="hi"),
+                498,
+            ),
+            (
+                _msg(message_id="u5", subject="Hello café world", body_text="hi"),
+                246,
+            ),
+        ]
+        for msg, expected in cases:
+            with self.subTest(message_id=msg.message_id):
+                self.assertEqual(project_rfc822_size(msg), expected)
+                if msg.attachments:
+                    placeholders = [b"\0" * a.size for a in msg.attachments]
+                    self.assertEqual(
+                        project_rfc822_size(msg),
+                        len(render_rfc822(msg, attachment_bytes=placeholders)),
+                    )
 
 
 if __name__ == "__main__":

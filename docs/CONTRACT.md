@@ -774,7 +774,10 @@ attachment size/filename/mime; no R2 reads). The IMAP door prefers this for RFC8
 zero attachment GETs. A renderer change bumps the version and requires a
 `POSTERN_IMAP_UIDVALIDITY` bump on the fleet image roll (same discipline as other projection
 changes). Pre-0012 rows keep NULL and fall back to a placeholder hydrate (message GET, still
-zero attachment GETs for SIZE).
+zero attachment GETs for SIZE). Projection v2 (current) uses hand-rolled RFC 2047
+Base64 encoded-words for non-ASCII headers and filenames in both
+`inbound/src/rfc822Project.ts` and `imap/posternimap/rfc822.py` -- never Python
+`email.header.Header` Q-encoding/folding, which diverged from the Worker cache.
 
 ### 10.4 Write side: who populates what
 
