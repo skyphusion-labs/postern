@@ -231,6 +231,28 @@ one browser tab via `sessionStorage`, nowhere else). Read, thread, and search
 work with a read token; supply a send-scoped token as well to compose and reply.
 Details: [webmail/README.md](webmail/README.md).
 
+#### Optional: username/password sign-in (session mode, #351)
+
+Webmail can also mint a short-lived, HttpOnly-cookie **session** from a
+username/password (the same `smtp_credentials` login you provision for SMTP
+submission), instead of pasting a token. It is **off by default** so that
+enabling this build changes nothing on an existing deployment; turn it on with an
+explicit config var (a plain `vars` entry, not a secret; it holds no credential):
+
+```jsonc
+// wrangler config "vars"
+"WEBMAIL_AUTH_BACKEND": "native",          // unset/"off" (default) = BYO-token only
+// optional session windows (seconds):
+"WEBMAIL_SESSION_IDLE_SECONDS": "1800",     // sliding idle window (default 30 min)
+"WEBMAIL_SESSION_ABSOLUTE_SECONDS": "43200" // absolute cap (default 12 h)
+```
+
+With `native`, users sign in with the username + secret you minted via
+`POST /api/admin/smtp-credentials`; the session grants read + send (browse,
+compose, reply), and sign-out revokes it instantly server-side. Directory
+(`ldap`/`system`) sign-in is designed but deferred, so those deployments keep using
+BYO-token webmail. Details: [webmail/README.md](webmail/README.md).
+
 ### IMAP proxy
 
 A small separate service that fronts the read API as IMAP, so Thunderbird, mutt,

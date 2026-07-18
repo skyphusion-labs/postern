@@ -85,14 +85,24 @@ A session is minted by verifying a credential. The verifier mirrors the door
 
 | `WEBMAIL_AUTH_BACKEND` | verifies against | phase |
 |---|---|---|
-| `native` (default) | `smtp_credentials` (the same PBKDF2 the relay `POST /api/smtp-auth` uses) | **phase 2** |
+| `off` (DEFAULT when unset) | no session endpoint; BYO-token only (self-host operator posture) | always available |
+| `native` (explicit opt-in) | `smtp_credentials` (the same PBKDF2 the relay `POST /api/smtp-auth` uses) | **phase 2** |
 | `ldap` / `system` | the directory, via a verifier the fleet doors already run | **phase 2+ (gated, see 1.9)** |
-| `off` | no session endpoint; BYO-token only (self-host operator posture) | always available |
 
-`native` is the fresh-clone default and the one this phase specifies end to end: the
-SAME username+secret a user configures for SMTP submission (native mode) logs into
-webmail. One credential, all doors, no new store; `smtp_credentials` becomes the local
-**account** table for the native backend, its role widened, its schema not forked.
+`native` is the fresh-clone RECOMMENDED backend and the one this phase specifies end
+to end: the SAME username+secret a user configures for SMTP submission (native mode)
+logs into webmail. One credential, all doors, no new store; `smtp_credentials` becomes
+the local **account** table for the native backend, its role widened, schema not forked.
+
+**Default is `off`, not `native` (amended in implementation, #351).** The contract
+first specified `native` as the default, but this repo auto-deploys to a live shared
+store with real `smtp_credentials` rows on every merge to main; a `native` default
+would silently convert every existing submission password into a full webmail session
+the moment #351 deploys, a surprise-on-deploy we do not ship. So an UNSET
+`WEBMAIL_AUTH_BACKEND` resolves to `off` (zero change to an existing deployment on
+merge), and an operator turns sessions on with an explicit `WEBMAIL_AUTH_BACKEND=native`
+after provisioning accounts (documented in DEPLOY). `ldap`/`system` are treated as
+`off` until the D-AUTH-2 phase lands.
 
 The `ldap`/`system` webmail login on a directory-backed deployment (the skyphusion
 fleet) is designed here but **gated to a later phase** because a Cloudflare Worker cannot
@@ -176,7 +186,10 @@ POST /api/session          (same-origin; no Authorization header)
 #### 1.5.2 The session record (server-side, D1)
 
 ```sql
--- migration 0010 (additive: CREATE TABLE only; auto-applies through the #112 gate)
+-- migration 0010 (#351: the webmail_sessions table ONLY; additive CREATE TABLE,
+-- auto-applies through the #112 gate). The section-2 durable-mailbox tables are a
+-- SEPARATE later migration, 0011 (#352); migrations are immutable per-deploy and the
+-- phases ship as separate PRs, so each phase takes its own migration number.
 CREATE TABLE IF NOT EXISTS webmail_sessions (
   id_hash      TEXT PRIMARY KEY,   -- sha256hex of the opaque cookie value; RAW id never stored
   identity     TEXT NOT NULL,      -- bound From address (authoritative sender for this session)
@@ -297,7 +310,7 @@ Full webmail needs durable **folder placement**, **flags beyond \Seen**, and
 ### 2.2 Flags beyond \Seen (additive columns)
 
 ```sql
--- migration 0010 (additive ALTER ADD COLUMN; auto-applies, no backfill, DEFAULT carries old rows)
+-- migration 0011 (#352) (additive ALTER ADD COLUMN; auto-applies, no backfill, DEFAULT carries old rows)
 ALTER TABLE messages ADD COLUMN flagged  INTEGER NOT NULL DEFAULT 0;  -- \Flagged / starred
 ALTER TABLE messages ADD COLUMN answered INTEGER NOT NULL DEFAULT 0;  -- \Answered
 ```
@@ -324,7 +337,7 @@ A message has ONE mutable system-box placement. INBOX/Sent are the arrival-defau
 Archive/Trash/Junk are placements a message MOVES into.
 
 ```sql
--- migration 0010 (additive)
+-- migration 0011 (#352) (additive)
 ALTER TABLE messages ADD COLUMN mailbox    TEXT;  -- NULL | 'archive' | 'trash' | 'junk'
 ALTER TABLE messages ADD COLUMN trashed_at TEXT;  -- soft-delete timestamp; drives Trash recovery window + purge
 ```
@@ -369,7 +382,7 @@ churn never touches the message store, its FTS, or its Vectorize index (C-class 
 stay off the mail store).
 
 ```sql
--- migration 0010 (additive: CREATE TABLE only)
+-- migration 0011 (#352) (additive: CREATE TABLE only)
 CREATE TABLE IF NOT EXISTS drafts (
   id           TEXT PRIMARY KEY,   -- server-minted uuid; the draft handle
   identity     TEXT NOT NULL,      -- owning account (bound From); IDOR boundary
@@ -481,7 +494,7 @@ UID, so INBOX/Sent stay conformant with `messages.id` and their existing UIDVALI
 preserved. Only the folders that gain messages out of order need the placement UID.
 
 ```sql
--- migration 0010 (additive: CREATE TABLE only). Backs per-folder UID assignment for
+-- migration 0011 (#352) (additive: CREATE TABLE only). Backs per-folder UID assignment for
 -- the re-populated folders. INBOX/Sent/All do NOT use this (they keep messages.id).
 CREATE TABLE IF NOT EXISTS mailbox_placement (
   message_id  TEXT NOT NULL,
@@ -507,17 +520,20 @@ insert/update the placement row).
 
 ### 2.7 Migration ordering and the #112 gate
 
-Everything in section 2 is `CREATE TABLE IF NOT EXISTS` or `ALTER TABLE ... ADD COLUMN`
+Everything in section 2 ships as migration `0011` (#352), separate from the auth-shell
+sessions table (migration `0010`, #351): migrations are immutable per-deploy and the
+phases ship as separate PRs. Every section-2 statement is `CREATE TABLE IF NOT EXISTS`
+or `ALTER TABLE ... ADD COLUMN`
 with a `DEFAULT`. That is the ADDITIVE class the `d1-migration-gate.mjs` auto-applies
 (section 0 principle 3). There is **no** `UPDATE`/backfill: old rows carry NULL `mailbox`
 (render in their direction-default view), `0` flags, no placement rows, and behave exactly
-as today. So migration `0010` needs no `postern:allow-destructive` marker and no
+as today. So migration `0011` needs no `postern:allow-destructive` marker and no
 supervised window; it ships with the code and applies online safely, the same discipline
 0006 and 0007 followed. `schema.sql` gains the same columns/tables for a fresh DB.
 
 If the implementation later needs to seed `mailbox_placement` for INBOX/Sent to unify the
 model, note that INBOX/Sent deliberately do NOT use the placement table (they keep
-`messages.id`), so no seed and no backfill is required, which keeps 0010 additive.
+`messages.id`), so no seed and no backfill is required, which keeps 0011 additive.
 
 ---
 

@@ -25,6 +25,13 @@ import {
   normalizeUsername,
 } from "./smtpcreds";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
+import {
+  handleSession,
+  resolveSession,
+  verifyCsrf,
+  sessionCookieValue,
+  webmailAuthBackend,
+} from "./session";
 import { readBodyCapped, PayloadTooLargeError } from "./body";
 import { handleMobileconfig } from "./mobileconfig";
 import { handleMtaSts } from "./mtasts";
@@ -70,6 +77,15 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     return handleSmtpAuth(request, env);
   }
 
+  // Webmail session endpoints (#351): sign in / whoami / sign out / refresh. Same-
+  // origin and NOT Bearer-gated (login carries no token), so handled BEFORE the token
+  // gate, mirroring /api/smtp-auth. handleSession owns CSRF for its state-changing
+  // verbs. It returns null only for a path it does not own (guarded here already).
+  if (path === "/api/session" || path === "/api/session/refresh") {
+    const sres = await handleSession(request, env);
+    if (sres) return sres;
+  }
+
   // The out-of-Worker inbound driver (CONTRACT section 2, #22/#29): POST /ingest
   // accepts a ParsedInbound JSON body from a transport that does NOT run inside CF
   // Email Routing (postern-relay's SMTP intake). It sits OUTSIDE /api/, gated by
@@ -96,8 +112,16 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   if (resolution === null) {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
+  // A session-authed state-changing request must carry a valid CSRF token (double-
+  // submit + session binding, contract 1.6). Bearer-authed requests are unaffected (a
+  // token is not ambient the way a cookie is). Reads are cookie+SameSite protected.
+  if (resolution.viaSession && isStateChanging(request.method)) {
+    if (!resolution.csrfHash || !(await verifyCsrf(request, resolution.csrfHash))) {
+      return json({ ok: false, error: "E_CSRF", message: "missing or invalid CSRF token" }, 403);
+    }
+  }
   const need = requiredScope(request.method, path);
-  if (need !== null && !scopeSatisfies(resolution.scope, need)) {
+  if (need !== null && !authorize(resolution, need)) {
     return json({ ok: false, error: "forbidden", message: `requires ${need} scope` }, 403);
   }
 
@@ -591,6 +615,56 @@ function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   return false; // admin: only `both`
 }
 
+// An authenticated resolution: a Bearer token (scope, optional bound identity) OR an
+// ambient webmail session (an explicit capability SET + bound identity + csrf binding).
+// `caps`, when present, is the authoritative grant and the gate checks membership; a
+// Bearer resolution has no `caps` and is checked via scopeSatisfies on `scope`.
+interface AuthResolution extends TokenResolution {
+  caps?: string[];
+  viaSession?: boolean;
+  csrfHash?: string;
+}
+
+// Resolve the ambient webmail session cookie to an AuthResolution, or null. Consulted
+// only when no Authorization header is present (Bearer wins, contract 1.8). Gated on
+// the native backend so flipping WEBMAIL_AUTH_BACKEND to off is an instant kill-switch.
+async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolution | null> {
+  if (webmailAuthBackend(env) !== "native") return null;
+  const rawId = sessionCookieValue(request);
+  if (!rawId) return null;
+  const session = await resolveSession(env, rawId);
+  if (!session) return null;
+  return {
+    scope: "read",
+    identity: session.identity,
+    caps: session.caps,
+    viaSession: true,
+    csrfHash: session.csrfHash,
+  };
+}
+
+// Authorize a resolution against a required route scope. A session carries an explicit
+// capability SET (checked by membership); a Bearer carries a single Scope (read/send/
+// both) checked by scopeSatisfies. `both` in either form satisfies everything.
+function authorize(resolution: AuthResolution, need: RouteScope): boolean {
+  if (resolution.caps) return capsSatisfy(resolution.caps, need);
+  return scopeSatisfies(resolution.scope, need);
+}
+
+// Capability-set membership. `both` grants all; otherwise the exact capability must be
+// present. `admin` is held only by `both`, so a webmail session (caps read+send) is
+// correctly denied credential provisioning, reindex, and hard-delete (the delete scope
+// arrives with the durable-mailbox phase #352, which adds "delete" to session caps).
+function capsSatisfy(caps: string[], need: RouteScope): boolean {
+  if (caps.includes("both")) return true;
+  return caps.includes(need);
+}
+
+// A state-changing method must carry CSRF when session-authed (contract 1.6).
+function isStateChanging(method: string): boolean {
+  return method !== "GET" && method !== "HEAD";
+}
+
 // Resolve the Authorization bearer to a scope (and, for a registry token, a bound
 // identity), or null if it matches nothing. The token is read from the Authorization
 // header only, never the URL/query.
@@ -612,10 +686,13 @@ function scopeSatisfies(have: Scope, need: RouteScope): boolean {
 //   2. Only if no static token matched, the per-identity send registry (#28): hash
 //      the presented Bearer and look it up. A hit grants `send` scope with an
 //      AUTHORITATIVE bound From; a miss is an unknown token (the caller returns 401).
-async function resolveToken(request: Request, env: Env): Promise<TokenResolution | null> {
+async function resolveToken(request: Request, env: Env): Promise<AuthResolution | null> {
   const auth = request.headers.get("authorization") ?? "";
   const got = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (got.length === 0) return null;
+  // No Authorization header: fall back to the ambient webmail session cookie (contract
+  // 1.8). An explicit Bearer ALWAYS wins; the cookie is consulted only when no Bearer
+  // is present, so a request is never treated as carrying two credentials at once.
+  if (got.length === 0) return resolveCookieAuth(request, env);
 
   const candidates: Array<[Scope, string[]]> = [
     ["both", tokenSet(env.POSTERN_API_TOKEN)],

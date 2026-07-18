@@ -107,20 +107,41 @@
   .compose-actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
   .compose-note { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
   .sendnote { color: var(--muted); font-size: 12px; }
+  header .identity { color: var(--fg); font-size: 13px; font-weight: 600; }
+
+  /* Keyboard focus visibility (a11y foundation): a clear ring for keyboard users
+     on every interactive control, without a persistent outline on mouse click. */
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .row-item:focus-visible { outline-offset: -2px; }
+
+  /* Sign-in card shares the gate look. */
+  #signin { margin: auto; max-width: 460px; padding: 28px; }
+  #signin .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px;
+  }
+  #signin h2 { margin: 0 0 4px; }
+  #signin p { color: var(--muted); margin: 6px 0 16px; font-size: 13px; }
+  #signin label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  #signin input { width: 100%; }
+  #signin .row { display: flex; gap: 8px; margin-top: 18px; }
+  #signin .row button { flex: 1; }
+  .switch { margin: 14px 0 0; font-size: 13px; }
+  .switch button { font: inherit; }
 </style>
 </head>
 <body>
 
-<header>
+<header role="banner">
   <h1>Postern webmail</h1>
   <span class="grow"></span>
+  <span class="identity" id="identity"></span>
   <span class="who" id="who"></span>
   <span class="sendnote" id="sendNote" style="display:none"></span>
   <button id="composeBtn" style="display:none">Compose</button>
   <button id="logout" class="link" style="display:none">Sign out</button>
 </header>
 
-<!-- Token gate -->
+<!-- BYO-token gate (operator / self-host path, contract 1.7) -->
 <div id="gate">
   <div class="card">
     <h2>Connect to your mailbox</h2>
@@ -136,29 +157,49 @@
     <div class="row">
       <button id="connect">Connect</button>
     </div>
-    <div class="err" id="gateErr"></div>
+    <div class="err" id="gateErr" role="alert" aria-live="assertive"></div>
+    <p class="switch" id="toSigninWrap" style="display:none"><button type="button" class="link" id="toSignin">Back to sign in</button></p>
+  </div>
+</div>
+
+<!-- Native sign-in (session cookie mode, #351) -->
+<div id="signin" style="display:none">
+  <div class="card">
+    <h2>Sign in to your mailbox</h2>
+    <p>Enter your Postern mailbox username and password.</p>
+    <form id="signinForm">
+      <label for="siUser">Username</label>
+      <input id="siUser" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false">
+      <label for="siPass">Password</label>
+      <input id="siPass" name="password" type="password" autocomplete="current-password">
+      <div class="row">
+        <button type="submit" id="siSubmit">Sign in</button>
+      </div>
+    </form>
+    <div class="err" id="signinErr" role="alert" aria-live="assertive"></div>
+    <p class="switch"><button type="button" class="link" id="toTokenGate">Use an API token instead</button></p>
   </div>
 </div>
 
 <!-- App -->
 <div id="app">
-  <div class="sidebar">
+  <div class="sidebar" role="navigation" aria-label="Mailbox">
     <div class="toolbar">
-      <input id="search" type="search" placeholder="Search (press Enter)">
-      <select id="searchMode" class="mode" title="Search mode (applies when searching)">
+      <input id="search" type="search" placeholder="Search (press Enter)" aria-label="Search mail">
+      <select id="searchMode" class="mode" title="Search mode (applies when searching)" aria-label="Search mode">
         <option value="hybrid">Hybrid</option>
         <option value="fts">Keyword</option>
         <option value="semantic">Semantic</option>
       </select>
-      <select id="folder" title="Folder">
+      <select id="folder" title="Folder" aria-label="Folder">
         <option value="">All</option>
         <option value="inbound">Inbox</option>
         <option value="outbound">Sent</option>
       </select>
     </div>
-    <div class="list" id="list"></div>
+    <div class="list" id="list" aria-label="Messages"></div>
   </div>
-  <div class="reading" id="reading">
+  <div class="reading" id="reading" role="main" aria-label="Message">
     <div class="empty">Select a message to read.</div>
   </div>
 </div>
@@ -198,6 +239,13 @@
     sendToken: SS.getItem("postern_send_token") || "",
     searchMode: normalizeSearchMode(SS.getItem("postern_search_mode") || "hybrid"),
     folder: "", q: "", cursor: null, items: [], selected: null,
+    // Auth mode: "token" = BYO Bearer token (operator/self-host path, sessionStorage);
+    // "session" = the native cookie session (#351), same-origin HttpOnly cookie + CSRF.
+    authMode: "token",
+    authBackend: "off",       // reported by GET /api/session: "native" or "off"
+    identity: null,           // { from, displayName } when session-authed (Sending as ...)
+    caps: [],                 // capability set granted to the session, e.g. ["read","send"]
+    csrfToken: "",            // session synchronizer token (also read from the companion cookie)
     // Send capability is a PROBED fact, not "a send token was pasted": null until
     // probed, true when POST /api/send cleared the scope gate, false when refused (#277).
     sendCapable: null,
@@ -206,9 +254,23 @@
     sendReason: ""
   };
 
-  // --- API client (Bearer token; token never logged, never in a URL) ---------
+  // Same-origin base for session mode (relative URLs, so the HttpOnly cookie rides);
+  // the pasted origin for BYO-token mode.
+  function baseUrl() {
+    return state.authMode === "session" ? "" : state.origin.replace(/\/+$/, "");
+  }
+  // Read the readable CSRF companion cookie (__Host-postern_csrf, not HttpOnly): the
+  // durable source echoed in X-Postern-CSRF on every write (double-submit). Reading it
+  // fresh at write time means a reload never strands writes.
+  function csrfFromCookie() {
+    var m = (document.cookie || "").match(/(?:^|;\s*)__Host-postern_csrf=([^;]+)/);
+    return m ? m[1] : "";
+  }
+
+  // --- API client. Session mode: same-origin cookie (credentials:include), no token
+  // in JS. Token mode: Bearer header, credentials:omit (token never logged/in a URL). ---
   function api(path, params) {
-    var url = state.origin.replace(/\/+$/, "") + path;
+    var url = baseUrl() + path;
     if (params) {
       var qs = Object.keys(params)
         .filter(function (k) { return params[k] != null && params[k] !== ""; })
@@ -216,11 +278,10 @@
         .join("&");
       if (qs) url += "?" + qs;
     }
-    return fetch(url, {
-      headers: { "authorization": "Bearer " + state.token, "accept": "application/json" },
-      // The token rides in the header, not as a cookie; do not attach ambient creds.
-      credentials: "omit", referrerPolicy: "no-referrer"
-    }).then(function (r) {
+    var opts = state.authMode === "session"
+      ? { headers: { "accept": "application/json" }, credentials: "include", referrerPolicy: "no-referrer" }
+      : { headers: { "authorization": "Bearer " + state.token, "accept": "application/json" }, credentials: "omit", referrerPolicy: "no-referrer" };
+    return fetch(url, opts).then(function (r) {
       return r.json().catch(function () { return { ok: false, error: "bad_json", status: r.status }; })
         .then(function (body) {
           if (r.status === 401) { var e = new Error("unauthorized"); e.code = 401; throw e; }
@@ -234,19 +295,37 @@
   }
 
   function apiWrite(path, body) {
-    if (!state.sendToken) throw new Error("send token not configured");
-    var url = state.origin.replace(/\/+$/, "") + path;
-    return fetch(url, {
-      method: "POST",
-      headers: {
-        "authorization": "Bearer " + state.sendToken,
-        "content-type": "application/json",
-        "accept": "application/json"
-      },
-      body: JSON.stringify(body),
-      credentials: "omit",
-      referrerPolicy: "no-referrer"
-    }).then(function (r) {
+    var url = baseUrl() + path;
+    var opts;
+    if (state.authMode === "session") {
+      // Cookie session: the HttpOnly session cookie rides automatically; a write must
+      // additionally carry the CSRF token in X-Postern-CSRF (double-submit, contract 1.6).
+      opts = {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "accept": "application/json",
+          "x-postern-csrf": csrfFromCookie()
+        },
+        body: JSON.stringify(body),
+        credentials: "include",
+        referrerPolicy: "no-referrer"
+      };
+    } else {
+      if (!state.sendToken) throw new Error("send token not configured");
+      opts = {
+        method: "POST",
+        headers: {
+          "authorization": "Bearer " + state.sendToken,
+          "content-type": "application/json",
+          "accept": "application/json"
+        },
+        body: JSON.stringify(body),
+        credentials: "omit",
+        referrerPolicy: "no-referrer"
+      };
+    }
+    return fetch(url, opts).then(function (r) {
       return r.json().catch(function () { return { ok: false, error: "bad_json", status: r.status }; })
         .then(function (j) {
           if (r.status === 401) { var e = new Error("unauthorized"); e.code = 401; throw e; }
@@ -291,6 +370,14 @@
   // POST reveals the token's send scope with zero mail sent: 403 = not send-capable,
   // 401 = bad token, anything else (400 validation) = the token cleared the scope gate.
   function probeSendCapability() {
+    // Session mode: capability is KNOWN from the granted caps (no probe, no mail). A
+    // native session has read+send, so compose is offered; a session without send is not.
+    if (state.authMode === "session") {
+      state.sendCapable = state.caps.indexOf("send") >= 0;
+      state.sendReason = state.sendCapable ? "" : "readonly";
+      updateComposeUI();
+      return;
+    }
     if (!state.sendToken) { state.sendCapable = false; updateComposeUI(); return; }
     state.sendCapable = null; updateComposeUI();
     var url = state.origin.replace(/\/+$/, "") + "/api/send";
@@ -318,14 +405,14 @@
   // plain <a href> cannot carry it (and we never put the token in a URL). Fetch
   // the bytes with the header, then trigger a download from an object URL.
   function downloadAttachment(messageId, index, filename, btn) {
-    var url = state.origin.replace(/\/+$/, "") +
+    var url = baseUrl() +
       "/api/messages/" + encodeURIComponent(messageId) + "/attachments/" + index;
     var label = btn ? btn.textContent : "";
     if (btn) { btn.disabled = true; btn.textContent = "Downloading..."; }
-    fetch(url, {
-      headers: { "authorization": "Bearer " + state.token },
-      credentials: "omit", referrerPolicy: "no-referrer"
-    }).then(function (r) {
+    var opts = state.authMode === "session"
+      ? { credentials: "include", referrerPolicy: "no-referrer" }
+      : { headers: { "authorization": "Bearer " + state.token }, credentials: "omit", referrerPolicy: "no-referrer" };
+    fetch(url, opts).then(function (r) {
       if (r.status === 401) { logout(); throw new Error("unauthorized"); }
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.blob();
@@ -510,26 +597,62 @@
       : d.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
   }
 
-  // --- gate ------------------------------------------------------------------
+  // --- gate / sign-in ---------------------------------------------------------
+  function focusFirst(id) {
+    var elm = $(id);
+    if (elm && typeof elm.focus === "function") { try { elm.focus(); } catch (_) {} }
+  }
+
   function showGate(msg) {
+    state.authMode = "token";
     $("app").className = "";
+    $("signin").style.display = "none";
     $("gate").style.display = "";
     $("logout").style.display = "none";
+    $("identity").textContent = "";
     $("who").textContent = "";
     $("origin").value = state.origin;
+    // Offer a way back to native sign-in only when the server supports it.
+    $("toSigninWrap").style.display = state.authBackend === "native" ? "" : "none";
     $("gateErr").textContent = msg || "";
+    focusFirst("origin");
   }
+
+  function showSignin(msg) {
+    state.authMode = "session";
+    $("app").className = "";
+    $("gate").style.display = "none";
+    $("signin").style.display = "";
+    $("logout").style.display = "none";
+    $("identity").textContent = "";
+    $("who").textContent = "";
+    $("signinErr").textContent = msg || "";
+    $("siPass").value = "";
+    focusFirst("siUser");
+  }
+
   function showApp() {
     $("gate").style.display = "none";
+    $("signin").style.display = "none";
     $("app").className = "on";
     $("logout").style.display = "";
-    $("who").textContent = state.origin;
+    if (state.authMode === "session" && state.identity) {
+      // Identity display (contract 1.5.1): show who the browser sends as. A send
+      // token could never surface this; a session GET echoes the bound identity.
+      $("identity").textContent = "Sending as " + state.identity.from;
+      $("who").textContent = state.identity.displayName || "";
+    } else {
+      $("identity").textContent = "";
+      $("who").textContent = state.origin;
+    }
     $("searchMode").value = state.searchMode;
     updateComposeUI();
     probeSendCapability();
   }
 
+  // BYO-token connect (operator / self-host path, contract 1.7). Unchanged behavior.
   function connect() {
+    state.authMode = "token";
     var origin = $("origin").value.trim();
     var token = $("token").value;
     var sendTok = $("sendToken").value.trim();
@@ -553,7 +676,67 @@
     });
   }
 
+  // Native sign-in (session cookie mode, #351): POST /api/session mints an HttpOnly
+  // session; the browser never holds the credential in JS.
+  function signIn() {
+    state.authMode = "session";
+    var username = $("siUser").value.trim();
+    var password = $("siPass").value;
+    $("signinErr").textContent = "";
+    if (!username || !password) { $("signinErr").textContent = "Enter your username and password."; return; }
+    $("siSubmit").disabled = true;
+    fetch("/api/session", {
+      method: "POST",
+      headers: { "content-type": "application/json", "accept": "application/json" },
+      body: JSON.stringify({ username: username, password: password }),
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      return r.json().catch(function () { return { ok: false }; }).then(function (b) { return { status: r.status, body: b }; });
+    }).then(function (res) {
+      $("siSubmit").disabled = false;
+      if (res.status === 200 && res.body && res.body.ok) { $("siPass").value = ""; onSession(res.body); return; }
+      if (res.status === 429) { $("signinErr").textContent = "Too many attempts. Please wait and try again."; return; }
+      $("signinErr").textContent = "Sign in failed. Check your username and password.";
+    }).catch(function () {
+      $("siSubmit").disabled = false;
+      $("signinErr").textContent = "Could not reach the server. Try again.";
+    });
+  }
+
+  // Adopt a session payload ({ identity, capabilities, csrfToken } from POST or GET
+  // /api/session) into state, then show the app.
+  function onSession(body) {
+    state.authMode = "session";
+    state.origin = "";
+    state.identity = body.identity || null;
+    state.caps = body.capabilities || [];
+    state.csrfToken = body.csrfToken || csrfFromCookie();
+    showApp();
+    resetAndLoad();
+  }
+
+  function sessionReset() {
+    state.identity = null; state.caps = []; state.csrfToken = "";
+    state.sendCapable = null; state.sendReason = "";
+    state.items = []; state.selected = null; state.cursor = null;
+    clear($("list")); renderReading(null);
+  }
+
+  // Sign out. Session mode: DELETE /api/session revokes the row server-side and clears
+  // the cookies; token mode: drop the tokens from sessionStorage.
   function logout() {
+    if (state.authMode === "session") {
+      var csrf = csrfFromCookie();
+      fetch("/api/session", {
+        method: "DELETE",
+        headers: { "accept": "application/json", "x-postern-csrf": csrf },
+        credentials: "include", referrerPolicy: "no-referrer"
+      }).catch(function () {}).then(function () {
+        sessionReset();
+        showSignin("Signed out.");
+      });
+      return;
+    }
     SS.removeItem("postern_token");
     SS.removeItem("postern_send_token");
     SS.removeItem("postern_origin");
@@ -617,7 +800,7 @@
     if (m.direction === "outbound") tags.push(el("span", { class: "tag out", text: "Sent" }));
     tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
     var who = m.direction === "outbound" ? ("To: " + (m.to || "")) : (m.from || "");
-    var item = el("div", { class: "row-item", "data-id": m.messageId }, [
+    var item = el("div", { class: "row-item", "data-id": m.messageId, role: "button", tabindex: "0", "aria-label": (m.subject || "(no subject)") + " from " + who }, [
       el("div", { class: "top" }, [
         el("div", { class: "from", text: who }),
         el("div", { class: "date", text: fmtDate(m.date || m.receivedAt) })
@@ -628,6 +811,9 @@
       ))
     ]);
     item.addEventListener("click", function () { selectMessage(m.messageId, item); });
+    item.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMessage(m.messageId, item); }
+    });
     $("list").appendChild(item);
   }
 
@@ -796,6 +982,9 @@
   $("origin").addEventListener("keydown", function (e) { if (e.key === "Enter") $("token").focus(); });
   $("logout").addEventListener("click", logout);
   $("composeBtn").addEventListener("click", function () { renderComposeForm({}); });
+  $("signinForm").addEventListener("submit", function (e) { e.preventDefault(); signIn(); });
+  $("toTokenGate").addEventListener("click", function () { showGate(""); });
+  $("toSignin").addEventListener("click", function () { showSignin(""); });
   $("search").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { state.q = e.target.value.trim(); resetAndLoad(); }
   });
@@ -808,13 +997,32 @@
     state.folder = e.target.value; state.q = ""; $("search").value = ""; resetAndLoad();
   });
 
-  // Auto-connect if a token is already in this tab's sessionStorage.
-  if (state.origin && state.token) {
-    showApp();
-    resetAndLoad();
-  } else {
+  // --- boot: prefer a live native session, else BYO-token, else the right gate -----
+  // GET /api/session (same-origin, cookie) tells us: a live session (restore it), or
+  // the configured backend so we show the sign-in form (native) or token gate (off).
+  function boot() {
+    fetch("/api/session", {
+      headers: { "accept": "application/json" },
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (b) { return { status: r.status, body: b }; });
+    }).then(function (res) {
+      if (res.status === 200 && res.body && res.body.ok) { onSession(res.body); return; }
+      state.authBackend = (res.body && res.body.authBackend) || "off";
+      afterNoSession();
+    }).catch(function () {
+      state.authBackend = "off";
+      afterNoSession();
+    });
+  }
+  // No live session: honor an existing BYO-token in this tab, else show sign-in
+  // (native backend) or the token gate (sessions off / unreachable).
+  function afterNoSession() {
+    if (state.origin && state.token) { state.authMode = "token"; showApp(); resetAndLoad(); return; }
+    if (state.authBackend === "native") { showSignin(""); return; }
     showGate("");
   }
+  boot();
 })();
 </script>
 </body>
