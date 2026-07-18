@@ -325,6 +325,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             quoteOriginal: true,
             text: draft.bodyText ?? undefined,
             html: draft.bodyHtml ?? undefined,
+            bcc: draft.bcc ? splitRecipientInput(draft.bcc) : undefined,
             attachments,
           }, ctx, resolution.identity);
         } else {
@@ -385,6 +386,17 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             mime,
             content,
           });
+          const committedUsage = await store.draftAttachmentUsage(env, id, identity);
+          if (committedUsage.count > MAX_ATTACHMENTS || committedUsage.bytes > MAX_ATTACHMENT_BYTES) {
+            await store.deleteDraftAttachment(env, id, identity, attachment.id);
+            throw new MailboxError(
+              "E_PAYLOAD_TOO_LARGE",
+              committedUsage.count > MAX_ATTACHMENTS
+                ? `too many attachments (max ${MAX_ATTACHMENTS})`
+                : "draft attachments exceed 25 MiB",
+              413,
+            );
+          }
           return json({ ok: true, attachment }, 201);
         }
       }

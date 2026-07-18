@@ -31,7 +31,7 @@ export interface SendRequest {
   replyTo?: string | EmailAddress;
   cc?: string | string[];
   bcc?: string | string[];
-  subject: string;
+  subject?: string;
   html?: string;
   text?: string;
   headers?: Record<string, string>;
@@ -227,14 +227,29 @@ function firstAddress(raw: string): string {
   return (raw.split(",")[0] ?? "").trim();
 }
 
-/** Bare addresses from a raw address-list header, preserving first-seen order. */
+/**
+ * Bare addresses from a raw address-list header, preserving first-seen order.
+ * Builds the display-name "remainder" (the text outside any <...> group) by
+ * slicing around the SAME match positions used to pull the angle addresses,
+ * rather than a second independent regex.replace pass over the whole string:
+ * two separate regex passes over attacker-controlled header text is exactly
+ * the "incomplete multi-character sanitization" shape a static scanner (and a
+ * crafted header) can catch out on overlapping/adjacent matches, even though
+ * this value is never rendered as HTML (it only feeds EMAIL_RE below).
+ */
 function addresses(raw: string | null | undefined): string[] {
   if (!raw) return [];
   const out: string[] = [];
   const angleRe = /<([^<>]+)>/g;
   let match: RegExpExecArray | null;
-  while ((match = angleRe.exec(raw)) !== null) out.push(match[1].trim());
-  const remainder = raw.replace(/<[^<>]+>/g, "");
+  let cursor = 0;
+  let remainder = "";
+  while ((match = angleRe.exec(raw)) !== null) {
+    out.push(match[1].trim());
+    remainder += raw.slice(cursor, match.index);
+    cursor = angleRe.lastIndex;
+  }
+  remainder += raw.slice(cursor);
   for (const part of remainder.split(",")) {
     const bare = part.trim();
     if (bare && EMAIL_RE.test(bare)) out.push(bare);
@@ -326,10 +341,10 @@ export async function send(
     original = await store.get(env, req.forwardMessageId.replace(/[<>]/g, "").trim());
     if (!original) throw new MailboxError("E_NOT_FOUND", "forward source message not found", 404);
   }
-  if (typeof req.subject !== "string" || req.subject.trim() === "") {
+  if (!original && (typeof req.subject !== "string" || req.subject.trim() === "")) {
     throw new MailboxError("E_FIELD_MISSING", "subject is required");
   }
-  rejectCRLF("subject", req.subject);
+  if (req.subject !== undefined) rejectCRLF("subject", req.subject);
   if (!req.html && !req.text) {
     throw new MailboxError("E_FIELD_MISSING", "at least one of html or text is required");
   }
@@ -364,7 +379,8 @@ export async function send(
   const body = original ? appendQuote(original, req.html, req.text, true) : { html: req.html, text: req.text };
   const subject = original
     ? `Fwd: ${original.subject.replace(/^\s*(?:(?:fwd?|fw):\s*)+/i, "").trim()}`
-    : req.subject;
+    : req.subject!;
+  rejectCRLF("subject", subject);
 
   return dispatchAndStore(env, ctx, {
     to,

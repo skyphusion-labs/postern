@@ -83,6 +83,15 @@ def _wire_size(d: dict[str, Any]) -> Optional[int]:
         return None
 
 
+def _int_or_none(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class MessageSummary:
     """A list-view row (no body), mirroring the API StoredMessageSummary."""
@@ -137,6 +146,15 @@ class MessageSummary:
     # Per-folder IMAP UID for trash/junk/archive (#352 §2.6). When set, the IMAP door
     # exposes this as the mailbox UID instead of messages.id.
     folder_uid: Optional[int] = None
+    # #342: the RFC822.SIZE render_rfc822 WOULD produce, precomputed by the store
+    # from D1 metadata alone (no R2 read) and cached here so getSize() never
+    # hydrates just to measure a byte count. None for a pre-#342 row or a row the
+    # store has not (re)computed yet -- message.py falls back to a real hydrate in
+    # that case, so an absent value is always safe, just not free. projection_version
+    # must match the renderer's PROJECTION_VERSION (rfc822.py) or the cached value is
+    # untrusted (a renderer change invalidates every previously cached size).
+    projected_size: Optional[int] = None
+    projection_version: Optional[int] = None
 
     @classmethod
     def from_json(cls, d: dict[str, Any], *, use_folder_uid: bool = False) -> "MessageSummary":
@@ -181,6 +199,8 @@ class MessageSummary:
             mailbox=d.get("mailbox"),
             trashed_at=d.get("trashedAt"),
             folder_uid=folder_uid_i,
+            projected_size=_int_or_none(d.get("projectedSize")),
+            projection_version=_int_or_none(d.get("projectionVersion")),
         )
 
 
@@ -246,6 +266,11 @@ class Message:
     reply_to: Optional[str] = None
     delivered_to: list[str] = field(default_factory=list)
     wire_size: Optional[int] = None
+    # #342: same cached-projection fields as MessageSummary (kept for parity /
+    # future use; message.py currently reads projected_size off the SUMMARY, since
+    # that is what is available body-free at getSize() time).
+    projected_size: Optional[int] = None
+    projection_version: Optional[int] = None
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> "Message":
@@ -273,6 +298,8 @@ class Message:
             reply_to=d.get("replyTo"),
             delivered_to=_delivered_to(d, to_addr),
             wire_size=_wire_size(d),
+            projected_size=_int_or_none(d.get("projectedSize")),
+            projection_version=_int_or_none(d.get("projectionVersion")),
         )
 
 

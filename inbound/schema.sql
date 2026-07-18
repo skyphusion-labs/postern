@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS messages (
   sender_addr   TEXT,
   reply_to_addr TEXT,
   wire_size     INTEGER,
+  -- Cached IMAP projection length (#342, migration 0012). projected_size is the
+  -- byte length of the canonical RFC822 projection (deterministic MIME boundaries);
+  -- projection_version invalidates the cache when the renderer changes (same
+  -- discipline as a UIDVALIDITY bump). NULL on pre-0012 rows.
+  projected_size INTEGER,
+  projection_version INTEGER,
   -- Durable flags + folder placement (#352, migration 0011). flagged/answered are
   -- \Flagged / \Answered beside the durable \Seen (2.2). mailbox is the ONE mutable
   -- system-box placement: NULL = the direction-default INBOX/Sent view (every old

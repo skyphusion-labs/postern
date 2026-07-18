@@ -461,7 +461,9 @@ export const WEBMAIL_HTML = `<!doctype html>
           }
           if (!r.ok || j.ok === false) {
             var msg = (j && (j.message || j.error)) || ("HTTP " + r.status);
-            throw new Error(msg);
+            var requestError = new Error(msg);
+            requestError.code = r.status;
+            throw requestError;
           }
           return j;
         });
@@ -1151,9 +1153,12 @@ export const WEBMAIL_HTML = `<!doctype html>
   function appendRow(m) {
     var tags = [];
     if (m.flagged) tags.push(el("span", { class: "star on", text: "★", title: "Flagged" }));
-    if (m.direction === "outbound") tags.push(el("span", { class: "tag out", text: "Sent" }));
-    if (m.isDraft) tags.push(el("span", { class: "tag out", text: "Draft" }));
-    else tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
+    if (m.isDraft) {
+      tags.push(el("span", { class: "tag out", text: "Draft" }));
+    } else {
+      if (m.direction === "outbound") tags.push(el("span", { class: "tag out", text: "Sent" }));
+      tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
+    }
     var who = m.direction === "outbound" ? ("To: " + (m.to || "")) : (m.from || "");
     var item = el("div", {
       class: "row-item" + (m.seen === false ? " unread" : ""),
@@ -1235,6 +1240,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     var rich = draft.bodyHtml != null ? true : !!opts.rich;
     var saveTimer = null;
     var saveChain = Promise.resolve();
+    var closed = false;
     var r = $("reading"); clear(r);
     var err = el("div", { class: "err", text: "" });
     var status = el("span", { class: "compose-status", text: updatedAt ? "Saved" : "Not saved yet" });
@@ -1422,6 +1428,7 @@ export const WEBMAIL_HTML = `<!doctype html>
 
     function saveDraft() {
       clearTimeout(saveTimer);
+      if (closed) return saveChain;
       status.textContent = "Saving...";
       saveChain = saveChain.catch(function () {}).then(function () {
         return apiSendRequest("PUT", "/api/drafts/" + encodeURIComponent(draftId), payload());
@@ -1438,6 +1445,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     }
 
     function scheduleSave() {
+      if (closed) return;
       clearTimeout(saveTimer);
       status.textContent = "Unsaved changes";
       saveTimer = setTimeout(function () { saveDraft().catch(function () {}); }, 800);
@@ -1513,14 +1521,24 @@ export const WEBMAIL_HTML = `<!doctype html>
 
     $("cmpCancel").addEventListener("click", function () {
       saveDraft().catch(function () {}).then(function () {
+        closed = true;
         state.folder = "drafts"; resetAndLoad(); renderReading(null);
       });
     });
     $("cmpDiscard").addEventListener("click", function () {
       clearTimeout(saveTimer);
-      apiSendRequest("DELETE", "/api/drafts/" + encodeURIComponent(draftId)).then(function () {
+      closed = true;
+      saveChain.catch(function () {}).then(function () {
+        return apiSendRequest("DELETE", "/api/drafts/" + encodeURIComponent(draftId));
+      }).then(function () {
         state.folder = "drafts"; resetAndLoad(); renderReading(null);
-      }).catch(function (e) { err.textContent = e.message; });
+      }).catch(function (e) {
+        if (e.code === 404) {
+          state.folder = "drafts"; resetAndLoad(); renderReading(null);
+          return;
+        }
+        err.textContent = e.message;
+      });
     });
     $("cmpSend").addEventListener("click", function () {
       err.textContent = "";

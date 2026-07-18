@@ -658,6 +658,54 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(size, len(render_rfc822(Message.from_json(raw))))
         self.assertNotEqual(size, 999999)
 
+    def test_size_with_projected_size_does_zero_attachment_fetches(self):
+        # #342: cached projectedSize answers RFC822.SIZE with no message GET and no
+        # attachment GETs -- the bulk-sync cost cliff.
+        from twisted.mail.imap4 import MessageSet
+        from posternimap.client import Message
+        from posternimap.rfc822 import PROJECTION_VERSION, project_rfc822_size
+
+        att = b"\x1f\x8b" + b"x" * 50
+        raw = make_message(
+            "ps1",
+            subject="projected",
+            body="body",
+            attachments=[{"filename": "a.gz", "mime": "application/gzip", "size": len(att)}],
+            attachmentBytes=[att],
+        )
+        projected = project_rfc822_size(Message.from_json(raw))
+        raw["projectedSize"] = projected
+        raw["projectionVersion"] = PROJECTION_VERSION
+        mb, transport = self._custom_mailbox([raw])
+        (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
+        self.assertEqual(msg.getSize(), projected)
+        self.assertEqual(transport.body_fetches, 0)
+        self.assertEqual(transport.attachment_fetches, 0)
+
+    def test_structure_hydrate_uses_placeholders_not_attachment_gets(self):
+        # #342: BODYSTRUCTURE / isMultipart hydrates the message row but not R2.
+        from twisted.mail.imap4 import MessageSet
+
+        att = b"payload-bytes"
+        raw = make_message(
+            "lazy1",
+            subject="lazy",
+            body="text body",
+            attachments=[{"filename": "f.bin", "mime": "application/octet-stream", "size": len(att)}],
+            attachmentBytes=[att],
+        )
+        mb, transport = self._custom_mailbox([raw])
+        (_, msg), = list(mb.fetch(MessageSet(1, 1), uid=False))
+        self.assertTrue(msg.isMultipart())
+        self.assertEqual(transport.body_fetches, 1)
+        self.assertEqual(transport.attachment_fetches, 0)
+        # Reading the attachment subpart fetches only that part.
+        import base64
+
+        wire = msg.getSubPart(1).getBodyFile().read()
+        self.assertEqual(base64.b64decode(wire), att)
+        self.assertEqual(transport.attachment_fetches, 1)
+
 
     # --- #102 Stage 1: lazy ENVELOPE, windowing, live refresh ---
 
