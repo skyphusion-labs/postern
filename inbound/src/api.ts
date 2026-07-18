@@ -124,14 +124,25 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // read-only token -- what the IMAP proxy commonly holds -- can manage its own read
     // state without being handed send/admin power. Idempotent; unknown ids are skipped.
     if (request.method === "POST" && path === "/api/messages/seen") {
-      const body = await readJson<{ ids?: unknown; seen?: unknown }>(request);
+      const body = await readJson<{ ids?: unknown; seen?: unknown; for?: unknown }>(request);
       if (!Array.isArray(body.ids) || !body.ids.every((x) => typeof x === "string")) {
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "ids must be an array of message ids" }, 400);
       }
       if (typeof body.seen !== "boolean") {
         return json({ ok: false, error: "E_FIELD_MISSING", message: "seen (boolean) is required" }, 400);
       }
-      const updated = await store.setSeen(env, body.ids as string[], body.seen);
+      // Optional per-recipient scope (#350): `for` a bare address makes the mark a
+      // per-recipient override (message_seen_by), never touching the row-level
+      // messages.seen; omitted = legacy estate behavior, unchanged. Validated as a
+      // bare address so a malformed value is a clean 400, not a silent no-op.
+      let forRecipient: string | undefined;
+      if (body.for !== undefined && body.for !== null) {
+        if (typeof body.for !== "string" || !EMAIL_RE.test(body.for.trim())) {
+          return json({ ok: false, error: "E_VALIDATION_ERROR", message: "for must be a bare email address" }, 400);
+        }
+        forRecipient = body.for.trim().toLowerCase();
+      }
+      const updated = await store.setSeen(env, body.ids as string[], body.seen, forRecipient);
       return json({ ok: true, updated });
     }
 
@@ -215,6 +226,9 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         mode: modeParam as "fts" | "substr" | "semantic" | "hybrid" | undefined,
         field: fieldParam === null ? undefined : fieldParam,
         direction: dirParam === null ? undefined : dirParam,
+        // Viewer scope (#350): recipient-relative INBOX + effective seen, mirroring
+        // /api/messages?to=. Unvalidated like list's `to` (a bare address filter).
+        to: url.searchParams.get("to") ?? undefined,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });
