@@ -31,7 +31,7 @@ export interface SendRequest {
   replyTo?: string | EmailAddress;
   cc?: string | string[];
   bcc?: string | string[];
-  subject: string;
+  subject?: string;
   html?: string;
   text?: string;
   headers?: Record<string, string>;
@@ -326,10 +326,10 @@ export async function send(
     original = await store.get(env, req.forwardMessageId.replace(/[<>]/g, "").trim());
     if (!original) throw new MailboxError("E_NOT_FOUND", "forward source message not found", 404);
   }
-  if (typeof req.subject !== "string" || req.subject.trim() === "") {
+  if (!original && (typeof req.subject !== "string" || req.subject.trim() === "")) {
     throw new MailboxError("E_FIELD_MISSING", "subject is required");
   }
-  rejectCRLF("subject", req.subject);
+  if (req.subject !== undefined) rejectCRLF("subject", req.subject);
   if (!req.html && !req.text) {
     throw new MailboxError("E_FIELD_MISSING", "at least one of html or text is required");
   }
@@ -364,7 +364,8 @@ export async function send(
   const body = original ? appendQuote(original, req.html, req.text, true) : { html: req.html, text: req.text };
   const subject = original
     ? `Fwd: ${original.subject.replace(/^\s*(?:(?:fwd?|fw):\s*)+/i, "").trim()}`
-    : req.subject;
+    : req.subject!;
+  rejectCRLF("subject", subject);
 
   return dispatchAndStore(env, ctx, {
     to,

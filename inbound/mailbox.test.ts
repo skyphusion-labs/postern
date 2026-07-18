@@ -207,7 +207,6 @@ describe("mailbox.reply (close the loop)", () => {
     await settle();
     await send(env, {
       to: "other@example.com",
-      subject: "caller value is ignored",
       text: "FYI",
       forwardMessageId: "forward@example.com",
     }, ctx);
