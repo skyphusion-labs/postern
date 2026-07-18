@@ -1021,6 +1021,14 @@ export async function putDraft(
   expectedUpdatedAt?: string,
 ): Promise<{ draft: Draft; conflict: boolean }> {
   const owner = identity.toLowerCase();
+  // Defense in depth for the IDOR boundary (#355 / contract §2.4): never INSERT
+  // under a new identity when the draft id already belongs to someone else.
+  // Callers (session + IMAP PUT) also 403 before this; without the check a
+  // colliding INSERT would either throw a PK error or (in loose fakes) dual-own.
+  const existingOwner = await getDraftOwner(env, id);
+  if (existingOwner !== null && existingOwner !== owner) {
+    throw new Error("draft belongs to another identity");
+  }
   const current = await getDraft(env, id, owner);
   if (current && expectedUpdatedAt !== current.updatedAt) return { draft: current, conflict: true };
   const { uid } = await allocateFolderUid(env, "drafts");

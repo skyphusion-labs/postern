@@ -1,0 +1,12 @@
+{
+  "name": "postern-webmail-e2e",
+  "private": true,
+  "description": "Playwright critical-journey tests for webmail v2 (#355)",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1"
+  }
+}

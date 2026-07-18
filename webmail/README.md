@@ -235,6 +235,15 @@ Settings (theme / density) live in `localStorage`. Remote images remain blocked
 by CSP (`img-src 'self' data:` only) plus body neutralization; the settings panel
 states that honestly (no fake toggle).
 
+## Release / upgrade
+
+Operator release notes (migrations 0010-0013, upgrade, rollback, smoke checklist):
+[`docs/WEBMAIL-V2-RELEASE.md`](../docs/WEBMAIL-V2-RELEASE.md). Phase-6 adversarial
+ledger: [`docs/reviews/webmail-v2-phase6-adversarial-2026-07-18.md`](../docs/reviews/webmail-v2-phase6-adversarial-2026-07-18.md).
+
+Browser critical-journey tests (Playwright, mocked `/api`): `webmail/e2e/`
+(`npm ci && npx playwright install chromium && npm test`).
+
 ## Deferred (follow-ups)
 
 - Full address book beyond recent-recipients.
