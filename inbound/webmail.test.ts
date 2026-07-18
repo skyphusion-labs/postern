@@ -85,6 +85,14 @@ describe("the page is XSS-conscious by construction", () => {
     expect(WEBMAIL_HTML).toContain('"/api/messages/seen"');
     expect(WEBMAIL_HTML).toContain("p.mailbox");
   });
+  it("loads drafts with the send credential in BYO token mode (#352)", () => {
+    // Drafts are send-scoped + identity-bound; generic api() uses the read Bearer.
+    expect(WEBMAIL_HTML).toContain("function apiSendGet");
+    expect(WEBMAIL_HTML).toContain('apiSendGet("/api/drafts")');
+    expect(WEBMAIL_HTML).toContain('Bearer " + state.sendToken');
+    // Must not list drafts via the read-token api() helper.
+    expect(WEBMAIL_HTML).not.toContain('api("/api/drafts")');
+  });
   it("never assigns innerHTML (all message content goes through text nodes)", () => {
     // A blunt but effective guard: the page script must not use innerHTML, which
     // is the one sink that would let stored message bytes execute. If a future

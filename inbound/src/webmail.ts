@@ -426,6 +426,43 @@ export const WEBMAIL_HTML = `<!doctype html>
     });
   }
 
+
+  // GET with the send credential (#352 drafts): drafts are send-scoped and
+  // identity-bound. Session mode still uses the cookie; BYO token mode must use
+  // the send token (usually a per-identity registry token), not the read Bearer.
+  function apiSendGet(path, params) {
+    var url = baseUrl() + path;
+    if (params) {
+      var qs = Object.keys(params)
+        .filter(function (k) { return params[k] != null && params[k] !== ""; })
+        .map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]); })
+        .join("&");
+      if (qs) url += "?" + qs;
+    }
+    var opts;
+    if (state.authMode === "session") {
+      opts = { headers: { "accept": "application/json" }, credentials: "include", referrerPolicy: "no-referrer" };
+    } else {
+      if (!state.sendToken) throw new Error("send token not configured");
+      opts = {
+        headers: { "authorization": "Bearer " + state.sendToken, "accept": "application/json" },
+        credentials: "omit",
+        referrerPolicy: "no-referrer"
+      };
+    }
+    return fetch(url, opts).then(function (r) {
+      return r.json().catch(function () { return { ok: false, error: "bad_json", status: r.status }; })
+        .then(function (body) {
+          if (r.status === 401) { var e = new Error("unauthorized"); e.code = 401; throw e; }
+          if (!r.ok || body.ok === false) {
+            var msg = (body && (body.message || body.error)) || ("HTTP " + r.status);
+            var err = new Error(msg); err.code = r.status; throw err;
+          }
+          return body;
+        });
+    });
+  }
+
   function updateComposeUI() {
     var capable = state.sendCapable === true;
     $("composeBtn").style.display = capable ? "" : "none";
@@ -898,7 +935,15 @@ export const WEBMAIL_HTML = `<!doctype html>
     var mode = fallbackFts ? "fts" : state.searchMode;
     var req;
     if (state.folder === "drafts" && !state.q) {
-      req = api("/api/drafts").then(function (body) {
+      if (state.authMode !== "session" && !state.sendToken) {
+        $("list").removeChild(loading);
+        $("list").appendChild(el("div", {
+          class: "loading",
+          text: "Drafts need an identity send token (BYO read token cannot list drafts)."
+        }));
+        return;
+      }
+      req = apiSendGet("/api/drafts").then(function (body) {
         return { items: (body.drafts || []).map(function (d) {
           return {
             messageId: d.id,
