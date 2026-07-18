@@ -164,6 +164,9 @@ class PosternMailbox:
         self._meter = meter or Meter(False)
         self._direction = direction
         self._to = to
+        # #357/#366: sender filter for the per-account Sent lens (from=V, outbound).
+        # None in estate mode. SEARCH passes from=V to /api/search (#366); the snapshot
+        # intersection below is only for window/folder membership, not from= scoping.
         self._from = from_addr
         self._viewer = viewer
         self._special_use = list(special_use or [])
@@ -466,6 +469,7 @@ class PosternMailbox:
                 field=field,
                 direction=self._direction,
                 to=self._to,
+                from_addr=self._from,
                 mailbox=self._mailbox_filter,
                 cursor=cursor,
                 limit=_SEARCH_PAGE_LIMIT,
@@ -473,6 +477,9 @@ class PosternMailbox:
             for h in page.items:
                 seq = by_uid.get(h.uid)
                 if seq is None:
+                    # Outside this folder's snapshot / window: drop it. Sent from=V
+                    # scoping is server-side via from= (#366); this intersection is
+                    # only the window/folder membership filter.
                     continue
                 out.append(h.uid if uid else seq)
             cursor = page.cursor

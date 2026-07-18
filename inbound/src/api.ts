@@ -376,6 +376,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // Viewer scope (#350): recipient-relative INBOX + effective seen, mirroring
         // /api/messages?to=. Unvalidated like list's `to` (a bare address filter).
         to: url.searchParams.get("to") ?? undefined,
+        // Sender filter (#366): same lower(from_addr) LIKE as /api/messages?from=.
+        from: url.searchParams.get("from") ?? undefined,
         // Durable-folder scope (#352 review), same values as /api/messages?mailbox=.
         mailbox: url.searchParams.get("mailbox") ?? undefined,
         viewer: resolution.viaSession ? resolution.identity?.from : undefined,
