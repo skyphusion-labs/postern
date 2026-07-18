@@ -16,7 +16,16 @@ import PostalMime from "postal-mime";
 import * as store from "./store";
 import { cleanBody, htmlToText, ingest, sha256hex, type ParsedInbound } from "./ingest";
 import { toArrayBuffer } from "./headers";
-import { send, reply, MailboxError, type SendRequest, type ReplyRequest } from "./mailbox";
+import {
+  send,
+  reply,
+  MailboxError,
+  MAX_ATTACHMENTS,
+  MAX_ATTACHMENT_BYTES,
+  type SendAttachment,
+  type SendRequest,
+  type ReplyRequest,
+} from "./mailbox";
 import { serveWebmail } from "./webmail";
 import {
   authenticate,
@@ -34,7 +43,7 @@ import {
   sessionCookieValue,
   webmailAuthBackend,
 } from "./session";
-import { readBodyCapped, PayloadTooLargeError } from "./body";
+import { readBodyCapped, readBytesCapped, PayloadTooLargeError } from "./body";
 import { handleMobileconfig } from "./mobileconfig";
 import { handleMtaSts } from "./mtasts";
 
@@ -302,17 +311,103 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         const id = decodeURIComponent(sendMatch[1]);
         const draft = await store.getDraft(env, id, identity);
         if (!draft) return json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
-        if (!draft.to) throw new MailboxError("E_FIELD_MISSING", "draft recipient required");
-        const result = await send(env, {
-          to: draft.to,
-          cc: draft.cc ?? undefined,
-          bcc: draft.bcc ?? undefined,
-          subject: draft.subject ?? "",
-          text: draft.bodyText ?? undefined,
-          html: draft.bodyHtml ?? undefined,
-        }, ctx, resolution.identity);
+        const staged = await store.loadDraftAttachments(env, id, identity);
+        const attachments: SendAttachment[] = staged.map((attachment) => ({
+          content: arrayBufferToBase64(attachment.content),
+          ...(attachment.filename ? { filename: attachment.filename } : {}),
+          ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
+        }));
+        let result;
+        if ((draft.composeMode === "reply" || draft.composeMode === "replyAll") && draft.sourceMessageId) {
+          result = await reply(env, {
+            messageId: draft.sourceMessageId,
+            mode: draft.composeMode,
+            quoteOriginal: true,
+            text: draft.bodyText ?? undefined,
+            html: draft.bodyHtml ?? undefined,
+            bcc: draft.bcc ? splitRecipientInput(draft.bcc) : undefined,
+            attachments,
+          }, ctx, resolution.identity);
+        } else {
+          if (!draft.to) throw new MailboxError("E_FIELD_MISSING", "draft recipient required");
+          result = await send(env, {
+            to: splitRecipientInput(draft.to),
+            cc: draft.cc ? splitRecipientInput(draft.cc) : undefined,
+            bcc: draft.bcc ? splitRecipientInput(draft.bcc) : undefined,
+            subject: draft.subject ?? "",
+            text: draft.bodyText ?? undefined,
+            html: draft.bodyHtml ?? undefined,
+            attachments,
+            ...(draft.composeMode === "forward" && draft.sourceMessageId
+              ? { forwardMessageId: draft.sourceMessageId }
+              : {}),
+          }, ctx, resolution.identity);
+        }
+        // Delete only after dispatch + sent-copy storage succeeds. Every validation,
+        // transport, or storage failure leaves the draft and staged bytes retryable.
         await store.deleteDraft(env, id, identity);
         return json({ ok: true, ...result });
+      }
+      const attachmentListMatch = /^\/([^/]+)\/attachments$/.exec(suffix);
+      if (attachmentListMatch) {
+        const id = decodeURIComponent(attachmentListMatch[1]);
+        if (!(await store.getDraft(env, id, identity))) {
+          return json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
+        }
+        if (request.method === "GET") {
+          return json({ ok: true, attachments: await store.listDraftAttachments(env, id, identity) });
+        }
+        if (request.method === "POST") {
+          const usage = await store.draftAttachmentUsage(env, id, identity);
+          if (usage.count >= MAX_ATTACHMENTS) {
+            throw new MailboxError("E_VALIDATION_ERROR", `too many attachments (max ${MAX_ATTACHMENTS})`);
+          }
+          let content: ArrayBuffer;
+          try {
+            content = await readBytesCapped(request, MAX_ATTACHMENT_BYTES);
+          } catch (error) {
+            if (error instanceof PayloadTooLargeError) {
+              throw new MailboxError("E_PAYLOAD_TOO_LARGE", "attachment exceeds 25 MiB", 413);
+            }
+            throw error;
+          }
+          if (content.byteLength === 0) throw new MailboxError("E_FIELD_MISSING", "attachment body is required");
+          if (usage.bytes + content.byteLength > MAX_ATTACHMENT_BYTES) {
+            throw new MailboxError("E_PAYLOAD_TOO_LARGE", "draft attachments exceed 25 MiB", 413);
+          }
+          const rawName = request.headers.get("x-postern-filename") ?? "";
+          const filename = decodeHeaderValue(rawName, "filename");
+          const mime = (request.headers.get("content-type") || "application/octet-stream").split(";")[0].trim();
+          if (/[\r\n]/.test(filename) || /[\r\n]/.test(mime)) {
+            throw new MailboxError("E_VALIDATION_ERROR", "attachment metadata contains line breaks");
+          }
+          const attachment = await store.putDraftAttachment(env, id, identity, {
+            ...(filename ? { filename } : {}),
+            mime,
+            content,
+          });
+          const committedUsage = await store.draftAttachmentUsage(env, id, identity);
+          if (committedUsage.count > MAX_ATTACHMENTS || committedUsage.bytes > MAX_ATTACHMENT_BYTES) {
+            await store.deleteDraftAttachment(env, id, identity, attachment.id);
+            throw new MailboxError(
+              "E_PAYLOAD_TOO_LARGE",
+              committedUsage.count > MAX_ATTACHMENTS
+                ? `too many attachments (max ${MAX_ATTACHMENTS})`
+                : "draft attachments exceed 25 MiB",
+              413,
+            );
+          }
+          return json({ ok: true, attachment }, 201);
+        }
+      }
+      const attachmentItemMatch = /^\/([^/]+)\/attachments\/([^/]+)$/.exec(suffix);
+      if (request.method === "DELETE" && attachmentItemMatch) {
+        const id = decodeURIComponent(attachmentItemMatch[1]);
+        const attachmentId = decodeURIComponent(attachmentItemMatch[2]);
+        const deleted = await store.deleteDraftAttachment(env, id, identity, attachmentId);
+        return deleted
+          ? json({ ok: true, deleted: attachmentId })
+          : json({ ok: false, error: "E_NOT_FOUND", message: "draft attachment not found" }, 404);
       }
       const itemMatch = /^\/([^/]+)$/.exec(suffix);
       if (itemMatch) {
@@ -503,7 +598,38 @@ function draftInput(body: Record<string, unknown>): store.DraftInput {
     bodyHtml: text("bodyHtml"),
     inReplyTo: text("inReplyTo"),
     threadId: text("threadId"),
+    composeMode: draftMode(body.composeMode),
+    sourceMessageId: text("sourceMessageId"),
   };
+}
+
+function draftMode(value: unknown): store.DraftComposeMode {
+  if (value === undefined || value === null || value === "new") return "new";
+  if (value === "reply" || value === "replyAll" || value === "forward") return value;
+  throw new MailboxError("E_VALIDATION_ERROR", "composeMode must be new, reply, replyAll, or forward");
+}
+
+function splitRecipientInput(value: string): string[] {
+  return value.split(/[,\n;]/).map((part) => part.trim()).filter(Boolean);
+}
+
+function decodeHeaderValue(value: string, label: string): string {
+  if (!value) return "";
+  try {
+    return decodeURIComponent(value).slice(0, 255);
+  } catch {
+    throw new MailboxError("E_VALIDATION_ERROR", `${label} header is not valid percent-encoding`);
+  }
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
 function requireImapIdentity(value: unknown, env: Env): string {

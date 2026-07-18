@@ -913,6 +913,8 @@ export interface Draft {
   bodyHtml: string | null;
   inReplyTo: string | null;
   threadId: string | null;
+  composeMode: DraftComposeMode;
+  sourceMessageId: string | null;
   uid: number;
   createdAt: string;
   updatedAt: string;
@@ -929,6 +931,8 @@ interface DraftRow {
   body_html: string | null;
   in_reply_to: string | null;
   thread_id: string | null;
+  compose_mode: string;
+  source_message_id: string | null;
   uid: number;
   created_at: string;
   updated_at: string;
@@ -946,16 +950,36 @@ function rowToDraft(row: DraftRow): Draft {
     bodyHtml: row.body_html,
     inReplyTo: row.in_reply_to,
     threadId: row.thread_id,
+    composeMode: normalizeDraftMode(row.compose_mode),
+    sourceMessageId: row.source_message_id,
     uid: row.uid,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-export type DraftInput = Pick<Draft, "to" | "cc" | "bcc" | "subject" | "bodyText" | "bodyHtml" | "inReplyTo" | "threadId">;
+export type DraftComposeMode = "new" | "reply" | "replyAll" | "forward";
+
+function normalizeDraftMode(value: string | null | undefined): DraftComposeMode {
+  return value === "reply" || value === "replyAll" || value === "forward" ? value : "new";
+}
+
+export interface DraftInput {
+  to: string | null;
+  cc: string | null;
+  bcc: string | null;
+  subject: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+  inReplyTo: string | null;
+  threadId: string | null;
+  composeMode?: DraftComposeMode;
+  sourceMessageId?: string | null;
+}
 
 const DRAFT_COLUMNS =
-  "id, identity, to_addr, cc_addr, bcc_addr, subject, body_text, body_html, in_reply_to, thread_id, uid, created_at, updated_at";
+  "id, identity, to_addr, cc_addr, bcc_addr, subject, body_text, body_html, in_reply_to, thread_id, " +
+  "compose_mode, source_message_id, uid, created_at, updated_at";
 
 export async function listDrafts(env: Env, identity: string): Promise<Draft[]> {
   const res = await env.DB.prepare(
@@ -1000,28 +1024,179 @@ export async function putDraft(
   if (current) {
     await env.DB.prepare(
       "UPDATE drafts SET to_addr=?, cc_addr=?, bcc_addr=?, subject=?, body_text=?, body_html=?, " +
-        "in_reply_to=?, thread_id=?, uid=?, updated_at=? WHERE id=? AND identity=?",
+        "in_reply_to=?, thread_id=?, compose_mode=?, source_message_id=?, uid=?, updated_at=? WHERE id=? AND identity=?",
     )
       .bind(input.to, input.cc, input.bcc, input.subject, input.bodyText, input.bodyHtml,
-        input.inReplyTo, input.threadId, uid, now, id, owner)
+        input.inReplyTo, input.threadId, normalizeDraftMode(input.composeMode), input.sourceMessageId ?? null,
+        uid, now, id, owner)
       .run();
   } else {
     await env.DB.prepare(
       "INSERT INTO drafts (id, identity, to_addr, cc_addr, bcc_addr, subject, body_text, body_html, " +
-        "in_reply_to, thread_id, uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "in_reply_to, thread_id, compose_mode, source_message_id, uid, created_at, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
       .bind(id, owner, input.to, input.cc, input.bcc, input.subject, input.bodyText, input.bodyHtml,
-        input.inReplyTo, input.threadId, uid, now, now)
+        input.inReplyTo, input.threadId, normalizeDraftMode(input.composeMode), input.sourceMessageId ?? null,
+        uid, now, now)
       .run();
   }
   return { draft: (await getDraft(env, id, owner))!, conflict: false };
 }
 
 export async function deleteDraft(env: Env, id: string, identity: string): Promise<boolean> {
+  await deleteAllDraftAttachments(env, id, identity);
   const res = await env.DB.prepare("DELETE FROM drafts WHERE id = ? AND identity = ?")
     .bind(id, identity.toLowerCase())
     .run();
   return (res.meta?.changes ?? 0) > 0;
+}
+
+export interface DraftAttachment {
+  id: string;
+  draftId: string;
+  filename: string | null;
+  mime: string | null;
+  size: number;
+  createdAt: string;
+}
+
+interface DraftAttachmentRow {
+  id: string;
+  draft_id: string;
+  filename: string | null;
+  mime: string | null;
+  size: number;
+  r2_key: string;
+  created_at: string;
+}
+
+function draftAttachmentMeta(row: DraftAttachmentRow): DraftAttachment {
+  return {
+    id: row.id,
+    draftId: row.draft_id,
+    filename: row.filename,
+    mime: row.mime,
+    size: row.size,
+    createdAt: row.created_at,
+  };
+}
+
+export async function listDraftAttachments(
+  env: Env,
+  draftId: string,
+  identity: string,
+): Promise<DraftAttachment[]> {
+  const res = await env.DB.prepare(
+    "SELECT id, draft_id, filename, mime, size, r2_key, created_at FROM draft_attachments " +
+      "WHERE draft_id = ? AND identity = ? ORDER BY created_at, id",
+  )
+    .bind(draftId, identity.toLowerCase())
+    .all<DraftAttachmentRow>();
+  return (res.results ?? []).map(draftAttachmentMeta);
+}
+
+export async function draftAttachmentUsage(
+  env: Env,
+  draftId: string,
+  identity: string,
+): Promise<{ count: number; bytes: number }> {
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes FROM draft_attachments " +
+      "WHERE draft_id = ? AND identity = ?",
+  )
+    .bind(draftId, identity.toLowerCase())
+    .first<{ count: number; bytes: number }>();
+  return { count: Number(row?.count ?? 0), bytes: Number(row?.bytes ?? 0) };
+}
+
+export async function putDraftAttachment(
+  env: Env,
+  draftId: string,
+  identity: string,
+  input: { filename?: string; mime?: string; content: ArrayBuffer },
+): Promise<DraftAttachment> {
+  const owner = identity.toLowerCase();
+  if (!(await getDraft(env, draftId, owner))) throw new Error("draft not found");
+  const id = crypto.randomUUID();
+  const safeName = (input.filename || "attachment").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100);
+  const key = `drafts/${draftId}/${id}-${safeName}`;
+  const now = new Date().toISOString();
+  await env.ATTACHMENTS.put(key, input.content, {
+    httpMetadata: { contentType: input.mime || "application/octet-stream" },
+  });
+  try {
+    await env.DB.prepare(
+      "INSERT INTO draft_attachments (id, draft_id, identity, filename, mime, size, r2_key, created_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+      .bind(id, draftId, owner, input.filename ?? null, input.mime ?? null, input.content.byteLength, key, now)
+      .run();
+  } catch (error) {
+    await env.ATTACHMENTS.delete(key);
+    throw error;
+  }
+  return { id, draftId, filename: input.filename ?? null, mime: input.mime ?? null, size: input.content.byteLength, createdAt: now };
+}
+
+export async function loadDraftAttachments(
+  env: Env,
+  draftId: string,
+  identity: string,
+): Promise<Array<{ id: string; filename?: string; mimeType?: string; content: ArrayBuffer }>> {
+  const res = await env.DB.prepare(
+    "SELECT id, draft_id, filename, mime, size, r2_key, created_at FROM draft_attachments " +
+      "WHERE draft_id = ? AND identity = ? ORDER BY created_at, id",
+  )
+    .bind(draftId, identity.toLowerCase())
+    .all<DraftAttachmentRow>();
+  const out: Array<{ id: string; filename?: string; mimeType?: string; content: ArrayBuffer }> = [];
+  for (const row of res.results ?? []) {
+    const object = await env.ATTACHMENTS.get(row.r2_key);
+    if (!object) throw new Error(`draft attachment ${row.id} bytes are missing`);
+    out.push({
+      id: row.id,
+      ...(row.filename ? { filename: row.filename } : {}),
+      ...(row.mime ? { mimeType: row.mime } : {}),
+      content: await object.arrayBuffer(),
+    });
+  }
+  return out;
+}
+
+export async function deleteDraftAttachment(
+  env: Env,
+  draftId: string,
+  identity: string,
+  attachmentId: string,
+): Promise<boolean> {
+  const owner = identity.toLowerCase();
+  const row = await env.DB.prepare(
+    "SELECT r2_key FROM draft_attachments WHERE id = ? AND draft_id = ? AND identity = ? LIMIT 1",
+  )
+    .bind(attachmentId, draftId, owner)
+    .first<{ r2_key: string }>();
+  if (!row) return false;
+  await env.ATTACHMENTS.delete(row.r2_key);
+  const result = await env.DB.prepare(
+    "DELETE FROM draft_attachments WHERE id = ? AND draft_id = ? AND identity = ?",
+  )
+    .bind(attachmentId, draftId, owner)
+    .run();
+  return (result.meta?.changes ?? 0) > 0;
+}
+
+async function deleteAllDraftAttachments(env: Env, draftId: string, identity: string): Promise<void> {
+  const owner = identity.toLowerCase();
+  const rows = await env.DB.prepare(
+    "SELECT r2_key FROM draft_attachments WHERE draft_id = ? AND identity = ?",
+  )
+    .bind(draftId, owner)
+    .all<{ r2_key: string }>();
+  for (const row of rows.results ?? []) await env.ATTACHMENTS.delete(row.r2_key);
+  await env.DB.prepare("DELETE FROM draft_attachments WHERE draft_id = ? AND identity = ?")
+    .bind(draftId, owner)
+    .run();
 }
 
 export async function messageAccessible(

@@ -178,11 +178,33 @@ CREATE TABLE IF NOT EXISTS drafts (
   body_html    TEXT,
   in_reply_to  TEXT,
   thread_id    TEXT,
+  -- Compose parity (#353, migration 0013). mode is new|reply|replyAll|forward;
+  -- source_message_id identifies the message whose recipients/quote seeded the
+  -- draft. Existing/IMAP drafts default to ordinary new-mail behavior.
+  compose_mode TEXT NOT NULL DEFAULT 'new',
+  source_message_id TEXT,
   uid          INTEGER NOT NULL,
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_drafts_identity ON drafts(identity, updated_at);
+
+-- Draft attachment staging (#353, migration 0013). Bytes live under the r2_key
+-- in ATTACHMENTS; identity duplicates the draft owner so every metadata/byte
+-- operation has an explicit IDOR predicate. Send consumes these through the one
+-- mailbox core, then removes them only after successful dispatch + sent storage.
+CREATE TABLE IF NOT EXISTS draft_attachments (
+  id         TEXT PRIMARY KEY,
+  draft_id   TEXT NOT NULL,
+  identity   TEXT NOT NULL,
+  filename   TEXT,
+  mime       TEXT,
+  size       INTEGER NOT NULL,
+  r2_key     TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_draft_attachments_owner
+  ON draft_attachments(draft_id, identity, created_at);
 
 -- Per-folder UID ledger + counters for the RE-POPULATED folders (#352, migration
 -- 0011). Archive/Trash/Junk (and Drafts via drafts.uid) gain messages OUT of

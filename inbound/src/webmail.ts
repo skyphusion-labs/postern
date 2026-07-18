@@ -122,6 +122,22 @@ export const WEBMAIL_HTML = `<!doctype html>
   .compose label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
   .compose input, .compose textarea { width: 100%; }
   .compose textarea { min-height: 180px; resize: vertical; }
+  .compose-editor {
+    width: 100%; min-height: 220px; padding: 10px; overflow-y: auto;
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .compose-editor.plain { white-space: pre-wrap; font-family: inherit; }
+  .formatbar { display: flex; gap: 4px; margin: 6px 0; flex-wrap: wrap; }
+  .formatbar button { min-width: 34px; padding: 4px 8px; }
+  .compose-status { color: var(--muted); font-size: 12px; margin-left: auto; align-self: center; }
+  .draft-files { list-style: none; padding: 0; margin: 8px 0; }
+  .draft-files li { display: flex; gap: 8px; align-items: center; margin: 5px 0; }
+  .draft-files .progress { color: var(--muted); font-size: 12px; }
+  .quote-preview {
+    margin-top: 14px; padding: 10px; border-left: 3px solid var(--line);
+    color: var(--muted); white-space: pre-wrap; max-height: 180px; overflow: auto;
+  }
   .compose-actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
   .compose-note { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
   .sendnote { color: var(--muted); font-size: 12px; }
@@ -331,36 +347,30 @@ export const WEBMAIL_HTML = `<!doctype html>
   }
 
   function apiWrite(path, body) {
+    return apiSendRequest("POST", path, body);
+  }
+
+  function apiSendRequest(method, path, body) {
     var url = baseUrl() + path;
     var opts;
+    var headers = { "accept": "application/json" };
+    if (body !== undefined) headers["content-type"] = "application/json";
     if (state.authMode === "session") {
       // Cookie session: the HttpOnly session cookie rides automatically; a write must
       // additionally carry the CSRF token in X-Postern-CSRF (double-submit, contract 1.6).
       opts = {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "accept": "application/json",
-          "x-postern-csrf": csrfFromCookie()
-        },
-        body: JSON.stringify(body),
+        method: method,
+        headers: headers,
         credentials: "include",
         referrerPolicy: "no-referrer"
       };
+      headers["x-postern-csrf"] = csrfFromCookie();
     } else {
       if (!state.sendToken) throw new Error("send token not configured");
-      opts = {
-        method: "POST",
-        headers: {
-          "authorization": "Bearer " + state.sendToken,
-          "content-type": "application/json",
-          "accept": "application/json"
-        },
-        body: JSON.stringify(body),
-        credentials: "omit",
-        referrerPolicy: "no-referrer"
-      };
+      headers["authorization"] = "Bearer " + state.sendToken;
+      opts = { method: method, headers: headers, credentials: "omit", referrerPolicy: "no-referrer" };
     }
+    if (body !== undefined) opts.body = JSON.stringify(body);
     return fetch(url, opts).then(function (r) {
       return r.json().catch(function () { return { ok: false, error: "bad_json", status: r.status }; })
         .then(function (j) {
@@ -374,7 +384,9 @@ export const WEBMAIL_HTML = `<!doctype html>
           }
           if (!r.ok || j.ok === false) {
             var msg = (j && (j.message || j.error)) || ("HTTP " + r.status);
-            throw new Error(msg);
+            var requestError = new Error(msg);
+            requestError.code = r.status;
+            throw requestError;
           }
           return j;
         });
@@ -955,6 +967,11 @@ export const WEBMAIL_HTML = `<!doctype html>
             date: d.updatedAt || d.createdAt || "",
             bodyText: d.bodyText || "",
             bodyHtml: d.bodyHtml || null,
+            cc: d.cc || "",
+            bcc: d.bcc || "",
+            composeMode: d.composeMode || "new",
+            sourceMessageId: d.sourceMessageId || null,
+            updatedAt: d.updatedAt || null,
             seen: true,
             flagged: false,
             trusted: true,
@@ -1007,9 +1024,12 @@ export const WEBMAIL_HTML = `<!doctype html>
   function appendRow(m) {
     var tags = [];
     if (m.flagged) tags.push(el("span", { class: "star on", text: "★", title: "Flagged" }));
-    if (m.direction === "outbound") tags.push(el("span", { class: "tag out", text: "Sent" }));
-    if (m.isDraft) tags.push(el("span", { class: "tag out", text: "Draft" }));
-    else tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
+    if (m.isDraft) {
+      tags.push(el("span", { class: "tag out", text: "Draft" }));
+    } else {
+      if (m.direction === "outbound") tags.push(el("span", { class: "tag out", text: "Sent" }));
+      tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
+    }
     var who = m.direction === "outbound" ? ("To: " + (m.to || "")) : (m.from || "");
     var item = el("div", {
       class: "row-item" + (m.seen === false ? " unread" : ""),
@@ -1042,7 +1062,15 @@ export const WEBMAIL_HTML = `<!doctype html>
     // Drafts have no /api/messages/:id body; keep the list summary in the pane.
     var draft = state.items.find(function (x) { return x.messageId === id && x.isDraft; });
     if (draft) {
-      renderReading(draft);
+      renderLoadingReading();
+      Promise.all([
+        apiSendGet("/api/drafts/" + encodeURIComponent(id)),
+        apiSendGet("/api/drafts/" + encodeURIComponent(id) + "/attachments")
+      ]).then(function (parts) {
+        var d = parts[0].draft;
+        d.attachments = parts[1].attachments || [];
+        renderComposeForm({ draft: d });
+      }).catch(function (e) { renderError(e.message); });
       return;
     }
     renderLoadingReading();
@@ -1074,46 +1102,292 @@ export const WEBMAIL_HTML = `<!doctype html>
 
   function renderComposeForm(opts) {
     opts = opts || {};
+    var draft = opts.draft || {};
+    var mode = draft.composeMode || opts.composeMode || "new";
+    var sourceMessageId = draft.sourceMessageId || opts.sourceMessageId || null;
+    var draftId = draft.id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
+    var updatedAt = draft.updatedAt || null;
+    var attachments = draft.attachments || [];
+    var rich = draft.bodyHtml != null ? true : !!opts.rich;
+    var saveTimer = null;
+    var saveChain = Promise.resolve();
+    var closed = false;
     var r = $("reading"); clear(r);
     var err = el("div", { class: "err", text: "" });
-    var toInput = el("input", { id: "cmpTo", type: "text", value: opts.to || "" });
-    var subInput = el("input", { id: "cmpSub", type: "text", value: opts.subject || "" });
-    var bodyInput = el("textarea", { id: "cmpBody" });
-    if (opts.text) bodyInput.value = opts.text;
+    var status = el("span", { class: "compose-status", text: updatedAt ? "Saved" : "Not saved yet" });
+    var toInput = el("input", { id: "cmpTo", type: "text", value: draft.to || opts.to || "", placeholder: "one@example.com, two@example.com" });
+    var ccInput = el("input", { id: "cmpCc", type: "text", value: draft.cc || opts.cc || "" });
+    var bccInput = el("input", { id: "cmpBcc", type: "text", value: draft.bcc || opts.bcc || "" });
+    var subInput = el("input", { id: "cmpSub", type: "text", value: draft.subject || opts.subject || "" });
+    var editor = el("div", {
+      id: "cmpBody", class: "compose-editor" + (rich ? "" : " plain"),
+      contenteditable: "true", role: "textbox", "aria-multiline": "true"
+    });
+    var initialText = draft.bodyText || opts.text || "";
+    if (rich && draft.bodyHtml) editor.appendChild(safeComposeFragment(draft.bodyHtml));
+    else editor.textContent = initialText;
+    var formatbar = el("div", { class: "formatbar", role: "toolbar", "aria-label": "Formatting" });
+    [["bold", "B"], ["italic", "I"], ["underline", "U"], ["insertUnorderedList", "Bullets"],
+      ["insertOrderedList", "Numbers"]].forEach(function (item) {
+      var btn = el("button", { type: "button", text: item[1], "data-command": item[0] });
+      btn.addEventListener("click", function () {
+        editor.focus(); document.execCommand(item[0], false, null); scheduleSave();
+      });
+      formatbar.appendChild(btn);
+    });
+    formatbar.style.display = rich ? "" : "none";
+    var modeBtn = el("button", { type: "button", text: rich ? "Use plain text" : "Use rich text" });
+    modeBtn.addEventListener("click", function () {
+      if (rich) {
+        editor.textContent = editor.innerText;
+        editor.classList.add("plain");
+        rich = false;
+      } else {
+        editor.classList.remove("plain");
+        rich = true;
+      }
+      formatbar.style.display = rich ? "" : "none";
+      modeBtn.textContent = rich ? "Use plain text" : "Use rich text";
+      scheduleSave();
+    });
+    var fileInput = el("input", { id: "cmpFiles", type: "file", multiple: "multiple" });
+    var fileList = el("ul", { class: "draft-files", id: "cmpFileList" });
+    var quoteBox = el("div", { class: "quote-preview" });
+    quoteBox.style.display = "none";
     var form = el("div", { class: "compose" }, [
-      el("h2", { text: opts.replyTo ? "Reply" : "Compose" }),
-      el("p", { class: "compose-note", text: "Sends via POST /api/" + (opts.replyTo ? "reply" : "send") + " with your send token." }),
+      el("h2", { text: mode === "replyAll" ? "Reply all" : mode === "reply" ? "Reply" : mode === "forward" ? "Forward" : "Compose" }),
+      el("p", { class: "compose-note", text: "Autosaves server-side; Send uses the same mailbox core as API clients." }),
       err,
       el("label", { for: "cmpTo", text: "To" }), toInput,
+      el("label", { for: "cmpCc", text: "Cc" }), ccInput,
+      el("label", { for: "cmpBcc", text: "Bcc" }), bccInput,
       el("label", { for: "cmpSub", text: "Subject" }), subInput,
-      el("label", { for: "cmpBody", text: "Message" }), bodyInput,
+      el("label", { for: "cmpBody", text: "Message" }),
+      el("div", { class: "formatbar" }, [modeBtn]),
+      formatbar, editor, quoteBox,
+      el("label", { for: "cmpFiles", text: "Attachments (20 files, 25 MiB total)" }), fileInput, fileList,
       el("div", { class: "compose-actions" }, [
         el("button", { id: "cmpSend", text: "Send" }),
-        el("button", { id: "cmpCancel", text: "Cancel" })
+        el("button", { id: "cmpCancel", text: "Close" }),
+        el("button", { id: "cmpDiscard", text: "Discard" }),
+        status
       ])
     ]);
     r.appendChild(form);
-    if (opts.replyTo) {
+    if (mode === "reply" || mode === "replyAll") {
       toInput.disabled = true;
+      ccInput.disabled = true;
       subInput.disabled = true;
     }
+    showQuote(opts.original || null);
+    if (!opts.original && sourceMessageId) {
+      api("/api/messages/" + encodeURIComponent(sourceMessageId)).then(function (body) {
+        showQuote(body.message);
+      }).catch(function () {});
+    }
+    renderFiles();
+
+    function safeComposeFragment(html) {
+      var frag = document.createDocumentFragment();
+      var doc;
+      try { doc = new DOMParser().parseFromString(String(html), "text/html"); } catch (_) { return frag; }
+      var allowed = ["A","B","BLOCKQUOTE","BR","CODE","DIV","EM","H1","H2","H3","I","LI","OL","P","PRE","S","SPAN","STRONG","U","UL"];
+      function copy(node, parent) {
+        if (node.nodeType === 3) { parent.appendChild(document.createTextNode(node.nodeValue || "")); return; }
+        if (node.nodeType !== 1) return;
+        var tag = node.tagName;
+        if (allowed.indexOf(tag) < 0) {
+          Array.prototype.slice.call(node.childNodes).forEach(function (child) { copy(child, parent); });
+          return;
+        }
+        var clean = document.createElement(tag.toLowerCase());
+        if (tag === "A") {
+          var href = node.getAttribute("href") || "";
+          if (/^(https?:|mailto:)/i.test(href)) clean.setAttribute("href", href);
+          clean.setAttribute("rel", "noopener noreferrer nofollow");
+        }
+        Array.prototype.slice.call(node.childNodes).forEach(function (child) { copy(child, clean); });
+        parent.appendChild(clean);
+      }
+      Array.prototype.slice.call(doc.body.childNodes).forEach(function (node) { copy(node, frag); });
+      return frag;
+    }
+
+    function showQuote(original) {
+      if (!original || mode === "new") return;
+      var source = (original.bodyText || htmlToPlain(original.bodyHtml || "")).trim();
+      var label = mode === "forward" ? "Forwarded message" : "Quoted message";
+      quoteBox.textContent = label + "\\nFrom: " + (original.from || "") + "\\n" + source;
+      quoteBox.style.display = "";
+    }
+
+    function htmlToPlain(html) {
+      try {
+        var doc = new DOMParser().parseFromString(String(html), "text/html");
+        return (doc.body && doc.body.textContent) || "";
+      } catch (_) { return ""; }
+    }
+
+    function recipientList(value) {
+      return String(value || "").split(/[,\\n;]/).map(function (x) { return x.trim(); }).filter(Boolean);
+    }
+
+    function validateRecipients() {
+      var re = /^[^@\\s]+@[^@\\s.]+(?:\\.[^@\\s.]+)+$/;
+      var fields = mode === "reply" || mode === "replyAll"
+        ? [["Bcc", bccInput.value]]
+        : [["To", toInput.value], ["Cc", ccInput.value], ["Bcc", bccInput.value]];
+      for (var i = 0; i < fields.length; i++) {
+        var values = recipientList(fields[i][1]);
+        for (var j = 0; j < values.length; j++) {
+          if (!re.test(values[j])) return "Invalid " + fields[i][0] + " address: " + values[j];
+        }
+      }
+      if (mode !== "reply" && mode !== "replyAll" && recipientList(toInput.value).length === 0) return "Enter a To recipient.";
+      return "";
+    }
+
+    function payload() {
+      var text = (editor.innerText || editor.textContent || "").trim();
+      return {
+        to: toInput.value.trim() || null,
+        cc: ccInput.value.trim() || null,
+        bcc: bccInput.value.trim() || null,
+        subject: subInput.value.trim() || "(no subject)",
+        bodyText: rich ? text : text,
+        bodyHtml: rich ? editor.innerHTML : null,
+        inReplyTo: sourceMessageId,
+        threadId: opts.threadId || draft.threadId || null,
+        composeMode: mode,
+        sourceMessageId: sourceMessageId,
+        updatedAt: updatedAt
+      };
+    }
+
+    function saveDraft() {
+      clearTimeout(saveTimer);
+      if (closed) return saveChain;
+      status.textContent = "Saving...";
+      saveChain = saveChain.catch(function () {}).then(function () {
+        return apiSendRequest("PUT", "/api/drafts/" + encodeURIComponent(draftId), payload());
+      }).then(function (body) {
+          updatedAt = body.draft.updatedAt;
+          status.textContent = "Saved";
+          return body.draft;
+        }).catch(function (e) {
+          status.textContent = "Not saved";
+          err.textContent = "Autosave failed: " + e.message;
+          throw e;
+      });
+      return saveChain;
+    }
+
+    function scheduleSave() {
+      if (closed) return;
+      clearTimeout(saveTimer);
+      status.textContent = "Unsaved changes";
+      saveTimer = setTimeout(function () { saveDraft().catch(function () {}); }, 800);
+    }
+
+    [toInput, ccInput, bccInput, subInput, editor].forEach(function (node) {
+      node.addEventListener("input", scheduleSave);
+    });
+
+    function renderFiles() {
+      clear(fileList);
+      attachments.forEach(function (a) {
+        var remove = el("button", { type: "button", text: "Remove" });
+        remove.addEventListener("click", function () {
+          remove.disabled = true;
+          apiSendRequest("DELETE", "/api/drafts/" + encodeURIComponent(draftId) +
+            "/attachments/" + encodeURIComponent(a.id)).then(function () {
+            attachments = attachments.filter(function (x) { return x.id !== a.id; });
+            renderFiles();
+          }).catch(function (e) { err.textContent = e.message; remove.disabled = false; });
+        });
+        fileList.appendChild(el("li", {}, [
+          el("span", { text: (a.filename || "attachment") + " (" + a.size + " bytes)" }), remove
+        ]));
+      });
+    }
+
+    function uploadFile(file) {
+      var progress = el("span", { class: "progress", text: file.name + " 0%" });
+      fileList.appendChild(el("li", {}, [progress]));
+      return saveDraft().then(function () {
+        return new Promise(function (resolve, reject) {
+          var xhr = new XMLHttpRequest();
+          xhr.open("POST", baseUrl() + "/api/drafts/" + encodeURIComponent(draftId) + "/attachments");
+          xhr.withCredentials = state.authMode === "session";
+          xhr.setRequestHeader("Accept", "application/json");
+          xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+          xhr.setRequestHeader("X-Postern-Filename", encodeURIComponent(file.name));
+          if (state.authMode === "session") xhr.setRequestHeader("X-Postern-CSRF", csrfFromCookie());
+          else xhr.setRequestHeader("Authorization", "Bearer " + state.sendToken);
+          xhr.upload.onprogress = function (event) {
+            if (event.lengthComputable) progress.textContent = file.name + " " + Math.round(event.loaded * 100 / event.total) + "%";
+          };
+          xhr.onload = function () {
+            var body = {};
+            try { body = JSON.parse(xhr.responseText); } catch (_) {}
+            if (xhr.status >= 200 && xhr.status < 300 && body.attachment) resolve(body.attachment);
+            else reject(new Error(body.message || body.error || ("HTTP " + xhr.status)));
+          };
+          xhr.onerror = function () { reject(new Error("attachment upload failed")); };
+          xhr.send(file);
+        });
+      }).then(function (attachment) {
+        attachments.push(attachment);
+        renderFiles();
+      }).catch(function (e) {
+        err.textContent = e.message;
+        renderFiles();
+      });
+    }
+
+    fileInput.addEventListener("change", function () {
+      var files = Array.prototype.slice.call(fileInput.files || []);
+      if (attachments.length + files.length > 20) { err.textContent = "At most 20 attachments are allowed."; return; }
+      var total = attachments.reduce(function (sum, a) { return sum + (a.size || 0); }, 0);
+      files.forEach(function (file) { total += file.size; });
+      if (total > 25 * 1024 * 1024) { err.textContent = "Attachments exceed 25 MiB."; return; }
+      files.reduce(function (chain, file) {
+        return chain.then(function () { return uploadFile(file); });
+      }, Promise.resolve());
+      fileInput.value = "";
+    });
+
     $("cmpCancel").addEventListener("click", function () {
-      if (state.selected) renderReading(state.selected);
-      else renderReading(null);
+      saveDraft().catch(function () {}).then(function () {
+        closed = true;
+        state.folder = "drafts"; resetAndLoad(); renderReading(null);
+      });
+    });
+    $("cmpDiscard").addEventListener("click", function () {
+      clearTimeout(saveTimer);
+      closed = true;
+      saveChain.catch(function () {}).then(function () {
+        return apiSendRequest("DELETE", "/api/drafts/" + encodeURIComponent(draftId));
+      }).then(function () {
+        state.folder = "drafts"; resetAndLoad(); renderReading(null);
+      }).catch(function (e) {
+        if (e.code === 404) {
+          state.folder = "drafts"; resetAndLoad(); renderReading(null);
+          return;
+        }
+        err.textContent = e.message;
+      });
     });
     $("cmpSend").addEventListener("click", function () {
       err.textContent = "";
-      var text = bodyInput.value.trim();
+      var recipientError = validateRecipients();
+      if (recipientError) { err.textContent = recipientError; return; }
+      var text = (editor.innerText || editor.textContent || "").trim();
       if (!text) { err.textContent = "Enter a message."; return; }
       $("cmpSend").disabled = true;
-      var req = opts.replyTo
-        ? apiWrite("/api/reply", { messageId: opts.replyTo, text: text })
-        : apiWrite("/api/send", {
-            to: toInput.value.trim(),
-            subject: subInput.value.trim() || "(no subject)",
-            text: text
-          });
-      req.then(function (res) {
+      saveDraft().then(function () {
+        return apiWrite("/api/drafts/" + encodeURIComponent(draftId) + "/send", {});
+      }).then(function (res) {
         state.folder = "sent"; state.q = ""; $("search").value = "";
         resetAndLoad();
         if (res.messageId) selectMessage(res.messageId, null);
@@ -1127,7 +1401,7 @@ export const WEBMAIL_HTML = `<!doctype html>
           return;
         }
         $("cmpSend").disabled = false;
-        err.textContent = e.message;
+        err.textContent = e.message + " Draft preserved for retry.";
       });
     });
   }
@@ -1145,6 +1419,8 @@ export const WEBMAIL_HTML = `<!doctype html>
       el("h2", { text: m.subject || "(no subject)" }),
       kv("From", m.from),
       kv("To", m.to),
+      m.cc ? kv("Cc", m.cc) : null,
+      m.bcc ? kv("Bcc", m.bcc) : null,
       kv("Date", m.date ? new Date(m.date).toLocaleString() : ""),
       el("div", { class: "kv" }, [
         el("b", { text: "Trust: " }),
@@ -1202,21 +1478,28 @@ export const WEBMAIL_HTML = `<!doctype html>
       }
     }
     if (state.sendCapable === true && !m.isDraft) {
-      var replyBtn = el("button", { text: "Reply" });
-      replyBtn.addEventListener("click", function () {
-        var reSub = (m.subject || "").match(/^Re:/i) ? (m.subject || "") : ("Re: " + (m.subject || ""));
-        renderComposeForm({
-          replyTo: m.messageId,
-          to: m.from || "",
-          subject: reSub,
-          text: "
-
----
-On " + (m.date ? new Date(m.date).toLocaleString() : "") + ", " + (m.from || "") + " wrote:
-" + (m.bodyText || "")
+      function composeFromMessage(label, composeMode) {
+        var button = el("button", { text: label });
+        button.addEventListener("click", function () {
+          var isForward = composeMode === "forward";
+          var prefix = isForward ? "Fwd: " : "Re: ";
+          var subject = (m.subject || "").match(isForward ? /^(Fwd?|Fw):/i : /^Re:/i)
+            ? (m.subject || "") : (prefix + (m.subject || ""));
+          renderComposeForm({
+            composeMode: composeMode,
+            sourceMessageId: m.messageId,
+            threadId: isForward ? null : m.threadId,
+            original: m,
+            to: isForward ? "" : (m.replyTo || m.from || ""),
+            cc: composeMode === "replyAll" ? [m.to || "", m.cc || ""].filter(Boolean).join(", ") : "",
+            subject: subject
+          });
         });
-      });
-      actions.push(replyBtn);
+        return button;
+      }
+      actions.push(composeFromMessage("Reply", "reply"));
+      actions.push(composeFromMessage("Reply all", "replyAll"));
+      actions.push(composeFromMessage("Forward", "forward"));
     }
     if (actions.length) {
       head.appendChild(el("div", { class: "msg-actions compose-actions" }, actions));
