@@ -579,6 +579,21 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id));
           return { results: matched as unknown as T[] };
         }
+        // #354 recent recipients: outbound rows for one bound From.
+        if (/SELECT to_addr, cc_addr, bcc_addr, date FROM messages/i.test(sql)) {
+          const owner = String(bound[0]).toLowerCase();
+          const matched = rows
+            .filter((r) => r.direction === "outbound" && r.from_addr.toLowerCase() === owner)
+            .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id))
+            .slice(0, 200)
+            .map((r) => ({
+              to_addr: r.to_addr,
+              cc_addr: r.cc_addr,
+              bcc_addr: r.bcc_addr,
+              date: r.date,
+            }));
+          return { results: matched as unknown as T[] };
+        }
         // summariesByIds(): FROM messages m WHERE m.message_id IN (?, ?, ...).
         // All binds are message ids; no ordering guarantee (caller re-orders).
         if (/FROM messages m WHERE m\.message_id IN \(/i.test(sql)) {
@@ -700,6 +715,25 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           else if (/m\.mailbox = \?/i.test(sql)) {
             const mailbox = String(bound[i++]);
             work = work.filter((r) => r.mailbox === mailbox);
+          }
+          // #354 search filters: date range, attachment presence, seen.
+          if (/m\.date >= \?/i.test(sql)) {
+            const after = String(bound[i++]);
+            work = work.filter((r) => r.date >= after);
+          }
+          if (/m\.date <= \?/i.test(sql)) {
+            const before = String(bound[i++]);
+            work = work.filter((r) => r.date <= before);
+          }
+          if (/NOT EXISTS \(SELECT 1 FROM attachments/i.test(sql)) {
+            work = work.filter((r) => !atts.some((a) => a.message_id === r.message_id));
+          } else if (/EXISTS \(SELECT 1 FROM attachments/i.test(sql)) {
+            work = work.filter((r) => atts.some((a) => a.message_id === r.message_id));
+          }
+          if (/\(m\.seen\) = 1/i.test(sql) || /\(COALESCE\(\(SELECT sb\.seen[\s\S]*?\)\) = 1/i.test(sql)) {
+            work = work.filter((r) => effSeen(r, seenViewer) === 1);
+          } else if (/\(m\.seen\) = 0/i.test(sql) || /\(COALESCE\(\(SELECT sb\.seen[\s\S]*?\)\) = 0/i.test(sql)) {
+            work = work.filter((r) => effSeen(r, seenViewer) === 0);
           }
           if (/m\.date < \?/i.test(sql)) {
             const d = String(bound[i++]);

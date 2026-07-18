@@ -6,11 +6,18 @@
 <meta name="referrer" content="no-referrer">
 <title>Postern webmail</title>
 <style>
-  :root {
+  :root, html[data-theme="dark"] {
     --bg: #14161a; --panel: #1c1f26; --panel-2: #232733; --line: #2e3340;
     --fg: #e7e9ee; --muted: #99a0ad; --accent: #6ea8fe; --accent-dim: #2b3550;
     --bad: #e06c75; --ok: #98c379;
   }
+  html[data-theme="light"] {
+    --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f0f2f5; --line: #d7dbe3;
+    --fg: #1c1f26; --muted: #5c6575; --accent: #2563eb; --accent-dim: #dbe7ff;
+    --bad: #b42318; --ok: #067647;
+  }
+  html[data-density="compact"] .row-item { padding: 6px 10px; }
+  html[data-density="compact"] body { font-size: 13px; }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
@@ -58,6 +65,39 @@
   .toolbar input { flex: 1; min-width: 120px; }
   .toolbar select { width: auto; }
   .toolbar .mode { min-width: 6.5rem; }
+  .filters {
+    display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px;
+    border-bottom: 1px solid var(--line); align-items: center;
+  }
+  .filters label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  .filters input[type="date"] { padding: 4px 6px; font-size: 12px; }
+  .filters .chip {
+    font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--fg); cursor: pointer;
+  }
+  .filters .chip.on { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+  .settings-panel {
+    position: fixed; top: 52px; right: 12px; width: 320px; z-index: 20;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.35); display: none;
+  }
+  .settings-panel.on { display: block; }
+  .settings-panel h2 { margin: 0 0 10px; font-size: 15px; }
+  .settings-panel label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  .settings-panel select { width: 100%; }
+  .settings-panel .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  .ac-wrap { position: relative; }
+  .ac-list {
+    position: absolute; left: 0; right: 0; top: 100%; z-index: 5;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    max-height: 160px; overflow-y: auto; display: none;
+  }
+  .ac-list.on { display: block; }
+  .ac-list button {
+    display: block; width: 100%; text-align: left; background: none; border: none;
+    border-radius: 0; padding: 6px 10px; color: var(--fg);
+  }
+  .ac-list button:hover { background: var(--accent-dim); }
   .list { overflow-y: auto; flex: 1; }
   .row-item {
     padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
@@ -175,8 +215,24 @@
   <span class="who" id="who"></span>
   <span class="sendnote" id="sendNote" style="display:none"></span>
   <button id="composeBtn" style="display:none">Compose</button>
+  <button id="settingsBtn" class="link" style="display:none">Settings</button>
   <button id="logout" class="link" style="display:none">Sign out</button>
 </header>
+<div id="settingsPanel" class="settings-panel" role="dialog" aria-label="Settings">
+  <h2>Settings</h2>
+  <label for="themeSelect">Theme</label>
+  <select id="themeSelect" aria-label="Theme">
+    <option value="dark">Dark</option>
+    <option value="light">Light</option>
+  </select>
+  <label for="densitySelect">Density</label>
+  <select id="densitySelect" aria-label="Density">
+    <option value="comfortable">Comfortable</option>
+    <option value="compact">Compact</option>
+  </select>
+  <p class="note" id="settingsSession">Session: not signed in.</p>
+  <p class="note">Remote images in message bodies are blocked by CSP (img-src 'none'). There is no toggle that can enable them under the current policy.</p>
+</div>
 
 <!-- BYO-token gate (operator / self-host path, contract 1.7) -->
 <div id="gate">
@@ -230,6 +286,15 @@
         <option value="semantic">Semantic</option>
       </select>
     </div>
+    <div class="filters" id="filters" aria-label="Search filters">
+      <button type="button" class="chip" data-filter="unseen" id="chipUnseen">Unread</button>
+      <button type="button" class="chip" data-filter="seen" id="chipSeen">Read</button>
+      <button type="button" class="chip" data-filter="hasAtt" id="chipHasAtt">Has attachment</button>
+      <label>From <input id="filterFrom" type="text" placeholder="from@" aria-label="Filter from" style="width:9rem"></label>
+      <label>After <input id="filterAfter" type="date" aria-label="After date"></label>
+      <label>Before <input id="filterBefore" type="date" aria-label="Before date"></label>
+      <button type="button" class="link" id="clearFilters">Clear filters</button>
+    </div>
     <div class="list" id="list" aria-label="Messages"></div>
   </div>
   <div class="reading" id="reading" role="main" aria-label="Message">
@@ -262,10 +327,20 @@
 
   // --- session state ---------------------------------------------------------
   var SS = window.sessionStorage;
+  var LS = window.localStorage;
   var SEARCH_MODES = ["fts", "semantic", "hybrid"];
   function normalizeSearchMode(v) {
     return SEARCH_MODES.indexOf(v) >= 0 ? v : "hybrid";
   }
+  function applyChromePrefs() {
+    var theme = LS.getItem("postern_theme") === "light" ? "light" : "dark";
+    var density = LS.getItem("postern_density") === "compact" ? "compact" : "comfortable";
+    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.setAttribute("data-density", density);
+    if ($("themeSelect")) $("themeSelect").value = theme;
+    if ($("densitySelect")) $("densitySelect").value = density;
+  }
+  applyChromePrefs();
   var state = {
     origin: SS.getItem("postern_origin") || "",
     token: SS.getItem("postern_token") || "",
@@ -273,6 +348,8 @@
     searchMode: normalizeSearchMode(SS.getItem("postern_search_mode") || "hybrid"),
     folder: "inbox", q: "", cursor: null, items: [], selected: null,
     folders: [],
+    filters: { from: "", after: "", before: "", seen: null, hasAttachment: null },
+    recentRecipients: [],
     // Auth mode: "token" = BYO Bearer token (operator/self-host path, sessionStorage);
     // "session" = the native cookie session (#351), same-origin HttpOnly cookie + CSRF.
     authMode: "token",
@@ -746,18 +823,63 @@
     $("signin").style.display = "none";
     $("app").className = "on";
     $("logout").style.display = "";
+    $("settingsBtn").style.display = "";
     if (state.authMode === "session" && state.identity) {
       // Identity display (contract 1.5.1): show who the browser sends as. A send
       // token could never surface this; a session GET echoes the bound identity.
       $("identity").textContent = "Sending as " + state.identity.from;
       $("who").textContent = state.identity.displayName || "";
+      $("settingsSession").textContent = "Session: " + state.identity.from +
+        (state.identity.displayName ? " (" + state.identity.displayName + ")" : "");
     } else {
       $("identity").textContent = "";
       $("who").textContent = state.origin;
+      $("settingsSession").textContent = "Session: BYO token at " + (state.origin || "(same origin)");
     }
     $("searchMode").value = state.searchMode;
+    applyChromePrefs();
     updateComposeUI();
     probeSendCapability();
+    loadRecentRecipients();
+  }
+
+  function loadRecentRecipients() {
+    var params = {};
+    if (state.authMode !== "session" && state.identity && state.identity.from) {
+      params.viewer = state.identity.from;
+    }
+    api("/api/recipients/recent", params).then(function (body) {
+      state.recentRecipients = body.recipients || [];
+    }).catch(function () {
+      state.recentRecipients = [];
+    });
+  }
+
+  function searchFilterParams() {
+    var p = {};
+    if (state.filters.from) p.from = state.filters.from;
+    if (state.filters.after) p.after = state.filters.after + "T00:00:00.000Z";
+    if (state.filters.before) p.before = state.filters.before + "T23:59:59.999Z";
+    if (state.filters.seen === true) p.seen = "1";
+    if (state.filters.seen === false) p.seen = "0";
+    if (state.filters.hasAttachment === true) p.hasAttachment = "1";
+    if (state.filters.hasAttachment === false) p.hasAttachment = "0";
+    if (state.folder === "inbox") p.direction = "inbound";
+    else if (state.folder === "sent") p.direction = "outbound";
+    else if (state.folder === "all") p.mailbox = "all";
+    else if (state.folder === "trash" || state.folder === "junk" || state.folder === "archive") {
+      p.mailbox = state.folder;
+    }
+    return p;
+  }
+
+  function syncFilterChips() {
+    $("chipUnseen").className = "chip" + (state.filters.seen === false ? " on" : "");
+    $("chipSeen").className = "chip" + (state.filters.seen === true ? " on" : "");
+    $("chipHasAtt").className = "chip" + (state.filters.hasAttachment === true ? " on" : "");
+    $("filterFrom").value = state.filters.from || "";
+    $("filterAfter").value = state.filters.after || "";
+    $("filterBefore").value = state.filters.before || "";
   }
 
   // BYO-token connect (operator / self-host path, contract 1.7). Unchanged behavior.
@@ -961,9 +1083,16 @@
         }), cursor: null };
       });
     } else {
-      req = state.q
-        ? api("/api/search", { q: state.q, mode: mode, limit: 50, cursor: state.cursor })
-        : api("/api/messages", listParams());
+      if (state.q) {
+        var sp = searchFilterParams();
+        sp.q = state.q;
+        sp.mode = mode;
+        sp.limit = 50;
+        sp.cursor = state.cursor;
+        req = api("/api/search", sp);
+      } else {
+        req = api("/api/messages", listParams());
+      }
     }
     req.then(function (body) {
       $("list").removeChild(loading);
@@ -1134,9 +1263,9 @@
       el("h2", { text: mode === "replyAll" ? "Reply all" : mode === "reply" ? "Reply" : mode === "forward" ? "Forward" : "Compose" }),
       el("p", { class: "compose-note", text: "Autosaves server-side; Send uses the same mailbox core as API clients." }),
       err,
-      el("label", { for: "cmpTo", text: "To" }), toInput,
-      el("label", { for: "cmpCc", text: "Cc" }), ccInput,
-      el("label", { for: "cmpBcc", text: "Bcc" }), bccInput,
+      el("label", { for: "cmpTo", text: "To" }), wrapAutocomplete(toInput),
+      el("label", { for: "cmpCc", text: "Cc" }), wrapAutocomplete(ccInput),
+      el("label", { for: "cmpBcc", text: "Bcc" }), wrapAutocomplete(bccInput),
       el("label", { for: "cmpSub", text: "Subject" }), subInput,
       el("label", { for: "cmpBody", text: "Message" }),
       el("div", { class: "formatbar" }, [modeBtn]),
@@ -1195,6 +1324,39 @@
       var label = mode === "forward" ? "Forwarded message" : "Quoted message";
       quoteBox.textContent = label + "\nFrom: " + (original.from || "") + "\n" + source;
       quoteBox.style.display = "";
+    }
+
+    function wrapAutocomplete(input) {
+      var list = el("div", { class: "ac-list" });
+      var wrap = el("div", { class: "ac-wrap" }, [input, list]);
+      function hide() { list.className = "ac-list"; clear(list); }
+      function showMatches() {
+        var raw = input.value || "";
+        var parts = raw.split(/[,;\n]/);
+        var prefix = (parts[parts.length - 1] || "").trim().toLowerCase();
+        clear(list);
+        if (!prefix || !state.recentRecipients.length) { hide(); return; }
+        var hits = state.recentRecipients.filter(function (r) {
+          return (r.address || "").toLowerCase().indexOf(prefix) === 0;
+        }).slice(0, 8);
+        if (!hits.length) { hide(); return; }
+        hits.forEach(function (r) {
+          var btn = el("button", { type: "button", text: r.address });
+          btn.addEventListener("mousedown", function (ev) {
+            ev.preventDefault();
+            parts[parts.length - 1] = r.address;
+            input.value = parts.join(", ").replace(/(,\s*)+$/, "");
+            hide();
+            scheduleSave();
+          });
+          list.appendChild(btn);
+        });
+        list.className = "ac-list on";
+      }
+      input.addEventListener("input", showMatches);
+      input.addEventListener("focus", showMatches);
+      input.addEventListener("blur", function () { setTimeout(hide, 120); });
+      return wrap;
     }
 
     function htmlToPlain(html) {
@@ -1517,6 +1679,17 @@
   $("origin").addEventListener("keydown", function (e) { if (e.key === "Enter") $("token").focus(); });
   $("logout").addEventListener("click", logout);
   $("composeBtn").addEventListener("click", function () { renderComposeForm({}); });
+  $("settingsBtn").addEventListener("click", function () {
+    $("settingsPanel").classList.toggle("on");
+  });
+  $("themeSelect").addEventListener("change", function (e) {
+    LS.setItem("postern_theme", e.target.value === "light" ? "light" : "dark");
+    applyChromePrefs();
+  });
+  $("densitySelect").addEventListener("change", function (e) {
+    LS.setItem("postern_density", e.target.value === "compact" ? "compact" : "comfortable");
+    applyChromePrefs();
+  });
   $("signinForm").addEventListener("submit", function (e) { e.preventDefault(); signIn(); });
   $("toTokenGate").addEventListener("click", function () { showGate(""); });
   $("toSignin").addEventListener("click", function () { showSignin(""); });
@@ -1528,6 +1701,36 @@
     SS.setItem("postern_search_mode", state.searchMode);
     if (state.q) resetAndLoad();
   });
+  $("chipUnseen").addEventListener("click", function () {
+    state.filters.seen = state.filters.seen === false ? null : false;
+    syncFilterChips();
+    if (state.q) resetAndLoad();
+  });
+  $("chipSeen").addEventListener("click", function () {
+    state.filters.seen = state.filters.seen === true ? null : true;
+    syncFilterChips();
+    if (state.q) resetAndLoad();
+  });
+  $("chipHasAtt").addEventListener("click", function () {
+    state.filters.hasAttachment = state.filters.hasAttachment === true ? null : true;
+    syncFilterChips();
+    if (state.q) resetAndLoad();
+  });
+  function applyTextFilters() {
+    state.filters.from = $("filterFrom").value.trim();
+    state.filters.after = $("filterAfter").value || "";
+    state.filters.before = $("filterBefore").value || "";
+    if (state.q) resetAndLoad();
+  }
+  $("filterFrom").addEventListener("change", applyTextFilters);
+  $("filterAfter").addEventListener("change", applyTextFilters);
+  $("filterBefore").addEventListener("change", applyTextFilters);
+  $("clearFilters").addEventListener("click", function () {
+    state.filters = { from: "", after: "", before: "", seen: null, hasAttachment: null };
+    syncFilterChips();
+    if (state.q) resetAndLoad();
+  });
+  syncFilterChips();
   // --- boot: prefer a live native session, else BYO-token, else the right gate -----
   // GET /api/session (same-origin, cookie) tells us: a live session (restore it), or
   // the configured backend so we show the sign-in form (native) or token gate (off).

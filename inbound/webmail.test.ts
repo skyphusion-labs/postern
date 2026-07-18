@@ -72,9 +72,20 @@ describe("the page is XSS-conscious by construction", () => {
     expect(WEBMAIL_HTML).toContain("function apiWrite");
   });
   it("defaults search to hybrid mode with a mode selector (parity with MCP)", () => {
-    expect(WEBMAIL_HTML).toContain("mode: mode");
+    // Search params are built via searchFilterParams() then sp.mode = mode (#354).
+    expect(WEBMAIL_HTML).toContain("sp.mode = mode");
     expect(WEBMAIL_HTML).toContain('id="searchMode"');
     expect(WEBMAIL_HTML).toContain("postern_search_mode");
+  });
+  it("exposes search filter chips, recent recipients, and settings (#354)", () => {
+    expect(WEBMAIL_HTML).toContain('id="filterAfter"');
+    expect(WEBMAIL_HTML).toContain('id="filterBefore"');
+    expect(WEBMAIL_HTML).toContain("hasAttachment");
+    expect(WEBMAIL_HTML).toContain("/api/recipients/recent");
+    expect(WEBMAIL_HTML).toContain('id="settingsBtn"');
+    expect(WEBMAIL_HTML).toContain("postern_theme");
+    expect(WEBMAIL_HTML).toContain("postern_density");
+    expect(WEBMAIL_HTML).toContain("blocked by CSP");
   });
   it("exposes folder rail + organize API client for durable mailbox ops (#352)", () => {
     expect(WEBMAIL_HTML).toContain('id="folders"');

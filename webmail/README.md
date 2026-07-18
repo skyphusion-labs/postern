@@ -215,11 +215,28 @@ cd inbound && npm run sync-webmail
 `webmail/index.html`. The served route at `/webmail` carries the locked-down CSP
 and security headers; opening the standalone file directly does not.
 
+## Search filters and thread search (#354)
+
+Search (`/api/search`) accepts the same folder/mailbox scope as list, plus
+`from`, `after`, `before`, `hasAttachment`, and `seen`. Those filters apply to
+every mode (fts / substr / semantic / hybrid), not only substr. The webmail
+filter chips keep the active query in page state for the current tab.
+
+Thread panel loads (`GET /api/threads/{threadId}`) are **not** search: they list
+every stored sibling in the thread for the current viewer, independent of the
+list/search filter chips. Searching finds messages; opening a hit then loads its
+full thread for reading.
+
+Recent-recipients autocomplete (`GET /api/recipients/recent`) is D-CONTACTS-1:
+outbound to/cc/bcc for one bound identity (session) or an explicit `viewer=` on
+BYO. It is never estate-wide when unbound.
+
+Settings (theme / density) live in `localStorage`. Remote images remain blocked
+by CSP (`img-src 'none'`); the settings panel states that honestly (no fake toggle).
+
 ## Deferred (follow-ups)
 
-- **Compose extras:** `cc` / `bcc`, attachments, HTML bodies, and drafts. The API
-  supports them; the compose UI is plain-text only for now ([`COMPOSE.md`](COMPOSE.md)
-  section 4).
+- Full address book beyond recent-recipients.
 - **"Sending as ..." identity display** is delivered in **session mode** (#351):
   `GET /api/session` echoes the bound identity, so the header shows it. In BYO-token
   mode the page still cannot introspect a send token's identity (a send token gets

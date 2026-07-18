@@ -129,12 +129,18 @@ export interface SearchQuery {
   // Sender filter (#366): same lower(from_addr) LIKE semantics as ListQuery.from,
   // so the IMAP Sent lens can push from=V server-side.
   from?: string;
-  // Durable-folder scope (#352), same semantics as ListQuery.mailbox: "all" = every
-  // placement, archive|trash|junk = that placement only, undefined = mailbox IS NULL
-  // (the direction-default INBOX/Sent view). Substr-only for now (the IMAP door's
-  // SEARCH path); fts/semantic/hybrid are unfiltered here (pre-existing, unrelated
-  // to #352 -- a folder-scoped IMAP SEARCH only ever calls mode=substr).
+  // Durable-folder scope (#352/#354): same semantics as ListQuery.mailbox across
+  // EVERY search mode (fts/substr/semantic/hybrid). "all" = every placement,
+  // archive|trash|junk = that placement only, undefined = mailbox IS NULL.
   mailbox?: string;
+  /** Inclusive ISO date lower bound on messages.date (#354). */
+  after?: string;
+  /** Inclusive ISO date upper bound on messages.date (#354). */
+  before?: string;
+  /** true = has >=1 attachment; false = none (#354). */
+  hasAttachment?: boolean;
+  /** Filter on effective seen (viewer-aware when to/viewer set) (#354). */
+  seen?: boolean;
   /** Internal bound-session account boundary; never caller-controlled. */
   viewer?: string;
   limit?: number;
@@ -1625,6 +1631,61 @@ export async function search(env: Env, q: SearchQuery): Promise<Page<SearchHit>>
   }
 }
 
+/** Shared SQL predicates for mailbox/date/attachment/seen across search modes (#354). */
+function pushCommonSearchFilters(
+  where: string[],
+  binds: unknown[],
+  q: SearchQuery,
+  opts: { seenExpr: string; seenBinds: unknown[] },
+): void {
+  const seenExpr = opts.seenExpr;
+  if (q.mailbox !== "all") {
+    if (q.mailbox) {
+      where.push("m.mailbox = ?");
+      binds.push(q.mailbox);
+    } else {
+      where.push("m.mailbox IS NULL");
+    }
+  }
+  if (q.after) {
+    where.push("m.date >= ?");
+    binds.push(q.after);
+  }
+  if (q.before) {
+    where.push("m.date <= ?");
+    binds.push(q.before);
+  }
+  if (q.hasAttachment === true) {
+    where.push("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.message_id)");
+  } else if (q.hasAttachment === false) {
+    where.push("NOT EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.message_id)");
+  }
+  if (q.seen === true) {
+    where.push(`(${seenExpr}) = 1`);
+    binds.push(...opts.seenBinds);
+  } else if (q.seen === false) {
+    where.push(`(${seenExpr}) = 0`);
+    binds.push(...opts.seenBinds);
+  }
+}
+
+function passesCommonSearchFilters(m: StoredMessageSummary, q: SearchQuery): boolean {
+  if (q.mailbox !== "all") {
+    if (q.mailbox) {
+      if (m.mailbox !== q.mailbox) return false;
+    } else if (m.mailbox !== null) {
+      return false;
+    }
+  }
+  if (q.after && m.date < q.after) return false;
+  if (q.before && m.date > q.before) return false;
+  if (q.hasAttachment === true && m.attachmentCount < 1) return false;
+  if (q.hasAttachment === false && m.attachmentCount > 0) return false;
+  if (q.seen === true && !m.seen) return false;
+  if (q.seen === false && m.seen) return false;
+  return true;
+}
+
 async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const limit = clampLimit(q.limit);
   const ftsExpr = toFtsQuery(q.q ?? "");
@@ -1655,6 +1716,10 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
     where.push(rv.direction);
     binds.push(...rv.directionBinds);
   }
+  // seenExpr also appears in WHERE when seen= is requested. Its viewer
+  // placeholder is therefore bound a second time, after the preceding WHERE
+  // predicates, in addition to the SELECT projection bind at the head.
+  pushCommonSearchFilters(where, binds, q, { seenExpr, seenBinds: sp.binds });
 
   const cur = decodeCursor(q.cursor);
   if (cur) {
@@ -1764,16 +1829,8 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     where.push(rv.direction);
     binds.push(...rv.directionBinds);
   }
-  // Durable-folder scope (#352 review: SEARCH must pass mailbox=, not silently
-  // search the whole estate). "all" = every placement (no filter, mirrors list()).
-  if (q.mailbox !== "all") {
-    if (q.mailbox) {
-      where.push("m.mailbox = ?");
-      binds.push(q.mailbox);
-    } else {
-      where.push("m.mailbox IS NULL");
-    }
-  }
+  // Durable-folder + date/attachment/seen (#352/#354): shared across modes.
+  pushCommonSearchFilters(where, binds, q, { seenExpr, seenBinds: sp.binds });
 
   const cur = decodeCursor(q.cursor);
   if (cur) {
@@ -1932,6 +1989,8 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
     // Viewer scope + direction + from= (#350/#128/#366): the vector index is neither
     // recipient-, sender-, nor direction-keyed, so scope the hydrated summaries.
     if (!passesViewerScope(message, viewer, q.direction, fromFilter, accountViewer)) continue;
+    // Folder/date/attachment/seen (#354): same post-hydrate gate as the SQL modes.
+    if (!passesCommonSearchFilters(message, q)) continue;
     items.push({ message, score: r.score });
   }
   // Score-ranked: single page, no date cursor.
@@ -1941,25 +2000,22 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
 async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const limit = clampLimit(q.limit);
   // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
+  const shared = {
+    q: q.q,
+    direction: q.direction,
+    to: q.to,
+    from: q.from,
+    mailbox: q.mailbox,
+    after: q.after,
+    before: q.before,
+    hasAttachment: q.hasAttachment,
+    seen: q.seen,
+    viewer: q.viewer,
+    limit,
+  };
   const [ftsPage, semPage] = await Promise.all([
-    ftsSearch(env, {
-      q: q.q,
-      mode: "fts",
-      limit,
-      direction: q.direction,
-      to: q.to,
-      from: q.from,
-      viewer: q.viewer,
-    }),
-    semanticSearch(env, {
-      q: q.q,
-      mode: "semantic",
-      limit,
-      direction: q.direction,
-      to: q.to,
-      from: q.from,
-      viewer: q.viewer,
-    }),
+    ftsSearch(env, { ...shared, mode: "fts" }),
+    semanticSearch(env, { ...shared, mode: "semantic" }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();
@@ -1993,6 +2049,52 @@ export class SearchModeUnsupported extends Error {
     super(`search mode '${mode}' is not supported yet (fts only until M4)`);
     this.name = "SearchModeUnsupported";
   }
+}
+
+export interface RecentRecipient {
+  address: string;
+  lastUsedAt: string;
+}
+
+/**
+ * D-CONTACTS-1 (#354): recent recipients for ONE bound identity, derived from
+ * that identity's outbound to/cc/bcc. Never estate-wide -- caller MUST pass the
+ * owning From address (session identity or explicit viewer).
+ */
+export async function recentRecipients(
+  env: Env,
+  identity: string,
+  limit = 25,
+): Promise<RecentRecipient[]> {
+  const owner = identity.trim().toLowerCase();
+  if (!owner) return [];
+  const cap = Math.min(Math.max(1, Math.floor(limit)), 50);
+  // Over-fetch outbound rows; dedupe addresses in memory by most-recent use.
+  const res = await env.DB.prepare(
+    `SELECT to_addr, cc_addr, bcc_addr, date FROM messages
+      WHERE direction = 'outbound' AND lower(from_addr) = ?
+      ORDER BY date DESC, id DESC
+      LIMIT 200`,
+  )
+    .bind(owner)
+    .all<{ to_addr: string | null; cc_addr: string | null; bcc_addr: string | null; date: string }>();
+
+  const seen = new Map<string, string>();
+  for (const row of res.results ?? []) {
+    const fields = [row.to_addr, row.cc_addr, row.bcc_addr];
+    for (const field of fields) {
+      if (!field) continue;
+      for (const addr of parseRecipients(field)) {
+        const key = addr.toLowerCase();
+        if (!key || key === owner || seen.has(key)) continue;
+        seen.set(key, row.date);
+        if (seen.size >= cap) {
+          return [...seen.entries()].map(([address, lastUsedAt]) => ({ address, lastUsedAt }));
+        }
+      }
+    }
+  }
+  return [...seen.entries()].map(([address, lastUsedAt]) => ({ address, lastUsedAt }));
 }
 
 // --- Backfill / re-embed the existing mailbox (#116 ws4) ---
