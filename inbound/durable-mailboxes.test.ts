@@ -156,4 +156,49 @@ describe("durable mailbox operations (#352)", () => {
     expect(second.draft.uid).toBeGreaterThan(first.draft.uid);
     expect(second.draft.subject).toBe("second");
   });
+
+  it("PUTs an imap-service draft revision under a fresh higher UID (§2.4.1)", async () => {
+    const { env, ctx } = makeFakeEnv({
+      POSTERN_API_TOKEN: "both-token",
+      POSTERN_API_TOKEN_IMAP: "imap-token",
+    });
+    const create = await handleApi(request("POST", "/api/imap/drafts", "imap-token", {
+      identity: "conrad@skyphusion.org",
+      to: "friend@example.com",
+      subject: "draft v1",
+      bodyText: "one",
+    }), env, ctx);
+    expect(create.status).toBe(201);
+    const first = (await create.json()) as { id: string; draft: store.Draft };
+
+    // A wrong identity must not be able to revise someone else's draft.
+    const wrongIdentity = await handleApi(request("PUT", `/api/imap/drafts/${first.id}`, "imap-token", {
+      identity: "someone-else@skyphusion.org",
+      to: "friend@example.com",
+      subject: "hijacked",
+    }), env, ctx);
+    expect(wrongIdentity.status).toBe(403);
+
+    const revise = await handleApi(request("PUT", `/api/imap/drafts/${first.id}`, "imap-token", {
+      identity: "conrad@skyphusion.org",
+      updatedAt: first.draft.updatedAt,
+      to: "friend@example.com",
+      subject: "draft v2",
+      bodyText: "two",
+    }), env, ctx);
+    expect(revise.status).toBe(200);
+    const revised = (await revise.json()) as { draft: store.Draft };
+    // Same draft id, but a strictly higher per-folder UID (contract §2.4.1: a
+    // revision presents as EXPUNGE(old uid) + a new higher UID, not a new draft).
+    expect(revised.draft.id).toBe(first.id);
+    expect(revised.draft.uid).toBeGreaterThan(first.draft.uid);
+    expect(revised.draft.subject).toBe("draft v2");
+
+    const stale = await handleApi(request("PUT", `/api/imap/drafts/${first.id}`, "imap-token", {
+      identity: "conrad@skyphusion.org",
+      updatedAt: first.draft.updatedAt,
+      subject: "stale write",
+    }), env, ctx);
+    expect(stale.status).toBe(409);
+  });
 });

@@ -126,6 +126,12 @@ export interface SearchQuery {
   // Viewer address for recipient-scoped search (#350): delivered-set membership +
   // viewer-relative INBOX + effective (per-recipient) seen, same as ListQuery.to.
   to?: string;
+  // Durable-folder scope (#352), same semantics as ListQuery.mailbox: "all" = every
+  // placement, archive|trash|junk = that placement only, undefined = mailbox IS NULL
+  // (the direction-default INBOX/Sent view). Substr-only for now (the IMAP door's
+  // SEARCH path); fts/semantic/hybrid are unfiltered here (pre-existing, unrelated
+  // to #352 -- a folder-scoped IMAP SEARCH only ever calls mode=substr).
+  mailbox?: string;
   /** Internal bound-session account boundary; never caller-controlled. */
   viewer?: string;
   limit?: number;
@@ -897,6 +903,14 @@ export async function getDraft(env: Env, id: string, identity: string): Promise<
   return row ? rowToDraft(row) : null;
 }
 
+/** Owning identity of a draft id, regardless of caller identity, or null if it doesn't exist. */
+export async function getDraftOwner(env: Env, id: string): Promise<string | null> {
+  const row = await env.DB.prepare("SELECT identity FROM drafts WHERE id = ? LIMIT 1")
+    .bind(id)
+    .first<{ identity: string }>();
+  return row ? row.identity : null;
+}
+
 export async function putDraft(
   env: Env,
   id: string,
@@ -1564,6 +1578,16 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     where.push(rv.direction);
     binds.push(...rv.directionBinds);
   }
+  // Durable-folder scope (#352 review: SEARCH must pass mailbox=, not silently
+  // search the whole estate). "all" = every placement (no filter, mirrors list()).
+  if (q.mailbox !== "all") {
+    if (q.mailbox) {
+      where.push("m.mailbox = ?");
+      binds.push(q.mailbox);
+    } else {
+      where.push("m.mailbox IS NULL");
+    }
+  }
 
   const cur = decodeCursor(q.cursor);
   if (cur) {
@@ -1575,7 +1599,8 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
-            m.flagged, m.answered, m.mailbox, m.trashed_at, NULL AS folder_uid,
+            m.flagged, m.answered, m.mailbox, m.trashed_at,
+            (SELECT mp.folder_uid FROM mailbox_placement mp WHERE mp.message_id=m.message_id AND mp.folder=m.mailbox) AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
        FROM messages m WHERE ${where.join(" AND ")}

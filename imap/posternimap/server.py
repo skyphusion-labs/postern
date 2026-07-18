@@ -372,6 +372,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         kind = classify(dest)
         if kind in ("soft_move", "restore"):
             placement = None
+            required_direction = None
             if kind == "soft_move":
                 placement = getattr(self.account, "placement_mailbox", lambda _n: None)(dest)
                 if placement is None:
@@ -379,8 +380,16 @@ class PosternIMAP4Server(imap4.IMAP4Server):
                         tag, verb + b" failed: unknown durable destination"
                     )
                     return
+            else:
+                # #352 core unblocker 5: restoring TO INBOX/Sent/All must reject a
+                # direction-incompatible source (inbound can't restore to Sent,
+                # outbound can't restore to INBOX) -- checked here, before the
+                # move, so the whole batch fails atomically on a mismatch.
+                required_direction = getattr(
+                    self.account, "restore_direction", lambda _n: None
+                )(dest)
             maybeDeferred(src.fetch, messages, uid).addCallback(
-                self._cbSoftMove, tag, is_move, placement
+                self._cbSoftMove, tag, is_move, placement, required_direction
             ).addErrback(self._ebCopyToTrashDelete, tag, verb)
             return
         if kind == "placeholder":
@@ -390,26 +399,31 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             return
         imap4.IMAP4Server.do_COPY(self, tag, messages, mailbox, uid)
 
-    def _cbSoftMove(self, fetched, tag, is_move=False, mailbox=None):
+    def _cbSoftMove(self, fetched, tag, is_move=False, mailbox=None, required_direction=None):
         src = getattr(self, "mbox", None)
         verb = b"MOVE" if is_move else b"COPY"
         if src is None:
             self.sendNegativeResponse(tag, verb + b" failed: no mailbox selected")
             return
-        moved_seqs = sorted((seq for seq, _msg in fetched), reverse=True)
         try:
             mover = getattr(src, "soft_move_fetched_messages", None)
             if callable(mover):
-                mover(fetched, mailbox)
+                removed_seqs = mover(fetched, mailbox, required_direction=required_direction)
             else:
-                src.delete_fetched_messages(fetched)
+                removed_seqs = src.delete_fetched_messages(fetched)
         except imap4.MailboxException as exc:
             self.sendNegativeResponse(tag, verb + b" failed: " + networkString(str(exc)))
         except Exception as exc:
             self.sendBadResponse(tag, verb + b" failed: " + networkString(str(exc)))
         else:
-            if is_move:
-                for seq in moved_seqs:
+            # #352 review: emit untagged EXPUNGE for whichever source rows the
+            # move ACTUALLY removed from this view's live snapshot -- for BOTH
+            # COPY and MOVE (there is no true dual-membership copy in this
+            # exclusive-placement model; a client not told would hold a stale
+            # sequence mapping regardless of verb). This replaces the old
+            # is_move-only gate that left COPY silently FETCH-unstable.
+            if removed_seqs:
+                for seq in removed_seqs:
                     self.sendUntaggedResponse(b"%d EXPUNGE" % (seq,))
             self.sendPositiveResponse(tag, verb + b" completed")
 

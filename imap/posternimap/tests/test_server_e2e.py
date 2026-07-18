@@ -59,6 +59,15 @@ def _patched_factory(cfg, transport):
         return PosternClient(self._cfg.api_url, tok, transport=transport)
 
     account_mod.PosternAccount._delete_client = fake_delete_client
+    orig_imap_client = account_mod.PosternAccount._imap_client
+
+    def fake_imap_client(self):
+        tok = self._cfg.service_imap_token
+        if not tok:
+            return None
+        return PosternClient(self._cfg.api_url, tok, transport=transport)
+
+    account_mod.PosternAccount._imap_client = fake_imap_client
 
     factory = PosternIMAPFactory.__new__(PosternIMAPFactory)
     factory._cfg = cfg
@@ -69,13 +78,16 @@ def _patched_factory(cfg, transport):
         orig_client,
         "_delete_client",
         orig_delete_client,
+        "_imap_client",
+        orig_imap_client,
     )
 
 
 def _restore_account(restore):
-    cls, attr1, orig1, attr2, orig2 = restore
+    cls, attr1, orig1, attr2, orig2, attr3, orig3 = restore
     setattr(cls, attr1, orig1)
     setattr(cls, attr2, orig2)
+    setattr(cls, attr3, orig3)
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
@@ -426,19 +438,36 @@ class ServerE2ETest(twisted_unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_append_to_drafts_succeeds_as_persist(self):
-        # Apple Mail auto-saves mid-compose via APPEND Drafts; #352 persists it.
+        # Apple Mail auto-saves mid-compose via APPEND Drafts; #352 persists it via
+        # the least-privilege POSTERN_API_TOKEN_IMAP seam (core unblocker 1), with
+        # identity derived from the (email-shaped) login.
         import io
 
-        proto = yield self._client()
+        cfg = Config(
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            service_imap_token="tok",
+        )
+        factory, restore = _patched_factory(cfg, self.transport)
+        port = reactor.listenTCP(0, factory, interface="127.0.0.1")
+        addr = port.getHost()
         try:
-            yield proto.login(b"agent", b"tok")
-            msg = io.BytesIO(b"From: a@example.com\r\nSubject: draft\r\n\r\nbody\r\n")
-            yield proto.append("Drafts", msg, ("\\Draft",))
-            self.assertEqual(len(self.transport.drafts), 1)
-            info = yield proto.select(b"Drafts")
-            self.assertEqual(info["EXISTS"], 1)
+            cc = ClientCreator(reactor, imap4.IMAP4Client)
+            proto = yield cc.connectTCP("127.0.0.1", addr.port)
+            try:
+                yield proto.login(b"agent@skyphusion.org", b"tok")
+                msg = io.BytesIO(b"From: a@example.com\r\nSubject: draft\r\n\r\nbody\r\n")
+                yield proto.append("Drafts", msg, ("\\Draft",))
+                self.assertEqual(len(self.transport.drafts), 1)
+                info = yield proto.select(b"Drafts")
+                self.assertEqual(info["EXISTS"], 1)
+            finally:
+                yield proto.logout()
         finally:
-            yield proto.logout()
+            _restore_account(restore)
+            yield port.stopListening()
 
     @defer.inlineCallbacks
     def test_append_to_other_placeholder_folder_is_rejected(self):
@@ -741,10 +770,14 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
     return a clean tagged NO (no server-side TypeError, no unhandled traceback), not a
     BAD 'Server error' or a str/bytes crash in __ebStatus."""
 
-    def _spin(self, status):
+    def _spin(self, status, *, service_imap_token=None):
         transport = ErrorTransport(status=status)
         cfg = Config(
-            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            service_imap_token=service_imap_token,
         )
         factory, restore = _patched_factory(cfg, transport)
         port = reactor.listenTCP(0, factory, interface="127.0.0.1")
@@ -842,17 +875,18 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
 
     @defer.inlineCallbacks
     def test_append_to_drafts_refuses_when_store_unreachable(self):
-        # Drafts APPEND persists via /api/drafts; a store failure is a loud NO.
+        # Drafts APPEND persists via /api/imap/drafts (#352 core unblocker 2); a
+        # store failure is a loud NO, never a silent drop.
         import io
 
-        addr, transport = self._spin(503)
+        addr, transport = self._spin(503, service_imap_token="tok")
         proto = yield self._client(addr)
         try:
-            yield proto.login(b"agent", b"tok")
+            yield proto.login(b"agent@skyphusion.org", b"tok")
             msg = io.BytesIO(b"From: a@b.com\r\nSubject: draft\r\n\r\nx\r\n")
             d = proto.append("Drafts", msg, ("\\Draft",))
             yield self.assertFailure(d, imap4.IMAP4Exception)
-            self.assertTrue(any("/api/drafts" in c for c in transport.calls))
+            self.assertTrue(any("/api/imap/drafts" in c for c in transport.calls))
         finally:
             yield proto.transport.loseConnection()
 
@@ -1513,9 +1547,15 @@ class IDCommandSelectAndTraceTest(unittest.TestCase):
 class MoveUntaggedSequencingTest(unittest.TestCase):
     """RFC 6851 sec 3 + RFC 3501 7.4.1 (#304): a MOVE to the Trash delete sink emits an
     untagged EXPUNGE per moved message, carrying the 1-based message SEQUENCE number
-    (never the UID), high-to-low, BEFORE the tagged OK. COPY emits none. Deterministic
-    StringTransport; the response callback is driven directly with a UID != seq fixture
-    so a sequence/UID mix-up cannot hide behind uid == seq (the #300 class)."""
+    (never the UID), high-to-low, BEFORE the tagged OK.
+
+    #352 review: COPY mutates the SAME exclusive placement as MOVE (there is no real
+    dual-membership copy in this model), so it emits the identical untagged EXPUNGE for
+    whichever source rows the mailbox's soft_move_fetched_messages reports as actually
+    removed from THIS view -- fixing the old, unsafe test_copy_emits_no_untagged_expunge
+    that locked in a silently FETCH-stale COPY. Deterministic StringTransport; the
+    response callback is driven directly with a UID != seq fixture so a sequence/UID
+    mix-up cannot hide behind uid == seq (the #300 class)."""
 
     def _server(self):
         from twisted.internet.testing import StringTransport
@@ -1541,19 +1581,26 @@ class MoveUntaggedSequencingTest(unittest.TestCase):
 
         return [(1, _M(101, "a")), (3, _M(103, "c"))]
 
-    def _mbox(self, deleted):
+    def _mbox(self, moved, *, removed=None):
+        """A minimal soft_move_fetched_messages double: records the moved seqs and
+        returns `removed` (defaulting to "everything moved left this view", the
+        common case for a filtered folder like Trash) -- mirrors the real
+        PosternMailbox contract (#352 review)."""
+
         class _Mbox:
             _delete_writable = True
 
-            def delete_fetched_messages(self, fetched):
-                deleted.append([seq for seq, _m in fetched])
+            def soft_move_fetched_messages(self, fetched, mailbox, *, required_direction=None):
+                seqs = [seq for seq, _m in fetched]
+                moved.append(seqs)
+                return sorted(seqs, reverse=True) if removed is None else removed
 
         return _Mbox()
 
     def test_move_emits_untagged_expunge_sequence_numbers_high_to_low(self):
         srv = self._server()
-        deleted = []
-        srv.mbox = self._mbox(deleted)
+        moved = []
+        srv.mbox = self._mbox(moved)
         srv.transport.clear()
         srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t1", is_move=True)
         out = srv.transport.value()
@@ -1565,16 +1612,37 @@ class MoveUntaggedSequencingTest(unittest.TestCase):
         # the UIDs (101/103) must never surface as EXPUNGE sequence ids
         self.assertNotIn(b"101 EXPUNGE", out)
         self.assertNotIn(b"103 EXPUNGE", out)
-        self.assertEqual(deleted, [[1, 3]])
+        self.assertEqual(moved, [[1, 3]])
 
-    def test_copy_emits_no_untagged_expunge(self):
+    def test_copy_emits_untagged_expunge_for_removed_source_rows(self):
+        # #352 review fix: COPY (soft-move under the hood) removes the source rows
+        # from THIS view exactly like MOVE does, so it must emit the same untagged
+        # EXPUNGE -- a client that isn't told would hold a stale sequence mapping.
         srv = self._server()
-        srv.mbox = self._mbox([])
+        moved = []
+        srv.mbox = self._mbox(moved)
         srv.transport.clear()
         srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t2", is_move=False)
         out = srv.transport.value()
+        self.assertIn(b"* 3 EXPUNGE\r\n", out)
+        self.assertIn(b"* 1 EXPUNGE\r\n", out)
+        self.assertLess(out.index(b"* 3 EXPUNGE"), out.index(b"* 1 EXPUNGE"))
+        self.assertLess(out.index(b"* 1 EXPUNGE"), out.index(b"t2 OK COPY completed"))
+        self.assertEqual(moved, [[1, 3]])
+
+    def test_copy_from_all_view_emits_no_expunge_when_row_still_owned(self):
+        # #352 review: when the source view is "All" (owns every placement), the
+        # mailbox reports nothing removed -- COPY correctly stays FETCH-stable here,
+        # unlike the filtered-view case above.
+        srv = self._server()
+        moved = []
+        srv.mbox = self._mbox(moved, removed=[])
+        srv.transport.clear()
+        srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t3", is_move=False)
+        out = srv.transport.value()
         self.assertNotIn(b"EXPUNGE", out)
-        self.assertIn(b"t2 OK COPY completed", out)
+        self.assertIn(b"t3 OK COPY completed", out)
+        self.assertEqual(moved, [[1, 3]])
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")

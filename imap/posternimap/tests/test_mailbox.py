@@ -279,6 +279,80 @@ class MailboxTest(unittest.TestCase):
         )
         self.assertEqual(trash.getMessageCount(), 1)
 
+    def test_soft_move_returns_removed_sequences_high_to_low(self):
+        # #352 review: soft_move_fetched_messages reports which rows actually left
+        # THIS view (server.py turns these into untagged EXPUNGE for both MOVE and
+        # COPY -- the fix for the old, unsafe test_copy_emits_no_untagged_expunge).
+        from twisted.mail.imap4 import MessageSet
+        from posternimap.mailbox import PosternMailbox
+
+        msgs = [make_message("a@x", subject="a", uid=10), make_message("b@x", subject="b", uid=20)]
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
+        mb = PosternMailbox(
+            PosternClient("https://x", "t", transport=transport),
+            page_size=2,
+            delete_writable=True,
+            seen_writable=True,
+            flags_writable=True,
+        )
+        mb.getMessageCount()
+        removed = mb.soft_move_fetched_messages(mb.fetch(MessageSet(1, 2), uid=False), "trash")
+        # both seq 1 and 2 left the (unplaced) default view; descending order.
+        self.assertEqual(removed, [2, 1])
+
+    def test_move_from_all_to_trash_does_not_strip_row_all_still_owns(self):
+        # #352 review: the All view has no placement filter -- it owns a message
+        # regardless of mailbox placement, so moving it to Trash must NOT strip the
+        # row from All's live snapshot (and must not emit an EXPUNGE for it either).
+        from twisted.mail.imap4 import MessageSet
+        from posternimap.mailbox import PosternMailbox
+
+        msgs = [make_message("a@x", subject="a", uid=10)]
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
+        all_view = PosternMailbox(
+            PosternClient("https://x", "t", transport=transport),
+            mailbox_filter="all",
+            page_size=2,
+            delete_writable=True,
+            seen_writable=True,
+            flags_writable=True,
+        )
+        all_view.getMessageCount()
+        removed = all_view.soft_move_fetched_messages(
+            all_view.fetch(MessageSet(1, 1), uid=False), "trash"
+        )
+        self.assertEqual(removed, [])
+        self.assertEqual(all_view.getMessageCount(), 1)
+        # the row is still fetchable at the same sequence, now reflecting placement.
+        refetched = list(all_view.fetch(MessageSet(1, 1), uid=False))
+        self.assertEqual(len(refetched), 1)
+
+    def test_restore_rejects_direction_incompatible_target(self):
+        # #352 core unblocker 5: outbound message can't be restored to INBOX.
+        from twisted.mail.imap4 import MessageSet
+        from posternimap.mailbox import PosternMailbox, ReadOnlyError
+
+        msgs = [
+            make_message(
+                "s1", direction="outbound", subject="s", mailbox="trash", folderUid=1
+            )
+        ]
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
+        trash = PosternMailbox(
+            PosternClient("https://x", "t", transport=transport),
+            mailbox_filter="trash",
+            page_size=2,
+            delete_writable=True,
+            seen_writable=True,
+            flags_writable=True,
+        )
+        trash.getMessageCount()
+        fetched = trash.fetch(MessageSet(1, 1), uid=False)
+        with self.assertRaises(ReadOnlyError):
+            trash.soft_move_fetched_messages(fetched, None, required_direction="inbound")
+        # rejected atomically -- no partial move happened server-side.
+        self.assertEqual(msgs[0].get("mailbox"), "trash")
+
     def test_append_sent_matcher_hit(self):
         # Sent APPEND matches a recent outbound copy -> OK (no silent drop, no double-store).
         from twisted.internet import defer
@@ -323,7 +397,15 @@ class MailboxTest(unittest.TestCase):
         from twisted.internet import defer
         from posternimap.mailbox import PosternMailbox
 
-        mb = PosternMailbox(self.client, mailbox_filter="drafts", delete_writable=True)
+        # #352 core unblocker 1/2: Drafts APPEND persists via the least-privilege
+        # imap-scoped client, with an explicit identity asserted on the call.
+        mb = PosternMailbox(
+            self.client,
+            mailbox_filter="drafts",
+            delete_writable=True,
+            imap_client=self.client,
+            identity="a@example.com",
+        )
         raw = b"From: a@example.com\r\nTo: b@example.com\r\nSubject: draft\r\n\r\nhello\r\n"
         d = mb.addMessage(raw, flags=["\\Draft"], date=None)
         out = []
@@ -331,6 +413,7 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(out, [None])
         self.assertEqual(len(self.transport.drafts), 1)
         self.assertEqual(self.transport.drafts[0]["subject"], "draft")
+        self.assertEqual(self.transport.drafts[0]["identity"], "a@example.com")
 
     def test_append_to_other_placeholder_folder_is_rejected(self):
         # Notes stays a placeholder: APPEND is a loud NO (#109 / #352).
@@ -1099,10 +1182,15 @@ class AccountTest(unittest.TestCase):
         self.assertIn("Notes", listed)
         self.assertEqual(set(listed["Notes"].getFlags()), {"\\HasNoChildren"})
         self.assertTrue(acct.isSubscribed("Notes"))
+        # #352 core unblocker 4: listing ALL mailboxes now warms the durable-folder
+        # UIDVALIDITY cache with one GET /api/folders (for Drafts/Trash/Junk/Archive
+        # in the same wildcard listing) -- selecting Notes itself must add NOTHING
+        # on top of that, cached or not.
+        calls_before = list(self.transport.calls)
         box = acct.select("Notes")
         self.assertIsNotNone(box)
         self.assertEqual(box.getMessageCount(), 0)
-        self.assertEqual(self.transport.calls, [])  # no API hit for the placeholder
+        self.assertEqual(self.transport.calls, calls_before)  # no extra API hit
 
     def test_account_advertises_personal_namespace(self):
         # #218 round 6: the account provides INamespacePresenter with one personal

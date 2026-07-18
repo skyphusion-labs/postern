@@ -31,27 +31,24 @@ views become viewer-relative to the authenticated login's address V.
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Mapping, Optional, Tuple
 
 from zope.interface import implementer
 
 from twisted.mail import imap4
 
-from .client import PosternClient
+from .client import PosternClient, PosternError
 from .config import Config
 from .mailbox import PosternMailbox
 from .measure import Meter
 
-# Stable UIDVALIDITY for durable folders minted once when they went real (#352 §3.4).
-# Distinct from INBOX/Sent/All (config imap_uidvalidity). Not read from the worker
-# counter API (none exists); these constants must not change without a deliberate
-# projection bump.
-_DURABLE_UIDVALIDITY = {
-    "archive": 352000001,
-    "trash": 352000002,
-    "junk": 352000003,
-    "drafts": 352000004,
-}
+_DURABLE_FOLDERS = ("archive", "trash", "junk", "drafts")
+
+# A loose but sufficient shape check for "does this login look like a mail
+# address" (#352 core unblocker: derive an IMAP-service identity from the
+# authenticated login in estate mode, where there is no per_account viewer).
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class _Folder:
@@ -125,20 +122,26 @@ _MAILBOXES: Dict[str, _Folder] = {
         None, ["\\Drafts"], False,
         delete_writable=True, mailbox="drafts",
     ),
+    # #352 review: Trash/Junk/Archive MUST scope to the viewer in per_account mode
+    # (viewer_to + viewer_seen) exactly like INBOX/All -- these are DELIVERED-mail
+    # placements, not sent copies, so they key off delivered-set membership (`to`),
+    # never `from` (that stays Sent-only). Without this, user A could list/move/
+    # EXPUNGE user B's trash: the placement filter (mailbox=trash) is estate-wide,
+    # so the viewer boundary MUST be layered on top the same way INBOX/All are.
     "Trash": _Folder(
         None, ["\\Trash"], False,
         seen_writable=True, delete_writable=True, flags_writable=True,
-        mailbox="trash",
+        mailbox="trash", viewer_to=True, viewer_seen=True,
     ),
     "Junk": _Folder(
         None, ["\\Junk"], False,
         seen_writable=True, delete_writable=True, flags_writable=True,
-        mailbox="junk",
+        mailbox="junk", viewer_to=True, viewer_seen=True,
     ),
     "Archive": _Folder(
         None, ["\\Archive"], False,
         seen_writable=True, delete_writable=True, flags_writable=True,
-        mailbox="archive",
+        mailbox="archive", viewer_to=True, viewer_seen=True,
     ),
     # Notes stays a placeholder (#218 Experiment A). writable_signal only.
     "Notes": _Folder(None, [], True, writable_signal=True),
@@ -162,6 +165,21 @@ class PosternAccount:
             else None
         )
         self._meter = Meter(cfg.measure)
+        # #352 core unblocker 4: durable-folder UIDVALIDITY is read through from
+        # the worker's GET /api/folders (mailbox_uid_counter), not a client-side
+        # hardcoded table. Cached per account/session (one login, one durable
+        # UIDVALIDITY for its whole lifetime) so every SELECT/LIST after the first
+        # does not pay a round trip; a fetch failure degrades to the config
+        # default rather than failing every mailbox open.
+        self._durable_uidvalidity_cache: Optional[Dict[str, int]] = None
+        # #352 §2.4.1 draft autosave: draft ids already revised in place (PUT) this
+        # session, so a later EXPUNGE of the stale pre-revision summary (held in a
+        # DIFFERENT PosternMailbox instance -- APPEND always selects a fresh
+        # throwaway mailbox, see server.do_APPEND) skips re-deleting the row the
+        # revision just wrote. Shared across every Drafts mailbox instance this
+        # account constructs, which is the only reason it lives here and not on
+        # PosternMailbox itself.
+        self._draft_revisions: set = set()
 
     def _client(self) -> PosternClient:
         return PosternClient(
@@ -179,15 +197,59 @@ class PosternAccount:
             meter=self._meter,
         )
 
+    def _imap_client(self) -> Optional[PosternClient]:
+        """The least-privilege client for /api/imap/drafts* + /api/imap/import
+
+        (#352 core unblocker 1): a SEPARATE token from read/delete, held only for
+        those two write seams. None when POSTERN_API_TOKEN_IMAP is unset -- Drafts
+        and the APPEND-import fallback then fail closed at the point of use
+        (AppendRejectedError), never silently reusing a read-scoped token that
+        would just 403 at the worker anyway.
+        """
+        imap_token = self._cfg.service_imap_token
+        if not imap_token:
+            return None
+        return PosternClient(
+            self._cfg.api_url, imap_token, timeout=self._cfg.api_timeout, meter=self._meter
+        )
+
+    def _imap_identity(self) -> Optional[str]:
+        """The identity asserted on IMAP-service calls (drafts / import, #352).
+
+        per_account mode: the derived viewer address IS the identity -- it is
+        already a real mail address on the configured domain. estate mode has no
+        viewer concept, so this falls back to the login itself ONLY when it looks
+        like a mail address (the common case: `POSTERN_IMAP_USERNAME` /
+        token-mode username set to the mailbox address); otherwise None, and
+        Drafts/import fail closed with an honest error rather than guessing.
+        """
+        if self._viewer is not None:
+            return self._viewer
+        candidate = (self._username or "").strip().lower()
+        return candidate if _EMAIL_RE.match(candidate) else None
+
+    def _durable_uidvalidity(self) -> Dict[str, int]:
+        if self._durable_uidvalidity_cache is None:
+            cache: Dict[str, int] = {}
+            try:
+                for f in self._client().get_folders():
+                    if f.id in _DURABLE_FOLDERS and f.uid_validity:
+                        cache[f.id] = f.uid_validity
+            except PosternError:
+                pass  # degrade to the config default below; never fail SELECT/LIST.
+            self._durable_uidvalidity_cache = cache
+        return self._durable_uidvalidity_cache
+
     def _mailbox(self, folder: _Folder, *, list_view: bool) -> PosternMailbox:
         delete_enabled = folder.delete_writable and self._cfg.service_delete_token is not None
         scoped = self._per_account and self._viewer is not None
         to = self._viewer if (scoped and folder.viewer_to) else None
         from_addr = self._viewer if (scoped and folder.viewer_from) else None
         viewer = self._viewer if (scoped and folder.viewer_seen) else None
-        # Durable folders get their own UIDVALIDITY; arrival views keep config.
-        if folder.mailbox in _DURABLE_UIDVALIDITY:
-            uidvalidity = _DURABLE_UIDVALIDITY[folder.mailbox]
+        # Durable folders get their own UIDVALIDITY (read through from the worker,
+        # #352 core unblocker 4); arrival views (INBOX/Sent/All) keep config.
+        if folder.mailbox in _DURABLE_FOLDERS:
+            uidvalidity = self._durable_uidvalidity().get(folder.mailbox, self._cfg.imap_uidvalidity)
         else:
             uidvalidity = self._cfg.imap_uidvalidity
         return PosternMailbox(
@@ -209,6 +271,9 @@ class PosternAccount:
             flags_writable=folder.flags_writable,
             delete_client=self._delete_client(),
             mailbox_filter=folder.mailbox,
+            imap_client=self._imap_client(),
+            identity=self._imap_identity(),
+            draft_revisions=self._draft_revisions,
         )
 
     # --- IAccount: read ---
@@ -287,6 +352,19 @@ class PosternAccount:
         if folder.mailbox in ("trash", "junk", "archive"):
             return folder.mailbox
         return None
+
+    def restore_direction(self, name: str) -> Optional[str]:
+        """The direction a restore DESTINATION (copyability()=="restore") requires
+
+        of its source messages (#352 core unblocker 5): "inbound" for INBOX,
+        "outbound" for Sent, None for All (accepts either). Only meaningful for
+        INBOX/Sent/All; any other name returns None (no constraint), which is safe
+        because callers only consult this for the "restore" kind.
+        """
+        folder = _MAILBOXES.get(_canonical(name))
+        if folder is None:
+            return None
+        return folder.direction
 
     # --- IAccount: write (mostly rejected; fixed read-only set) ---
 

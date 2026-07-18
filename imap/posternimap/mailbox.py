@@ -26,13 +26,13 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from email.message import Message as PyMessage
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 from zope.interface import implementer
 
 from twisted.mail import imap4
 
-from .client import Message, MessageSummary, PosternClient, PosternError
+from .client import Draft, Message, MessageSummary, PosternClient, PosternError
 from .measure import Meter
 from .message import PosternIMAPMessage
 
@@ -43,6 +43,11 @@ _UID_VALIDITY = 1
 _SEARCH_PAGE_LIMIT = 200
 _SEARCH_MAX_PAGES_UNBOUNDED = 1000
 _SENT_MATCH_WINDOW = timedelta(minutes=10)
+# #352 §2.4.1: how long a same (to, subject) draft is treated as "the same logical
+# draft, being autosaved again" rather than a genuinely new one. Generous compared
+# to _SENT_MATCH_WINDOW: an editing session (pauses included) can run much longer
+# than a submit-then-APPEND-copy race.
+_DRAFT_REVISION_WINDOW = timedelta(hours=12)
 
 
 class ReadOnlyError(imap4.MailboxException):
@@ -140,9 +145,22 @@ class PosternMailbox:
         flags_writable: bool = False,
         delete_client: Optional[PosternClient] = None,
         mailbox_filter: Optional[str] = None,
+        imap_client: Optional[PosternClient] = None,
+        identity: Optional[str] = None,
+        draft_revisions: Optional[set] = None,
     ) -> None:
         self._client = client
         self._delete_client = delete_client
+        # #352 core unblocker 1/2/3: the least-privilege client + asserted identity
+        # for /api/imap/drafts* and /api/imap/import. None when the operator has not
+        # configured POSTERN_API_TOKEN_IMAP or no identity could be derived --
+        # Drafts/import then fail closed (AppendRejectedError) rather than guess.
+        self._imap_client = imap_client
+        self._identity = identity
+        # Shared across every Drafts mailbox instance the account constructs (see
+        # PosternAccount._draft_revisions); a fresh local set when unset (e.g. a
+        # test constructing PosternMailbox directly) so the code path is uniform.
+        self._draft_revisions: set = draft_revisions if draft_revisions is not None else set()
         self._meter = meter or Meter(False)
         self._direction = direction
         self._to = to
@@ -213,7 +231,11 @@ class PosternMailbox:
             ) from exc
 
     def _load_drafts(self) -> List[MessageSummary]:
-        return [d.as_summary() for d in self._client.list_drafts()]
+        if self._imap_client is None or not self._identity:
+            # No IMAP-service seam configured / no derivable identity: fail closed
+            # to an empty Drafts view rather than 401/403-ing the whole SELECT.
+            return []
+        return [d.as_summary() for d in self._imap_client.list_imap_drafts(self._identity)]
 
     def _load_messages(self) -> tuple[List[MessageSummary], int]:
         items: List[MessageSummary] = []
@@ -371,7 +393,9 @@ class PosternMailbox:
 
         def hydrate():
             if self._is_drafts:
-                draft = self._client.get_draft(mid)
+                if self._imap_client is None or not self._identity:
+                    return None
+                draft = self._imap_client.get_imap_draft(self._identity, mid)
                 if draft is None:
                     return None
                 return Message(
@@ -442,6 +466,7 @@ class PosternMailbox:
                 field=field,
                 direction=self._direction,
                 to=self._to,
+                mailbox=self._mailbox_filter,
                 cursor=cursor,
                 limit=_SEARCH_PAGE_LIMIT,
             )
@@ -597,9 +622,9 @@ class PosternMailbox:
             if self._is_drafts:
                 self._append_draft(parsed)
             elif self._mailbox_filter in ("trash", "junk", "archive"):
-                self._append_placement(parsed, self._mailbox_filter)
+                self._append_placement(parsed, raw, self._mailbox_filter)
             elif self._direction == "outbound" and self._mailbox_filter is None:
-                self._append_sent(parsed)
+                self._append_sent(parsed, raw)
             else:
                 # INBOX / All: refuse -- no honest home for a genuine new APPEND.
                 return defer.fail(
@@ -619,6 +644,10 @@ class PosternMailbox:
         return defer.succeed(None)
 
     def _append_draft(self, parsed: PyMessage) -> None:
+        if self._imap_client is None or not self._identity:
+            raise AppendRejectedError(
+                "Drafts APPEND requires POSTERN_API_TOKEN_IMAP and a bound identity"
+            )
         fields = {
             "to": _header_addrs(parsed, "To") or None,
             "cc": _header_addrs(parsed, "Cc") or None,
@@ -630,36 +659,89 @@ class PosternMailbox:
         # Normalize empty strings to None for the API.
         clean = {k: (v if v else None) for k, v in fields.items()}
         try:
-            self._client.create_draft(clean)
+            revision = self._find_draft_revision_target(clean)
+            if revision is not None:
+                self._imap_client.update_imap_draft(
+                    self._identity,
+                    revision.id,
+                    clean,
+                    updated_at=revision.updated_at or None,
+                )
+                # #352 §2.4.1: this draft id's OLD (pre-revision) uid, still sitting
+                # in some session's live snapshot marked \Deleted, must NOT be
+                # hard-deleted when that session's EXPUNGE reaches it -- the PUT
+                # above already rewrote the SAME row under a new, higher uid.
+                self._draft_revisions.add(revision.id)
+            else:
+                self._imap_client.create_imap_draft(self._identity, clean)
         except PosternError as exc:
             if exc.status in (401, 403):
                 raise AppendRejectedError(
-                    "Drafts APPEND requires a bound identity (send-registry token)"
+                    "Drafts APPEND requires a bound identity (POSTERN_API_TOKEN_IMAP scope)"
                 ) from exc
             raise
 
-    def _append_placement(self, parsed: PyMessage, mailbox: str) -> None:
-        mid = _message_id_header(parsed)
-        if not mid:
-            raise AppendRejectedError(
-                "APPEND into this folder requires a Message-ID matching an existing message"
-            )
-        existing = self._client.get_message(mid)
-        if existing is None:
-            # No store-via-API for genuine new bytes yet; refuse loudly (never drop).
-            raise AppendRejectedError(
-                "APPEND of a new message into this folder is not supported; "
-                "move an existing message instead"
-            )
-        self._client.move_messages([mid], mailbox)
+    def _find_draft_revision_target(self, fields: dict) -> Optional[Draft]:
+        """Contract §2.4.1: an autosave revision of an existing draft mints a NEW,
+        higher UID for the SAME draft id instead of piling up a second draft.
 
-    def _append_sent(self, parsed: PyMessage) -> None:
-        """Sent APPEND: fallback matcher (#352 section 3.2). Hit -> OK; miss -> refuse.
+        do_APPEND always selects a fresh, unloaded PosternMailbox for the target
+        folder (see server.py), so there is no session-local \\Deleted snapshot to
+        correlate against at this point -- match against SERVER-side truth instead:
+        the most recent draft for this identity with the same (to, subject), within
+        a generous recency window. Mirrors the fallback-matcher pattern
+        _append_sent already uses for Sent (same idea, applied to Drafts).
+        """
+        to = fields.get("to") or ""
+        subject = fields.get("subject") or ""
+        if not to and not subject:
+            return None
+        if self._imap_client is None or not self._identity:
+            return None
+        try:
+            drafts = self._imap_client.list_imap_drafts(self._identity)
+        except PosternError:
+            return None
+        now = datetime.now(timezone.utc)
+        best: Optional[Tuple[datetime, Draft]] = None
+        for d in drafts:
+            if _bare_addr(d.to_addr or "") != _bare_addr(to):
+                continue
+            if _norm_subject(d.subject or "") != _norm_subject(subject):
+                continue
+            src = d.updated_at or d.created_at
+            try:
+                ts = datetime.fromisoformat(src.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if abs(now - ts) > _DRAFT_REVISION_WINDOW:
+                continue
+            if best is None or ts > best[0]:
+                best = (ts, d)
+        return best[1] if best else None
+
+    def _append_placement(self, parsed: PyMessage, raw: bytes, mailbox: str) -> None:
+        mid = _message_id_header(parsed)
+        if mid:
+            existing = self._client.get_message(mid)
+            if existing is not None:
+                self._client.move_messages([mid], mailbox)
+                return
+        # #352 core unblocker 3: a genuine new Trash/Junk/Archive APPEND (no
+        # matching existing message) is now PERSISTED via the IMAP-service import
+        # seam instead of refused -- never silently dropped.
+        self._import_or_reject(raw, mailbox)
+
+    def _append_sent(self, parsed: PyMessage, raw: bytes) -> None:
+        """Sent APPEND: fallback matcher (#352 section 3.2). Hit -> OK; miss ->
+        persist via the IMAP-service import seam (core unblocker 3), never refuse.
 
         The submission path already stored outbound copies with a core-minted
         Message-ID, so a client APPEND carries a different id. Matching recent
         outbound by from+to+subject within a short window avoids the copy-failed
-        regression without silent discard on a genuine miss.
+        regression without a spurious second row on a genuine hit.
         """
         mid = _message_id_header(parsed)
         if mid:
@@ -695,10 +777,29 @@ class PosternMailbox:
                 continue
             if abs(stored_dt - msg_dt) <= _SENT_MATCH_WINDOW or abs(stored_dt - now) <= _SENT_MATCH_WINDOW:
                 return
-        raise AppendRejectedError(
-            "APPEND to Sent did not match a recent outbound message; "
-            "refusing rather than silently discarding"
-        )
+        self._import_or_reject(raw, "sent")
+
+    def _import_or_reject(self, raw: bytes, folder: str) -> None:
+        """POST /api/imap/import (#352 core unblocker 3), or an honest refusal.
+
+        Fails closed -- never silently drops -- when the IMAP-service seam is not
+        configured or no identity could be derived; a live 401/403 from the worker
+        (token present but lacking `imap` scope) maps to the same clean refusal.
+        """
+        if self._imap_client is None or not self._identity:
+            raise AppendRejectedError(
+                "APPEND of a new message into this folder requires "
+                "POSTERN_API_TOKEN_IMAP and a bound identity; refusing rather "
+                "than silently discarding"
+            )
+        try:
+            self._imap_client.import_message(self._identity, folder, raw)
+        except PosternError as exc:
+            if exc.status in (401, 403):
+                raise AppendRejectedError(
+                    "APPEND import requires the POSTERN_API_TOKEN_IMAP scope"
+                ) from exc
+            raise AppendRejectedError(f"APPEND import failed: {exc}") from exc
 
     def expunge(self):
         """Hard-delete messages marked \\Deleted; return sequence numbers high-to-low."""
@@ -714,7 +815,19 @@ class PosternMailbox:
                 continue
             try:
                 if self._is_drafts:
-                    self._client.delete_draft(summary.message_id)
+                    if summary.message_id in self._draft_revisions:
+                        # #352 §2.4.1: already superseded in place by an autosave
+                        # PUT (see _append_draft) -- the row is NOT gone, it was
+                        # rewritten under a new uid; deleting it now would destroy
+                        # the just-saved revision. Just drop the stale local row.
+                        self._draft_revisions.discard(summary.message_id)
+                    elif self._imap_client is not None and self._identity:
+                        self._imap_client.delete_imap_draft(self._identity, summary.message_id)
+                    else:
+                        raise ReadOnlyError(
+                            "EXPUNGE of a draft requires POSTERN_API_TOKEN_IMAP "
+                            "and a bound identity"
+                        )
                 else:
                     delete_client = self._delete_client or self._client
                     delete_client.delete_message(summary.message_id)
@@ -731,27 +844,81 @@ class PosternMailbox:
             del self._summaries[i]
         return expunged_seqs
 
-    def soft_move_fetched_messages(self, fetched, mailbox: Optional[str]) -> None:
+    def _matches_own_filter(self, mailbox_value: Optional[str]) -> bool:
+        """Would a row with this `mailbox` placement still appear in THIS view?
+
+        Mirrors the server-side predicate list_messages(mailbox=self._mailbox_filter)
+        applies: "all" sees every placement; trash/junk/archive see only their own
+        exact placement; the direction-default views (INBOX/Sent, mailbox_filter is
+        None) see only unplaced (mailbox IS NULL) rows. Used after a soft-move to
+        decide whether the row genuinely LEFT this session's snapshot (#352 review:
+        COPY/MOVE from All to Trash must not strip a row All still owns).
+        """
+        if self._mailbox_filter == "all":
+            return True
+        if self._mailbox_filter in ("trash", "junk", "archive"):
+            return mailbox_value == self._mailbox_filter
+        return mailbox_value is None
+
+    def soft_move_fetched_messages(
+        self,
+        fetched,
+        mailbox: Optional[str],
+        *,
+        required_direction: Optional[str] = None,
+    ) -> List[int]:
         """Soft-move fetched messages via POST /api/messages/move (#352).
 
-        mailbox is archive|trash|junk, or None to restore to the direction-default view.
+        mailbox is archive|trash|junk, or None to restore to the direction-default
+        view. `required_direction` (#352 core unblocker 5) rejects a restore whose
+        source messages do not match the destination's direction (e.g. an outbound
+        Sent copy restored to INBOX, or an inbound message restored to Sent) --
+        checked BEFORE the move so a mixed batch fails atomically, never partially.
+
+        Returns the 1-based sequence numbers (descending) that were actually
+        REMOVED from this view's live snapshot -- i.e. rows that no longer match
+        this mailbox's own filter after the move (see _matches_own_filter). The
+        caller (server._cbSoftMove) emits an untagged EXPUNGE for exactly these,
+        for BOTH COPY and MOVE: this mailbox mutates the SAME exclusive placement
+        either way (there is no real dual-membership COPY here), so a client that
+        is not told via EXPUNGE would hold a stale, now-wrong sequence mapping
+        regardless of which verb it used (the bug locked in by the old
+        test_copy_emits_no_untagged_expunge).
         """
         self._ensure_loaded()
         if self._empty or self._is_drafts:
             raise ReadOnlyError("move is not enabled on this mailbox")
-        ids = [msg._summary.message_id for _seq, msg in fetched]
-        if not ids:
-            return
+        items = [(seq, msg._summary) for seq, msg in fetched]
+        if not items:
+            return []
+        if required_direction is not None:
+            bad = [s.message_id for _seq, s in items if s.direction != required_direction]
+            if bad:
+                raise ReadOnlyError(
+                    f"cannot restore {required_direction!r}-incompatible message(s) "
+                    "to this folder"
+                )
+        ids = [s.message_id for _seq, s in items]
         try:
             self._client.move_messages(ids, mailbox)
         except PosternError as exc:
             raise ReadOnlyError(f"move failed: {exc}") from exc
-        id_set = set(ids)
-        self._summaries = [s for s in self._summaries if s.message_id not in id_set]
+        moved_ids = set(ids)
+        remove_at: List[int] = []
+        for i, s in enumerate(self._summaries):
+            if s.message_id not in moved_ids:
+                continue
+            s.mailbox = mailbox
+            if not self._matches_own_filter(mailbox):
+                remove_at.append(i)
+        removed_seqs = sorted((i + 1 for i in remove_at), reverse=True)
+        for i in reversed(remove_at):
+            del self._summaries[i]
+        return removed_seqs
 
-    def delete_fetched_messages(self, fetched) -> None:
+    def delete_fetched_messages(self, fetched) -> List[int]:
         """Back-compat alias: soft-move to trash (prefer soft_move_fetched_messages)."""
-        self.soft_move_fetched_messages(fetched, "trash")
+        return self.soft_move_fetched_messages(fetched, "trash")
 
     def destroy(self):
         raise ReadOnlyError("postern-imap is read-only; mailboxes cannot be destroyed")

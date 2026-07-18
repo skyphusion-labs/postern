@@ -376,6 +376,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // Viewer scope (#350): recipient-relative INBOX + effective seen, mirroring
         // /api/messages?to=. Unvalidated like list's `to` (a bare address filter).
         to: url.searchParams.get("to") ?? undefined,
+        // Durable-folder scope (#352 review), same values as /api/messages?mailbox=.
+        mailbox: url.searchParams.get("mailbox") ?? undefined,
         viewer: resolution.viaSession ? resolution.identity?.from : undefined,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
@@ -539,6 +541,32 @@ async function handleImapDrafts(request: Request, url: URL, path: string, env: E
     return (await store.deleteDraft(env, id, identity))
       ? json({ ok: true, deleted: id })
       : json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
+  }
+  // PUT /api/imap/drafts/{id}: autosave revision (contract §2.4.1). Mirrors the
+  // session-identity PUT /api/drafts/{id} (optimistic concurrency via updatedAt),
+  // but the identity is asserted explicitly in the body (the imap door has no
+  // bound Bearer identity) rather than taken from the resolved token. putDraft
+  // mints a fresh per-folder uid on every write (store.ts allocateFolderUid),
+  // so a revision always presents as the same draft id under a new, higher UID --
+  // the IMAP door then reads that as EXPUNGE(old uid) + APPEND(new uid).
+  if (match && request.method === "PUT") {
+    const body = await readJson<Record<string, unknown>>(request);
+    const identity = requireImapIdentity(body.identity, env);
+    const id = decodeURIComponent(match[1]);
+    const owner = await store.getDraftOwner(env, id);
+    if (owner !== null && owner !== identity.toLowerCase()) {
+      return json({ ok: false, error: "E_FORBIDDEN", message: "draft belongs to another identity" }, 403);
+    }
+    const result = await store.putDraft(
+      env,
+      id,
+      identity,
+      draftInput(body),
+      typeof body.updatedAt === "string" ? body.updatedAt : undefined,
+    );
+    return result.conflict
+      ? json({ ok: false, error: "E_CONFLICT", current: result.draft }, 409)
+      : json({ ok: true, draft: result.draft });
   }
   return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
 }

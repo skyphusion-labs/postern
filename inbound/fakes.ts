@@ -326,6 +326,10 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/FROM drafts WHERE id = \? AND identity = \?/i.test(sql)) {
           return (drafts.find((d) => d.id === String(bound[0]) && d.identity === String(bound[1])) ?? null) as T | null;
         }
+        if (/SELECT identity FROM drafts WHERE id = \?/i.test(sql)) {
+          const row = drafts.find((d) => d.id === String(bound[0]));
+          return (row ? { identity: row.identity } : null) as T | null;
+        }
         if (/SELECT message_id FROM messages WHERE message_id = \?/i.test(sql)) {
           const row = rows.find((r) => r.message_id === String(bound[0]));
           return (row ? { message_id: row.message_id } : null) as T | null;

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,6 +18,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple
 
 from .measure import Meter
+
+_log = logging.getLogger(__name__)
 
 # Identify the proxy to the Postern API. The default urllib User-Agent
 # ("Python-urllib/x.y") is a known-bot signature that Cloudflare blocks with HTTP
@@ -35,6 +38,17 @@ class PosternError(Exception):
 
 class PosternAuthError(PosternError):
     """401 from the Postern API: the bearer token is missing or wrong."""
+
+
+class MissingFolderUidError(ValueError):
+    """A durable-folder row (trash/junk/archive) has no valid folderUid (#352 review).
+
+    FAIL CLOSED: never fall back to messages.id for a durable-folder UID. Reusing
+    the arrival id would silently collide with a DIFFERENT message's real UID in
+    that same per-folder UID space (they are minted from unrelated counters), which
+    is a correctness hazard worse than dropping the row. Callers drop the offending
+    row from the presented view rather than crash the whole SELECT/SEARCH.
+    """
 
 
 def _delivered_to(d: dict[str, Any], to_addr: str) -> list[str]:
@@ -130,8 +144,14 @@ class MessageSummary:
         folder_uid = d.get("folderUid")
         folder_uid_i = int(folder_uid) if folder_uid is not None else None
         # Placed folders (trash/junk/archive) use folder_uid as the IMAP UID; arrival
-        # views keep messages.id. Fall back to messages.id when placement has no uid yet.
-        if use_folder_uid and folder_uid_i is not None and folder_uid_i > 0:
+        # views keep messages.id. #352 review: FAIL CLOSED when a durable-folder row
+        # has no folderUid -- never fall back to messages.id (a different, unrelated
+        # UID space that could collide with another message's real per-folder UID).
+        if use_folder_uid:
+            if folder_uid_i is None or folder_uid_i <= 0:
+                raise MissingFolderUidError(
+                    f"durable-folder row {d.get('messageId')!r} has no folderUid"
+                )
             uid = folder_uid_i
         else:
             uid = int(d["uid"])
@@ -162,6 +182,24 @@ class MessageSummary:
             trashed_at=d.get("trashedAt"),
             folder_uid=folder_uid_i,
         )
+
+
+def _summaries_fail_closed(
+    raw_items: list[dict[str, Any]], *, use_folder_uid: bool
+) -> list["MessageSummary"]:
+    """Parse a page of raw summary dicts, dropping (not crashing on) any durable-
+    folder row that fails MessageSummary.from_json's fail-closed folderUid check."""
+    out: list[MessageSummary] = []
+    for m in raw_items:
+        try:
+            out.append(MessageSummary.from_json(m, use_folder_uid=use_folder_uid))
+        except MissingFolderUidError:
+            _log.warning(
+                "postern-imap: dropping durable-folder row %r with no folderUid "
+                "(#352 fail-closed; never reused messages.id)",
+                m.get("messageId"),
+            )
+    return out
 
 
 @dataclass
@@ -242,6 +280,33 @@ class Message:
 class Page:
     items: list[MessageSummary]
     cursor: Optional[str]
+
+
+@dataclass
+class FolderInfo:
+    """One row of GET /api/folders (#352 core unblocker 4).
+
+    The AUTHORITATIVE source for durable-folder UIDVALIDITY: uid_validity is the
+    worker's mailbox_uid_counter value for archive/trash/junk/drafts, None for the
+    arrival views (inbox/sent/all) which use the config UIDVALIDITY instead.
+    """
+
+    id: str
+    label: str
+    count: int
+    unread: int
+    uid_validity: Optional[int] = None
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> "FolderInfo":
+        uv = d.get("uidValidity")
+        return cls(
+            id=d.get("id", ""),
+            label=d.get("label", ""),
+            count=int(d.get("count", 0)),
+            unread=int(d.get("unread", 0)),
+            uid_validity=int(uv) if uv is not None else None,
+        )
 
 
 @dataclass
@@ -432,10 +497,7 @@ class PosternClient:
         body = self._get("/api/messages", params)
         use_folder_uid = mailbox in ("trash", "junk", "archive")
         return Page(
-            items=[
-                MessageSummary.from_json(m, use_folder_uid=use_folder_uid)
-                for m in body.get("items", [])
-            ],
+            items=_summaries_fail_closed(body.get("items", []), use_folder_uid=use_folder_uid),
             cursor=body.get("cursor"),
         )
 
@@ -477,6 +539,7 @@ class PosternClient:
         field: Optional[str] = None,
         direction: Optional[str] = None,
         to: Optional[str] = None,
+        mailbox: Optional[str] = None,
         cursor: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> Page:
@@ -486,8 +549,10 @@ class PosternClient:
 
         `field` is the substr column selector (#212/#216); `direction` scopes the
         search to one folder's mail server-side (inbound|outbound), so a folder search
-        pages only over its own matches. Both are ignored by the non-substr modes; the
-        worker validates them strictly.
+        pages only over its own matches. `mailbox` (#352 review) scopes a durable-folder
+        SEARCH the same way list_messages does -- a Trash SEARCH must only match Trash,
+        never leak arrival-view hits under a colliding UID. Ignored by the non-substr
+        modes; the worker validates all three strictly.
         """
         params: dict[str, str] = {"q": q}
         if mode:
@@ -501,17 +566,17 @@ class PosternClient:
         # searches pass to=None and are unchanged.
         if to:
             params["to"] = to
+        if mailbox:
+            params["mailbox"] = mailbox
         if cursor:
             params["cursor"] = cursor
         if limit is not None:
             params["limit"] = str(limit)
         body = self._get("/api/search", params)
+        use_folder_uid = mailbox in ("trash", "junk", "archive")
+        hits = [h["message"] for h in body.get("items", []) if h.get("message")]
         return Page(
-            items=[
-                MessageSummary.from_json(h["message"])
-                for h in body.get("items", [])
-                if h.get("message")
-            ],
+            items=_summaries_fail_closed(hits, use_folder_uid=use_folder_uid),
             cursor=body.get("cursor"),
         )
 
@@ -591,14 +656,19 @@ class PosternClient:
         updated = body.get("updated", 0)
         return int(updated) if isinstance(updated, (int, float)) else 0
 
-    def list_drafts(self) -> list[Draft]:
-        """GET /api/drafts -- identity-owned drafts for the bound token (#352)."""
-        body = self._get("/api/drafts", {})
+    def list_imap_drafts(self, identity: str) -> list[Draft]:
+        """GET /api/imap/drafts?identity= -- the IMAP-service seam (#352 core
+
+        unblocker 2). Unlike the session-bound /api/drafts, the IMAP door has no
+        ambient identity, so it is asserted explicitly on every call.
+        """
+        body = self._get("/api/imap/drafts", {"identity": identity})
         return [Draft.from_json(d) for d in body.get("drafts", [])]
 
-    def get_draft(self, draft_id: str) -> Optional[Draft]:
+    def get_imap_draft(self, identity: str, draft_id: str) -> Optional[Draft]:
         try:
-            body = self._get(f"/api/drafts/{urllib.parse.quote(draft_id, safe='')}", {})
+            path = f"/api/imap/drafts/{urllib.parse.quote(draft_id, safe='')}"
+            body = self._get(path, {"identity": identity})
         except PosternError as e:
             if e.status == 404:
                 return None
@@ -606,22 +676,34 @@ class PosternClient:
         draft = body.get("draft")
         return Draft.from_json(draft) if draft else None
 
-    def create_draft(self, fields: dict[str, Any]) -> Draft:
-        """POST /api/drafts -- create a durable draft (APPEND Drafts)."""
-        body = self._post("/api/drafts", fields, expect_status=(200, 201))
+    def create_imap_draft(self, identity: str, fields: dict[str, Any]) -> Draft:
+        """POST /api/imap/drafts -- create a durable draft (APPEND Drafts)."""
+        payload = dict(fields)
+        payload["identity"] = identity
+        body = self._post("/api/imap/drafts", payload, expect_status=(200, 201))
         draft = body.get("draft")
         if not draft:
             raise PosternError("draft create returned no draft")
         return Draft.from_json(draft)
 
-    def update_draft(
-        self, draft_id: str, fields: dict[str, Any], *, updated_at: Optional[str] = None
+    def update_imap_draft(
+        self,
+        identity: str,
+        draft_id: str,
+        fields: dict[str, Any],
+        *,
+        updated_at: Optional[str] = None,
     ) -> Draft:
-        """PUT /api/drafts/{id} -- optimistic-concurrency draft replace."""
+        """PUT /api/imap/drafts/{id} -- autosave revision (contract 2.4.1): mints a
+        fresh, higher per-folder UID for the SAME draft id (optimistic concurrency
+        via updated_at); the caller (mailbox._append_draft) presents this to the
+        IMAP client as EXPUNGE(old uid) + the new higher UID, never a second draft.
+        """
         payload = dict(fields)
+        payload["identity"] = identity
         if updated_at is not None:
             payload["updatedAt"] = updated_at
-        path = f"/api/drafts/{urllib.parse.quote(draft_id, safe='')}"
+        path = f"/api/imap/drafts/{urllib.parse.quote(draft_id, safe='')}"
         url = self._base + path
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="PUT")
@@ -647,9 +729,35 @@ class PosternClient:
             raise PosternError("draft update returned no draft")
         return Draft.from_json(draft)
 
-    def delete_draft(self, draft_id: str) -> None:
-        path = "/api/drafts/" + urllib.parse.quote(draft_id, safe="")
-        self._delete(path)
+    def delete_imap_draft(self, identity: str, draft_id: str) -> None:
+        path = "/api/imap/drafts/" + urllib.parse.quote(draft_id, safe="")
+        self._delete(path, params={"identity": identity})
+
+    def import_message(self, identity: str, folder: str, raw_mime: bytes) -> None:
+        """POST /api/imap/import -- persist an APPEND miss (#352 core unblocker 3).
+
+        Backs Sent-matcher misses and new Trash/Junk/Archive APPENDs: instead of
+        refusing (the old, honest-but-lossy behavior), the message is persisted
+        server-side via the IMAP-service seam. folder is sent|archive|trash|junk.
+        """
+        import base64
+
+        payload = {
+            "identity": identity,
+            "folder": folder,
+            "rawMime": base64.b64encode(raw_mime).decode("ascii"),
+        }
+        self._post("/api/imap/import", payload, expect_status=(200, 201))
+
+    def get_folders(self, *, to: Optional[str] = None) -> list[FolderInfo]:
+        """GET /api/folders -- server-authoritative counts + durable UIDVALIDITY
+
+        (#352 core unblocker 4). `to` scopes the unread counts for a per_account
+        viewer, mirroring list/search; UIDVALIDITY itself is estate-wide.
+        """
+        params = {"to": to} if to else {}
+        body = self._get("/api/folders", params)
+        return [FolderInfo.from_json(f) for f in body.get("folders", [])]
 
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""
@@ -729,8 +837,10 @@ class PosternClient:
         except (ValueError, UnicodeDecodeError) as e:
             raise PosternError(f"invalid JSON from Postern API: {e}") from e
 
-    def _delete(self, path: str) -> None:
+    def _delete(self, path: str, *, params: Optional[dict[str, str]] = None) -> None:
         url = self._base + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, method="DELETE")
         req.add_header("Authorization", f"Bearer {self._token}")
         req.add_header("Accept", "application/json")
