@@ -232,7 +232,8 @@ outbound to/cc/bcc for one bound identity (session) or an explicit `viewer=` on
 BYO. It is never estate-wide when unbound.
 
 Settings (theme / density) live in `localStorage`. Remote images remain blocked
-by CSP (`img-src 'none'`); the settings panel states that honestly (no fake toggle).
+by CSP (`img-src 'self' data:` only) plus body neutralization; the settings panel
+states that honestly (no fake toggle).
 
 ## Deferred (follow-ups)
 
