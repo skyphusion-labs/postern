@@ -170,6 +170,46 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return json({ ok: true, updated });
     }
 
+    if (request.method === "POST" && path === "/api/messages/flags") {
+      const body = await readJson<{ ids?: unknown; set?: unknown }>(request);
+      if (!Array.isArray(body.ids) || !body.ids.every((x) => typeof x === "string")) {
+        return json({ ok: false, error: "E_VALIDATION_ERROR", message: "ids must be an array of message ids" }, 400);
+      }
+      if (!body.set || typeof body.set !== "object" || Array.isArray(body.set)) {
+        return json({ ok: false, error: "E_VALIDATION_ERROR", message: "set must be an object" }, 400);
+      }
+      const raw = body.set as Record<string, unknown>;
+      if ((raw.flagged !== undefined && typeof raw.flagged !== "boolean") ||
+          (raw.answered !== undefined && typeof raw.answered !== "boolean") ||
+          (raw.flagged === undefined && raw.answered === undefined)) {
+        return json({ ok: false, error: "E_VALIDATION_ERROR", message: "set requires boolean flagged and/or answered" }, 400);
+      }
+      const updated = await store.setFlags(
+        env,
+        body.ids as string[],
+        { flagged: raw.flagged as boolean | undefined, answered: raw.answered as boolean | undefined },
+        resolution.viaSession ? resolution.identity?.from : undefined,
+      );
+      return json({ ok: true, updated });
+    }
+
+    if (request.method === "POST" && path === "/api/messages/move") {
+      const body = await readJson<{ ids?: unknown; mailbox?: unknown }>(request);
+      if (!Array.isArray(body.ids) || !body.ids.every((x) => typeof x === "string")) {
+        return json({ ok: false, error: "E_VALIDATION_ERROR", message: "ids must be an array of message ids" }, 400);
+      }
+      if (body.mailbox !== null && body.mailbox !== "archive" && body.mailbox !== "trash" && body.mailbox !== "junk") {
+        return json({ ok: false, error: "E_VALIDATION_ERROR", message: "mailbox must be archive, trash, junk, or null" }, 400);
+      }
+      const updated = await store.moveMessages(
+        env,
+        body.ids as string[],
+        body.mailbox,
+        resolution.viaSession ? resolution.identity?.from : undefined,
+      );
+      return json({ ok: true, updated });
+    }
+
     // --- admin: provision / rotate an SMTP submission credential (#68) ---
     // Operator action, gated by a `both`-scoped mailbox token (this block is past
     // the scope check above). Mints or rotates a per-user submission credential and
@@ -220,6 +260,76 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
       const page = await store.list(env, parseListQuery(url));
       return json({ ok: true, ...page });
+    }
+
+    if (request.method === "GET" && path === "/api/folders") {
+      // Viewer for unread counts: session-bound identity wins; BYO read tokens
+      // (IMAP / operator) may pass ?to= the same way list/search do (#350/#352).
+      const viewer = resolution.identity?.from ?? url.searchParams.get("to") ?? undefined;
+      return json({ ok: true, folders: await store.folders(env, viewer) });
+    }
+
+    // Server-side drafts are identity-owned. Static operator tokens are deliberately
+    // insufficient because no trustworthy owner can be derived from them.
+    if (path === "/api/drafts" || path.startsWith("/api/drafts/")) {
+      const identity = resolution.identity?.from;
+      if (!identity) throw new MailboxError("E_IDENTITY_REQUIRED", "drafts require a bound identity", 403);
+      const suffix = path.slice("/api/drafts".length);
+      if (request.method === "GET" && suffix === "") {
+        return json({ ok: true, drafts: await store.listDrafts(env, identity) });
+      }
+      if (request.method === "POST" && suffix === "") {
+        const input = draftInput(await readJson<Record<string, unknown>>(request));
+        const id = crypto.randomUUID();
+        const result = await store.putDraft(env, id, identity, input);
+        return json({ ok: true, id, draft: result.draft }, 201);
+      }
+      const sendMatch = /^\/([^/]+)\/send$/.exec(suffix);
+      if (request.method === "POST" && sendMatch) {
+        const id = decodeURIComponent(sendMatch[1]);
+        const draft = await store.getDraft(env, id, identity);
+        if (!draft) return json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
+        if (!draft.to) throw new MailboxError("E_FIELD_MISSING", "draft recipient required");
+        const result = await send(env, {
+          to: draft.to,
+          cc: draft.cc ?? undefined,
+          bcc: draft.bcc ?? undefined,
+          subject: draft.subject ?? "",
+          text: draft.bodyText ?? undefined,
+          html: draft.bodyHtml ?? undefined,
+        }, ctx, resolution.identity);
+        await store.deleteDraft(env, id, identity);
+        return json({ ok: true, ...result });
+      }
+      const itemMatch = /^\/([^/]+)$/.exec(suffix);
+      if (itemMatch) {
+        const id = decodeURIComponent(itemMatch[1]);
+        if (request.method === "GET") {
+          const draft = await store.getDraft(env, id, identity);
+          return draft
+            ? json({ ok: true, draft })
+            : json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
+        }
+        if (request.method === "PUT") {
+          const body = await readJson<Record<string, unknown>>(request);
+          const result = await store.putDraft(
+            env,
+            id,
+            identity,
+            draftInput(body),
+            typeof body.updatedAt === "string" ? body.updatedAt : undefined,
+          );
+          return result.conflict
+            ? json({ ok: false, error: "E_CONFLICT", current: result.draft }, 409)
+            : json({ ok: true, draft: result.draft });
+        }
+        if (request.method === "DELETE") {
+          const deleted = await store.deleteDraft(env, id, identity);
+          return deleted
+            ? json({ ok: true, deleted: id })
+            : json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
+        }
+      }
     }
 
     // --- read: search ---
@@ -290,6 +400,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) {
       const id = decodeURIComponent(path.slice("/api/messages/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "message id required" }, 400);
+      if (resolution.viaSession && resolution.identity &&
+          !(await store.messageAccessible(env, id, resolution.identity.from, true))) {
+        return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
+      }
       const deleted = await store.deleteMessage(env, id, ctx);
       if (!deleted) return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
       return json({ ok: true, deleted: id });
@@ -328,14 +442,37 @@ function parseLimit(url: URL): number | undefined {
 function parseListQuery(url: URL): import("./store").ListQuery {
   const p = url.searchParams;
   const dir = p.get("direction");
+  const mailbox = p.get("mailbox");
   return {
     to: p.get("to") ?? undefined,
     from: p.get("from") ?? undefined,
     thread: p.get("thread") ?? undefined,
     direction: dir === "inbound" || dir === "outbound" ? dir : undefined,
+    mailbox: mailbox === "archive" || mailbox === "trash" || mailbox === "junk" || mailbox === "all"
+      ? mailbox
+      : undefined,
     q: p.get("q") ?? undefined,
     limit: parseLimit(url),
     cursor: p.get("cursor") ?? undefined,
+  };
+}
+
+function draftInput(body: Record<string, unknown>): store.DraftInput {
+  const text = (name: string): string | null => {
+    const value = body[name];
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string") throw new MailboxError("E_VALIDATION_ERROR", `${name} must be a string`);
+    return value;
+  };
+  return {
+    to: text("to"),
+    cc: text("cc"),
+    bcc: text("bcc"),
+    subject: text("subject"),
+    bodyText: text("bodyText"),
+    bodyHtml: text("bodyHtml"),
+    inReplyTo: text("inReplyTo"),
+    threadId: text("threadId"),
   };
 }
 
@@ -575,7 +712,7 @@ function transportAuthorized(request: Request, env: Env): boolean {
 
 // The scope a route/method demands. `admin` (credential provisioning) is strictly
 // more privileged than send and is satisfied ONLY by a `both` token.
-type RouteScope = "read" | "send" | "admin";
+type RouteScope = "read" | "send" | "delete" | "admin";
 
 // Map the method+path to the scope it requires, mirroring the route table in
 // handleApi exactly. Returns null for any path with no API handler, so (once the
@@ -586,6 +723,8 @@ function requiredScope(method: string, path: string): RouteScope | null {
   // Marking (un)read is a side effect of READING, so it is read-scoped -- the IMAP
   // proxy (often holding only a read token) must be able to persist \Seen (#seen).
   if (method === "POST" && path === "/api/messages/seen") return "read";
+  if (method === "POST" && (path === "/api/messages/flags" || path === "/api/messages/move")) return "read";
+  if (path === "/api/drafts" || path.startsWith("/api/drafts/")) return "send";
   if (method === "POST" && path === "/api/admin/smtp-credentials") return "admin";
   if (method === "DELETE" && /^\/api\/admin\/smtp-credentials\/(.+)$/.test(path)) return "admin";
   // Reindex/backfill is the most privileged: a new /api/admin/* path is NOT
@@ -595,9 +734,10 @@ function requiredScope(method: string, path: string): RouteScope | null {
   // Reconcile is read-only but reports over the whole estate; gate it `admin` like
   // reindex so only a both-scoped token can run the audit (#134).
   if (method === "POST" && path === "/api/admin/reconcile") return "admin";
-  if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "admin";
+  if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
   if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
   if (method === "GET" && path === "/api/search") return "read";
+  if (method === "GET" && path === "/api/folders") return "read";
   if (method === "GET" && path === "/api/mobileconfig") return "read";
   // Single message and the /attachments/{i} sub-route both live under here.
   if (method === "GET" && path.startsWith("/api/messages/")) return "read";
@@ -612,6 +752,7 @@ function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (have === "both") return true;
   if (need === "read") return have === "read";
   if (need === "send") return have === "send";
+  if (need === "delete") return have === "delete";
   return false; // admin: only `both`
 }
 
@@ -698,6 +839,7 @@ async function resolveToken(request: Request, env: Env): Promise<AuthResolution 
     ["both", tokenSet(env.POSTERN_API_TOKEN)],
     ["read", tokenSet(env.POSTERN_API_TOKEN_READ)],
     ["send", tokenSet(env.POSTERN_API_TOKEN_SEND)],
+    ["delete", tokenSet(env.POSTERN_API_TOKEN_DELETE)],
   ];
 
   let matched: Scope | null = null;

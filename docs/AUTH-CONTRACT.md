@@ -328,7 +328,7 @@ Presence-check with `${VAR:+SET}` only.
 | `POSTERN_TRANSPORT_TOKEN` | transport seam (`/ingest`, `/dispatch`, native `/api/smtp-auth`) | relay (inbound + native submission) | crew-secrets -> `/etc/...env` 0600 | exists |
 | `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | submission door (587/465) | crew-secrets -> `/etc/postern-submission.env` 0600 | exists; holds a `send`-scoped value once provisioned (worker `POSTERN_API_TOKEN_SEND`, #85) |
 | `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store (`/api/messages`, `/search`) in `ldap`/`pam` mode | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | exists; holds a `read`-scoped value once provisioned (worker `POSTERN_API_TOKEN_READ`, #85) |
-| `POSTERN_API_TOKEN_DELETE` (store-delete) | IMAP proxy EXPUNGE only (`DELETE /api/messages/{id}`) | postern-imap | crew-secrets minter tier -> swarm `postern_imap_delete_token` | provisioned as a dedicated member of worker `POSTERN_API_TOKEN` (#278); NOT the read token |
+| `POSTERN_API_TOKEN_DELETE` (store-delete) | IMAP proxy EXPUNGE only (`DELETE /api/messages/{id}`) | postern-imap | crew-secrets minter tier -> swarm `postern_imap_delete_token` | dedicated worker `delete`-scope slot (#352); NOT read or `both` |
 | ~~`POSTERN_LDAP_BIND_PASSWORD`~~ | **RETIRED** -- direct-bind (Option A, section 5b) uses no service account, so there is no search-bind password to hold. | -- | -- | -- |
 | `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname (587 STARTTLS + 465 implicit share it) | submission door (587/465) | crew-secrets / cert store (staged) | **gated** (exposure) |
 
@@ -338,13 +338,15 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 
 | Worker secret | Scope | Reaches |
 |---|---|---|
-| `POSTERN_API_TOKEN` | `both` | read + send + credential-admin (the egalitarian single-key default) |
+| `POSTERN_API_TOKEN` | `both` | read + send + delete + credential-admin (the egalitarian single-key default) |
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
-| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From) |
-| `POSTERN_SEND_IDENTITIES` (registry, #28; a config VAR, not a secret -- #335) | `send` + bound From | `POST /api/send`/`reply` as the token's OWN identity |
+| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
+| `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
+| `POSTERN_SEND_IDENTITIES` (registry, #28; a config VAR, not a secret -- #335) | `send` + bound From | send/reply and own-draft CRUD as the token's OWN identity |
 
-The three STATIC slots (`POSTERN_API_TOKEN`, `POSTERN_API_TOKEN_READ`,
-`POSTERN_API_TOKEN_SEND`) each hold a **comma-separated SET of tokens** (#154):
+The four STATIC slots (`POSTERN_API_TOKEN`, `POSTERN_API_TOKEN_READ`,
+`POSTERN_API_TOKEN_SEND`, `POSTERN_API_TOKEN_DELETE`) each hold a
+**comma-separated SET of tokens** (#154):
 entries are trimmed, empty entries (stray commas, whitespace) are ignored, and a
 bearer matching ANY member resolves to that slot's scope. A single bare value (no
 comma) is a one-element set -- the pre-#154 format, unchanged -- so existing
@@ -359,7 +361,7 @@ not a token list.
 
 Unknown token -> `401`; known token outside its scope -> `403`. Credential-admin
 (`/api/admin/smtp-credentials`) is reachable ONLY by a `both` token. Provisioning
-the two scoped secrets is OPTIONAL and non-breaking: with only `POSTERN_API_TOKEN`
+the scoped secrets is OPTIONAL and non-breaking: with only `POSTERN_API_TOKEN`
 set, every consumer keeps using that one `both` value exactly as before.
 
 **Per-identity send registry (#28) -- one scope, many identities.** The scope split

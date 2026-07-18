@@ -54,13 +54,23 @@ CREATE TABLE IF NOT EXISTS messages (
   bcc_addr      TEXT,
   sender_addr   TEXT,
   reply_to_addr TEXT,
-  wire_size     INTEGER
+  wire_size     INTEGER,
+  -- Durable flags + folder placement (#352, migration 0011). flagged/answered are
+  -- \Flagged / \Answered beside the durable \Seen (2.2). mailbox is the ONE mutable
+  -- system-box placement: NULL = the direction-default INBOX/Sent view (every old
+  -- row), 'archive'|'junk' = moved into that box, 'trash' + trashed_at = soft delete
+  -- (2.3/2.5, the D6 fix). All is the union regardless of mailbox.
+  flagged     INTEGER NOT NULL DEFAULT 0,
+  answered    INTEGER NOT NULL DEFAULT 0,
+  mailbox     TEXT,
+  trashed_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_from ON messages(from_addr);
 CREATE INDEX IF NOT EXISTS idx_date ON messages(date);
 CREATE INDEX IF NOT EXISTS idx_trusted ON messages(trusted, received_at);
 CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
+CREATE INDEX IF NOT EXISTS idx_messages_mailbox ON messages(mailbox);
 
 -- Attachments: bytes stored in R2 (ATTACHMENTS bucket), metadata + key here.
 CREATE TABLE IF NOT EXISTS attachments (
@@ -142,4 +152,48 @@ CREATE TABLE IF NOT EXISTS message_seen_by (
   recipient  TEXT NOT NULL,
   seen       INTEGER NOT NULL,
   PRIMARY KEY (message_id, recipient)
+);
+
+-- Server-side drafts (#352, migration 0011). A draft is NOT a messages row (no
+-- Message-ID, no direction, rewritten on every autosave); it lives here so draft
+-- churn never touches the message store / FTS / Vectorize. identity is the owning
+-- bound From (the IDOR boundary). uid is the per-folder IMAP UID from
+-- mailbox_uid_counter['drafts']; a NEW uid is minted on every successful write
+-- (2.4.1: autosave = EXPUNGE old uid + new higher UID, RFC 3501 immutability).
+-- updated_at doubles as the optimistic-concurrency token for PUT autosave.
+CREATE TABLE IF NOT EXISTS drafts (
+  id           TEXT PRIMARY KEY,
+  identity     TEXT NOT NULL,
+  to_addr      TEXT,
+  cc_addr      TEXT,
+  bcc_addr     TEXT,
+  subject      TEXT,
+  body_text    TEXT,
+  body_html    TEXT,
+  in_reply_to  TEXT,
+  thread_id    TEXT,
+  uid          INTEGER NOT NULL,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_identity ON drafts(identity, updated_at);
+
+-- Per-folder UID ledger + counters for the RE-POPULATED folders (#352, migration
+-- 0011). Archive/Trash/Junk (and Drafts via drafts.uid) gain messages OUT of
+-- arrival order, so they cannot expose messages.id as the IMAP UID (that would
+-- insert a lower UID after a higher one). Each gets a per-folder monotonic
+-- folder_uid assigned on placement, NEVER reused, under its own UIDVALIDITY minted
+-- once. INBOX/Sent/All do NOT use these (they keep messages.id). mailbox (above) is
+-- the fast single-placement read; mailbox_placement is the per-folder UID ledger.
+CREATE TABLE IF NOT EXISTS mailbox_placement (
+  message_id  TEXT NOT NULL,
+  folder      TEXT NOT NULL,
+  folder_uid  INTEGER NOT NULL,
+  added_at    TEXT NOT NULL,
+  PRIMARY KEY (message_id, folder)
+);
+CREATE TABLE IF NOT EXISTS mailbox_uid_counter (
+  folder      TEXT PRIMARY KEY,
+  next_uid    INTEGER NOT NULL,
+  uidvalidity INTEGER NOT NULL
 );
