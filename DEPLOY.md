@@ -68,13 +68,15 @@ After `schema.sql` succeeds, list the migration files under
 cd inbound
 npx wrangler d1 execute postern --remote --command "
 INSERT INTO d1_migrations (name) VALUES
+  ('0000_base_schema.sql'),
   ('0001_attachments_fts_dmarc.sql'),
   ('0002_direction_thread.sql'),
   ('0003_body_html.sql'),
   ('0004_smtp_credentials.sql'),
   ('0005_messages_autoincrement_uid.sql'),
   ('0006_envelope_v2.sql'),
-  ('0007_seen.sql');
+  ('0007_seen.sql'),
+  ('0008_vector_ledger.sql');
 "
 ```
 
@@ -85,9 +87,13 @@ npx wrangler d1 migrations list postern --remote
 ```
 
 **Greenfield alternative:** skip `schema.sql` and apply migrations directly
-(`npx wrangler d1 migrations apply postern --remote`). Wrangler creates
-`d1_migrations` and records each file as it runs; CI then no-ops until a new
-migration lands.
+(`npx wrangler d1 migrations apply postern --remote`). Migration
+`0000_base_schema.sql` creates the base `messages` table, so the full chain
+(`0000` through `0008`) bootstraps an empty store on its own; wrangler creates
+`d1_migrations` and records each file as it runs, and CI then no-ops until a new
+migration lands. Use this OR the `schema.sql` + baseline-seed path above, never
+both. (`0000` is `CREATE TABLE IF NOT EXISTS`, so it is also a harmless no-op on
+a store already built by `schema.sql`.)
 
 **Existing store / offline migration (0005 pattern):** when a migration must be
 applied manually (core-table rebuild, backup-first operation), run it offline
