@@ -21,14 +21,46 @@ describe("serveWebmail", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const csp = res.headers.get("content-security-policy") || "";
+    // Assert the COMPLETE served policy, not just the strict directives (#343/D4).
+    // The docs must match this string exactly; the two 'unsafe-inline' directives
+    // are unavoidable (one inline script + one inline style) and are NOT hidden.
+    expect(csp).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
+        "connect-src 'self'; img-src 'self' data:; frame-src 'self'; " +
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
     // connect-src 'self' is the anti-exfiltration control: a hijacked page
     // cannot ship the pasted token to another host.
     expect(csp).toContain("connect-src 'self'");
     expect(csp).toContain("default-src 'none'");
     // frame-src 'self' permits the sandboxed srcdoc iframe the body view uses.
     expect(csp).toContain("frame-src 'self'");
+    // The inline app forces 'unsafe-inline' for script and style; assert it so the
+    // security docs cannot drift from the truth (#343/D4).
+    expect(csp).toContain("script-src 'unsafe-inline'");
+    expect(csp).toContain("style-src 'unsafe-inline'");
+    // img-src 'self' data: is why remote images are always blocked: the srcdoc
+    // reading pane inherits this policy, so no https remote image can load.
+    expect(csp).toContain("img-src 'self' data:");
+    expect(csp).not.toContain("img-src 'self' data: https:");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+});
+
+describe("remote images are always blocked (no inert opt-in) (#343)", () => {
+  it("has no \"Load remote images\" opt-in that the served CSP would silently defeat", () => {
+    // The srcdoc reading pane inherits the served img-src 'self' data:, so a
+    // per-message opt-in could never load remote images without relaxing the
+    // top-frame CSP. The honest fix removed it: remote content is always
+    // neutralized and the banner is a non-actionable notice.
+    expect(WEBMAIL_HTML).not.toContain("Load remote images");
+    // no code path that re-mounts the body with raw (un-neutralized) HTML
+    expect(WEBMAIL_HTML).not.toContain("mount(true)");
+    // the neutralizer is still the single render path for HTML bodies
+    expect(WEBMAIL_HTML).toContain("neutralizeRemoteHtml");
+    // the informational (non-actionable) blocked-content notice survives
+    expect(WEBMAIL_HTML).toContain("Images are not loaded in webmail.");
   });
 });
 

@@ -84,18 +84,14 @@
     margin-top: 18px; padding-top: 18px; border: none; border-top: 1px solid var(--line);
     width: 100%; min-height: 220px; background: var(--panel-2);
   }
-  /* #60: remote-content blocked-by-default banner (tracking-pixel privacy) */
+  /* #60/#343: remote content is always blocked (tracking-pixel privacy); this
+     banner is a non-actionable notice, not an opt-in (see renderBody). */
   .remote-banner {
     margin-top: 18px; padding: 8px 12px; display: flex; align-items: center; gap: 10px;
     flex-wrap: wrap; background: var(--panel-2); border: 1px solid var(--line);
     border-radius: 6px; font-size: 13px; color: var(--muted);
   }
   .remote-banner + .msg-body-frame { margin-top: 0; }
-  .remote-banner .load-remote {
-    font-size: 12px; padding: 3px 10px; cursor: pointer; background: transparent;
-    color: var(--accent); border: 1px solid var(--accent); border-radius: 6px;
-  }
-  .remote-banner .load-remote:hover { background: var(--accent); color: #0b0d10; }
   .attachments { margin-top: 18px; }
   .attachments h3 { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
   .attachments li { font-size: 13px; margin-bottom: 4px; }
@@ -362,13 +358,17 @@
       return '<a href="' + u + '" target="_blank" rel="noopener noreferrer nofollow">' + u + '</a>';
     });
   }
-  // --- remote-content blocking (#60): privacy by default -----------------------
+  // --- remote-content blocking (#60/#343): privacy always ----------------------
   // HTML bodies can reference remote subresources (img src, srcset, CSS url(),
   // <link rel=stylesheet>, legacy background=""). Even in the sandbox="" iframe
   // (which blocks scripts) those still FETCH on open: that is the tracking-pixel
-  // leak (the sender learns the open, the reader's IP, time, and client). So by
-  // default we neutralize remote-loading references and offer a per-message
-  // opt-in ("Load remote images"), exactly like Gmail / Apple Mail / Thunderbird.
+  // leak (the sender learns the open, the reader's IP, time, and client). So we
+  // ALWAYS neutralize remote-loading references; there is no per-message opt-in.
+  // Why no opt-in: the served /webmail CSP is img-src 'self' data:, and the
+  // reading pane is an about:srcdoc iframe that INHERITS that policy (a nested
+  // meta CSP can only tighten it, never relax it), so a remote image cannot load
+  // even if we emitted its URL. A real opt-in would mean relaxing the top-frame
+  // CSP for the whole page, defeating this very protection (#343).
   // Parsing uses DOMParser (text/html is INERT: no scripts run, no resources load)
   // and we only mutate attributes / text nodes, never assign innerHTML.
   function isRemoteUrl(u) {
@@ -479,27 +479,22 @@
       f.setAttribute("srcdoc", doc);
       return f;
     }
-    function mount(loadRemote) {
+    function mount() {
       clear(wrap);
       if (!hasHtml) { wrap.appendChild(frameFor(linkify(escapeHtml((m && m.bodyText) || "")), false)); return; }
-      var inner, blocked = 0;
-      if (loadRemote) {
-        inner = String(m.bodyHtml);               // per-message opt-in: load everything
-      } else {
-        var res = neutralizeRemoteHtml(m.bodyHtml);
-        inner = res.html; blocked = res.blocked;
-      }
-      if (blocked > 0 && !loadRemote) {
-        var btn = el("button", { class: "load-remote", text: "Load remote images" });
-        btn.addEventListener("click", function () { mount(true); });
+      // Remote content is ALWAYS neutralized: the served page CSP (img-src 'self'
+      // data:) is inherited by this srcdoc iframe, so remote loads are blocked at
+      // the platform layer regardless. There is no opt-in to load them (#343).
+      var res = neutralizeRemoteHtml(m.bodyHtml);
+      var inner = res.html, blocked = res.blocked;
+      if (blocked > 0) {
         wrap.appendChild(el("div", { class: "remote-banner" }, [
-          el("span", { text: "Remote content blocked to protect your privacy (" + blocked + " item" + (blocked === 1 ? "" : "s") + "). " }),
-          btn
+          el("span", { text: "Remote content blocked to protect your privacy (" + blocked + " item" + (blocked === 1 ? "" : "s") + "). Images are not loaded in webmail." })
         ]));
       }
       wrap.appendChild(frameFor(inner, true));
     }
-    mount(false);
+    mount();
     return wrap;
   }
 

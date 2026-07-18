@@ -1,11 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { WEBMAIL_HTML } from "./src/webmail";
 
-// #60: HTML email bodies must not auto-load remote subresources (tracking pixels,
-// remote CSS) on open; a per-message opt-in then loads them. The webmail page is a
-// vanilla IIFE embedded as a string, so we (1) execute its real remote-detection
-// helpers in isolation (the security-relevant logic that decides what counts as
-// remote), and (2) assert the default-block + opt-in wiring is present in the page.
+// #60/#343: HTML email bodies must not auto-load remote subresources (tracking
+// pixels, remote CSS) on open. Remote content is ALWAYS neutralized: the served
+// /webmail CSP (img-src 'self' data:) is inherited by the srcdoc reading pane, so
+// a per-message opt-in could never load remote images without relaxing the
+// top-frame CSP; the inert opt-in was removed (#343). The webmail page is a vanilla
+// IIFE embedded as a string, so we (1) execute its real remote-detection helpers in
+// isolation (the logic that decides what counts as remote), and (2) assert the
+// always-block wiring (and the absence of an opt-in) is present in the page.
 
 // Pull the contiguous block of pure helpers (isRemoteUrl, hasRemoteInSrcset,
 // BLOCKED_IMG, stripRemoteCssUrls) out of the shipped page source and evaluate it.
@@ -80,21 +83,25 @@ describe("#60 remote CSS url() neutralization", () => {
   });
 });
 
-describe("#60 default-block + per-message opt-in wiring", () => {
+describe("#60/#343 always-block wiring (no inert opt-in)", () => {
   it("renders the body via renderBody (not raw bodyIframe)", () => {
     expect(WEBMAIL_HTML).toContain("function renderBody");
     expect(WEBMAIL_HTML).toContain("r.appendChild(renderBody(m))");
   });
 
-  it("neutralizes remote content by DEFAULT", () => {
+  it("neutralizes remote content ALWAYS (the single render path for HTML)", () => {
     expect(WEBMAIL_HTML).toContain("function neutralizeRemoteHtml");
     expect(WEBMAIL_HTML).toContain("neutralizeRemoteHtml(m.bodyHtml)");
   });
 
-  it("offers a per-message opt-in that loads the RAW body", () => {
-    expect(WEBMAIL_HTML).toContain("Load remote images");
-    // opt-in path renders the original HTML (so remote content loads only on opt-in)
-    expect(WEBMAIL_HTML).toContain('inner = String(m.bodyHtml)');
+  it("has NO opt-in that would load the raw body (the srcdoc CSP defeats it)", () => {
+    // The served img-src 'self' data: is inherited by the srcdoc reading pane, so
+    // a "Load remote images" opt-in could never work without relaxing the top-frame
+    // CSP. It was removed (#343); the blocked-content banner is now informational.
+    expect(WEBMAIL_HTML).not.toContain("Load remote images");
+    expect(WEBMAIL_HTML).not.toContain("inner = String(m.bodyHtml)");
+    expect(WEBMAIL_HTML).not.toContain("mount(true)");
+    expect(WEBMAIL_HTML).toContain("Images are not loaded in webmail.");
   });
 
   it("stashes the original src and uses an inline data: placeholder", () => {

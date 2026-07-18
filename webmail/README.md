@@ -111,11 +111,31 @@ XSS is the main surface. The page is built to neutralize it:
   there; otherwise the plain text is escaped and bare URLs linkified. The
   `<script>`, `onerror`, `onload`, etc. in an HTML body are inert under the
   sandbox.
-- **Locked-down CSP** on the served page: `default-src 'none'`,
-  `connect-src 'self'` (a hijacked page cannot exfiltrate the token to another
-  host), `frame-src 'self'` (only the sandboxed srcdoc body frame), no
-  third-party resources, `frame-ancestors 'none'`, plus `nosniff` and
-  `no-referrer`.
+- **Locked-down CSP** on the served page. The full served policy is:
+
+  ```
+  default-src none; style-src unsafe-inline; script-src unsafe-inline;
+  connect-src self; img-src self data:; frame-src self;
+  base-uri none; form-action none; frame-ancestors none
+  ```
+
+  - `connect-src self` is the anti-exfiltration control (a hijacked page cannot
+    ship the pasted token to another host); `frame-src self` permits only the
+    sandboxed srcdoc body frame; `frame-ancestors none`, plus `nosniff` and
+    `no-referrer`.
+  - `script-src unsafe-inline` and `style-src unsafe-inline` are present and
+    unavoidable: the app is one inline `<script>` and one inline `<style>` (no
+    build step, no external assets). Because inline script is allowed, the CSP is
+    NOT the top-frame XSS control; the sole top-frame control is the no-`innerHTML`
+    discipline (all message-derived content goes through text nodes / `setAttribute`),
+    guarded by a test.
+  - `img-src self data:` means remote images are **always blocked** on the served
+    `/webmail` path. The reading pane is an `about:srcdoc` `sandbox=""` iframe, which
+    inherits this policy, so remote subresources cannot load regardless of message
+    content. There is no "load remote images" opt-in: a working one would require
+    relaxing this directive for the whole top frame, defeating the tracking-pixel
+    protection it provides. A per-message notice reports how many remote items were
+    blocked; it is informational, not an action (#343).
 - **Attachment download via a Bearer fetch.** The API is token-gated, so a
   download fetches the bytes with the `Authorization` header and saves them from
   an object URL; the token is never placed in a URL. The endpoint returns the
