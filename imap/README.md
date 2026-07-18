@@ -180,6 +180,10 @@ Flipping a live door from `estate` to `per_account` is an operator window: folde
 membership changes, so **bump `POSTERN_IMAP_UIDVALIDITY`** (RFC 3501) on the same roll
 so clients discard their cached estate view and resync into the per-account view.
 
+Projection changes that alter BODY[] bytes (including the #342 deterministic MIME
+boundary renderer) also require a **UIDVALIDITY bump** on the fleet IMAP image roll so
+clients drop SIZE/BODY caches that would disagree with the new projection.
+
 ## Run it
 
 ```bash

@@ -726,6 +726,8 @@ sender: string | null;       // messages.sender_addr    raw header
 replyTo: string | null;      // messages.reply_to_addr  raw header
 deliveredTo: string[];       // parsed from messages.delivered_to; v1 fallback [to_addr]
 wireSize: number | null;     // messages.wire_size
+projectedSize: number | null; // messages.projected_size (#342)
+projectionVersion: number | null; // messages.projection_version (#342)
 ```
 
 The IMAP proxy fills ENVELOPE Cc/Bcc/Sender/Reply-To from the fidelity fields (NIL when
@@ -740,6 +742,16 @@ spec-true means here. `wireSize` is stored fidelity for API consumers and diagno
 becomes the IMAP SIZE only in a future milestone where FETCH itself is byte-exact (raw
 blob storage). Serving `wireSize` against a projected body would make SIZE and the
 literal disagree, which is the one combination that actually breaks clients.
+
+**Cached projection (#342).** `projectedSize` / `projectionVersion` cache the byte length of
+the canonical RFC822 projection (deterministic MIME boundaries from message-id + part path).
+Computed at `store.put` / attachment finalize from D1 metadata only (body lengths +
+attachment size/filename/mime; no R2 reads). The IMAP door prefers this for RFC822.SIZE when
+`projectionVersion` matches the renderer's version, so bulk `UID FETCH … RFC822.SIZE` does
+zero attachment GETs. A renderer change bumps the version and requires a
+`POSTERN_IMAP_UIDVALIDITY` bump on the fleet image roll (same discipline as other projection
+changes). Pre-0012 rows keep NULL and fall back to a placeholder hydrate (message GET, still
+zero attachment GETs for SIZE).
 
 ### 10.4 Write side: who populates what
 

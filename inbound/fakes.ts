@@ -28,6 +28,8 @@ interface Row {
   sender_addr: string | null;
   reply_to_addr: string | null;
   wire_size: number | null;
+  projected_size: number | null;
+  projection_version: number | null;
   flagged: number;
   answered: number;
   mailbox: string | null;
@@ -260,6 +262,13 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           row.trashed_at = bound[1] === null ? null : String(bound[1]);
           return { meta: { changes: 1 } };
         }
+        if (/UPDATE messages SET projected_size = \?, projection_version = \?/i.test(sql)) {
+          const row = rows.find((r) => r.message_id === String(bound[2]));
+          if (!row) return { meta: { changes: 0 } };
+          row.projected_size = bound[0] === null ? null : Number(bound[0]);
+          row.projection_version = bound[1] === null ? null : Number(bound[1]);
+          return { meta: { changes: 1 } };
+        }
         if (/DELETE FROM mailbox_placement WHERE message_id/i.test(sql)) {
           const id = String(bound[0]);
           let changes = 0;
@@ -398,14 +407,14 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         // RETURNING thread_id, is_fresh. Faithful to store.put()'s single atomic
         // statement -- fresh insert (is_fresh=1), merge-append (is_fresh=0), or a
         // true-dedup no-op (recipient already a member -> WHERE false -> no row).
-        // Bind order: 15 insert cols, then delivered_set(15), cc(16), bcc(17),
-        // sender(18), reply_to(19), wire_size(20), seen(21), merge_rcpt(22),
-        // where-rcpt(23), is_fresh cmp = delivered_set(24).
+        // Bind order (#342): delivered_set(15), cc(16), bcc(17), sender(18),
+        // reply_to(19), wire_size(20), projected_size(21), projection_version(22),
+        // seen(23), merge_rcpt(24), where-rcpt(25), is_fresh cmp = delivered_set(26).
         if (/INSERT INTO messages/i.test(sql) && /ON CONFLICT/i.test(sql)) {
           const b = bound as unknown[];
           const message_id = b[0] as string;
           const delivered_set = b[15] as string;
-          const merge_rcpt = b[22] as string;
+          const merge_rcpt = b[24] as string;
           const existing = rows.find((r) => r.message_id === message_id);
           if (!existing) {
             rows.push({
@@ -431,7 +440,9 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
               sender_addr: b[18] as string | null,
               reply_to_addr: b[19] as string | null,
               wire_size: b[20] as number | null,
-              seen: b[21] as number,
+              projected_size: b[21] as number | null,
+              projection_version: b[22] as number | null,
+              seen: b[23] as number,
               flagged: 0,
               answered: 0,
               mailbox: null,
@@ -542,6 +553,8 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             sender_addr: r.sender_addr,
             reply_to_addr: r.reply_to_addr,
             wire_size: r.wire_size,
+            projected_size: r.projected_size,
+            projection_version: r.projection_version,
             has_html: r.body_html && String(r.body_html).trim() ? 1 : 0,
             attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
             flagged: r.flagged,
@@ -664,6 +677,8 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             sender_addr: r.sender_addr,
             reply_to_addr: r.reply_to_addr,
             wire_size: r.wire_size,
+            projected_size: r.projected_size,
+            projection_version: r.projection_version,
             has_html: r.body_html && String(r.body_html).trim() ? 1 : 0,
             attachment_count: atts.filter((a) => a.message_id === r.message_id).length,
             flagged: r.flagged,

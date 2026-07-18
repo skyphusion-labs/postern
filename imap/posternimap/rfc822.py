@@ -1,28 +1,33 @@
 """Render a Postern stored Message as an RFC822 byte string for IMAP FETCH.
 
-Pure stdlib (email.message), so it is unit-testable without Twisted. Postern
-stores cleaned plain-text bodies; we project them back into a valid RFC822 message:
-the stored headers we have (From/To/Subject/Date/Message-ID, plus In-Reply-To when
-threaded) and the text body. When attachment bytes are supplied (fetched from the
-Postern API during IMAP hydration), they are inlined as MIME parts in a
-multipart/mixed projection so MUAs can download them normally.
+Canonical projection (#342): deterministic MIME boundaries derived from
+message-id + part path, and a hand-rolled serializer shared (by contract) with
+inbound/src/rfc822Project.ts. SIZE and BODY[] are the same byte length when
+attachment payloads are replaced by same-size placeholders, so the Worker can
+cache projected_size from D1 metadata with no R2 reads.
 """
 
 from __future__ import annotations
 
-import email
+import base64
+import hashlib
 import re
+from datetime import datetime, timezone
 from html import escape as _html_escape
 from typing import Optional, Sequence
-from email.message import EmailMessage
-from email.utils import format_datetime, parsedate_to_datetime
+from email.header import Header
+from email.utils import format_datetime, formataddr, parseaddr, parsedate_to_datetime
 
 from .client import Message, MessageSummary
+
+PROJECTION_VERSION = 1
 
 # Collapses RFC 5322 header folding (a CRLF/LF followed by leading whitespace) back
 # to a single space, so a value handed to the IMAP ENVELOPE serializer is one line:
 # a raw newline inside an ENVELOPE quoted-string would desync the IMAP response.
 _WIRE_FOLD_RE = re.compile(r"\r?\n[ \t]+")
+
+_NL = "\n"
 
 
 def _fmt_date(iso: str) -> str:
@@ -31,21 +36,17 @@ def _fmt_date(iso: str) -> str:
     try:
         return format_datetime(parsedate_to_datetime(iso))
     except (TypeError, ValueError):
-        # Stored dates are ISO-8601; email.utils wants RFC2822. If parsing the
-        # stored value fails, fall back to the raw string rather than dropping it.
         try:
-            from datetime import datetime
-
-            return format_datetime(datetime.fromisoformat(iso.replace("Z", "+00:00")))
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return format_datetime(dt)
         except ValueError:
             return iso
 
 
 def _angle(value: str) -> str:
-    """Wrap a message identifier in RFC 5322 angle brackets exactly once. The
-    store strips <> from messageId but keeps In-Reply-To verbatim (WITH its
-    brackets), so unconditional wrapping emitted "<<...>>" on the wire and broke
-    client-side threading (#179 transcript). Idempotent for either form."""
+    """Wrap a message identifier in RFC 5322 angle brackets exactly once."""
     v = value.strip()
     if v.startswith("<") and v.endswith(">"):
         return v
@@ -53,24 +54,36 @@ def _angle(value: str) -> str:
 
 
 def _hdr(value: str) -> str:
-    """Strip CR/LF from a header value. EmailMessage rejects embedded newlines
-    (raising ValueError), so a malicious stored Subject/From could otherwise
-    crash the render; collapsing them to spaces keeps the projection robust and
-    injection-safe regardless of what the store holds.
-    """
+    """Strip CR/LF from a header value."""
     return value.replace("\r", " ").replace("\n", " ")
 
 
+def _encode_header_value(value: str) -> str:
+    """RFC 2047-encode a unstructured header when it is non-ASCII."""
+    v = _hdr(value)
+    try:
+        v.encode("ascii")
+        return v
+    except UnicodeEncodeError:
+        return Header(v, "utf-8").encode()
+
+
+def _encode_address_header(value: str) -> str:
+    """Encode a display-name without wrapping the addr-spec (ENVELOPE parity)."""
+    v = _hdr(value)
+    try:
+        v.encode("ascii")
+        return v
+    except UnicodeEncodeError:
+        name, addr = parseaddr(v)
+        if addr:
+            enc_name = Header(name, "utf-8").encode() if name else ""
+            return formataddr((enc_name, addr)) if enc_name else addr
+        return Header(v, "utf-8").encode()
+
+
 def _to_wire(value: str) -> str:
-    """Make a header value safe to hand the IMAP ENVELOPE/FETCH serializer: a single
-    ASCII line. Twisted's collapseNestedLists implicitly ASCII-encodes ENVELOPE
-    fields, so a raw non-ASCII str (e.g. a U+2026 in a Subject) raises
-    UnicodeEncodeError and drops the connection mid-scan (#161). Callers pass values
-    already RFC 2047 encoded (pure ASCII encoded-words) via EmailMessage; this unfolds
-    them and is a belt-and-suspenders guarantee that the result is ASCII and one line.
-    Never raises -- a pathological value degrades to ASCII (lossy) rather than crashing
-    the FETCH and dropping the client.
-    """
+    """Make a header value safe to hand the IMAP ENVELOPE/FETCH serializer."""
     try:
         v = _WIRE_FOLD_RE.sub(" ", value).replace("\r", " ").replace("\n", " ")
         v.encode("ascii")
@@ -87,53 +100,9 @@ def _to_wire(value: str) -> str:
             return ""
 
 
-def _apply_envelope_headers(
-    em: EmailMessage,
-    *,
-    from_addr: Optional[str],
-    to_addr: Optional[str],
-    subject: str,
-    date_iso: str,
-    message_id: Optional[str],
-    in_reply_to: Optional[str],
-    cc: Optional[str] = None,
-    bcc: Optional[str] = None,
-    sender: Optional[str] = None,
-    reply_to: Optional[str] = None,
-) -> None:
-    """Set the stored envelope headers on `em`. Shared by render_rfc822 (the full
-    message) and envelope_headers (the body-free scan), so a header is encoded
-    IDENTICALLY both ways: EmailMessage's modern policy RFC 2047-encodes any
-    non-ASCII field as ASCII encoded-words on serialization (what real MUAs expect
-    on the wire), which is exactly the IMAP ENVELOPE wire form.
-
-    Cc/Bcc/Sender/Reply-To are the envelope v2 fidelity fields (CONTRACT 10.3): the
-    RAW RFC 5322 header strings as they arrived (display names and all). We set them
-    EXACTLY as we set To -- hand the raw string to EmailMessage, which folds/encodes
-    it on serialization -- and never parse or re-split the address list (a display
-    name may contain a comma). When a field is absent/None the header is simply not
-    set, so the IMAP server renders it NIL: byte-identical to the v1 render for old
-    rows, which carry NULL in these columns."""
-    if from_addr:
-        em["From"] = _hdr(from_addr)
-    if to_addr:
-        em["To"] = _hdr(to_addr)
-    if cc:
-        em["Cc"] = _hdr(cc)
-    if bcc:
-        em["Bcc"] = _hdr(bcc)
-    if sender:
-        em["Sender"] = _hdr(sender)
-    if reply_to:
-        em["Reply-To"] = _hdr(reply_to)
-    em["Subject"] = _hdr(subject or "")
-    date = _fmt_date(date_iso)
-    if date:
-        em["Date"] = date
-    if message_id:
-        em["Message-ID"] = _hdr(_angle(message_id))
-    if in_reply_to:
-        em["In-Reply-To"] = _hdr(_angle(in_reply_to))
+def _boundary_token(message_id: str, path: str) -> str:
+    digest = hashlib.sha256(f"{message_id}\0{path}".encode("utf-8")).hexdigest()
+    return f"b{digest[:32]}"
 
 
 def _split_mime(mime: Optional[str]) -> tuple[str, str]:
@@ -166,10 +135,12 @@ def _mime_from_filename(filename: Optional[str]) -> Optional[str]:
     return by_ext.get(ext)
 
 
-def _set_attachment_content_name(part, filename: str) -> None:
-    """Set Content-Type name= so BODYSTRUCTURE carries NAME for MUAs (#294)."""
-    name = filename or "attachment"
-    part.set_param("name", name, header="Content-Type", replace=True)
+def _quote_filename(name: str) -> str:
+    return _hdr(name).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _ensure_trailing_nl(text: str) -> str:
+    return text if text.endswith("\n") else text + "\n"
 
 
 def _attachment_note(msg: Message) -> str:
@@ -189,118 +160,213 @@ def _inline_attachments(msg: Message, attachment_bytes: Sequence[bytes]) -> bool
     return bool(msg.attachments) and len(attachment_bytes) == len(msg.attachments)
 
 
+def _envelope_lines(msg: Message) -> list[str]:
+    lines: list[str] = []
+    if msg.from_addr:
+        lines.append(f"From: {_encode_address_header(msg.from_addr)}")
+    if msg.to_addr:
+        lines.append(f"To: {_encode_address_header(msg.to_addr)}")
+    if msg.cc:
+        lines.append(f"Cc: {_encode_address_header(msg.cc)}")
+    if msg.bcc:
+        lines.append(f"Bcc: {_encode_address_header(msg.bcc)}")
+    if msg.sender:
+        lines.append(f"Sender: {_encode_address_header(msg.sender)}")
+    if msg.reply_to:
+        lines.append(f"Reply-To: {_encode_address_header(msg.reply_to)}")
+    lines.append(f"Subject: {_encode_header_value(msg.subject or '')}")
+    date = _fmt_date(msg.date)
+    if date:
+        lines.append(f"Date: {date}")
+    if msg.message_id:
+        lines.append(f"Message-ID: {_encode_header_value(_angle(msg.message_id))}")
+    if msg.in_reply_to:
+        lines.append(f"In-Reply-To: {_encode_header_value(_angle(msg.in_reply_to))}")
+    lines.append("MIME-Version: 1.0")
+    return lines
+
+
+def _part(headers: list[str], body: bytes) -> bytes:
+    return ("\n".join(headers) + "\n\n").encode("ascii", "replace") + body
+
+
+def _text_body(text: str) -> bytes:
+    return _ensure_trailing_nl(text).encode("utf-8")
+
+
+def _wrap_multipart(boundary: str, parts: list[bytes]) -> bytes:
+    chunks: list[bytes] = []
+    for part in parts:
+        chunks.append(f"--{boundary}\n".encode("ascii"))
+        chunks.append(part)
+        if not part.endswith(b"\n"):
+            chunks.append(b"\n")
+    chunks.append(f"--{boundary}--\n".encode("ascii"))
+    return b"".join(chunks)
+
+
+def _base64_wire(data: bytes) -> bytes:
+    b64 = base64.b64encode(data).decode("ascii")
+    if not b64:
+        return b"\n"
+    lines = [b64[i : i + 76] for i in range(0, len(b64), 76)]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def _attachment_part(filename: Optional[str], mime: Optional[str], data: bytes) -> bytes:
+    name = filename or "attachment"
+    resolved = mime or _mime_from_filename(filename) or "application/octet-stream"
+    maintype, subtype = _split_mime(resolved)
+    q = _quote_filename(name)
+    return _part(
+        [
+            f'Content-Type: {maintype}/{subtype}; name="{q}"',
+            "Content-Transfer-Encoding: base64",
+            f'Content-Disposition: attachment; filename="{q}"',
+            "MIME-Version: 1.0",
+        ],
+        _base64_wire(data),
+    )
+
+
+def _alternative_part(message_id: str, path: str, plain: str, html: str) -> bytes:
+    boundary = _boundary_token(message_id, path)
+    parts = [
+        _part(
+            [
+                'Content-Type: text/plain; charset="utf-8"',
+                "Content-Transfer-Encoding: 8bit",
+            ],
+            _text_body(plain),
+        ),
+        _part(
+            [
+                'Content-Type: text/html; charset="utf-8"',
+                "Content-Transfer-Encoding: 8bit",
+                "MIME-Version: 1.0",
+            ],
+            _text_body(html),
+        ),
+    ]
+    return _part(
+        [f'Content-Type: multipart/alternative; boundary="{boundary}"'],
+        _wrap_multipart(boundary, parts),
+    )
+
+
 def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] = None) -> bytes:
-    """Build a valid RFC822 message from a stored Message. Header values are set
-    via EmailMessage, which folds/encodes them safely (no header injection).
+    """Build a valid RFC822 message from a stored Message.
 
     When `attachment_bytes` is supplied with one entry per stored attachment, the
     render becomes multipart/mixed with real attachment parts. Without bytes (or
     when the count does not match), attachments are noted in the body text only.
     """
-    em = EmailMessage()
-    _apply_envelope_headers(
-        em,
-        from_addr=msg.from_addr,
-        to_addr=msg.to_addr,
-        subject=msg.subject or "",
-        date_iso=msg.date,
-        message_id=msg.message_id,
-        in_reply_to=msg.in_reply_to,
-        cc=msg.cc,
-        bcc=msg.bcc,
-        sender=msg.sender,
-        reply_to=msg.reply_to,
-    )
-
+    mid = msg.message_id or "unknown"
     html = (msg.body_html or "").strip()
     inline = attachment_bytes is not None and _inline_attachments(msg, attachment_bytes)
 
-    # cte="8bit" is load-bearing (#210). EmailMessage otherwise picks
-    # quoted-printable/base64 for any non-ASCII, long-line, or "="-bearing body
-    # (every HTML/marketing mail), but the IMAP door serves the DECODED payload
-    # (message.getBodyFile) under that declared encoding, so a client honours the
-    # header and decodes the raw bytes a SECOND time, corrupting them ("=ab" run,
-    # multibyte soup). 8bit is the identity encoding: the served body equals what the
-    # header declares, so the client decodes exactly once. IMAP literals are 8-bit
-    # clean (RFC 3501 counts octets), so an 8bit body is wire-safe.
-    #
-    # Line-length deviation (deliberate, noted): 8bit carries the RFC 5322/5321
-    # <=998-octet line expectation, and HTML mail routinely has multi-kilobyte lines.
-    # We do NOT re-wrap (that would corrupt HTML); IMAP BODY[] is an octet-counted
-    # literal so transport is safe, and MUAs render long 8bit lines fine. The hard
-    # invariant we DO keep: the declared CTE always matches the served bytes (identity),
-    # so the client never double-decodes -- test_render_8bit_is_identity_on_long_lines
-    # fails if EmailMessage ever silently re-picks quoted-printable for some payload.
-    if html:
-        text = msg.body_text or ""
-        if msg.attachments and not inline:
-            text = text + "\n\n" + _attachment_note(msg)
-        html_part = html
-        if msg.attachments and not inline:
+    plain = msg.body_text or ""
+    html_part = html
+    if msg.attachments and not inline:
+        plain = plain + "\n\n" + _attachment_note(msg)
+        if html:
             html_part = html + _html_attachment_note(msg)
-        # multipart/alternative: plain first, html second (RFC 2046 increasing preference).
-        em.set_content(text, cte="8bit")
-        em.add_alternative(html_part, subtype="html", cte="8bit")
-    else:
-        text = msg.body_text or ""
-        if msg.attachments and not inline:
-            text = text + "\n\n" + _attachment_note(msg)
-        em.set_content(text, cte="8bit")
 
-    if inline:
-        assert attachment_bytes is not None
-        for att, data in zip(msg.attachments, attachment_bytes):
-            mime = att.mime or _mime_from_filename(att.filename)
-            maintype, subtype = _split_mime(mime)
-            filename = att.filename or "attachment"
-            em.add_attachment(
-                data,
-                maintype=maintype,
-                subtype=subtype,
-                filename=filename,
-                disposition="attachment",
-            )
-            payload = em.get_payload()
-            if isinstance(payload, list) and payload:
-                _set_attachment_content_name(payload[-1], filename)
-    return em.as_bytes()
+    env = _envelope_lines(msg)
+    atts = msg.attachments if inline else []
+
+    if not atts and not html_part:
+        env.append('Content-Type: text/plain; charset="utf-8"')
+        env.append("Content-Transfer-Encoding: 8bit")
+        return ("\n".join(env) + "\n\n").encode("ascii", "replace") + _text_body(plain)
+
+    if not atts and html_part:
+        boundary = _boundary_token(mid, "0")
+        env.append(f'Content-Type: multipart/alternative; boundary="{boundary}"')
+        parts = [
+            _part(
+                [
+                    'Content-Type: text/plain; charset="utf-8"',
+                    "Content-Transfer-Encoding: 8bit",
+                ],
+                _text_body(plain),
+            ),
+            _part(
+                [
+                    'Content-Type: text/html; charset="utf-8"',
+                    "Content-Transfer-Encoding: 8bit",
+                    "MIME-Version: 1.0",
+                ],
+                _text_body(html_part),
+            ),
+        ]
+        return ("\n".join(env) + "\n\n").encode("ascii", "replace") + _wrap_multipart(
+            boundary, parts
+        )
+
+    assert attachment_bytes is not None
+    boundary = _boundary_token(mid, "0")
+    env.append(f'Content-Type: multipart/mixed; boundary="{boundary}"')
+    if html_part:
+        first = _alternative_part(mid, "0.0", plain, html_part)
+    else:
+        first = _part(
+            [
+                'Content-Type: text/plain; charset="utf-8"',
+                "Content-Transfer-Encoding: 8bit",
+            ],
+            _text_body(plain),
+        )
+    parts = [first]
+    for att, data in zip(msg.attachments, attachment_bytes):
+        parts.append(_attachment_part(att.filename, att.mime, data))
+    return ("\n".join(env) + "\n\n").encode("ascii", "replace") + _wrap_multipart(
+        boundary, parts
+    )
+
+
+def project_rfc822_size(msg: Message) -> int:
+    """Projected RFC822 length using same-size zero attachment placeholders (#342)."""
+    if msg.attachments:
+        placeholders = [b"\0" * max(0, int(a.size)) for a in msg.attachments]
+        return len(render_rfc822(msg, attachment_bytes=placeholders))
+    return len(render_rfc822(msg))
 
 
 def envelope_headers(summary: MessageSummary) -> dict[str, str]:
     """The IMAP ENVELOPE / scan-relevant headers for a summary, body-free.
 
-    Returns a lowercase-keyed map of the headers an IMAP client needs to render
-    a row (From/To/Cc/Sender/Reply-To/Subject/Date/Message-ID/In-Reply-To) formatted
-    IDENTICALLY to render_rfc822 above, so a header served from the list summary is
-    byte-for-byte what a hydrated FETCH would return (#102: serve ENVELOPE from the
-    list response, never a per-message body fetch). Only headers the summary actually
-    carries are included: the envelope v2 fidelity fields (Cc/Bcc/Sender/Reply-To)
-    appear when the store holds them and are simply omitted when NULL, so the IMAP
-    server renders those NIL for old rows -- byte-identical to the pre-v2 render.
-    Subject is always present (render_rfc822 always sets it), matching the rendered
-    form for an empty subject.
+    Returns a lowercase-keyed map formatted IDENTICALLY to render_rfc822 above.
     """
     try:
-        em = EmailMessage()
-        _apply_envelope_headers(
-            em,
-            from_addr=summary.from_addr,
-            to_addr=summary.to_addr,
-            subject=summary.subject or "",
-            date_iso=summary.date,
-            message_id=summary.message_id,
-            in_reply_to=summary.in_reply_to,
-            cc=summary.cc,
-            bcc=summary.bcc,
-            sender=summary.sender,
-            reply_to=summary.reply_to,
-        )
-        parsed = email.message_from_bytes(em.as_bytes())
-        return {k.lower(): _to_wire(v) for k, v in parsed.items()}
+        lines: list[str] = []
+        if summary.from_addr:
+            lines.append(f"From: {_encode_address_header(summary.from_addr)}")
+        if summary.to_addr:
+            lines.append(f"To: {_encode_address_header(summary.to_addr)}")
+        if summary.cc:
+            lines.append(f"Cc: {_encode_address_header(summary.cc)}")
+        if summary.bcc:
+            lines.append(f"Bcc: {_encode_address_header(summary.bcc)}")
+        if summary.sender:
+            lines.append(f"Sender: {_encode_address_header(summary.sender)}")
+        if summary.reply_to:
+            lines.append(f"Reply-To: {_encode_address_header(summary.reply_to)}")
+        lines.append(f"Subject: {_encode_header_value(summary.subject or '')}")
+        date = _fmt_date(summary.date)
+        if date:
+            lines.append(f"Date: {date}")
+        if summary.message_id:
+            lines.append(f"Message-ID: {_encode_header_value(_angle(summary.message_id))}")
+        if summary.in_reply_to:
+            lines.append(f"In-Reply-To: {_encode_header_value(_angle(summary.in_reply_to))}")
+        out: dict[str, str] = {}
+        for line in lines:
+            k, sep, v = line.partition(": ")
+            if k and sep:
+                out[k.lower()] = _to_wire(v)
+        return out
     except Exception:
-        # Fail-safe (#161): a pathological stored value must never raise into the
-        # ENVELOPE scan and drop the connection. Degrade to a raw, ASCII-forced map
-        # (lossy on non-ASCII, but safe) built straight from the summary.
         h: dict[str, str] = {}
         if summary.from_addr:
             h["from"] = _to_wire(_hdr(summary.from_addr))
