@@ -181,8 +181,11 @@ membership changes, so **bump `POSTERN_IMAP_UIDVALIDITY`** (RFC 3501) on the sam
 so clients discard their cached estate view and resync into the per-account view.
 
 Projection changes that alter BODY[] bytes (including the #342 deterministic MIME
-boundary renderer) also require a **UIDVALIDITY bump** on the fleet IMAP image roll so
+boundary renderer, and any `PROJECTION_VERSION` bump such as v2 Unicode header
+encoding) also require a **UIDVALIDITY bump** on the fleet IMAP image roll so
 clients drop SIZE/BODY caches that would disagree with the new projection.
+Stale `messages.projected_size` rows (older `projection_version`) are ignored by
+IMAP and fall back to a one-shot metadata hydrate.
 
 ## Run it
 

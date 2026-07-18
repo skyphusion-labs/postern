@@ -48,26 +48,65 @@ describe("projected size (#342)", () => {
 
   it("matches Python golden sizes for the shared fixture set", async () => {
     // Kept in lockstep with imap/posternimap/rfc822.py project_rfc822_size samples.
+    const base = {
+      messageId: "abc123",
+      from: "alice@example.com",
+      to: "agent@skyphusion.org",
+      date: "2026-06-18T12:00:00Z",
+    };
     expect(
       await projectRfc822Size({
-        messageId: "abc123",
-        from: "alice@example.com",
-        to: "agent@skyphusion.org",
+        ...base,
         subject: "Hello",
-        date: "2026-06-18T12:00:00Z",
         bodyText: "line one\nline two",
       }),
     ).toBe(234);
     expect(
       await projectRfc822Size({
-        messageId: "abc123",
-        from: "alice@example.com",
-        to: "agent@skyphusion.org",
+        ...base,
         subject: "Hello",
-        date: "2026-06-18T12:00:00Z",
         bodyText: "line one",
         attachments: [{ filename: "f.pdf", mime: "application/pdf", size: 100 }],
       }),
     ).toBe(697);
+    // Unicode corpus (v2): B-encoding + B-encoded filenames; no Header Q/fold.
+    expect(
+      await projectRfc822Size({ ...base, messageId: "u1", subject: "café", bodyText: "hi" }),
+    ).toBe(230);
+    expect(
+      await projectRfc822Size({
+        ...base,
+        messageId: "u2",
+        from: "José <jose@example.com>",
+        subject: "Hello",
+        bodyText: "hi",
+      }),
+    ).toBe(237);
+    expect(
+      await projectRfc822Size({
+        ...base,
+        messageId: "u3",
+        subject: "Hello",
+        bodyText: "hi",
+        attachments: [{ filename: "résumé.pdf", mime: "application/pdf", size: 10 }],
+      }),
+    ).toBe(612);
+    expect(
+      await projectRfc822Size({
+        ...base,
+        messageId: "u4",
+        subject: ("Long ".repeat(40)) + "café",
+        bodyText: "hi",
+      }),
+    ).toBe(498);
+    expect(
+      await projectRfc822Size({
+        ...base,
+        messageId: "u5",
+        subject: "Hello café world",
+        bodyText: "hi",
+      }),
+    ).toBe(246);
+    expect(PROJECTION_VERSION).toBe(2);
   });
 });

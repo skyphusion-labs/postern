@@ -3,7 +3,9 @@
 // MIME boundaries (sha256(message_id + NUL + path)) make a length from D1
 // metadata match live BODY[].
 
-export const PROJECTION_VERSION = 1;
+// v2: always RFC 2047 B-encoding (no Q/fold) + B-encoded non-ASCII filenames.
+// Must stay byte-length identical to imap/posternimap/rfc822.py.
+export const PROJECTION_VERSION = 2;
 
 export interface ProjectAttachment {
   filename: string | null;
@@ -151,7 +153,10 @@ function cat(parts: Uint8Array[]): Uint8Array {
 }
 
 function quoteFilename(name: string): string {
-  return hdr(name).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  // Keep Content-* headers ASCII: B-encode non-ASCII filenames (matches Python).
+  const v = hdr(name);
+  const encoded = isAscii(v) ? v : b64Word(v);
+  return encoded.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function base64Wire(size: number): Uint8Array {
