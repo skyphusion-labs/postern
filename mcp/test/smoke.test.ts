@@ -17,7 +17,7 @@ describe("registerTools (tool listing + scope gate)", () => {
     const { server, handlers } = fakeServer();
     const fakeClient: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
     const names = registerTools(server, fakeClient, new Set<Scope>(["read"]), READ_TOOLS);
-    expect(names.sort()).toEqual(["mailbox_get", "mailbox_list", "mailbox_search", "mailbox_thread"]);
+    expect(names.sort()).toEqual(["mailbox_get", "mailbox_get_attachment", "mailbox_list", "mailbox_search", "mailbox_thread"]);
     expect([...handlers.keys()].sort()).toEqual(names.sort());
   });
 

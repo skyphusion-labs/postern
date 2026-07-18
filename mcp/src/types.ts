@@ -40,7 +40,10 @@ export interface Page<T> {
   cursor: string | null;
 }
 
-export type SearchMode = "fts" | "semantic" | "hybrid";
+export type SearchMode = "fts" | "substr" | "semantic" | "hybrid";
+// Which column(s) the substring mode matches (worker /api/search field param,
+// api.ts:206). Only meaningful for mode "substr"; ignored by the other modes.
+export type SearchField = "subject" | "body" | "text";
 export type Direction = "inbound" | "outbound";
 
 // Result of a send/reply (POST /api/send, POST /api/reply). The worker wraps it
@@ -53,9 +56,20 @@ export interface SendResult {
   providerMessageId?: string;
 }
 
+// One outbound attachment on a send. content is standard base64 (no line wrapping)
+// over JSON, exactly the worker SendAttachment shape (mailbox.ts:19-25); filename
+// and mimeType are optional and the transport fills sane defaults. The worker caps
+// count (20) and decoded total (25 MiB) and rejects oversize with a clean 413.
+export interface SendAttachmentInput {
+  content: string;
+  filename?: string;
+  mimeType?: string;
+}
+
 // What an agent may set on mailbox_send. A deliberate, safe subset of the worker's
-// SendRequest (no raw headers, no attachments in v1.1): an agent composes a plain
-// message; the worker owns From-enforcement, DKIM, threading, and the sent-copy store.
+// SendRequest (no raw headers): an agent composes a plain message with optional
+// attachments; the worker owns From-enforcement, DKIM, threading, and the sent-copy
+// store, and validates attachments (count, base64, size).
 export interface SendInput {
   to: string | string[];
   subject: string;
@@ -66,6 +80,9 @@ export interface SendInput {
   // Optional From override; the worker rejects any From outside ALLOWED_FROM_DOMAIN.
   from?: string;
   replyTo?: string;
+  // Optional attachments (base64 over JSON). Omitted -> the send is byte-for-byte
+  // the no-attachment request, unchanged.
+  attachments?: SendAttachmentInput[];
 }
 
 // What an agent may set on mailbox_reply. The worker pulls the referenced stored

@@ -10,6 +10,7 @@ import type {
   MessageSummary,
   Page,
   ReplyInput,
+  SearchField,
   SearchHit,
   SearchMode,
   SendInput,
@@ -48,17 +49,21 @@ export class PosternClient {
   async search(args: {
     q: string;
     mode?: SearchMode;
+    field?: SearchField;
     limit?: number;
     cursor?: string;
     direction?: Direction;
   }): Promise<Page<SearchHit>> {
     const params: Record<string, string> = { q: args.q };
     if (args.mode) params.mode = args.mode;
+    // field selects which column(s) the "substr" mode matches (worker api.ts:206);
+    // the worker validates it strictly and ignores it for the non-substr modes.
+    if (args.field) params.field = args.field;
     if (args.limit !== undefined) params.limit = String(args.limit);
     if (args.cursor) params.cursor = args.cursor;
-    // Forwarded for direction-scoped search (#116 ws2). The store supports it; if
-    // the API has not yet wired it on /api/search the param is simply ignored,
-    // so this is forward-compatible, never an error.
+    // direction is wired on /api/search (worker #128, api.ts:197): the worker
+    // validates it strictly (inbound|outbound) and 400s a typo, so we forward it
+    // as-is and let the worker be the authority.
     if (args.direction) params.direction = args.direction;
     const body = await this.requestGet("/api/search", params);
     return { items: (body.items as SearchHit[]) ?? [], cursor: body.cursor ?? null };
@@ -93,6 +98,72 @@ export class PosternClient {
       if (err instanceof PosternError && err.status === 404) return null;
       throw err;
     }
+  }
+
+  // Fetch one attachment's raw bytes as base64. GET /api/messages/{id}/attachments/{i}
+  // returns the bytes (not JSON), so this bypasses the JSON request() path. Returns
+  // null on 404 (no such message/index). maxBytes caps the transfer: if the response
+  // declares a Content-Length over the cap we refuse BEFORE reading the body (no huge
+  // download just to reject it), and re-check the decoded length as defense in depth.
+  async getAttachmentBytes(
+    messageId: string,
+    index: number,
+    maxBytes: number,
+  ): Promise<{ base64: string; contentType: string; size: number } | null> {
+    const path = `/api/messages/${encodeURIComponent(messageId)}/attachments/${index}`;
+    const url = this.base + path;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    let resp: Response;
+    try {
+      resp = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: "*/*",
+          "User-Agent": this.userAgent,
+        },
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new PosternError(`request to ${path} failed: ${reason}`);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (resp.status === 404) return null;
+    if (resp.status === 401) {
+      throw new PosternError("Postern API rejected the token (check the token; the required scope must be granted)", 401);
+    }
+    if (resp.status === 403) {
+      const detail = await safeErrorMessage(resp);
+      throw new PosternError(
+        `Postern API returned 403${detail ? `: ${detail}` : " (Cloudflare WAF or token scope; ensure the custom User-Agent is sent and the token carries the required scope)"}`,
+        403,
+      );
+    }
+    if (!resp.ok) {
+      throw new PosternError(`Postern API error (HTTP ${resp.status}) on ${path}`, resp.status);
+    }
+    const declared = Number(resp.headers.get("content-length") ?? "");
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new PosternError(
+        `attachment is ${declared} bytes, over the ${maxBytes}-byte limit; raise POSTERN_MCP_MAX_ATTACHMENT_BYTES to fetch it`,
+        413,
+      );
+    }
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    if (buf.byteLength > maxBytes) {
+      throw new PosternError(
+        `attachment is ${buf.byteLength} bytes, over the ${maxBytes}-byte limit; raise POSTERN_MCP_MAX_ATTACHMENT_BYTES to fetch it`,
+        413,
+      );
+    }
+    return {
+      base64: Buffer.from(buf).toString("base64"),
+      contentType: resp.headers.get("content-type") || "application/octet-stream",
+      size: buf.byteLength,
+    };
   }
 
   async thread(threadId: string): Promise<Message[]> {

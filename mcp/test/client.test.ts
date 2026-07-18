@@ -100,3 +100,72 @@ describe("errors", () => {
     await expect(client().list({})).rejects.toMatchObject({ status: 503 });
   });
 });
+
+// A fetch double for the raw attachment-bytes path (arrayBuffer + headers.get),
+// distinct from the JSON mockFetch above.
+function mockAttachmentFetch(status: number, bytes: Uint8Array, headers: Record<string, string>) {
+  const calls: { url: string; init: any }[] = [];
+  const fn = vi.fn(async (url: string, init: any) => {
+    calls.push({ url, init });
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (k: string) => headers[k.toLowerCase()] ?? null },
+      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      text: async () => "",
+    } as unknown as Response;
+  });
+  vi.stubGlobal("fetch", fn);
+  return calls;
+}
+
+describe("getAttachmentBytes", () => {
+  it("GETs the attachment path and returns base64 + content-type + size", async () => {
+    const bytes = new Uint8Array([65, 66, 67]); // "ABC"
+    const calls = mockAttachmentFetch(200, bytes, { "content-type": "text/plain", "content-length": "3" });
+    const res = await client().getAttachmentBytes("m1", 0, 1024);
+    expect(calls[0].url).toBe("https://api.example/api/messages/m1/attachments/0");
+    expect(calls[0].init.method).toBe("GET");
+    expect(calls[0].init.headers["User-Agent"]).toBe(USER_AGENT);
+    expect(res).toEqual({ base64: "QUJD", contentType: "text/plain", size: 3 });
+  });
+
+  it("returns null on 404 (no such message/index)", async () => {
+    mockAttachmentFetch(404, new Uint8Array(), {});
+    const res = await client().getAttachmentBytes("m1", 9, 1024);
+    expect(res).toBeNull();
+  });
+
+  it("refuses (413) when the declared Content-Length exceeds the cap, before reading the body", async () => {
+    let readBody = false;
+    const fn = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (k: string) => (k.toLowerCase() === "content-length" ? "999999" : "application/pdf") },
+      arrayBuffer: async () => {
+        readBody = true;
+        return new ArrayBuffer(0);
+      },
+      text: async () => "",
+    })) as any;
+    vi.stubGlobal("fetch", fn);
+    await expect(client().getAttachmentBytes("m1", 0, 10)).rejects.toMatchObject({ status: 413 });
+    expect(readBody).toBe(false);
+  });
+
+  it("refuses (413) when the decoded body exceeds the cap even without Content-Length", async () => {
+    const bytes = new Uint8Array(20);
+    mockAttachmentFetch(200, bytes, { "content-type": "application/octet-stream" });
+    await expect(client().getAttachmentBytes("m1", 0, 10)).rejects.toMatchObject({ status: 413 });
+  });
+});
+
+describe("search field forwarding (substr)", () => {
+  it("forwards mode=substr and field on /api/search", async () => {
+    const calls = mockFetch(200, { ok: true, items: [], cursor: null });
+    await client().search({ q: "x", mode: "substr", field: "body" });
+    const u = new URL(calls[0].url);
+    expect(u.searchParams.get("mode")).toBe("substr");
+    expect(u.searchParams.get("field")).toBe("body");
+  });
+});
