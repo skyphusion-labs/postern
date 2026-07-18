@@ -419,6 +419,13 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             : json({ ok: false, error: "E_NOT_FOUND", message: "draft not found" }, 404);
         }
         if (request.method === "PUT") {
+          // IDOR boundary (#355): a bound identity must not create-or-overwrite a
+          // draft id owned by someone else. Mirror the IMAP PUT check (403) so
+          // both doors share the same ownership gate; putDraft also refuses.
+          const owner = await store.getDraftOwner(env, id);
+          if (owner !== null && owner !== identity.toLowerCase()) {
+            return json({ ok: false, error: "E_FORBIDDEN", message: "draft belongs to another identity" }, 403);
+          }
           const body = await readJson<Record<string, unknown>>(request);
           const result = await store.putDraft(
             env,
@@ -710,6 +717,12 @@ async function handleImapDrafts(request: Request, url: URL, path: string, env: E
     const body = await readJson<Record<string, unknown>>(request);
     const identity = requireImapIdentity(body.identity, env);
     const id = typeof body.id === "string" && body.id.trim() ? body.id.trim() : crypto.randomUUID();
+    // Client-chosen ids (IMAP APPEND) must not collide with another identity's
+    // draft (#355 IDOR). putDraft also refuses; this returns a clean 403.
+    const owner = await store.getDraftOwner(env, id);
+    if (owner !== null && owner !== identity.toLowerCase()) {
+      return json({ ok: false, error: "E_FORBIDDEN", message: "draft belongs to another identity" }, 403);
+    }
     const result = await store.putDraft(env, id, identity, draftInput(body));
     return json({ ok: true, id, draft: result.draft }, 201);
   }

@@ -126,9 +126,26 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # Webmail v2 phase 6 (#355): Playwright critical journeys (mocked /api).
+  webmail-e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webmail/e2e
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webmail/e2e/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+
   ci:
     name: ci
-    needs: [inbound, relay, imap, clients-python, mcp]
+    needs: [inbound, relay, imap, clients-python, mcp, webmail-e2e]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -139,3 +156,4 @@ jobs:
           test "${{ needs.imap.result }}" = "success"
           test "${{ needs.clients-python.result }}" = "success"
           test "${{ needs.mcp.result }}" = "success"
+          test "${{ needs.webmail-e2e.result }}" = "success"

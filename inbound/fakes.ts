@@ -304,6 +304,11 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         if (/INSERT INTO drafts/i.test(sql)) {
           const [id, identity, to_addr, cc_addr, bcc_addr, subject, body_text, body_html,
             in_reply_to, thread_id, compose_mode, source_message_id, uid, created_at, updated_at] = bound;
+          // Mirror D1 PRIMARY KEY (id): reject duplicate inserts so IDOR tests
+          // cannot pass only because the fake silently dual-owns a draft id.
+          if (drafts.some((d) => d.id === String(id))) {
+            throw new Error("UNIQUE constraint failed: drafts.id");
+          }
           drafts.push({
             id: String(id), identity: String(identity), to_addr: to_addr as string | null,
             cc_addr: cc_addr as string | null, bcc_addr: bcc_addr as string | null,
