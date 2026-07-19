@@ -20,10 +20,24 @@ NCII bright line is the one stated exception.
 
 ## Why the pointer sits here
 
-Postern is the cleanest case in the whole inventory: **we operate nothing and we hold nothing.**
-Postern is free software you deploy into your own Cloudflare account on your own domain, and your
-mail lives entirely on infrastructure you control. Your instance never talks to us, so there is
-nothing for us to collect, disclose, or be compelled to hand over.
+**Postern is self-host only, permanently, and we are never going to host it for you.** Conrad has
+said so in as many words. It is not a gap waiting to be filled by a managed tier later, and it is
+worth stating as a settled fact rather than a current state, because "we do not offer that yet"
+invites someone to close the gap.
+
+So the cleanest case in the whole inventory: **we operate nothing and we hold nothing.** Postern is
+free software you deploy into your own Cloudflare account on your own domain, and your mail lives
+entirely on infrastructure you control. Your instance never talks to us, so there is nothing for us
+to collect, disclose, or be compelled to hand over.
+
+**That last clause is the point, and it is stronger than a promise.** There is no hosted Postern,
+therefore there is no Postern user data at Skyphusion Labs, therefore there is nothing for us to
+disclose about it, and nothing anyone could compel us to produce. Not "we choose not to look at your
+mail": we are **structurally not in the path.**
+
+The self-host default is an active preference, not a limitation we are apologising for. We would
+rather you ran it yourself. That is a DIY ethos before it is a privacy argument, and the privacy
+argument follows from it: software you run is software nobody else can quietly change the terms on.
 
 [`PRIVACY.md`](PRIVACY.md) is the detailed policy and remains canonical for this product. The
 commitment is the standard that policy is written against.
