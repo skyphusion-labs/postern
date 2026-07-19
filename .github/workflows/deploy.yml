@@ -4,8 +4,10 @@ name: deploy
 # `skyphusion-email` job): on a pushed version tag (v*), deploy the inbound
 # Cloudflare Worker to production via `wrangler deploy`. A bare merge to main
 # NEVER redeploys prod; cut a SemVer tag to ship
-# (git tag -a vX.Y.Z && git push origin vX.Y.Z). workflow_dispatch is kept for a
-# deliberate manual redeploy.
+# (git tag -a vX.Y.Z && git push origin vX.Y.Z). workflow_dispatch may run the
+# gate (typecheck/test) but the deploy step is guarded with
+# `if: startsWith(github.ref, 'refs/tags/v')` so a manual dispatch from a
+# non-tag ref never ships production (same pattern as common-thread).
 #
 # PRs are gated by ci.yml (inbound/relay/imap checks). This workflow owns the
 # release deploy, and re-runs the inbound typecheck/test inline so the deploy is
@@ -97,6 +99,7 @@ jobs:
       # so only recognizably additive migrations auto-apply (#112; see the header
       # comment and .github/scripts/d1-migration-gate.mjs).
       - name: Deploy inbound (migrate + deploy)
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: inbound
         env:
           POSTERN_INBOUND_WRANGLER: ${{ secrets.POSTERN_INBOUND_WRANGLER }}
