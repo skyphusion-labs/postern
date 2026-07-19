@@ -1,13 +1,15 @@
 name: deploy
 
 # Deploy step ported from the decommissioned Jenkins pipeline (the old
-# `skyphusion-email` job): on a green push to main, deploy the inbound
-# Cloudflare Worker to production via `wrangler deploy`.
+# `skyphusion-email` job): on a pushed version tag (v*), deploy the inbound
+# Cloudflare Worker to production via `wrangler deploy`. A bare merge to main
+# NEVER redeploys prod; cut a SemVer tag to ship
+# (git tag -a vX.Y.Z && git push origin vX.Y.Z). workflow_dispatch is kept for a
+# deliberate manual redeploy.
 #
 # PRs are gated by ci.yml (inbound/relay/imap checks). This workflow owns the
-# main deploy, and re-runs the inbound typecheck/test inline so the deploy is
-# gated behind green on the exact code being shipped (faithful to the Jenkins
-# "deploy only on green main"). Branch/PR pushes never deploy.
+# release deploy, and re-runs the inbound typecheck/test inline so the deploy is
+# gated behind green on the exact code being shipped. Branch/PR pushes never deploy.
 #
 # Worker deployed (name per inbound/wrangler.jsonc):
 #   inbound/  -> postern        (CF Email Routing ingestion + store/read/send API;
@@ -54,13 +56,14 @@ name: deploy
 
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: deploy-postern-main
+  group: deploy-postern-tag
   cancel-in-progress: false
 
 jobs:
