@@ -5,6 +5,10 @@
 
 **Last updated:** 2026-07-10
 
+> The product-wide commitment this policy is written against is
+> [`PRIVACY-COMMITMENT.md`](PRIVACY-COMMITMENT.md), a pointer to the canonical copy at the
+> constellation hub.
+
 ---
 
 ## BLUF (bottom line up front)
