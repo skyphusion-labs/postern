@@ -7,7 +7,7 @@ name: imap-image
 # deploy; the Swarm stack pins it by the immutable git short-SHA tag this
 # workflow produces, so `docker service update --image ...:<sha>` is exact.
 #
-# After a green push, dispatches fleet-chezmoi `postern-door-roll` to pin the image on
+# After a green publish (version tag or manual dispatch), dispatches fleet-chezmoi `postern-door-roll` to pin the image on
 # the door host and redeploy `postern-imap` (requires org secret FLEET_DISPATCH_TOKEN).
 #
 # Triggers:
@@ -56,6 +56,16 @@ jobs:
         working-directory: imap
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Assert built commit is on main (no publish/roll of an unmerged commit)
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish/roll an unreviewed image"
+            exit 1
+          fi
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -70,8 +80,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Assert built commit is on main (no publish/roll of an unmerged commit)
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish/roll an unreviewed image"
+            exit 1
+          fi
 
       - name: Log in to GHCR
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -98,7 +119,7 @@ jobs:
         with:
           context: ./imap
           file: ./imap/Dockerfile
-          push: true
+          push: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # The runtime target is x86_64; a single linux/amd64 image keeps the GHCR
@@ -109,10 +130,21 @@ jobs:
 
   dispatch-roll:
     needs: build
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Assert built commit is on main (no publish/roll of an unmerged commit)
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish/roll an unreviewed image"
+            exit 1
+          fi
       - name: Dispatch postern-imap roll to fleet-chezmoi
         env:
           FLEET_DISPATCH_TOKEN: ${{ secrets.FLEET_DISPATCH_TOKEN }}
