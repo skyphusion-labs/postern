@@ -1,3 +1,7 @@
+## v1.0.3
+
+Release sync bump (2026-07-21). No functional changes in this tag.
+
 # Changelog
 
 Notable changes per release. SemVer-style: **v1.0.0** is the first production-ready
