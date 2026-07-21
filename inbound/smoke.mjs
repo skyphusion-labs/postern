@@ -62,6 +62,10 @@ function fail(msg, detail) {
 }
 function assert(cond, msg, detail) { cond ? ok(msg) : fail(msg, detail); }
 
+function emailsEqual(a, b) {
+  return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+}
+
 async function api(method, path, { body, auth = true, scope = "read" } = {}) {
   const headers = { "content-type": "application/json" };
   if (auth) {
@@ -102,6 +106,7 @@ async function main() {
 
   // --- 2. send + sent copy in the store ---
   console.log("\n2. POST /api/send -> sent copy in the store");
+  assert(cfg.to, "POSTERN_TO is required (distinct from POSTERN_FROM for the reply leg)", { from: cfg.from, to: cfg.to });
   let sentId;
   let threadId;
   {
@@ -109,7 +114,7 @@ async function main() {
     const send = await api("POST", "/api/send", {
       scope: "send",
       body: {
-        to: cfg.to || cfg.from, // self-send if no separate mailbox given; still proves the store path
+        to: cfg.to,
         from: cfg.from,
         subject,
         text: "Postern clean-deploy smoke: outbound + store leg.",
@@ -136,7 +141,9 @@ async function main() {
 
   // --- 3. reply threads + sent copy stored ---
   console.log("\n3. POST /api/reply -> shared thread, reply copy stored");
-  {
+  if (emailsEqual(cfg.to, cfg.from)) {
+    ok("SKIP POST /api/reply: POSTERN_TO must differ from POSTERN_FROM (outbound self-address has no reply recipient)");
+  } else {
     const reply = await api("POST", "/api/reply", {
       scope: "send",
       body: { messageId: sentId, text: "Reply leg of the smoke.", html: "<p>Reply leg of the smoke.</p>" },
