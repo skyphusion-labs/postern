@@ -1,3 +1,14 @@
+## v1.0.4
+
+Security dependency overrides for Dependabot advisories (#394, #395).
+
+- **mcp:** npm overrides pin transitive deps through `@modelcontextprotocol/sdk`:
+  `fast-uri@3.1.4` (GHSA-4c8g-83qw-93j6 and backslash-host GHSA), `@hono/node-server@2.0.11`
+  (GHSA-frvp-7c67-39w9). Postern MCP uses stdio transport only; overrides clear the advisory
+  surface without waiting on upstream SDK pins (#394, #395).
+- **inbound:** npm override `sharp@0.35.3` for the wrangler/miniflare dev dependency chain (#395).
+- **python:** `postern-client` version synced to 1.0.4 for PyPI publish on release tag.
+
 ## v1.0.3
 
 Release sync bump (2026-07-21). No functional changes in this tag.
