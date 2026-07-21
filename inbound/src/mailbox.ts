@@ -422,12 +422,14 @@ export async function reply(
     throw new MailboxError("E_NOT_FOUND", `no stored message with id ${req.messageId}`, 404);
   }
 
-  // Route to the stored Reply-To when the original set one (RFC 5322 fidelity,
-  // #189): list / role mail that sets Reply-To must not have replies mis-sent to
-  // its From. Resolved from STORED state, never caller input. Extract the bare
-  // address from the (possibly display-name-bearing, possibly multi-value) header.
+  // Route replies from stored state, never caller input. Inbound: Reply-To or From
+  // (RFC 5322 fidelity, #189). Outbound sent copy: the original To, since From is
+  // us and excluding the sender would leave no recipient (smoke-staging #25).
   const from = resolveFrom(env, req.from, identity);
-  const primary = firstAddress(original.replyTo ?? original.from);
+  const primary =
+    original.direction === "outbound"
+      ? firstAddress(original.to)
+      : firstAddress(original.replyTo ?? original.from);
   const to = dedupeRecipients([primary], [from.email]);
   const derived = req.mode === "replyAll"
     ? [...addresses(original.to), ...addresses(original.cc)]

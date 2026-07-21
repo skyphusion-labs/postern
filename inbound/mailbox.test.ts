@@ -154,6 +154,23 @@ describe("mailbox.reply (close the loop)", () => {
     expect(refs).toContain("<third@example.com>");
   });
 
+  it("replies to an outbound sent copy by routing to the original To", async () => {
+    const { env, ctx, settle, sent } = makeFakeEnv();
+    const sentRes = await send(env, {
+      to: "dev@example.com",
+      subject: "status",
+      text: "deploy ok",
+    }, ctx);
+    await settle();
+
+    const res = await reply(env, { messageId: sentRes.messageId, text: "follow-up" }, ctx);
+    await settle();
+
+    expect(sent[1].to).toEqual(["dev@example.com"]);
+    expect(sent[1].subject).toBe("Re: status");
+    expect(res.threadId).toBe(sentRes.threadId);
+  });
+
   it("derives reply-all recipients, excluding and deduping the sending identity", async () => {
     const { env, ctx, settle, sent } = makeFakeEnv();
     await ingest(env, {
