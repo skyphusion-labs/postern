@@ -3,11 +3,15 @@
 Notable changes per release. SemVer-style: **v1.0.0** is the first production-ready
 Core v1.0 mailbox (M1 contract). Newest first.
 
-## v1.0.2 -- 2026-07-17
+## v1.0.2
 
-- IMAP: accept Apple Mail's mid-compose `APPEND Drafts` autosave as a no-op so
-  composing does not raise a Drafts error. Drafts remains client-local; Postern
-  still stores no server-side draft.
+Reply routing fixes for outbound sent mail and staging smoke.
+
+- **inbound:** replying to a stored outbound send targets the original `To`
+  recipients instead of `From` (the sender), fixing `reply has no recipient
+  after excluding sender` on sent-mail replies (#386).
+- **smoke-staging:** skip the reply leg with an explicit ok when
+  `POSTERN_TO` equals `POSTERN_FROM` (self-addressed staging send) (#387).
 
 ## v1.0.1 -- 2026-07-16
 
