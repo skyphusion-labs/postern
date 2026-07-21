@@ -33,8 +33,8 @@ and the env vars above. Full tool list, send opt-in, and per-identity send:
 and importable `PosternClient`. Details: [clients/python/README.md](../clients/python/README.md).
 
 Release mechanics: push tag `postern-mcp-v*` for npm (`.github/workflows/npm-mcp.yml`);
-publish a GitHub Release whose tag matches `clients/python/pyproject.toml` for PyPI
-(`.github/workflows/publish-pypi.yml`).
+push tag `v*` with `clients/python/pyproject.toml` synced to the same version for PyPI
+(`.github/workflows/publish-pypi.yml`, same tag as deploy and GitHub Release).
 
 ## Same-account Worker (service binding)
 
