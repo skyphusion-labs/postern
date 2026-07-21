@@ -36,7 +36,7 @@ jobs:
         working-directory: relay
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           # Track the relay go.mod toolchain so CI never drifts from the code.
           go-version-file: relay/go.mod
@@ -63,7 +63,7 @@ jobs:
         working-directory: imap
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # Twisted is the only runtime dep; mypy is the type gate (mirrors the
@@ -92,7 +92,7 @@ jobs:
         working-directory: clients/python
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # Zero runtime deps (pure stdlib urllib); install the package + dev extras so

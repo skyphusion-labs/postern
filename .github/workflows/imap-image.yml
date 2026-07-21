@@ -66,7 +66,7 @@ jobs:
             echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish/roll an unreviewed image"
             exit 1
           fi
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # Install the package with the SAME extras the runtime image ships
