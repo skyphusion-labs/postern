@@ -7,11 +7,19 @@ name: deploy
 # (git tag -a vX.Y.Z && git push origin vX.Y.Z). workflow_dispatch may run the
 # gate (typecheck/test) but the deploy step is guarded with
 # `if: startsWith(github.ref, 'refs/tags/v')` so a manual dispatch from a
-# non-tag ref never ships production (same pattern as common-thread).
+# non-tag ref never ships production (same pattern as common-thread). A dispatch
+# run says so loudly, in the log and in the job summary, because a green
+# "deploy" run that deployed nothing is otherwise indistinguishable in the run
+# list from one that shipped (#418 item 4).
 #
 # PRs are gated by ci.yml (inbound/relay/imap checks). This workflow owns the
 # release deploy, and re-runs the inbound typecheck/test inline so the deploy is
 # gated behind green on the exact code being shipped. Branch/PR pushes never deploy.
+#
+# ORDERING (#418): the `preflight` job runs the shared tag gate first, and the
+# deploy job lists it in `needs:`, so a tag whose pins, CHANGELOG section, or
+# main-ancestry are wrong stops HERE instead of shipping production while the
+# release + publish workflows fail downstream (what v1.0.5 did).
 #
 # Worker deployed (name per inbound/wrangler.jsonc):
 #   inbound/  -> postern        (CF Email Routing ingestion + store/read/send API;
@@ -38,6 +46,12 @@ name: deploy
 #                             absent. Worker runtime secrets (e.g.
 #                             POSTERN_API_TOKEN) are set once via `wrangler secret
 #                             put` and persist across deploys -- not set here.
+#
+# Optional live-probe secrets (same names smoke-staging.yml uses, so an operator
+# who already runs the nightly smoke gets this for free):
+#   POSTERN_SMOKE_BASE_URL / POSTERN_SMOKE_API_TOKEN / POSTERN_SMOKE_SEND_TOKEN /
+#   POSTERN_SMOKE_FROM / POSTERN_SMOKE_TO -- when all the required ones are set,
+#   the tag deploy also proves the release by BEHAVIOR against the live instance.
 #
 # D1 migrations: the inbound deploy runs `wrangler d1 migrations apply` before
 # `wrangler deploy`, so a schema change ships with its code instead of drifting.
@@ -69,8 +83,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The shared tag gate (#418 item 1): version pins in lockstep with the tag, a
+  # non-empty CHANGELOG section, and the tag on origin/main. Every tag workflow
+  # runs this same job, so the fan-out is all-or-nothing.
+  preflight:
+    uses: ./.github/workflows/tag-preflight.yml
+    with:
+      track: release
+
   deploy:
     name: Deploy workers to Cloudflare
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -80,15 +103,27 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Assert tag is on main (no prod deploy from an unmerged branch)
-        if: startsWith(github.ref, 'refs/tags/v')
+
+      # A dispatch run is a GATE run. The deploy step below is tag-guarded and
+      # correct, but the run it produces looks exactly like a shipping one in the
+      # Actions list, so say it plainly in the log and the summary (#418 item 4).
+      # GITHUB_REF_NAME comes from the environment, never interpolated into the
+      # shell line, so a hostile ref name cannot become shell input.
+      - name: Gate-only run (NOTHING is deployed)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::tag $GITHUB_REF_NAME points at $GITHUB_SHA which is not on origin/main; refusing to deploy an unreviewed commit"
-            exit 1
-          fi
+          set -eo pipefail
+          echo "::notice title=Gate only::Ran the gate on ${GITHUB_REF_NAME}. NOTHING was deployed: production ships only from a pushed v* tag."
+          {
+            echo "### Gate only -- NOTHING was deployed"
+            echo ""
+            echo "This run typechecked and tested \`${GITHUB_REF_NAME}\` and stopped there."
+            echo "Production ships only from a pushed SemVer tag:"
+            echo ""
+            echo '```'
+            echo "git tag -a vX.Y.Z -m ... && git push origin vX.Y.Z"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-node@v7
         with:
@@ -110,11 +145,15 @@ jobs:
       # so only recognizably additive migrations auto-apply (#112; see the header
       # comment and .github/scripts/d1-migration-gate.mjs).
       - name: Deploy inbound (migrate + deploy)
+        id: deploy
         if: startsWith(github.ref, 'refs/tags/v')
         working-directory: inbound
         env:
           POSTERN_INBOUND_WRANGLER: ${{ secrets.POSTERN_INBOUND_WRANGLER }}
         run: |
+          # The default step shell is `bash -e {0}`, which does NOT set pipefail:
+          # without this, the `| tee` below would swallow a failing deploy.
+          set -eo pipefail
           if [ -n "$POSTERN_INBOUND_WRANGLER" ]; then
             printf "%s" "$POSTERN_INBOUND_WRANGLER" > wrangler.ci.json
             CFG=wrangler.ci.json
@@ -131,7 +170,61 @@ jobs:
           echo "Applying D1 migrations (only un-applied ones run)"
           npx wrangler d1 migrations apply DB --remote -c "$CFG"
           echo "Deploying inbound worker"
-          npx wrangler deploy -c "$CFG"
+          npx wrangler deploy -c "$CFG" | tee deploy.out
+          # Hand the uploaded version id to the read-back step below. wrangler
+          # prints "Current Version ID: <uuid>" on a successful deploy; strip any
+          # ANSI first so a colorized line still parses. No id means no way to
+          # verify the artifact, which is a FAILED release, not a green one.
+          version_id="$(sed 's/\x1b\[[0-9;]*m//g' deploy.out \
+            | grep -Eo 'Current Version ID:[[:space:]]*[0-9a-fA-F-]{36}' \
+            | grep -Eo '[0-9a-fA-F-]{36}' | tail -1 || true)"
+          if [ -z "$version_id" ]; then
+            echo "::error::wrangler deploy printed no version id; the deployed artifact cannot be verified"
+            exit 1
+          fi
+          echo "Uploaded version ${version_id}"
+          echo "version_id=${version_id}" >> "$GITHUB_OUTPUT"
+
+      # VERIFY THE ARTIFACT, NOT THE PIPELINE (#418 item 5). A green deploy step
+      # is the pipeline's opinion of itself; this reads the live deployment back
+      # out of the Cloudflare API and asserts production is serving the exact
+      # version this run uploaded. It reuses the config materialized above (the
+      # step below removes it, always).
+      - name: Verify the deployed artifact (API read-back)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: inbound
+        env:
+          EXPECTED_VERSION_ID: ${{ steps.deploy.outputs.version_id }}
+        run: |
+          set -eo pipefail
+          if [ -f wrangler.ci.json ]; then
+            CFG=wrangler.ci.json
+          else
+            CFG=wrangler.jsonc
+          fi
+          npx wrangler deployments status --json -c "$CFG" > deployment.json
+          node ../.github/scripts/verify-worker-deployment.mjs deployment.json "$EXPECTED_VERSION_ID"
+
+      # Second, INDEPENDENT probe: behavior, not metadata. Runs only when the
+      # operator has the smoke secrets configured (the same ones smoke-staging.yml
+      # uses), and says so when it does not, so a skipped probe never reads as a
+      # passed one. Outbound + store checks only; no MX poll on the release path.
+      - name: Probe the live instance (inbound/smoke.mjs)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: inbound
+        env:
+          POSTERN_BASE_URL: ${{ secrets.POSTERN_SMOKE_BASE_URL }}
+          POSTERN_API_TOKEN: ${{ secrets.POSTERN_SMOKE_API_TOKEN }}
+          POSTERN_SEND_TOKEN: ${{ secrets.POSTERN_SMOKE_SEND_TOKEN }}
+          POSTERN_FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
+          POSTERN_TO: ${{ secrets.POSTERN_SMOKE_TO }}
+        run: |
+          set -eo pipefail
+          if [ -z "$POSTERN_BASE_URL" ] || [ -z "$POSTERN_API_TOKEN" ] || [ -z "$POSTERN_FROM" ] || [ -z "$POSTERN_TO" ]; then
+            echo "::notice title=Live probe skipped::Smoke secrets are not configured; this release is verified by API read-back only."
+            exit 0
+          fi
+          node smoke.mjs
 
       # Always remove the CI-materialized operator config, even when the deploy
       # step above failed partway: GitHub runs run: blocks under bash -e, so a
@@ -142,4 +235,4 @@ jobs:
       - name: Clean up materialized config
         if: always()
         working-directory: inbound
-        run: rm -f wrangler.ci.json migrations.pending.txt
+        run: rm -f wrangler.ci.json migrations.pending.txt deploy.out deployment.json

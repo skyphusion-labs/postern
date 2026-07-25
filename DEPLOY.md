@@ -53,6 +53,24 @@ applies `wrangler d1 migrations apply DB --remote` before the inbound deploy, so
 a schema change ships with its code. Wrangler tracks which migration files have
 already run in a `d1_migrations` table and applies only the pending ones.
 
+**What the tag gate checks first.** Every tag-triggered workflow (deploy, the
+GitHub Release, the PyPI publish, both door images) starts with one shared
+preflight, `.github/scripts/tag-preflight.sh`, and refuses the whole set if the
+tag is not shippable. Before you push `vX.Y.Z`, make sure that commit is on your
+default branch and carries the same version in all three pins
+(`clients/python/pyproject.toml`, `clients/python/postern_client/__init__.py`,
+`inbound/package.json`) plus a non-empty `## vX.Y.Z` section in `CHANGELOG.md`.
+This is deliberate: it exists because a tag once deployed production while the
+release and publish jobs failed on missing pins. If you run your own fork on your
+own version numbers, bump those four and add your CHANGELOG section in the same
+commit you tag.
+
+After the deploy, the workflow verifies the ARTIFACT rather than trusting a green
+run: it reads the live deployment back out of the API and asserts the Worker is
+serving the version that run just uploaded. Set the optional `POSTERN_SMOKE_*`
+secrets (same ones `smoke-staging.yml` uses) and it also runs
+`inbound/smoke.mjs` against your live instance on each release.
+
 **Fresh install via `schema.sql` (above):** the schema is already current, but
 `d1_migrations` is still empty. The first CI deploy will try to re-apply
 `0001_attachments_fts_dmarc.sql` and later files against an already-built store
