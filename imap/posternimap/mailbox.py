@@ -127,6 +127,7 @@ class PosternMailbox:
         client: PosternClient,
         *,
         direction: Optional[str] = None,
+        lens: Optional[str] = None,
         to: Optional[str] = None,
         from_addr: Optional[str] = None,
         viewer: Optional[str] = None,
@@ -163,6 +164,10 @@ class PosternMailbox:
         self._draft_revisions: set = draft_revisions if draft_revisions is not None else set()
         self._meter = meter or Meter(False)
         self._direction = direction
+        # #403: the viewer-relative view name (inbox|sent) when this folder IS a
+        # lens, e.g. the per-account INBOX. `direction` then stays None: the two are
+        # mutually exclusive at the API, and a lens is not a direction.
+        self._lens = lens
         self._to = to
         # #357/#366: sender filter for the per-account Sent lens (from=V, outbound).
         # None in estate mode. SEARCH passes from=V to /api/search (#366); the snapshot
@@ -247,6 +252,7 @@ class PosternMailbox:
         while True:
             page = self._client.list_messages(
                 direction=self._direction,
+                lens=self._lens,
                 to=self._to,
                 from_addr=self._from,
                 mailbox=self._mailbox_filter,
@@ -272,6 +278,7 @@ class PosternMailbox:
         while True:
             page = self._client.list_messages(
                 direction=self._direction,
+                lens=self._lens,
                 to=self._to,
                 from_addr=self._from,
                 mailbox=self._mailbox_filter,
@@ -468,6 +475,7 @@ class PosternMailbox:
                 mode="substr",
                 field=field,
                 direction=self._direction,
+                lens=self._lens,
                 to=self._to,
                 from_addr=self._from,
                 mailbox=self._mailbox_filter,

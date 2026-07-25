@@ -32,6 +32,11 @@ function fail(err: unknown): TextResult {
 }
 
 const DIRECTION = z.enum(["inbound", "outbound"]);
+// A viewer-relative VIEW, as opposed to the stored wire fact `direction` filters
+// (worker #403). inbox = mail delivered to the viewer that the viewer did not write
+// (so a same-domain send from a colleague is in it); sent = mail the viewer wrote.
+// Needs `to` as the viewer address, and cannot be combined with `direction`.
+const LENS = z.enum(["inbox", "sent"]);
 const MODE = z.enum(["fts", "substr", "semantic", "hybrid"]);
 // Which column(s) the "substr" mode matches (worker /api/search field param);
 // ignored by the other modes.
@@ -78,21 +83,26 @@ export const READ_TOOLS: ToolDef[] = [
     description:
       "Search the mailbox (subject + body) and return matching messages newest-first. " +
       "mode defaults to 'hybrid' (semantic + keyword). Optionally filter by direction " +
-      "('inbound' = received, 'outbound' = what we sent). This is the primary tool for " +
-      "finding mail by topic.",
+      "('inbound' = received, 'outbound' = what we sent) -- direction is the stored " +
+      "fact, so an inbound filter never returns a sent copy. For one address's own " +
+      "view pass to=<address> plus lens=inbox|sent. mode 'fts' is exact keyword " +
+      "matching: every word must appear, so no match means no result (use it to prove " +
+      "a message is NOT there). This is the primary tool for finding mail by topic.",
     inputSchema: {
       query: z.string().min(1).describe("the search text"),
       mode: MODE.optional().describe("search mode; defaults to hybrid. substr is a literal substring match (use with field)"),
       field: FIELD.optional().describe("for mode substr only: which column to match (subject/body/text); ignored by other modes"),
       limit: z.number().int().positive().max(200).optional().describe("max results (default server-side ~50)"),
-      direction: DIRECTION.optional().describe("filter to received (inbound) or sent (outbound) mail"),
+      direction: DIRECTION.optional().describe("filter on the STORED direction: received (inbound) or sent (outbound)"),
+      to: z.string().optional().describe("viewer address: scope the search to one address's mail"),
+      lens: LENS.optional().describe("viewer view (needs to=): inbox = delivered to them and not written by them; sent = written by them. Not combinable with direction"),
       cursor: z.string().optional().describe("opaque pagination cursor from a previous page"),
     },
     handler: async (client, a) => {
       const mode: SearchMode = a.mode ?? "hybrid";
       const field: SearchField | undefined = a.field;
-      const page = await client.search({ q: a.query, mode, field, limit: a.limit, cursor: a.cursor, direction: a.direction });
-      return { query: a.query, mode, field: field ?? null, direction: a.direction ?? null, count: page.items.length, cursor: page.cursor, results: page.items };
+      const page = await client.search({ q: a.query, mode, field, limit: a.limit, cursor: a.cursor, direction: a.direction, to: a.to, lens: a.lens });
+      return { query: a.query, mode, field: field ?? null, direction: a.direction ?? null, to: a.to ?? null, lens: a.lens ?? null, count: page.items.length, cursor: page.cursor, results: page.items };
     },
   },
   {
@@ -100,18 +110,23 @@ export const READ_TOOLS: ToolDef[] = [
     scope: "read",
     description:
       "List messages with optional filters (to, from, direction, thread) newest-first, " +
-      "paginated via cursor. Use mailbox_search for topic search; use this to browse or " +
-      "filter by participant/folder.",
+      "paginated via cursor. `direction` is the STORED fact, so to=<addr> with " +
+      "direction=inbound answers 'what actually ARRIVED for this address' and never " +
+      "returns our own sent copy; to=<addr> alone returns everything delivered to it, " +
+      "and to=<addr> with lens=inbox is that address's INBOX view (arrivals plus " +
+      "same-domain mail others sent it). Use mailbox_search for topic search; use this " +
+      "to browse or filter by participant/folder.",
     inputSchema: {
       to: z.string().optional().describe("filter by recipient address"),
       from: z.string().optional().describe("filter by sender address"),
-      direction: DIRECTION.optional().describe("inbound (received) or outbound (sent)"),
+      direction: DIRECTION.optional().describe("filter on the STORED direction: inbound (received) or outbound (sent)"),
+      lens: LENS.optional().describe("viewer view (needs to=): inbox = delivered to them and not written by them; sent = written by them. Not combinable with direction"),
       thread: z.string().optional().describe("filter to a thread id"),
       limit: z.number().int().positive().max(200).optional().describe("max results (default ~50)"),
       cursor: z.string().optional().describe("opaque pagination cursor"),
     },
     handler: async (client, a) => {
-      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, thread: a.thread, limit: a.limit, cursor: a.cursor });
+      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, thread: a.thread, limit: a.limit, cursor: a.cursor });
       return { count: page.items.length, cursor: page.cursor, messages: page.items };
     },
   },

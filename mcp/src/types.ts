@@ -45,6 +45,10 @@ export type SearchMode = "fts" | "substr" | "semantic" | "hybrid";
 // api.ts:206). Only meaningful for mode "substr"; ignored by the other modes.
 export type SearchField = "subject" | "body" | "text";
 export type Direction = "inbound" | "outbound";
+// Named viewer-relative view (worker #403 / CONTRACT 10.9). `direction` filters the
+// stored wire fact; `lens` asks for a VIEW of one viewer's mail. Mutually exclusive,
+// and a lens needs a viewer (to=) -- the worker refuses both violations.
+export type ViewLens = "inbox" | "sent";
 
 // Result of a send/reply (POST /api/send, POST /api/reply). The worker wraps it
 // as `{ ok: true, ...SendResult }`; the client unwraps to this. threadId is the

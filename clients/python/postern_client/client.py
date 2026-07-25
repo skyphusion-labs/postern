@@ -167,11 +167,18 @@ class PosternClient:
         from_addr: Optional[str] = None,
         thread: Optional[str] = None,
         direction: Optional[str] = None,
+        lens: Optional[str] = None,
         q: Optional[str] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> dict[str, Any]:
-        """GET /api/messages. Returns {items: [summary...], cursor: str|None}."""
+        """GET /api/messages. Returns {items: [summary...], cursor: str|None}.
+
+        `direction` filters the STORED wire fact (inbound|outbound), so
+        to=X + direction=inbound is what actually ARRIVED for X and never the
+        stored sent copy. `lens` (inbox|sent) asks for X's own VIEW instead; it
+        needs `to` and cannot be combined with `direction` (CONTRACT 10.9).
+        """
         params: dict[str, str] = {}
         if to:
             params["to"] = to
@@ -181,6 +188,8 @@ class PosternClient:
             params["thread"] = thread
         if direction:
             params["direction"] = direction
+        if lens:
+            params["lens"] = lens
         if q:
             params["q"] = q
         if limit is not None:

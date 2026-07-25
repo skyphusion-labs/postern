@@ -27,8 +27,8 @@ flowchart LR
 
 | Tool | What it does | Wraps |
 |---|---|---|
-| `mailbox_search` | Search subject + body, newest-first. `mode` defaults to `hybrid` (semantic + keyword); other modes: `fts`, `semantic`, `substr` (literal substring; pair with `field` = `subject`/`body`/`text`). Optional `direction` (`inbound`/`outbound`), `limit`, `cursor`. **The primary tool.** | `GET /api/search` |
-| `mailbox_list` | Browse/filter by `to` / `from` / `direction` / `thread`, paginated via `cursor`. | `GET /api/messages` |
+| `mailbox_search` | Search subject + body, newest-first. `mode` defaults to `hybrid` (semantic + keyword); other modes: `fts`, `semantic`, `substr` (literal substring; pair with `field` = `subject`/`body`/`text`). Optional `direction` (`inbound`/`outbound`, the stored fact), `to` + `lens` (`inbox`/`sent`, one address's view), `limit`, `cursor`. `mode=fts` requires every word of the query, so an empty result really means not-here. **The primary tool.** | `GET /api/search` |
+| `mailbox_list` | Browse/filter by `to` / `from` / `direction` / `thread`, paginated via `cursor`. `direction` is the stored fact (`to=X&direction=inbound` = what ARRIVED for X, never our sent copy); `to=X&lens=inbox\|sent` is X's own view. `lens` needs `to` and is not combinable with `direction`. | `GET /api/messages` |
 | `mailbox_get` | Fetch one full message (headers + body text + attachment metadata) by `message_id`. | `GET /api/messages/{id}` |
 | `mailbox_get_attachment` | Fetch one attachment as base64 **bytes** by `message_id` + zero-based `index` (the index into the `mailbox_get` attachment metadata). Returns `filename`, `mimeType`, `size`, `content` (base64). Oversize attachments are **refused with a clear error, never truncated** (cap: `POSTERN_MCP_MAX_ATTACHMENT_BYTES`, default 5 MiB). | `GET /api/messages/{id}/attachments/{i}` |
 | `mailbox_thread` | Fetch every message in a thread by `thread_id`. | `GET /api/threads/{id}` |

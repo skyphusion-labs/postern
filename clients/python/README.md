@@ -74,6 +74,12 @@ postern reply <message-id> --text "thanks, got it"
 postern list --direction inbound --limit 20
 postern list --from alice@example.com --cursor "<cursor-from-previous-page>"
 
+# "did anything ARRIVE for this address": --direction is the stored fact, so the
+# stored copy of a message we SENT to it never answers yes
+postern list --to abuse@example.com --direction inbound
+# that address's own INBOX view instead (arrivals + same-domain mail others sent it)
+postern list --to abuse@example.com --lens inbox
+
 # read one message / a whole thread
 postern get <message-id>
 postern thread <thread-id>
