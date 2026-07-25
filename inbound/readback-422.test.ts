@@ -24,6 +24,7 @@ import { handleApi } from "./src/api";
 import * as store from "./src/store";
 import { hashSecret } from "./src/smtpcreds";
 import { mintNativeSession, SESSION_COOKIE, CSRF_COOKIE } from "./src/session";
+import { resetRoleCache } from "./src/roles";
 import { realEnv, putInbound, putOutbound } from "./realdb";
 
 const ME = "me@skyphusion.org";
@@ -255,6 +256,51 @@ describe("#422 search: the same swallow, the same fix, in every mode", () => {
         await handleApi(sessionGet(`/api/search?q=alpha&mode=semantic&to=${OTHER}`, cookie), env, ctx),
       ),
     ).toEqual([]);
+  });
+});
+
+describe("#422 composes with the #425 role branch, in that order", () => {
+  // The agreed contract: a session to=R where R is a role the session belongs to is
+  // rewritten upstream into the ROLE boundary (to=R, lens=inbox, seenFor=session,
+  // account viewer DROPPED), so it reaches recipientWhere and never touches the
+  // account-boundary filter added here. Every other to= falls through to this fix.
+  // Asserted from the outside, through handleApi, because the ordering is the point.
+  const ROLE = "abuse@skyphusion.org";
+
+  it("a role read answers with the QUEUE, not the empty page the account filter would give", async () => {
+    const { env, ctx, raw } = realEnv({
+      WEBMAIL_AUTH_BACKEND: "native",
+      POSTERN_VIEWER_ROLES: `${ROLE}=${ME}`,
+    });
+    resetRoleCache();
+    await seedEstate(env, ctx);
+    await putInbound(env, ctx, { id: "queue@x", from: "reporter@example.com", to: ROLE, subject: "abuse" });
+    const cookie = await sessionCookie(env, raw, ME);
+
+    // Role branch wins: the queue mail comes back even though it is delivered to
+    // NEITHER side of my account boundary.
+    expect(await ids(await handleApi(sessionGet(`/api/messages?to=${ROLE}`, cookie), env, ctx)))
+      .toEqual(["queue@x"]);
+  });
+
+  it("the SAME address for a NON-member falls through to this fix (empty, not the queue)", async () => {
+    const { env, ctx, raw } = realEnv({
+      WEBMAIL_AUTH_BACKEND: "native",
+      POSTERN_VIEWER_ROLES: `${ROLE}=${OTHER}`, // configured, but I am not a member
+    });
+    resetRoleCache();
+    await seedEstate(env, ctx);
+    await putInbound(env, ctx, { id: "queue@x", from: "reporter@example.com", to: ROLE, subject: "abuse" });
+    const cookie = await sessionCookie(env, raw, ME);
+
+    const seen = await ids(await handleApi(sessionGet(`/api/messages?to=${ROLE}`, cookie), env, ctx));
+    expect(seen).toEqual([]);
+    expect(seen).not.toContain("queue@x");
+    // Control on the same env: the member DOES get the queue, so the empty answer
+    // above is the membership check plus this filter, not a broken role map.
+    const memberCookie = await sessionCookie(env, raw, OTHER);
+    expect(await ids(await handleApi(sessionGet(`/api/messages?to=${ROLE}`, memberCookie), env, ctx)))
+      .toEqual(["queue@x"]);
   });
 });
 
