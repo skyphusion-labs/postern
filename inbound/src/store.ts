@@ -809,15 +809,29 @@ export async function getAttachment(
  * "mark (un)read", or any API client. Idempotent -- setting a row to its current state
  * is a no-op (SQLite reports 0 changes). Unknown ids are silently skipped (they simply
  * match no row). An empty id list is a no-op that never touches D1.
+ *
+ * `viewer` (#410) restricts every write to messages that viewer can actually SEE --
+ * the same delivered-to / from-addr predicate setFlags and moveMessages apply, and the
+ * same one messageAccessible uses for the single-message routes. It is passed for
+ * SESSION-authed callers only; a Bearer caller (the IMAP door) omits it and keeps the
+ * pre-#410 estate behavior byte for byte. An id the viewer cannot see is skipped, not
+ * refused, exactly as an unknown id is.
  */
 export async function setSeen(
   env: Env,
   messageIds: string[],
   seen: boolean,
   forRecipient?: string,
+  viewer?: string,
 ): Promise<number> {
   if (messageIds.length === 0) return 0;
   const placeholders = messageIds.map(() => "?").join(", ");
+  // The viewer-accessibility predicate, identical to setFlags/moveMessages and to
+  // messageAccessible: the message was delivered to the viewer, or the viewer sent it.
+  const access = viewer
+    ? " AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
+    : "";
+  const accessBinds = viewer ? [viewer.toLowerCase(), viewer.toLowerCase()] : [];
 
   // Scoped (#350): mark read/unread for ONE recipient -- upsert a sparse override
   // in message_seen_by, never touching messages.seen (the estate/legacy flag).
@@ -826,9 +840,9 @@ export async function setSeen(
   if (forRecipient) {
     const recipient = forRecipient.trim().toLowerCase();
     const existing = await env.DB.prepare(
-      `SELECT message_id FROM messages WHERE message_id IN (${placeholders})`,
+      `SELECT message_id FROM messages WHERE message_id IN (${placeholders})${access}`,
     )
-      .bind(...messageIds)
+      .bind(...messageIds, ...accessBinds)
       .all<{ message_id: string }>();
     const ids = (existing.results ?? []).map((r) => r.message_id);
     for (const id of ids) {
@@ -850,16 +864,25 @@ export async function setSeen(
   // per matched message row (trigger rows never appear), so results.length is the
   // true count of existing ids updated.
   const res = await env.DB.prepare(
-    `UPDATE messages SET seen = ? WHERE message_id IN (${placeholders}) RETURNING message_id`,
+    `UPDATE messages SET seen = ? WHERE message_id IN (${placeholders})${access} RETURNING message_id`,
   )
-    .bind(seen ? 1 : 0, ...messageIds)
+    .bind(seen ? 1 : 0, ...messageIds, ...accessBinds)
     .all<{ message_id: string }>();
-  await env.DB.prepare(
-    `UPDATE message_seen_by SET seen = ? WHERE message_id IN (${placeholders})`,
-  )
-    .bind(seen ? 1 : 0, ...messageIds)
-    .run();
-  return (res.results ?? []).length;
+  const touched = (res.results ?? []).map((r) => r.message_id);
+  // Realign the per-recipient overrides. WITHOUT a viewer this stays byte-identical
+  // to before #410 (every requested id, unknown ones matching nothing); WITH a viewer
+  // only the rows the viewer was actually allowed to touch are realigned, so the gate
+  // cannot be sidestepped through the override table.
+  const realignIds = viewer ? touched : messageIds;
+  if (realignIds.length > 0) {
+    const realign = realignIds.map(() => "?").join(", ");
+    await env.DB.prepare(
+      `UPDATE message_seen_by SET seen = ? WHERE message_id IN (${realign})`,
+    )
+      .bind(seen ? 1 : 0, ...realignIds)
+      .run();
+  }
+  return touched.length;
 }
 
 /** Persist \Flagged / \Answered beside the existing durable \Seen flag. */

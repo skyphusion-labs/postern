@@ -177,7 +177,31 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         }
         forRecipient = body.for.trim().toLowerCase();
       }
-      const updated = await store.setSeen(env, body.ids as string[], body.seen, forRecipient);
+      // Viewer binding under SESSION auth (#410). This route was the one of its
+      // family of three that trusted `for` verbatim: its siblings (flags, move) and
+      // the single-message GET/DELETE/attachment routes all bind the session viewer.
+      // Under a session the viewer is the BOUND identity, never a caller-supplied
+      // address, so a webmail user can neither write another account read-state
+      // override (`for: someone-else@`) nor flip ROW-LEVEL messages.seen estate-wide
+      // by omitting `for`. A mismatched explicit `for` is refused rather than
+      // silently rewritten, so a confused client learns it is confused.
+      //
+      // BEARER-TOKEN CALLERS ARE UNTOUCHED, deliberately: the IMAP door passes `for`
+      // with a token and is legitimately estate-scoped (#350/#357). Nothing in this
+      // block runs unless resolution.viaSession.
+      let viewer: string | undefined;
+      if (resolution.viaSession && resolution.identity) {
+        const bound = resolution.identity.from.trim().toLowerCase();
+        if (forRecipient && forRecipient !== bound) {
+          return json(
+            { ok: false, error: "E_FORBIDDEN", message: "for must match the session identity" },
+            403,
+          );
+        }
+        forRecipient = bound;
+        viewer = bound;
+      }
+      const updated = await store.setSeen(env, body.ids as string[], body.seen, forRecipient, viewer);
       return json({ ok: true, updated });
     }
 

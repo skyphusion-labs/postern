@@ -150,8 +150,8 @@ This mirrors the server-side per-function token split (#85): the worker resolves
 `/api/reply` but `403` on `/api/search` and `/api/admin/*`. So even if a send token
 leaked, its blast radius is bounded to sending; it cannot read or administer.
 
-The boot-level gate is proven by `npm run smoke` and documented end to end in
-[`PROOF-per-identity-send.md`](PROOF-per-identity-send.md).
+The boot-level gate is proven by `npm run smoke` (`scripts/stdio-smoke.mjs`) and
+unit-covered in `test/send-tools.test.ts`.
 
 ## Per-identity send
 
@@ -210,8 +210,12 @@ npm run build && npm run smoke   # boots the built server over stdio and asserts
 env exposes exactly the five read tools, and adding `POSTERN_SEND_TOKEN` adds
 `mailbox_send` + `mailbox_reply`. Live request scope-gating (a read token gets `403` on
 send, a send token `403` on read) and the per-identity From-binding are enforced by the
-worker (#85, #138); the end-to-end proof is in
-[`PROOF-per-identity-send.md`](PROOF-per-identity-send.md).
+worker (#85, #138); the authoritative contract is
+[`docs/SEND-IDENTITIES.md`](../docs/SEND-IDENTITIES.md). The end-to-end
+verification (two-party, live worker: spoofed same-domain `from` overridden to
+the token's bound identity for every registered token, unknown token 401) was
+run 2026-06; the record is maintained in the operators' private infrastructure
+repository.
 
 ## License
 

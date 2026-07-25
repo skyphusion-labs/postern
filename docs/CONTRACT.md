@@ -316,7 +316,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
-| POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
+| POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean, for?: address}` (un)read; returns `{updated}` (READ-scoped, #seen). Under SESSION auth the viewer is FORCED to the bound identity and a mismatched `for` is `403 E_FORBIDDEN` (#410) | (#seen) |
 | POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
 | POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
 | GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts; durable folders also return `uidValidity` | webmail v2 (#352) |
@@ -354,9 +354,25 @@ It is **`read`-scoped**, not send/admin: marking mail read is a side effect of R
 read door commonly holds only a read token, so a read token must be able to persist its own read state.
 It backs the IMAP `\Seen` flag (`postern-imap` STOREs it) and the webmail unread view. Inbound mail is
 stored unread; outbound sent copies are stored read. IMAP hard delete uses a dedicated `delete`
-token; read-only IMAP credentials can still mark `\Seen`.
-stored unread and outbound sent copies read (`store.put`); the column DEFAULT is `read` so migration
-0007 backfills existing rows without resurfacing the whole historical mailbox as unread.
+token; read-only IMAP credentials can still mark `\Seen`. The store writes those defaults at
+insert time (`store.put`); the column DEFAULT is `read`, so migration 0007 backfilled existing
+rows without resurfacing the whole historical mailbox as unread.
+
+**Viewer binding under session auth (#410).** For a BEARER caller the route behaves
+exactly as it always has: `for` is honored verbatim (the IMAP door is legitimately
+estate-scoped, #350/#357) and omitting it flips the row-level estate flag. For a
+SESSION-authed caller (webmail) the viewer is the session identity, never a
+caller-supplied address: an explicit `for` that is not the bound identity is refused
+with `403 { "error": "E_FORBIDDEN" }`, omitting `for` writes the caller OWN
+per-recipient override instead of the row-level `messages.seen`, and every write is
+filtered by the same accessibility predicate `flags` / `move` and the single-message
+routes apply -- an id the session cannot see is skipped (it does not count toward
+`updated`), never written. This closes the gap where a session could write another
+account read-state or flip estate-wide read flags on messages it would be denied on
+read. **The webmail client also sends its own `for` in session mode** (the IMAP door
+already does the same, `posternimap/client.py`): belt and braces with the server
+binding, and correct against an older worker that lacks it. BYO-token webmail carries
+no bound identity in the page, so it sends none and keeps the estate behavior.
 
 `GET /api/mobileconfig` (#187) returns a per-user Apple configuration profile
 (`application/x-apple-aspen-config`) that sets up iOS Mail in one tap: IMAP
@@ -1038,7 +1054,10 @@ layers beside message identity, it does not fork it.
   `for`: upsert the `(id, for)` override only, never touching `messages.seen`; unknown
   ids are skipped (as legacy). Without `for` (legacy callers): UPDATE `messages.seen`
   AND realign any EXISTING override rows for those ids, so the estate lens stays
-  authoritative when used. Old callers keep working unchanged. `read`-scoped as before.
+  authoritative when used. Old callers keep working unchanged. `read`-scoped as before. Since
+  #410 a SESSION-authed caller does not choose: `for` is forced to the bound identity
+  (a mismatch is `403 E_FORBIDDEN`) and both the override write and the estate write are
+  restricted to messages that viewer can see. Bearer callers are untouched.
 - **Read:** viewer-scoped `list`/`search` (`to=V`) render effective seen via the
   COALESCE join; unscoped reads render `messages.seen`. `/api/search` gains an optional
   `to=` mirroring `/api/messages` across ALL modes: `fts` and `substr` push the
