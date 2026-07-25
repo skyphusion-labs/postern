@@ -31,9 +31,29 @@ jobs:
 
       - name: Relay coverage
         working-directory: relay
+        env:
+          # Floor (#419): coverage.yml previously only printed the total with
+          # nothing able to fail on a regression, so a PR deleting half the
+          # tests would merge green while the ruleset presents `coverage` as a
+          # real required check. Set comfortably below the current ~79 percent so
+          # normal drift does not trip it, but a real regression does.
+          RELAY_COVERAGE_FLOOR: "65"
         run: |
+          set -euo pipefail
           go test -race -coverprofile=coverage.out -covermode=atomic ./...
-          go tool cover -func=coverage.out | tail -1
+          summary="$(go tool cover -func=coverage.out | tail -1)"
+          echo "$summary"
+          pct="$(echo "$summary" | grep -oE '[0-9]+\.[0-9]+' | tail -1)"
+          if [ -z "$pct" ]; then
+            echo "::error::could not parse relay total coverage from: $summary"
+            exit 1
+          fi
+          awk -v pct="$pct" -v floor="$RELAY_COVERAGE_FLOOR" 'BEGIN {
+            if (pct + 0 < floor + 0) {
+              printf "relay coverage %.1f%% is below the %s%% floor\n", pct, floor
+              exit 1
+            }
+          }'
 
       - name: Setup Node
         uses: actions/setup-node@v7

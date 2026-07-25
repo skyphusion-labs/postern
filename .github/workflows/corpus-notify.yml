@@ -29,6 +29,9 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Repository guard (#419): without this, any fork pushing to its own main
+    # gets a guaranteed red X on the missing org secret (mirrors smoke-staging.yml).
+    if: github.repository == 'skyphusion-labs/postern'
     steps:
       - name: Dispatch corpus-sync to search-mcp
         env:
