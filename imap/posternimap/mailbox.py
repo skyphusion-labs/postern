@@ -129,6 +129,7 @@ class PosternMailbox:
         direction: Optional[str] = None,
         lens: Optional[str] = None,
         to: Optional[str] = None,
+        seen_for: Optional[str] = None,
         from_addr: Optional[str] = None,
         viewer: Optional[str] = None,
         special_use: Optional[List[str]] = None,
@@ -146,6 +147,7 @@ class PosternMailbox:
         flags_writable: bool = False,
         delete_client: Optional[PosternClient] = None,
         mailbox_filter: Optional[str] = None,
+        role_queue: bool = False,
         imap_client: Optional[PosternClient] = None,
         identity: Optional[str] = None,
         draft_revisions: Optional[set] = None,
@@ -169,6 +171,13 @@ class PosternMailbox:
         # mutually exclusive at the API, and a lens is not a direction.
         self._lens = lens
         self._to = to
+        # #404 role folders: the effective-seen KEY for reads, when it is not the
+        # membership filter. A personal lens keys seen off its own viewer address
+        # (to == V, so this stays None and the wire is unchanged); a role folder
+        # filters on the role address R but must render and persist READ STATE for
+        # the human V, so it passes seen_for=V and the worker COALESCEs the (id, V)
+        # override instead of the (id, R) one.
+        self._seen_for = seen_for
         # #357/#366: sender filter for the per-account Sent lens (from=V, outbound).
         # None in estate mode. SEARCH passes from=V to /api/search (#366); the snapshot
         # intersection below is only for window/folder membership, not from= scoping.
@@ -186,6 +195,11 @@ class PosternMailbox:
         self._delete_writable = delete_writable
         self._flags_writable = flags_writable
         self._mailbox_filter = mailbox_filter
+        # #404: this view is a shared role queue (Roles/<role>). Read plus a
+        # per-viewer \\Seen only; every other write is refused honestly. The flag
+        # lives here, not just in the account folder table, so the refusal holds
+        # even for a caller that builds a PosternMailbox directly.
+        self._role_queue = role_queue
         self._is_drafts = mailbox_filter == "drafts"
         self._summaries: List[MessageSummary] = []
         self._loaded = False
@@ -254,6 +268,7 @@ class PosternMailbox:
                 direction=self._direction,
                 lens=self._lens,
                 to=self._to,
+                seen_for=self._seen_for,
                 from_addr=self._from,
                 mailbox=self._mailbox_filter,
                 limit=self._page_size,
@@ -280,6 +295,7 @@ class PosternMailbox:
                 direction=self._direction,
                 lens=self._lens,
                 to=self._to,
+                seen_for=self._seen_for,
                 from_addr=self._from,
                 mailbox=self._mailbox_filter,
                 limit=self._page_size,
@@ -477,6 +493,7 @@ class PosternMailbox:
                 direction=self._direction,
                 lens=self._lens,
                 to=self._to,
+                seen_for=self._seen_for,
                 from_addr=self._from,
                 mailbox=self._mailbox_filter,
                 cursor=cursor,
@@ -903,6 +920,15 @@ class PosternMailbox:
         self._ensure_loaded()
         if self._empty or self._is_drafts:
             raise ReadOnlyError("move is not enabled on this mailbox")
+        if self._role_queue:
+            # #404: a COPY/MOVE out of a shared role queue would soft-place
+            # estate-wide state on behalf of every other member (the message
+            # leaves the queue for all of them). That is queue-handled workflow,
+            # deliberately not modeled yet, so refuse loudly instead of letting
+            # one member silently clear another member queue.
+            raise ReadOnlyError(
+                "this folder is a shared role queue; COPY/MOVE out of it is not supported"
+            )
         items = [(seq, msg._summary) for seq, msg in fetched]
         if not items:
             return []

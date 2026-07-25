@@ -153,6 +153,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_VIEWER_MODE` | no | `estate` | `estate` = the whole shared mailbox (historical door, byte-identical). `per_account` = scope every real folder to the login's viewer address V (see below). A **view** tier, not a credential boundary (#357) |
 | `POSTERN_IMAP_VIEWER_DOMAIN` | in `per_account` | -- | the mail domain V is built on: `V = localpart(login)@THIS`. REQUIRED when `per_account` (startup fails loud without it, never a silent fall-back to the estate view) |
 | `POSTERN_IMAP_VIEWER_MAP` | no | -- | optional `login=addr,login2=addr2` overrides for directories where the login id is NOT the mail local part (e.g. `crockenhaus=conrad@example.org`). An override wins over the rule |
+| `POSTERN_IMAP_VIEWER_ROLES` | no | -- | role-address membership, `role=member+member,role2=member` (full addresses both sides). Each role publishes as its OWN folder `Roles/<local part>` for its members (#404). `per_account` only; any malformed or ambiguous entry is a startup failure |
 
 ### Per-account view scoping (#357)
 
@@ -186,6 +187,74 @@ encoding) also require a **UIDVALIDITY bump** on the fleet IMAP image roll so
 clients drop SIZE/BODY caches that would disagree with the new projection.
 Stale `messages.projected_size` rows (older `projection_version`) are ignored by
 IMAP and fall back to a one-shot metadata hydrate.
+
+### Role queues (#404)
+
+A role address (`abuse@`, `security@`, `support@`) belongs to a FUNCTION, not a person,
+so under per-account scoping it is nobody viewer address and its mail lands in NO view:
+delivered, stored, searchable through the API, and invisible to every human. Conrad
+ruling (2026-07-25): role mail gets its OWN FOLDER per role address, never merged into
+anyone INBOX.
+
+```
+POSTERN_IMAP_VIEWER_MODE=per_account
+POSTERN_IMAP_VIEWER_DOMAIN=example.org
+POSTERN_IMAP_VIEWER_ROLES="abuse@example.org=ada@example.org+ben@example.org,security@example.org=ada@example.org"
+```
+
+Ada then sees `Roles/abuse` and `Roles/security` beside her own INBOX; Ben sees
+`Roles/abuse` only; anyone else sees neither, and a SELECT of one answers exactly as it
+would for a mailbox that does not exist. `Roles` itself is a `\Noselect` parent node,
+so a client that discovers folders with `LIST "" "%"` still finds the hierarchy.
+
+**The ownership model.** A viewer resolves to a SET of addresses: V (personal, from
+`POSTERN_IMAP_VIEWER_DOMAIN` / `POSTERN_IMAP_VIEWER_MAP`) plus every role V is a member
+of. `POSTERN_IMAP_VIEWER_MAP` stays exactly 1:1 -- one login, one personal address --
+and role membership is keyed on the resolved ADDRESS, so the two compose by
+construction: the login resolves to V first, then membership is looked up for V. A login
+repointed by the map carries its roles with it.
+
+- **INBOX stays personal**: `to=V`. Role mail is not merged into it.
+- **`Roles/<role>`**: `to=<role address>` with `lens=inbox`, the same named
+  viewer-relative view INBOX uses (CONTRACT 10.9, as amended by #403), windowed like
+  INBOX. It asks for the LENS, never `direction=inbound`: `direction` is the stored
+  wire fact, so filtering on it would drop the same-domain sends delivered to the
+  queue (a colleague escalating to `abuse@` from inside the domain is stored
+  outbound), which is the blindness class the recipient lenses exist to fix. A reply
+  sent AS the queue is its own Sent copy and stays out of the folder.
+- **Read state stays PER MEMBER**: a role read passes `seenFor=V`, and a `\Seen` STORE
+  writes `for=V`, so "Ada read it" never renders as "the queue is handled". Shared-queue
+  workflow (assignment, handled state) is deliberately NOT modeled yet.
+- **A role folder is read plus `\Seen` only.** `PERMANENTFLAGS` is `\Seen`; APPEND,
+  COPY/MOVE (in or out), EXPUNGE, `\Flagged` and `\Answered` are refused with a tagged
+  NO, never a silent OK. Those would all write estate-wide state on behalf of every
+  other member.
+
+**Fail-closed, no exceptions.** A malformed, duplicated, self-referential or
+name-colliding `POSTERN_IMAP_VIEWER_ROLES` entry is a startup ConfigError (the door does
+not start, rather than serving a half-parsed membership map, where a dropped member
+reads exactly like "that person is not on the queue"). Setting it outside `per_account`
+is also a startup error. A login with no derivable V serves nothing at all, roles
+included: membership is unanswerable without V.
+
+**Operator rules.**
+
+- **Worker dependency + deploy ORDERING.** Per-member read state needs the worker to
+  accept `seenFor` on `GET /api/messages` and `GET /api/search` (it otherwise keys
+  effective seen off `to`, i.e. the ROLE, and a member `\Seen` would not stick). The
+  worker ignores unknown query params, so an out-of-order deploy degrades SILENTLY to
+  queue-level read state: ship and verify the worker FIRST, then the door, then flip
+  membership on.
+- **UIDVALIDITY.** Introducing role folders needs NO bump: the names are new, so no
+  cached UID map can be invalidated, and existing folders are untouched. Repointing an
+  existing role folder name at a different address (or renaming a local part) IS a
+  bump-class change: bump `POSTERN_IMAP_UIDVALIDITY` on a stop-first roll.
+- **`FILE_ALSO_UNDER` overlap.** That ingest map (CONTRACT 10.2b) adds an owner to the
+  DELIVERED SET, so on a deployment running both, role mail appears in the owner INBOX
+  as well as the role folder. Once a role has a folder, drop it from `FILE_ALSO_UNDER`.
+- **Webmail** scopes to the bound session identity and does not yet know about role
+  membership; parity is tracked separately.
+
 
 ## Run it
 

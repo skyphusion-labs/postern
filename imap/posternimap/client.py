@@ -494,6 +494,7 @@ class PosternClient:
         self,
         *,
         to: Optional[str] = None,
+        seen_for: Optional[str] = None,
         from_addr: Optional[str] = None,
         thread: Optional[str] = None,
         direction: Optional[str] = None,
@@ -506,6 +507,14 @@ class PosternClient:
         params: dict[str, str] = {}
         if to:
             params["to"] = to
+        # #404: decouple the effective-seen KEY from the membership filter. The
+        # worker keys effective seen off `to` by default (CONTRACT 10.9), which is
+        # right for a personal lens (to == the viewer) and wrong for a shared role
+        # queue, where membership is the role address R but read state belongs to the
+        # human V. Sent ONLY when it differs from `to`, so every pre-#404 call is
+        # byte-identical on the wire.
+        if seen_for and seen_for != to:
+            params["seenFor"] = seen_for
         if from_addr:
             params["from"] = from_addr
         if thread:
@@ -573,6 +582,7 @@ class PosternClient:
         direction: Optional[str] = None,
         lens: Optional[str] = None,
         to: Optional[str] = None,
+        seen_for: Optional[str] = None,
         from_addr: Optional[str] = None,
         mailbox: Optional[str] = None,
         cursor: Optional[str] = None,
@@ -604,6 +614,11 @@ class PosternClient:
         # searches pass to=None and are unchanged.
         if to:
             params["to"] = to
+        # #404: effective-seen key, decoupled from the membership filter for role
+        # folders (to=R, seenFor=V). Omitted when it equals `to`, so a personal or
+        # estate search is byte-identical to before.
+        if seen_for and seen_for != to:
+            params["seenFor"] = seen_for
         # #366: Sent lens pushes from=V server-side (same semantics as /api/messages).
         if from_addr:
             params["from"] = from_addr
