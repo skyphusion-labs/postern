@@ -177,6 +177,21 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           } as Row);
           return { meta: { changes: 1 } };
         }
+        // The delivered_to APPEND for every address after the envelope recipient
+        // (role-address filing). Mirrors the production statement including its
+        // delimiter-safe idempotence guard. A fake that silently ignored this
+        // statement would let an order-dependent bug pass green, which is exactly
+        // how the first version of that feature shipped.
+        if (/UPDATE messages\s+SET delivered_to = COALESCE/i.test(sql)) {
+          const extra = String(bound[0]);
+          const id = String(bound[1]);
+          const row = rows.find((r) => r.message_id === id);
+          if (!row) return { meta: { changes: 0 } };
+          const cur = row.delivered_to ?? `,${row.to_addr},`;
+          if (cur.toLowerCase().includes(`,${extra.toLowerCase()},`)) return { meta: { changes: 0 } };
+          row.delivered_to = `${cur}${extra},`;
+          return { meta: { changes: 1 } };
+        }
         if (/INSERT INTO attachments/i.test(sql)) {
           const [message_id, filename, mime, size, r2_key, created_at] = bound as [string, string | null, string | null, number, string, string];
           atts.push({ id: attSeq++, message_id, filename, mime, size, r2_key, created_at });

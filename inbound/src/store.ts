@@ -297,10 +297,18 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
   // `to` when a caller omits deliveredTo, so the column is never null.
   const deliveredList = normalizeDelivered(input.deliveredTo, input.to);
   const deliveredSet = `,${deliveredList.join(",")},`;
-  // The single recipient the merge appends on a dedup hit. Inbound delivers one
-  // envelope recipient per invocation, so this is that address; outbound writes
-  // its full set complete at insert and never conflicts (we mint unique ids).
+  // The recipient the ATOMIC merge appends on a dedup hit: the envelope address this
+  // invocation delivered to, which is why it must stay first in deliveredList.
+  //
+  // It is no longer the ONLY address inbound can carry. Role-address filing
+  // (FILE_ALSO_UNDER) hands ingest [recipient, ...owners], and the upsert below appends
+  // exactly one. On a FRESH insert that is harmless (the whole set is written at once),
+  // but on a MERGE -- a second delivery of the same Message-ID, i.e. mail addressed to a
+  // role address AND something else, where the other recipient happened to land first --
+  // the owners would be silently dropped and the role mail would go back to being
+  // invisible. `extraRcpts` closes that, right below the upsert.
   const mergeRcpt = deliveredList[0];
+  const extraRcpts = deliveredList.slice(1);
 
   // ONE atomic upsert, safe under CF's concurrent per-recipient invocations of the
   // SAME Message-ID (#178). On conflict we MERGE the new recipient into the row's
@@ -381,6 +389,27 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
       deliveredSet,
     )
     .all<{ thread_id: string | null; is_fresh: number }>();
+
+  // EVERY OTHER address this delivery is for, appended idempotently. The NOT LIKE guard
+  // makes each statement a no-op when the address is already on the row, so this is safe
+  // on the fresh-insert path (where the full set was just written), on the merge path
+  // (where the upsert appended only the envelope recipient), and on a retry.
+  //
+  // Deliberately separate statements rather than a cleverer single upsert: the atomic
+  // insert-or-merge above is the concurrency-critical one (#178, concurrent per-recipient
+  // invocations of the SAME Message-ID) and it stays exactly as it was. These run only
+  // when a delivery actually carries extra addresses, which today means only mail to a
+  // configured role address.
+  for (const extra of extraRcpts) {
+    await env.DB.prepare(
+      `UPDATE messages
+          SET delivered_to = COALESCE(delivered_to, ',' || to_addr || ',') || ? || ','
+        WHERE message_id = ?
+          AND COALESCE(delivered_to, ',' || to_addr || ',') NOT LIKE '%,' || ? || ',%'`,
+    )
+      .bind(extra, input.messageId, extra)
+      .run();
+  }
 
   const returned = (res.results ?? [])[0];
   if (!returned) {

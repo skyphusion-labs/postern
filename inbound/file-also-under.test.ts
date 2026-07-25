@@ -99,6 +99,39 @@ describe("FILE_ALSO_UNDER, through the real ingest path", () => {
     expect(deliveredOf(rows)[0]).toBe("abuse@example.com");
   });
 
+  // ORDER INDEPENDENCE (found after the first version shipped, by asking what happens when the
+  // deliveries arrive the other way round). CF invokes the worker once per envelope recipient and
+  // we do not control the order. The first version only worked when the ROLE address happened to
+  // be delivered first: a same-Message-ID merge appends the envelope recipient alone, so a report
+  // sent to abuse@ AND anything else could land with abuse@ and no owner -- the role mail
+  // invisible again, which is the whole defect, surviving in a narrower form.
+  it("files under the owner even when the mapped address is delivered SECOND", async () => {
+    const { env, ctx, settle, rows } = makeFakeEnv({ FILE_ALSO_UNDER: MAP });
+    const id = "order@example.com";
+    await ingest(env, msg("ops@example.com", { messageId: id }), ctx);
+    await ingest(env, msg("abuse@example.com", { messageId: id }), ctx);
+    await settle();
+
+    expect(rows).toHaveLength(1);
+    const delivered = deliveredOf(rows);
+    expect(delivered).toContain("ops@example.com");
+    expect(delivered).toContain("abuse@example.com");
+    expect(delivered, "the owner must not depend on delivery order").toContain("owner@example.com");
+  });
+
+  it("is IDEMPOTENT: redelivering the same message adds nothing twice", async () => {
+    const { env, ctx, settle, rows } = makeFakeEnv({ FILE_ALSO_UNDER: MAP });
+    const id = "dupe@example.com";
+    await ingest(env, msg("abuse@example.com", { messageId: id }), ctx);
+    await ingest(env, msg("abuse@example.com", { messageId: id }), ctx);
+    await ingest(env, msg("abuse@example.com", { messageId: id }), ctx);
+    await settle();
+
+    const delivered = deliveredOf(rows);
+    expect(delivered.filter((a) => a === "owner@example.com")).toHaveLength(1);
+    expect(delivered.filter((a) => a === "abuse@example.com")).toHaveLength(1);
+  });
+
   it("does not disturb a second, unmapped recipient of the SAME message", async () => {
     const { env, ctx, settle, rows } = makeFakeEnv({ FILE_ALSO_UNDER: MAP });
     const id = "shared@example.com";
