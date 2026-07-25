@@ -150,22 +150,39 @@ cursor (a `Page` cursor encodes `(date, id)`); it is always present and `> 0`.
 ```ts
 interface ListQuery {
   to?: string; from?: string; thread?: string;
-  direction?: "inbound" | "outbound";
+  direction?: "inbound" | "outbound";  // the STORED wire fact, filtered exactly
+  lens?: "inbox" | "sent";             // named viewer-relative view (needs a viewer)
   q?: string;                         // FTS over subject + body
   limit?: number;                     // default 50, max 200
   cursor?: string;                    // opaque; encodes (date, id) of the last row
 }
-interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; limit?: number; cursor?: string }
+interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; limit?: number; cursor?: string }
 interface Page<T> { items: T[]; cursor: string | null }   // cursor=null means no more
 interface SearchHit { message: StoredMessageSummary; score?: number; snippet?: string }
 ```
 
 The `cursor` is opaque: keyset pagination on `(date DESC, id DESC)` (the encoded last tuple),
 stable under concurrent inserts; `cursor: null` means no more rows. Read endpoints fetch
-`limit + 1` rows to decide whether a next cursor exists. The `q` / search text is **sanitized**
-into a phrase expression before it reaches FTS5 `MATCH` (word tokens, each quoted, OR-joined),
+`limit + 1` rows to decide whether a next cursor exists.
+
+**`direction` vs `lens` (#403).** `direction` filters the STORED wire fact and nothing else:
+a row returned under `direction=inbound` always reports `direction: "inbound"`, viewer-scoped
+or not, so "did anything ARRIVE for this address" is answerable and our own sent copy can never
+answer it. A viewer-relative VIEW is named by `lens` instead (10.9): `inbox` = delivered to the
+viewer and not written by the viewer, `sent` = written by the viewer. `lens` requires a viewer
+(`to=`, or a bound session) and cannot be combined with `direction` -- both filter the same axis,
+so the pair is `E_VALIDATION_ERROR` rather than a silent winner, and a viewerless `lens` is
+refused rather than degraded to the estate view. Before #403 the INBOX lens was implicit in
+`direction=inbound` whenever a viewer was present, which made the explicit filter unexpressible.
+
+The `q` / search text is **sanitized**
+into a phrase expression before it reaches FTS5 `MATCH` (word tokens, each quoted, **AND-joined**),
 so caller input cannot inject FTS operators or break the query; an all-punctuation query matches
-nothing. All filter values are bound params. `search` modes: `fts` (M1, date-ordered + cursor-paged), `substr` (M9, exact case-insensitive substring for IMAP SEARCH parity, see 10.8), `semantic` and `hybrid` (M4, over the
+nothing. AND (not OR, pre-#403) is what makes ABSENCE representable: every token of the query must
+appear in a hit, so a marker string that was never delivered returns an EMPTY set instead of every
+message that happens to share one of its words. Only the first 16 word tokens are required (a
+bound on the MATCH expression); under AND that cap can only widen a match, never hide one, and no
+read-back marker comes close to it. All filter values are bound params. `search` modes: `fts` (M1, date-ordered + cursor-paged), `substr` (M9, exact case-insensitive substring for IMAP SEARCH parity, see 10.8), `semantic` and `hybrid` (M4, over the
 Vectorize index the store populates for BOTH inbound and outbound mail, #116 ws2). `semantic` embeds the query with the same model
 (`@cf/baai/bge-base-en-v1.5`) and queries Vectorize, collapsing chunk-hits to unique messages
 (best chunk score wins) and hydrating from D1; `hybrid` blends the fts and semantic result sets
@@ -289,11 +306,11 @@ none touches D1 directly (#25, #26).
 
 | Method | Route | Purpose | Milestone |
 |---|---|---|---|
-| GET | `/api/messages?to=&from=&thread=&direction=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `mailbox=archive\|trash\|junk\|all`, unset = direction-default views) | M1 / webmail v2 (#352) |
+| GET | `/api/messages?to=&from=&thread=&direction=&lens=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `mailbox=archive\|trash\|junk\|all`, unset = arrival views) | M1 / webmail v2 (#352) / #403 |
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
-| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354) | M1 / M4 / M9 / webmail v2 (#212/#354) |
+| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&to=&from=&direction=&lens=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` mean exactly what they do on `/api/messages` (#403) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 |
 | GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
@@ -855,11 +872,16 @@ image or multipart/related part arrives as a stored attachment part -- fidelity 
 the contract; inline (cid) RENDERING remains the tracked refinement it already is on the
 submission side. The in-Worker driver already stores postal-mime's full attachment set.
 
-### 10.6 Search direction (#128)
+### 10.6 Search direction (#128, amended by #403)
 
 `/api/search` reads the `direction` query param (`inbound` | `outbound`, else
 `E_VALIDATION_ERROR`), passing it into `store.search()` exactly as `/api/messages` already
 does. Additive; the param was previously ignored.
+
+**#403:** `direction` is the STORED wire fact in EVERY mode and on both read endpoints, never
+re-interpreted into a view (see section 1 and 10.9), and `/api/messages` now validates it as
+strictly as `/api/search` always has -- a typo was previously coerced to "no filter", which
+returned the unfiltered set as though it had been filtered.
 
 ### 10.6b Search filters + recent recipients (#354)
 
@@ -898,7 +920,7 @@ still returns every stored sibling for the viewer (filter chips do not trim the 
 `mode=substr` serves IMAP `SEARCH` parity (#148). IMAP `SEARCH SUBJECT/BODY/TEXT` are
 case-insensitive **substring** matches (RFC 3501); the default `fts` mode is FTS5
 word-token matching and returns a DIFFERENT set (a token query cannot express a
-substring: `foo` does not match `foobar`, and a multi-word query is OR-of-tokens, not
+substring: `foo` does not match `foobar`, and a multi-word query is AND-of-tokens, not
 a contiguous phrase), so pushing IMAP `SEARCH` to `fts` would lose behavior and break
 the RFC-as-source-of-truth rule. `substr` is the exact-substring predicate the IMAP
 door pushes to.
@@ -920,7 +942,8 @@ Semantics (`field` selects the column, default `text`):
   persist (`Received`, `X-*`, etc.) are not searchable, and that self-consistency IS the
   spec-true posture, not a gap.
 
-The `direction` filter (`inbound` | `outbound`) applies exactly as for `fts` (10.6).
+The `direction` filter (`inbound` | `outbound`) and the `lens` view apply exactly as for
+`fts` (10.6 / 10.9): one shared builder, so no mode can drift from another.
 
 Rules:
 
@@ -960,20 +983,34 @@ missed it: it is not `direction=inbound`, and it is not unseen. This is the fc#7
 lens. External recipients read through their own provider, never our lenses, so only
 same-domain recipients are in scope.
 
-**Viewer-relative INBOX (the direction lens).** `direction` stays the stored wire fact.
-The READ predicate changes ONLY when a query is viewer-scoped (`to=V`) AND asks for
-`direction=inbound`:
+**Viewer-relative INBOX: `lens=inbox` (AMENDED by #403).** `direction` is the stored wire
+fact, always and everywhere. The viewer-relative INBOX is a NAMED view, requested with
+`lens=inbox` on a viewer-scoped query (`to=V`, or a bound session):
 
 ```sql
--- "INBOX for V" = mail delivered to V that V did not send
+-- "INBOX for V" = mail delivered to V that V did not send   (lens=inbox)
 COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || :V || ',%'
 AND (m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> :V))
 ```
 
-Applied in ONE builder (`store.recipientWhere`) shared by `list`, `fts`, and `substr`
-search. Sent stays sender-based (`from=V`), not `to=V`. Unscoped queries (no `to`) are
-unchanged. **Edge (accepted, documented):** a true self-send (V to V only) stays
+Applied in ONE builder (`store.recipientWhere`, `store.accountWhere` for a bound session)
+shared by `list`, `fts`, and `substr`, and mirrored predicate-for-predicate by the
+`passesViewerScope` post-filter the score-ranked modes use. `lens=sent` is the sender-based
+Sent view (`lower(from_addr) = V`), never delivered-set based. Unscoped queries (no viewer)
+are unchanged. **Edge (accepted, documented):** a true self-send (V to V only) stays
 Sent-only for V, born seen; correct, you wrote it.
+
+**Why it moved (#403).** As first shipped, this predicate was implicit: `to=V` +
+`direction=inbound` WAS the lens. That made the plain filter unexpressible -- a caller asking
+"what actually arrived for `abuse@`" got the stored SENT copy of a message addressed to
+`abuse@` back under `direction=inbound`, i.e. a row contradicting the filter it was returned
+under, and a self-sent probe read as a delivery. Naming the view fixes it without weakening
+the view: `to=V` alone still returns everything delivered to V (including same-domain sends),
+`lens=inbox` is byte-identical to the old predicate, and `direction` now answers the arrival
+question honestly. Callers of the lens: webmail's Inbox/Sent folders in SESSION mode (token
+mode has no viewer, so it keeps the estate arrival view, matching `/api/folders`), and the
+IMAP door in `per_account` mode. `/api/folders` counts already used these predicates directly
+and are unchanged.
 
 **Per-recipient seen (sparse override).** A new table (migration 0009):
 
@@ -1023,9 +1060,9 @@ API/webmail/MCP callers that pass `to=V`, which is where fc#792 actually lived.
 **Per-account door mode (#357, opt-in).** The door gained a `POSTERN_IMAP_VIEWER_MODE`:
 `estate` (default) is byte-identical to the above; `per_account` scopes each login to a
 viewer address V derived from the authenticated username, turning the shared folders into
-viewer lenses: INBOX = `to=V` + `direction=inbound` (the recipient predicate above, so it
-now surfaces same-domain sends), Sent = `from=V` + `direction=outbound`, All = `to=V` both
-directions (unwindowed). `\Seen` STOREs on the `to=V` lenses carry `for=V` (per-recipient
+viewer lenses: INBOX = `to=V` + `lens=inbox` (the recipient predicate above, so it
+now surfaces same-domain sends; it sends `lens`, NOT `direction`, since #403), Sent =
+`from=V` + `direction=outbound`, All = `to=V` both directions (unwindowed). `\Seen` STOREs on the `to=V` lenses carry `for=V` (per-recipient
 override); Sent keeps the estate flag, matching what a `from=V` read renders. This is a
 VIEW tier (a deterrent), NOT a credential boundary: the door still reads with an
 estate-wide token, so per-user privacy stays the later credential work (#351 / D-AUTH-2).

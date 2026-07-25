@@ -269,8 +269,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
 
     // --- read: list / filter ---
     if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
-      const query = parseListQuery(url);
-      if (resolution.viaSession && resolution.identity) query.viewer = resolution.identity.from;
+      const sessionIdentity =
+        resolution.viaSession && resolution.identity ? resolution.identity.from : undefined;
+      const query = parseListQuery(url, sessionIdentity);
+      if (sessionIdentity) query.viewer = sessionIdentity;
       const page = await store.list(env, query);
       return json({ ok: true, ...page });
     }
@@ -488,11 +490,19 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
+      // Viewer-relative view (#403), same rules as /api/messages: refuses an
+      // unknown value, refuses lens+direction, refuses a lens with no viewer.
+      const sessionIdentity = resolution.viaSession ? resolution.identity?.from : undefined;
+      const lens = parseViewLens(
+        url.searchParams,
+        Boolean(sessionIdentity || url.searchParams.get("to")?.trim()),
+      );
       const page = await store.search(env, {
         q,
         mode: modeParam as "fts" | "substr" | "semantic" | "hybrid" | undefined,
         field: fieldParam === null ? undefined : fieldParam,
         direction: dirParam === null ? undefined : dirParam,
+        lens,
         // Viewer scope (#350): recipient-relative INBOX + effective seen, mirroring
         // /api/messages?to=. Unvalidated like list's `to` (a bare address filter).
         to: url.searchParams.get("to") ?? undefined,
@@ -504,7 +514,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         before,
         hasAttachment: hasAttParam === null ? undefined : hasAttParam === "1" || hasAttParam === "true",
         seen: seenParam === null ? undefined : seenParam === "1" || seenParam === "true",
-        viewer: resolution.viaSession ? resolution.identity?.from : undefined,
+        viewer: sessionIdentity,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });
@@ -622,15 +632,53 @@ function parseLimit(url: URL): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-function parseListQuery(url: URL): import("./store").ListQuery {
-  const p = url.searchParams;
+/** The stored-direction filter, validated STRICTLY (#403).
+ *
+ *  It used to be coerced (`dir === "inbound" || ... : undefined`), so a typo was a
+ *  silently-ignored filter and the caller got the unfiltered set back as if it had
+ *  been filtered -- the same false-pass class this issue is about. /api/search has
+ *  always validated it; both edges now refuse identically. */
+function parseDirection(p: URLSearchParams): "inbound" | "outbound" | undefined {
   const dir = p.get("direction");
+  if (dir === null) return undefined;
+  if (dir !== "inbound" && dir !== "outbound") {
+    throw new MailboxError("E_VALIDATION_ERROR", "direction must be inbound or outbound");
+  }
+  return dir;
+}
+
+/** The named viewer-relative view (#403; CONTRACT 10.9).
+ *
+ *  `lens` and `direction` filter the SAME axis from opposite ends (a view vs the
+ *  stored wire fact), so accepting both would have to silently pick a winner:
+ *  refuse instead. A lens without a viewer is refused rather than degraded to the
+ *  estate view, so a caller can never believe it got a viewer-scoped answer it
+ *  did not get. */
+function parseViewLens(p: URLSearchParams, hasViewer: boolean): import("./store").ViewLens | undefined {
+  const raw = p.get("lens");
+  if (raw === null) return undefined;
+  if (raw !== "inbox" && raw !== "sent") {
+    throw new MailboxError("E_VALIDATION_ERROR", "lens must be inbox or sent");
+  }
+  if (p.get("direction") !== null) {
+    throw new MailboxError("E_VALIDATION_ERROR", "lens and direction are mutually exclusive");
+  }
+  if (!hasViewer) {
+    throw new MailboxError("E_VALIDATION_ERROR", "lens requires a viewer: pass to= or use a bound session");
+  }
+  return raw;
+}
+
+function parseListQuery(url: URL, sessionIdentity?: string): import("./store").ListQuery {
+  const p = url.searchParams;
   const mailbox = p.get("mailbox");
+  const to = p.get("to") ?? undefined;
   return {
-    to: p.get("to") ?? undefined,
+    to,
     from: p.get("from") ?? undefined,
     thread: p.get("thread") ?? undefined,
-    direction: dir === "inbound" || dir === "outbound" ? dir : undefined,
+    direction: parseDirection(p),
+    lens: parseViewLens(p, Boolean(sessionIdentity || to?.trim())),
     mailbox: mailbox === "archive" || mailbox === "trash" || mailbox === "junk" || mailbox === "all"
       ? mailbox
       : undefined,

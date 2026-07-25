@@ -108,7 +108,14 @@ export interface ListQuery {
   to?: string;
   from?: string;
   thread?: string;
+  /** The STORED wire fact, filtered exactly (#403). Never re-interpreted into a
+   *  view: a row returned under direction=inbound always reports inbound. The
+   *  viewer-relative views live on `lens`. */
   direction?: "inbound" | "outbound";
+  /** Named viewer-relative view (#403; the semantics #350 used to overload onto
+   *  `direction`). Requires a viewer (`to` or `viewer`); mutually exclusive with
+   *  `direction`. Validated at the API edge. */
+  lens?: ViewLens;
   mailbox?: MailboxFilter;
   /** Internal account boundary for a bound webmail session. Unlike public `to`,
    * this includes the viewer's authored Sent rows in All while keeping Inbox
@@ -118,6 +125,11 @@ export interface ListQuery {
   limit?: number; // default 50, max 200
   cursor?: string; // opaque; encodes (date, id) of the last row
 }
+
+/** Viewer-relative views (CONTRACT 10.9):
+ *  - inbox: mail delivered to V that V did not author (an INBOX, not a direction).
+ *  - sent: mail V authored (sender-based, never delivered-set based). */
+export type ViewLens = "inbox" | "sent";
 
 export type MailboxPlacement = "archive" | "trash" | "junk" | null;
 export type MailboxFilter = MailboxPlacement | "all";
@@ -129,8 +141,12 @@ export interface SearchQuery {
   mode?: "fts" | "substr" | "semantic" | "hybrid"; // substr = #212; semantic/hybrid = M4
   // substr only (#212): which column(s) the substring matches; default "text".
   field?: SearchField;
-  // Restrict to one direction (#128); undefined = both. Validated at the API edge.
+  // Restrict to one STORED direction (#128); undefined = both. Exact, never
+  // re-interpreted into a view (#403). Validated at the API edge.
   direction?: "inbound" | "outbound";
+  // Named viewer-relative view (#403); requires a viewer (to/viewer), mutually
+  // exclusive with direction. Same semantics as ListQuery.lens in every mode.
+  lens?: ViewLens;
   // Viewer address for recipient-scoped search (#350): delivered-set membership +
   // viewer-relative INBOX + effective (per-recipient) seen, same as ListQuery.to.
   to?: string;
@@ -1385,48 +1401,68 @@ function seenProjection(viewer: string | undefined): { expr: string; binds: unkn
   };
 }
 
-/** The (to + direction) WHERE fragments shared by list, fts, and substr search.
+/** The (to + direction/lens) WHERE fragments shared by list, fts, and substr search.
  *  - to=V: delivered-set membership (#178), COALESCE fallback to a v1 to_addr.
- *  - direction=inbound WITH to=V: viewer-relative INBOX (#350) -- inbound mail for
- *    V PLUS same-store outbound NOT authored by V, so a same-domain send lands in
- *    the recipient INBOX, not only the sender Sent. A true self-send (from=V)
- *    stays Sent-only (correct: you wrote it).
- *  - direction=outbound, or no viewer: the stored direction fact, unchanged.
+ *  - direction=D: the STORED wire fact, exactly, viewer or not (#403). Before #403 a
+ *    viewer-scoped direction=inbound was silently rewritten into the INBOX lens, so
+ *    an explicit filter could not be expressed and rows contradicted the filter they
+ *    came back under (an outbound sent copy answering "did anything arrive").
+ *  - lens=inbox (needs V): viewer-relative INBOX (#350) -- inbound mail for V PLUS
+ *    same-store outbound NOT authored by V, so a same-domain send lands in the
+ *    recipient INBOX, not only the sender Sent. A true self-send (from=V) stays
+ *    Sent-only (correct: you wrote it). This is exactly the predicate that used to
+ *    hide behind direction=inbound; it now has its own name.
+ *  - lens=sent (needs V): sender-based (from_addr = V), never delivered-set based,
+ *    so the membership fragment is dropped.
  *  Outbound from_addr is a bare address by construction (mailbox.send), so the
- *  lower() compare is exact; the branch only inspects outbound rows anyway. */
+ *  lower() compare is exact; the lens branch only inspects outbound rows anyway. */
 function recipientWhere(
   viewer: string | undefined,
   direction: "inbound" | "outbound" | undefined,
+  lens?: ViewLens,
 ): { membership: string | null; membershipBinds: unknown[]; direction: string | null; directionBinds: unknown[] } {
+  // A lens is a view OF someone. Without a viewer there is nothing to be relative
+  // to, and quietly dropping it would hand back an estate answer under a
+  // viewer-scoped question -- the failure this issue exists to remove. The API edge
+  // refuses this with a 400 first; this is the last-line guard for internal callers.
+  if (lens && !viewer) throw new Error("store: lens requires a viewer");
   const out = {
     membership: null as string | null,
     membershipBinds: [] as unknown[],
     direction: null as string | null,
     directionBinds: [] as unknown[],
   };
+  if (viewer && lens === "sent") {
+    out.direction = "lower(m.from_addr) = ?";
+    out.directionBinds = [viewer];
+    return out;
+  }
   if (viewer) {
     out.membership = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
     out.membershipBinds = [viewer];
   }
+  if (viewer && lens === "inbox") {
+    out.direction = "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))";
+    out.directionBinds = [viewer];
+    return out;
+  }
   if (direction === "inbound" || direction === "outbound") {
-    if (viewer && direction === "inbound") {
-      out.direction = "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))";
-      out.directionBinds = [viewer];
-    } else {
-      out.direction = "m.direction = ?";
-      out.directionBinds = [direction];
-    }
+    out.direction = "m.direction = ?";
+    out.directionBinds = [direction];
   }
   return out;
 }
 
-/** Account-owned view for a bound webmail session. */
+/** Account-owned view for a bound webmail session. Same #403 split as
+ *  recipientWhere: `lens` names the Inbox/Sent folder views, and `direction`
+ *  filters the stored wire fact inside the account boundary. */
 function accountWhere(
   viewer: string,
   direction: "inbound" | "outbound" | undefined,
+  lens?: ViewLens,
 ): { membership: string | null; membershipBinds: unknown[]; direction: string | null; directionBinds: unknown[] } {
   const delivered = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
-  if (direction === "inbound") {
+  if (lens === "inbox") {
     return {
       membership: delivered,
       membershipBinds: [viewer],
@@ -1434,7 +1470,7 @@ function accountWhere(
       directionBinds: [viewer],
     };
   }
-  if (direction === "outbound") {
+  if (lens === "sent") {
     return {
       membership: null,
       membershipBinds: [],
@@ -1442,11 +1478,13 @@ function accountWhere(
       directionBinds: [viewer],
     };
   }
+  // Account boundary (delivered to V or authored by V), plus the exact stored
+  // direction when one was asked for.
   return {
     membership: `(${delivered} OR lower(m.from_addr) = ?)`,
     membershipBinds: [viewer, viewer],
-    direction: null,
-    directionBinds: [],
+    direction: direction ? "m.direction = ?" : null,
+    directionBinds: direction ? [direction] : [],
   };
 }
 
@@ -1544,13 +1582,26 @@ function decodeCursor(cursor: string | undefined): { date: string; id: number } 
   return null;
 }
 
-// Turn arbitrary user text into a safe FTS5 MATCH expression. FTS5 query syntax
-// would otherwise throw on quotes/operators (and could be abused), so we extract
-// word tokens and quote each as a phrase, OR-joined. Empty input -> no MATCH.
+/** Sanitize caller text into an FTS5 MATCH expression. FTS5 query syntax would
+ *  otherwise throw on quotes/operators (and could be abused), so the text is
+ *  reduced to word tokens. Empty input -> no MATCH.
+ *
+ *  Word tokens are quoted (so caller input can never inject an FTS operator or
+ *  break the query) and joined with AND: EVERY token must appear in a matching
+ *  message. The pre-#403 join was OR, which made ABSENCE unrepresentable -- a
+ *  multi-token marker that exists nowhere still matched any message carrying any
+ *  one of its tokens, so "search for the marker, assert a hit" went green on
+ *  garbage (#403 defect 1). An all-punctuation query still matches nothing.
+ *
+ *  Cap: only the first FTS_MAX_TOKENS tokens are required. Under AND that cap can
+ *  only WIDEN a match (fewer required terms), so it is documented in CONTRACT
+ *  section 1 rather than left silent; read-back markers are far below it. */
+const FTS_MAX_TOKENS = 16;
+
 function toFtsQuery(q: string): string {
-  const tokens = (q.match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, 16);
+  const tokens = (q.match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, FTS_MAX_TOKENS);
   if (tokens.length === 0) return "";
-  return tokens.map((t) => `"${t}"`).join(" OR ");
+  return tokens.map((t) => `"${t}"`).join(" AND ");
 }
 
 /**
@@ -1578,12 +1629,13 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     return { items: [], cursor: null };
   }
 
-  // Recipient view (#178 delivered-set membership) at the `to` slot; the direction
-  // predicate (viewer-relative INBOX for #350) is appended AFTER from/thread so the
-  // bind order stays stable. ONE builder for list, fts, and substr search.
+  // Recipient view (#178 delivered-set membership) at the `to` slot; the
+  // direction/lens predicate (#350 INBOX view, #403 exact direction) is appended
+  // AFTER from/thread so the bind order stays stable. ONE builder for list, fts,
+  // and substr search.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction)
-    : recipientWhere(recipientViewer, q.direction);
+    ? accountWhere(accountViewer, q.direction, q.lens)
+    : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -1812,11 +1864,11 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const binds: unknown[] = [...sp.binds, ftsExpr];
   const where: string[] = ["m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"];
 
-  // Recipient view + viewer-relative INBOX (#350/#178); membership then direction,
-  // the same order list/substr use, so fts shares the one "INBOX for V" builder.
+  // Recipient view + named lens (#350/#178/#403); membership then direction, the
+  // same order list/substr use, so fts shares the one view builder.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction)
-    : recipientWhere(recipientViewer, q.direction);
+    ? accountWhere(accountViewer, q.direction, q.lens)
+    : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -1927,10 +1979,10 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   for (let k = 0; k < cols.length; k++) binds.push(pattern);
   const where: string[] = [`(${orClause})`];
 
-  // Recipient view + viewer-relative INBOX (#350/#178).
+  // Recipient view + named lens (#350/#178/#403), the same builder as list/fts.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction)
-    : recipientWhere(recipientViewer, q.direction);
+    ? accountWhere(accountViewer, q.direction, q.lens)
+    : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
     binds.push(...rv.membershipBinds);
@@ -2045,12 +2097,13 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
 
 /**
  * Post-hydrate viewer scope for the score-ranked modes (#350), which cannot push a
- * WHERE to Vectorize. Mirrors /api/messages semantics on a hydrated summary:
- *  - no viewer: the optional direction filter only (#128), as before.
+ * WHERE to Vectorize. Mirrors /api/messages semantics on a hydrated summary, and
+ * must stay predicate-for-predicate identical to recipientWhere / accountWhere:
+ *  - no viewer: the optional stored-direction filter only (#128), as before.
  *  - to=V: delivered-set membership (drop anything NOT delivered to V -- the leak the
- *    lead caught), then the same viewer-relative INBOX rule list/fts use when
- *    direction=inbound (inbound OR outbound-not-authored-by-V), else the plain
- *    direction filter.
+ *    lead caught), then lens=inbox (inbound OR outbound-not-authored-by-V) or the
+ *    EXACT stored direction (#403), never one silently standing in for the other.
+ *  - lens=sent: sender-based (from == V), membership not required.
  *  - from= (#366): same lower(from_addr) substring match as list/fts/substr.
  */
 function passesViewerScope(
@@ -2059,30 +2112,31 @@ function passesViewerScope(
   direction: "inbound" | "outbound" | undefined,
   fromFilter?: string,
   accountViewer?: string,
+  lens?: ViewLens,
 ): boolean {
   if (fromFilter) {
     const needle = fromFilter.toLowerCase();
     if (!m.from.toLowerCase().includes(needle)) return false;
   }
+  const bareFrom = (parseRecipients(m.from)[0] ?? "").toLowerCase();
+  const scope = accountViewer ?? viewer;
+  if (scope && lens === "sent") return bareFrom === scope;
   if (accountViewer) {
-    const from = (parseRecipients(m.from)[0] ?? "").toLowerCase();
     const delivered = m.deliveredTo.map((a) => a.toLowerCase());
-    if (direction === "outbound") return from === accountViewer;
-    if (direction === "inbound") {
+    if (lens === "inbox") {
       return delivered.includes(accountViewer) &&
-        (m.direction === "inbound" || (m.direction === "outbound" && from !== accountViewer));
+        (m.direction === "inbound" || (m.direction === "outbound" && bareFrom !== accountViewer));
     }
-    return delivered.includes(accountViewer) || from === accountViewer;
+    if (!delivered.includes(accountViewer) && bareFrom !== accountViewer) return false;
+    return !direction || m.direction === direction;
   }
   if (!viewer) return !direction || m.direction === direction;
   const delivered = m.deliveredTo.map((a) => a.toLowerCase());
   if (!delivered.includes(viewer)) return false;
-  if (direction === "inbound") {
-    const bareFrom = (parseRecipients(m.from)[0] ?? "").toLowerCase();
+  if (lens === "inbox") {
     return m.direction === "inbound" || (m.direction === "outbound" && bareFrom !== viewer);
   }
-  if (direction === "outbound") return m.direction === "outbound";
-  return true;
+  return !direction || m.direction === direction;
 }
 
 async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
@@ -2102,9 +2156,10 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
     if (!message) continue;
-    // Viewer scope + direction + from= (#350/#128/#366): the vector index is neither
-    // recipient-, sender-, nor direction-keyed, so scope the hydrated summaries.
-    if (!passesViewerScope(message, viewer, q.direction, fromFilter, accountViewer)) continue;
+    // Viewer scope + direction/lens + from= (#350/#128/#366/#403): the vector index
+    // is neither recipient-, sender-, nor direction-keyed, so scope the hydrated
+    // summaries with the same predicates the SQL modes push down.
+    if (!passesViewerScope(message, viewer, q.direction, fromFilter, accountViewer, q.lens)) continue;
     // Folder/date/attachment/seen (#354): same post-hydrate gate as the SQL modes.
     if (!passesCommonSearchFilters(message, q)) continue;
     items.push({ message, score: r.score });
@@ -2119,6 +2174,7 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const shared = {
     q: q.q,
     direction: q.direction,
+    lens: q.lens,
     to: q.to,
     from: q.from,
     mailbox: q.mailbox,

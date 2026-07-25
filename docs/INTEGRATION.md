@@ -117,6 +117,15 @@ The read endpoints take the same bearer token:
 curl "https://<your-worker>.<account>.workers.dev/api/messages?direction=inbound&q=invoice&limit=20" \
   -H "Authorization: Bearer $POSTERN_API_TOKEN"
 
+# "did anything actually ARRIVE for this address": direction is the stored fact, so
+# the sent copy of a message addressed to it is never counted as an arrival
+curl "https://<your-worker>.<account>.workers.dev/api/messages?to=abuse@example.com&direction=inbound" \
+  -H "Authorization: Bearer $POSTERN_API_TOKEN"
+
+# that address's INBOX VIEW instead (arrivals + same-domain mail others sent it)
+curl "https://<your-worker>.<account>.workers.dev/api/messages?to=abuse@example.com&lens=inbox" \
+  -H "Authorization: Bearer $POSTERN_API_TOKEN"
+
 # one message + attachment metadata
 curl "https://<your-worker>.<account>.workers.dev/api/messages/<messageId>" \
   -H "Authorization: Bearer $POSTERN_API_TOKEN"
@@ -133,6 +142,13 @@ curl "https://<your-worker>.<account>.workers.dev/api/search?q=invoice&mode=fts"
 curl "https://<your-worker>.<account>.workers.dev/api/threads/<threadId>" \
   -H "Authorization: Bearer $POSTERN_API_TOKEN"
 ```
+
+`direction` (`inbound`/`outbound`) filters the stored wire fact; `lens` (`inbox`/`sent`) asks
+for a viewer's VIEW and needs a viewer (`to=`). They cannot be combined, and an unknown value
+of either is a `400 E_VALIDATION_ERROR` rather than a quietly-dropped filter. `mode=fts` on
+`/api/search` requires EVERY word of the query to appear, so an empty result set is a real
+"not here" (CONTRACT sections 1 and 10.9).
+
 
 ## Request fields (send / reply)
 

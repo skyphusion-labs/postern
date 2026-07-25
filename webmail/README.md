@@ -46,8 +46,9 @@ apply `schema.sql` then `seed.dev.sql` to a local D1, `wrangler dev`, open
 
 ## What it does (v1)
 
-- **Message list** with an Inbox / Sent / All folder filter (the API's
-  `direction` filter).
+- **Message list** with an Inbox / Sent / All folder filter (the API's `lens`
+  view in session mode, its `direction` filter in token mode, which has no viewer;
+  CONTRACT 10.9).
 - **Read view** for a single message: headers, trust verdict (spf/dkim/dmarc),
   the body (HTML or plain text, rendered in a sandboxed iframe), and attachments
   with a **Download** button each.

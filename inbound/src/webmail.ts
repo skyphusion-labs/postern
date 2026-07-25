@@ -875,6 +875,24 @@ export const WEBMAIL_HTML = `<!doctype html>
     });
   }
 
+  // Folder scope (#403). A bound session has a viewer, so Inbox/Sent are the NAMED
+  // viewer lenses (lens=inbox / lens=sent) -- the same predicates /api/folders counts
+  // with, so the rail and the list agree. Token mode has no viewer: the API refuses a
+  // viewerless lens, and the honest token-mode view IS the estate arrival view, so it
+  // keeps filtering on the stored direction.
+  function applyFolderScope(p) {
+    var session = state.authMode === "session";
+    if (state.folder === "inbox") {
+      if (session) p.lens = "inbox"; else p.direction = "inbound";
+    } else if (state.folder === "sent") {
+      if (session) p.lens = "sent"; else p.direction = "outbound";
+    } else if (state.folder === "all") {
+      p.mailbox = "all";
+    } else if (state.folder === "trash" || state.folder === "junk" || state.folder === "archive") {
+      p.mailbox = state.folder;
+    }
+  }
+
   function searchFilterParams() {
     var p = {};
     if (state.filters.from) p.from = state.filters.from;
@@ -884,12 +902,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     if (state.filters.seen === false) p.seen = "0";
     if (state.filters.hasAttachment === true) p.hasAttachment = "1";
     if (state.filters.hasAttachment === false) p.hasAttachment = "0";
-    if (state.folder === "inbox") p.direction = "inbound";
-    else if (state.folder === "sent") p.direction = "outbound";
-    else if (state.folder === "all") p.mailbox = "all";
-    else if (state.folder === "trash" || state.folder === "junk" || state.folder === "archive") {
-      p.mailbox = state.folder;
-    }
+    applyFolderScope(p);
     return p;
   }
 
@@ -1000,12 +1013,7 @@ export const WEBMAIL_HTML = `<!doctype html>
   // --- folders + list (#352) -------------------------------------------------
   function listParams() {
     var p = { limit: 50, cursor: state.cursor };
-    if (state.folder === "inbox") p.direction = "inbound";
-    else if (state.folder === "sent") p.direction = "outbound";
-    else if (state.folder === "all") p.mailbox = "all";
-    else if (state.folder === "trash" || state.folder === "junk" || state.folder === "archive") {
-      p.mailbox = state.folder;
-    }
+    applyFolderScope(p);
     return p;
   }
 
