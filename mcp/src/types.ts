@@ -2,6 +2,14 @@
 // MCP server is a READ client of that API; these shapes are exactly what the
 // JSON endpoints return (camelCase column names), so no remapping is needed.
 
+// Durable-folder placement (worker MailboxPlacement, store.ts): null = the
+// default placement (an ordinary inbox/sent row), so the absence of a folder
+// is a real, distinct state, not "unknown".
+export type MailboxPlacement = "archive" | "trash" | "junk" | null;
+// The mailbox= query-param filter (worker MailboxFilter, store.ts): the same
+// placements plus "all" (every placement, vs. omitted = mailbox IS NULL).
+export type MailboxFilter = "archive" | "trash" | "junk" | "all";
+
 export interface MessageSummary {
   // Monotonic, arrival-ordered insertion key (store #103). Stable; > 0.
   uid?: number;
@@ -15,6 +23,20 @@ export interface MessageSummary {
   inReplyTo: string | null;
   trusted: boolean;
   receivedAt: string;
+  // Read/flag state (#419 sync): mirrors StoredMessageSummary.{seen,flagged,
+  // answered} (inbound/src/store.ts) so an agent can ask for unread mail
+  // without a per-message fetch.
+  seen: boolean;
+  flagged: boolean;
+  answered: boolean;
+  // Durable folder placement (#419 sync): mirrors StoredMessageSummary.mailbox.
+  mailbox: MailboxPlacement;
+  // Normalized envelope recipients (#419 sync): mirrors
+  // StoredMessageSummary.deliveredTo.
+  deliveredTo: string[];
+  // Raw RFC822 byte size at intake, null on rows that predate the column
+  // (#419 sync): mirrors StoredMessageSummary.wireSize.
+  wireSize: number | null;
   attachmentCount: number;
 }
 
@@ -26,6 +48,9 @@ export interface AttachmentMeta {
 
 export interface Message extends Omit<MessageSummary, "attachmentCount"> {
   bodyText: string;
+  // Original HTML body when the message had one, else null (#419 sync):
+  // mirrors StoredMessage.bodyHtml (inbound/src/store.ts).
+  bodyHtml: string | null;
   attachments: AttachmentMeta[];
 }
 

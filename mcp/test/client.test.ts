@@ -52,6 +52,29 @@ describe("search", () => {
     expect(page.items).toEqual([hit]);
     expect(page.cursor).toBe("c1");
   });
+
+  it("forwards from, mailbox, after, before, hasAttachment, and seen (#419 sync)", async () => {
+    const calls = mockFetch(200, { ok: true, items: [], cursor: null });
+    await client().search({
+      q: "x",
+      from: "a@b.com",
+      mailbox: "archive",
+      after: "2026-01-01",
+      before: "2026-02-01",
+      hasAttachment: true,
+      seen: false,
+    });
+    const u = new URL(calls[0].url);
+    expect(u.searchParams.get("from")).toBe("a@b.com");
+    expect(u.searchParams.get("mailbox")).toBe("archive");
+    expect(u.searchParams.get("after")).toBe("2026-01-01");
+    expect(u.searchParams.get("before")).toBe("2026-02-01");
+    expect(u.searchParams.get("hasAttachment")).toBe("true");
+    // seen=false must still be forwarded (not dropped as falsy): the worker
+    // distinguishes "unset" from "false", so omitting it here would silently
+    // turn an unread-only search into an unfiltered one.
+    expect(u.searchParams.get("seen")).toBe("false");
+  });
 });
 
 describe("list", () => {
@@ -62,6 +85,13 @@ describe("list", () => {
     expect(u.pathname).toBe("/api/messages");
     expect(u.searchParams.get("direction")).toBe("inbound");
     expect(u.searchParams.get("from")).toBe("a@b.com");
+  });
+
+  it("forwards mailbox (#419 sync)", async () => {
+    const calls = mockFetch(200, { ok: true, items: [], cursor: null });
+    await client().list({ mailbox: "trash" });
+    const u = new URL(calls[0].url);
+    expect(u.searchParams.get("mailbox")).toBe("trash");
   });
 });
 
