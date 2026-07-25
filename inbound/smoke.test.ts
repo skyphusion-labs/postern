@@ -48,7 +48,7 @@ describe("extractDmarcResult", () => {
 });
 
 describe("isTrusted", () => {
-  const allow = "skyphusion.org,rockenhaus.net,github.com";
+  const allow = "skyphusion.org,example.net,github.com";
 
   it("trusts an allowlisted domain that passes SPF", () => {
     expect(isTrusted("alerts@skyphusion.org", "pass", "none", allow)).toBe(true);

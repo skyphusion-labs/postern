@@ -50,7 +50,7 @@ interface Env {
   /**
    * Comma-separated list of trusted sender domains/addresses.
    * Only senders on this list that also pass SPF or DKIM get trusted=1.
-   * Example: "skyphusion.org,rockenhaus.net,github.com,healthchecks.io"
+   * Example: "skyphusion.org,example.net,github.com,healthchecks.io"
    */
   TRUSTED_SENDER_DOMAINS: string;
   /**
