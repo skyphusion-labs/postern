@@ -497,6 +497,7 @@ class PosternClient:
         from_addr: Optional[str] = None,
         thread: Optional[str] = None,
         direction: Optional[str] = None,
+        lens: Optional[str] = None,
         mailbox: Optional[str] = None,
         q: Optional[str] = None,
         limit: Optional[int] = None,
@@ -511,6 +512,11 @@ class PosternClient:
             params["thread"] = thread
         if direction:
             params["direction"] = direction
+        # #403: `lens` names a viewer-relative view (inbox|sent); `direction` filters
+        # the stored wire fact. The worker refuses both at once, so a folder sends
+        # exactly one of them.
+        if lens:
+            params["lens"] = lens
         # #352: mailbox=archive|trash|junk|all scopes durable folder views; omit for
         # direction-default INBOX/Sent (worker applies mailbox IS NULL).
         if mailbox:
@@ -565,6 +571,7 @@ class PosternClient:
         mode: Optional[str] = None,
         field: Optional[str] = None,
         direction: Optional[str] = None,
+        lens: Optional[str] = None,
         to: Optional[str] = None,
         from_addr: Optional[str] = None,
         mailbox: Optional[str] = None,
@@ -589,6 +596,9 @@ class PosternClient:
             params["field"] = field
         if direction:
             params["direction"] = direction
+        # #403: the named viewer view; mutually exclusive with direction (worker-enforced).
+        if lens:
+            params["lens"] = lens
         # #357: a viewer-scoped search (to=V) applies the same recipient-relative
         # predicate + effective seen the list path does (CONTRACT 10.9); estate
         # searches pass to=None and are unchanged.

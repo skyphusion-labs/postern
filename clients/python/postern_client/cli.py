@@ -84,7 +84,12 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--to")
     ls.add_argument("--from", dest="from_addr")
     ls.add_argument("--thread")
-    ls.add_argument("--direction", choices=["inbound", "outbound"])
+    ls.add_argument("--direction", choices=["inbound", "outbound"], help="filter on the stored direction")
+    ls.add_argument(
+        "--lens",
+        choices=["inbox", "sent"],
+        help="viewer view for --to (inbox = delivered to them, not written by them); not combinable with --direction",
+    )
     ls.add_argument("--q", help="free-text filter")
     ls.add_argument("--limit", type=int)
     ls.add_argument("--cursor", help="pagination cursor from a previous page")
@@ -159,6 +164,7 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
                 from_addr=args.from_addr,
                 thread=args.thread,
                 direction=args.direction,
+                lens=args.lens,
                 q=args.q,
                 limit=args.limit,
                 cursor=args.cursor,

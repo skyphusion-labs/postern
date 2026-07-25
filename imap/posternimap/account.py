@@ -243,6 +243,13 @@ class PosternAccount:
     def _mailbox(self, folder: _Folder, *, list_view: bool) -> PosternMailbox:
         delete_enabled = folder.delete_writable and self._cfg.service_delete_token is not None
         scoped = self._per_account and self._viewer is not None
+        # #403: with a viewer, an arrival view is the NAMED lens (lens=inbox), not
+        # direction=inbound -- the worker now filters `direction` on the stored wire
+        # fact, so an INBOX asking for direction=inbound would go blind to same-domain
+        # sends again (the fc#792 class #350 fixed). Estate mode has no viewer and
+        # keeps the stored-direction filter, which IS the honest estate arrival view.
+        lens = "inbox" if (scoped and folder.viewer_to and folder.direction == "inbound") else None
+        direction = None if lens else folder.direction
         to = self._viewer if (scoped and folder.viewer_to) else None
         from_addr = self._viewer if (scoped and folder.viewer_from) else None
         viewer = self._viewer if (scoped and folder.viewer_seen) else None
@@ -254,7 +261,8 @@ class PosternAccount:
             uidvalidity = self._cfg.imap_uidvalidity
         return PosternMailbox(
             self._client(),
-            direction=folder.direction,
+            direction=direction,
+            lens=lens,
             to=to,
             from_addr=from_addr,
             viewer=viewer,

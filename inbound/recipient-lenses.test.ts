@@ -7,83 +7,10 @@
 // is that engine.) The API-surface tests use the shared fake env (they need tokens).
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
 import * as store from "./src/store";
 import { handleApi } from "./src/api";
 import { makeFakeEnv } from "./fakes";
-
-// A minimal D1-compatible adapter over a real in-memory SQLite loaded with the
-// production schema.sql (messages + FTS triggers + message_seen_by).
-function realEnv(): { env: Env; ctx: ExecutionContext; raw: DatabaseSync } {
-  const db = new DatabaseSync(":memory:");
-  db.exec(readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
-  const DB = {
-    prepare(sql: string) {
-      const stmt = db.prepare(sql);
-      let bound: unknown[] = [];
-      return {
-        bind(...args: unknown[]) {
-          bound = args;
-          return this;
-        },
-        async all<T>() {
-          return { results: stmt.all(...(bound as never[])) as unknown as T[] };
-        },
-        async first<T>() {
-          return (stmt.get(...(bound as never[])) ?? null) as T | null;
-        },
-        async run() {
-          const r = stmt.run(...(bound as never[]));
-          return { meta: { changes: Number(r.changes) } };
-        },
-      };
-    },
-  };
-  const env = { DB, ALLOWED_FROM_DOMAIN: "skyphusion.org" } as unknown as Env;
-  const ctx = { waitUntil() {} } as unknown as ExecutionContext;
-  return { env, ctx, raw: db };
-}
-
-const AUTH = { spf: "none", dkim: "none", dmarc: "none" };
-
-async function putOutbound(env: Env, ctx: ExecutionContext, o: { id: string; from: string; to: string[]; subject?: string; body?: string; date?: string }) {
-  return store.put(
-    env,
-    {
-      messageId: o.id,
-      direction: "outbound",
-      from: o.from,
-      to: o.to.join(", "),
-      subject: o.subject ?? "s",
-      date: o.date ?? "2026-02-01T00:00:00.000Z",
-      bodyText: o.body ?? "body",
-      auth: AUTH,
-      trusted: true,
-      deliveredTo: o.to.map((a) => a.toLowerCase()),
-    },
-    ctx,
-  );
-}
-
-async function putInbound(env: Env, ctx: ExecutionContext, o: { id: string; from: string; to: string; subject?: string; body?: string; date?: string }) {
-  return store.put(
-    env,
-    {
-      messageId: o.id,
-      direction: "inbound",
-      from: o.from,
-      to: o.to,
-      subject: o.subject ?? "s",
-      date: o.date ?? "2026-02-02T00:00:00.000Z",
-      bodyText: o.body ?? "body",
-      auth: AUTH,
-      trusted: false,
-      deliveredTo: [o.to.toLowerCase()],
-    },
-    ctx,
-  );
-}
+import { realEnv, putInbound, putOutbound, AUTH } from "./realdb";
 
 describe("#350 store lenses (real SQLite)", () => {
   it("seeds a per-recipient unread override for same-domain outbound, except the sender", async () => {
@@ -111,14 +38,14 @@ describe("#350 store lenses (real SQLite)", () => {
     const { env, ctx } = realEnv();
     await putOutbound(env, ctx, { id: "ab@skyphusion.org", from: "alice@skyphusion.org", to: ["bob@skyphusion.org"], subject: "quarterly" });
 
-    const bobInbox = await store.list(env, { to: "bob@skyphusion.org", direction: "inbound" });
+    const bobInbox = await store.list(env, { to: "bob@skyphusion.org", lens: "inbox" });
     expect(bobInbox.items.map((m) => m.messageId)).toEqual(["ab@skyphusion.org"]);
     expect(bobInbox.items[0].seen).toBe(false); // effective seen from the override
     // B's unseen poll counts it.
     expect(bobInbox.items.filter((m) => !m.seen)).toHaveLength(1);
 
     // A's INBOX does not (A is not a delivered recipient, and authored it).
-    const aliceInbox = await store.list(env, { to: "alice@skyphusion.org", direction: "inbound" });
+    const aliceInbox = await store.list(env, { to: "alice@skyphusion.org", lens: "inbox" });
     expect(aliceInbox.items).toHaveLength(0);
     // A's Sent (sender-based, from=A) still shows it, seen.
     const aliceSent = await store.list(env, { from: "alice@skyphusion.org" });
@@ -132,7 +59,7 @@ describe("#350 store lenses (real SQLite)", () => {
     // No override seeded (recipient == sender).
     expect((raw.prepare("SELECT COUNT(*) n FROM message_seen_by").get() as { n: number }).n).toBe(0);
     // Not in carol's INBOX (outbound authored by carol).
-    const inbox = await store.list(env, { to: "carol@skyphusion.org", direction: "inbound" });
+    const inbox = await store.list(env, { to: "carol@skyphusion.org", lens: "inbox" });
     expect(inbox.items).toHaveLength(0);
     // Present in carol's Sent, seen.
     const sent = await store.list(env, { from: "carol@skyphusion.org" });
@@ -199,14 +126,14 @@ describe("#350 store lenses (real SQLite)", () => {
     const { env, ctx } = realEnv();
     await putOutbound(env, ctx, { id: "fc792@skyphusion.org", from: "alice@skyphusion.org", to: ["bob@skyphusion.org"], subject: "status" });
     // B's lens surfaces it, unseen; B's unseen poll counts it.
-    const bob1 = await store.list(env, { to: "bob@skyphusion.org", direction: "inbound" });
+    const bob1 = await store.list(env, { to: "bob@skyphusion.org", lens: "inbox" });
     expect(bob1.items.map((m) => m.messageId)).toEqual(["fc792@skyphusion.org"]);
     expect(bob1.items[0].seen).toBe(false);
     // A's Sent still shows it seen.
     expect((await store.list(env, { from: "alice@skyphusion.org" })).items[0].seen).toBe(true);
     // B marks read (for=B): A's row-level state untouched.
     await store.setSeen(env, ["fc792@skyphusion.org"], true, "bob@skyphusion.org");
-    expect((await store.list(env, { to: "bob@skyphusion.org", direction: "inbound" })).items[0].seen).toBe(true);
+    expect((await store.list(env, { to: "bob@skyphusion.org", lens: "inbox" })).items[0].seen).toBe(true);
     expect((await store.get(env, "fc792@skyphusion.org"))!.seen).toBe(true); // messages.seen was 1 all along
     // Legacy unscoped mark-read still works.
     await putInbound(env, ctx, { id: "legacy@skyphusion.org", from: "ext@gmail.com", to: "bob@skyphusion.org" });

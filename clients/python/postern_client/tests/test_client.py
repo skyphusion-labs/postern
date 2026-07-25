@@ -138,6 +138,23 @@ class ListSearchTest(unittest.TestCase):
         self.assertIn("limit=10", url)
         self.assertIn("cursor=c1", url)
 
+    def test_list_sends_lens_and_never_both(self):
+        # #403: `lens` is the viewer VIEW, `direction` the stored wire fact. They are
+        # mutually exclusive at the API, so the client sends exactly what it was
+        # given, never both and never one standing in for the other.
+        t = FakeTransport(body=b'{"ok":true,"items":[],"cursor":null}')
+        _client(t).list_messages(to="abuse@x.com", lens="inbox")
+        url = t.last.full_url
+        self.assertIn("lens=inbox", url)
+        self.assertNotIn("direction=", url)
+
+    def test_list_omits_lens_by_default(self):
+        t = FakeTransport(body=b'{"ok":true,"items":[],"cursor":null}')
+        _client(t).list_messages(to="abuse@x.com", direction="inbound")
+        url = t.last.full_url
+        self.assertIn("direction=inbound", url)
+        self.assertNotIn("lens=", url)
+
     def test_search_params(self):
         t = FakeTransport(body=b'{"ok":true,"items":[],"cursor":null}')
         _client(t).search("invoice", mode="hybrid", limit=5)

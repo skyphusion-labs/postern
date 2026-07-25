@@ -263,6 +263,11 @@ class FakeTransport:
 
     def _list(self, params):
         direction = params.get("direction")
+        # #403: `lens` names the viewer-relative view; `direction` is the stored
+        # wire fact. The worker refuses both at once and refuses a viewerless lens,
+        # so the fake mirrors that shape rather than re-deriving a view from
+        # direction (the overload this issue removed).
+        lens = params.get("lens")
         to_filter = params.get("to")
         from_filter = params.get("from")
         mailbox = params.get("mailbox")
@@ -275,7 +280,7 @@ class FakeTransport:
             rows = [m for m in rows if m.get("mailbox") == mailbox]
         else:
             rows = [m for m in rows if not m.get("mailbox")]
-        if to_filter and direction == "inbound":
+        if to_filter and lens == "inbox":
             v = to_filter.strip().lower()
             needle = f",{v},"
             rows = [
@@ -287,6 +292,9 @@ class FakeTransport:
                     or (m["direction"] == "outbound" and m.get("from", "").strip().lower() != v)
                 )
             ]
+        elif to_filter and lens == "sent":
+            v = to_filter.strip().lower()
+            rows = [m for m in rows if m.get("from", "").strip().lower() == v]
         else:
             if direction:
                 rows = [m for m in rows if m["direction"] == direction]
@@ -587,6 +595,8 @@ class FakeTransport:
         # matches the subject only, body the body only, text (the default) either.
         field = params.get("field", "text")
         direction = params.get("direction")
+        lens = params.get("lens")
+        to_filter = params.get("to")
         # #352 review: SEARCH must pass mailbox= so a durable-folder search is
         # actually scoped server-side (never leak an arrival-view hit under a
         # colliding folderUid). "all" = no filter; unset = mailbox IS NULL.
@@ -603,6 +613,19 @@ class FakeTransport:
                 matched = q in subj or q in body
             if not matched or (direction and m.get("direction") != direction):
                 return False
+            # #403: the same split the list path applies.
+            if to_filter and lens == "inbox":
+                v = to_filter.strip().lower()
+                if f",{v}," not in self._delivered_set(m):
+                    return False
+                if not (
+                    m["direction"] == "inbound"
+                    or (m["direction"] == "outbound" and m.get("from", "").strip().lower() != v)
+                ):
+                    return False
+            elif to_filter and lens == "sent":
+                if m.get("from", "").strip().lower() != to_filter.strip().lower():
+                    return False
             if mailbox == "all":
                 return True
             if mailbox:

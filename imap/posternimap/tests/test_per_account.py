@@ -106,6 +106,21 @@ class ClientViewerParamTest(unittest.TestCase):
         c.search_page("hello", mode="substr")
         self.assertFalse(any("to=" in u for u in t.calls))
 
+    def test_list_and_search_send_lens_not_direction(self):
+        # #403 at the wire: the per-account INBOX must ask for lens=inbox. The worker
+        # refuses lens+direction together, so sending both would 400 the whole door.
+        c, t = self._client()
+        c.list_messages(to="v@example.org", lens="inbox")
+        c.search_page("hello", mode="substr", to="v@example.org", lens="inbox")
+        self.assertTrue(all("lens=inbox" in u for u in t.calls), t.calls)
+        self.assertFalse(any("direction=" in u for u in t.calls), t.calls)
+
+    def test_list_and_search_omit_lens_by_default(self):
+        c, t = self._client()
+        c.list_messages(direction="inbound")
+        c.search_page("hello", mode="substr", direction="inbound")
+        self.assertFalse(any("lens=" in u for u in t.calls), t.calls)
+
     def test_search_page_sends_from(self):
         c, t = self._client()
         c.search_page("hello", mode="substr", from_addr="v@example.org")
@@ -166,6 +181,10 @@ class AccountScopingTest(unittest.TestCase):
             self.assertIsNone(mb._to, name)
             self.assertIsNone(mb._from, name)
             self.assertIsNone(mb._viewer, name)
+            # #403: no viewer means no lens; the estate INBOX keeps filtering on the
+            # stored direction, which IS the honest whole-estate arrival view.
+            self.assertIsNone(mb._lens, name)
+        self.assertEqual(acct.select("INBOX")._direction, "inbound")
 
     def test_per_account_inbox_is_to_v_lens(self):
         acct = self._account(
@@ -175,7 +194,11 @@ class AccountScopingTest(unittest.TestCase):
         self.assertEqual(mb._to, "conrad@example.org")
         self.assertIsNone(mb._from)
         self.assertEqual(mb._viewer, "conrad@example.org")  # seen writes carry for=V
-        self.assertEqual(mb._direction, "inbound")
+        # #403: with a viewer the arrival view is the NAMED lens, not a direction.
+        # Asking for direction=inbound here would filter the stored wire fact and
+        # send the per-account INBOX blind to same-domain sends again (fc#792).
+        self.assertEqual(mb._lens, "inbox")
+        self.assertIsNone(mb._direction)
 
     def test_per_account_sent_is_from_v_lens(self):
         acct = self._account(
@@ -185,6 +208,8 @@ class AccountScopingTest(unittest.TestCase):
         self.assertEqual(mb._from, "conrad@example.org")
         self.assertIsNone(mb._to)
         self.assertIsNone(mb._viewer)  # Sent seen stays estate (read/write consistency)
+        # Sent pushes from=V + the stored outbound fact; no lens involved (#403).
+        self.assertIsNone(mb._lens)
         self.assertEqual(mb._direction, "outbound")
 
     def test_per_account_all_is_to_v_both_directions(self):

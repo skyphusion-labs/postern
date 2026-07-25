@@ -15,6 +15,7 @@ import type {
   SearchMode,
   SendInput,
   SendResult,
+  ViewLens,
 } from "./types.js";
 
 export const USER_AGENT = "postern-mcp (+https://github.com/skyphusion-labs/postern)";
@@ -53,6 +54,8 @@ export class PosternClient {
     limit?: number;
     cursor?: string;
     direction?: Direction;
+    to?: string;
+    lens?: ViewLens;
   }): Promise<Page<SearchHit>> {
     const params: Record<string, string> = { q: args.q };
     if (args.mode) params.mode = args.mode;
@@ -65,6 +68,11 @@ export class PosternClient {
     // validates it strictly (inbound|outbound) and 400s a typo, so we forward it
     // as-is and let the worker be the authority.
     if (args.direction) params.direction = args.direction;
+    // Viewer scope + named lens (worker #350/#403): to= is the viewer, lens= names
+    // the view. The worker refuses lens+direction and a viewerless lens, so a bad
+    // combination is a clean 400 here, never a quietly different answer.
+    if (args.to) params.to = args.to;
+    if (args.lens) params.lens = args.lens;
     const body = await this.requestGet("/api/search", params);
     return { items: (body.items as SearchHit[]) ?? [], cursor: body.cursor ?? null };
   }
@@ -74,6 +82,7 @@ export class PosternClient {
     from?: string;
     thread?: string;
     direction?: Direction;
+    lens?: ViewLens;
     q?: string;
     limit?: number;
     cursor?: string;
@@ -83,6 +92,7 @@ export class PosternClient {
     if (args.from) params.from = args.from;
     if (args.thread) params.thread = args.thread;
     if (args.direction) params.direction = args.direction;
+    if (args.lens) params.lens = args.lens;
     if (args.q) params.q = args.q;
     if (args.limit !== undefined) params.limit = String(args.limit);
     if (args.cursor) params.cursor = args.cursor;
