@@ -94,7 +94,21 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   // gate, mirroring /api/smtp-auth. handleSession owns CSRF for its state-changing
   // verbs. It returns null only for a path it does not own (guarded here already).
   if (path === "/api/session" || path === "/api/session/refresh") {
-    const sres = await handleSession(request, env);
+    // #429: this dispatch sits BEFORE the try/catch that wraps every gated route, so an
+    // unexpected throw here (a genuine D1 outage inside mintNativeSession, past the
+    // fail-closed throttle answer) escaped route-level error mapping entirely and
+    // surfaced as an unmapped runtime failure. Give the session path the same envelope.
+    //
+    // The #409 fail-closed answers are RESPONSES, not throws: an unreadable throttle
+    // store returns 503 E_AUTH_UNAVAILABLE and a rejected credential returns 401, and
+    // both return straight through this block untouched. What is caught here is only
+    // what would otherwise have escaped, which is why wrapping cannot swallow them.
+    let sres: Response | null;
+    try {
+      sres = await handleSession(request, env);
+    } catch (err) {
+      return sessionErrorResponse(err);
+    }
     if (sres) return sres;
   }
 
@@ -1477,6 +1491,27 @@ async function readJson<T>(request: Request): Promise<T> {
   } catch {
     throw new MailboxError("E_VALIDATION_ERROR", "invalid JSON body");
   }
+}
+
+/** The envelope for an UNEXPECTED throw on the PRE-GATE session path (#429).
+ *
+ *  A structured MailboxError maps exactly as it does on a gated route, so the two edges
+ *  answer identically for the same error. Anything else is, by construction, an infra
+ *  failure the session path did not anticipate, and it deliberately does NOT reuse
+ *  errorResponse unknown-error branch: that one answers 400 and echoes err.message, which
+ *  on a D1 outage would both blame the CALLER for a server failure and put internal error
+ *  text on the wire. A fixed 500 with a fixed message says the true thing and discloses
+ *  nothing; the detail goes to the log, where an operator can see it and a client cannot.
+ *
+ *  E_INTERNAL_SERVER_ERROR is the existing vocabulary for this (CONTRACT section 4), not a
+ *  new code minted for one route. */
+function sessionErrorResponse(err: unknown): Response {
+  if (err instanceof MailboxError) return errorResponse(err);
+  console.error("session route failed:", err instanceof Error ? err.message : String(err));
+  return json(
+    { ok: false, error: "E_INTERNAL_SERVER_ERROR", message: "session unavailable" },
+    500,
+  );
 }
 
 function errorResponse(err: unknown): Response {
