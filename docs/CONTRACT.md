@@ -1028,6 +1028,27 @@ Sent view (`lower(from_addr) = V`), never delivered-set based. Unscoped queries 
 are unchanged. **Edge (accepted, documented):** a true self-send (V to V only) stays
 Sent-only for V, born seen; correct, you wrote it.
 
+**`to=` under a bound SESSION is a recipient FILTER, not the viewer (#422).** With a
+session the ACCOUNT is the viewer (the boundary is "delivered to V or authored by V"),
+so `to=` no longer answers "whose mailbox is this". It is applied as ordinary
+delivered-set membership ANDed INSIDE that boundary, which is the same predicate `to=`
+means on every other auth path:
+
+```sql
+-- session viewer V, caller filter to=X
+(<account boundary for V>) AND COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || :X || ',%'
+```
+
+It can only ever NARROW the answer: a session asking `to=` another account's address gets
+an empty page, never that account's mail. It composes with `lens` (`lens=sent&to=X` is "my
+sent mail that went to X") and with `direction`, and it does NOT move the seen projection
+key, which stays the session identity unless `seenFor` says otherwise. Before #422 the
+parameter was accepted and then dropped: a session that filtered by correspondent got the
+UNFILTERED page back with no way to tell (the same false-PASS family as the swallowed
+`direction` in section 1). Role addresses are handled ahead of this rule: a session
+`to=R` for a role R the session is a member of is rewritten into the role boundary
+(#425) and never reaches the account-boundary path.
+
 **Why it moved (#403).** As first shipped, this predicate was implicit: `to=V` +
 `direction=inbound` WAS the lens. That made the plain filter unexpressible -- a caller asking
 "what actually arrived for `abuse@`" got the stored SENT copy of a message addressed to
