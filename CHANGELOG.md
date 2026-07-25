@@ -2,8 +2,14 @@
 
 Notable changes per release. SemVer-style: **v1.0.0** is the first production-ready
 Core v1.0 mailbox (M1 contract). Newest first. This tracks the inbound Worker +
-`postern-client` release train; `@skyphusion/postern-mcp` (`mcp/`) tags and
-versions on its own npm publish cadence and does not get an entry here by convention.
+`postern-client` release train (the `v*` tags).
+
+`@skyphusion/postern-mcp` (`mcp/`) rides its own `postern-mcp-v*` tag track and is
+deliberately **release-less**: those tags get no section here and cut no GitHub
+Release, because the npm registry is that train's ledger and duplicating it in two
+places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
+enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
+mismatched MCP tag fails before it publishes.
 
 ## v1.1.0
 

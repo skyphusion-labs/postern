@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"log"
 	"net"
 	"strings"
 	"testing"
@@ -62,6 +64,55 @@ func TestLoadConfig_LegacyMode(t *testing.T) {
 	}
 	if cfg.inboundMode() != "legacy-send" {
 		t.Errorf("inboundMode = %q, want legacy-send", cfg.inboundMode())
+	}
+}
+
+func TestLoadConfig_LegacyModeWarnsDeprecated(t *testing.T) {
+	// #414: the legacy inbound path (POSTERN_INGEST_URL unset, EMAIL_WORKER_URL
+	// set) must not go silent -- it silently re-SENDS received mail out the
+	// worker's /send door. loadConfig itself must log a loud warning at startup
+	// naming the misroute, not just leave it to be inferred from inboundMode().
+	clearRelayEnv(t)
+	t.Setenv("EMAIL_WORKER_URL", "https://worker.example/send")
+	t.Setenv("EMAIL_RELAY_TOKEN", "tok")
+
+	orig := log.Writer()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "DEPRECATED") {
+		t.Errorf("startup log = %q, want a DEPRECATED warning", out)
+	}
+	if !strings.Contains(out, "EMAIL_WORKER_URL") {
+		t.Errorf("startup log = %q, want it to name EMAIL_WORKER_URL", out)
+	}
+	if !strings.Contains(out, "/send") || !strings.Contains(out, "/ingest") {
+		t.Errorf("startup log = %q, want it to name both the /send misroute and the /ingest fix", out)
+	}
+}
+
+func TestLoadConfig_IngestModeNoLegacyWarning(t *testing.T) {
+	// The modern /ingest seam must never trip the legacy warning.
+	clearRelayEnv(t)
+	t.Setenv("POSTERN_INGEST_URL", "https://core.example/ingest")
+	t.Setenv("POSTERN_TRANSPORT_TOKEN", "tok")
+
+	orig := log.Writer()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if strings.Contains(buf.String(), "DEPRECATED") {
+		t.Errorf("startup log = %q, want no deprecation warning on the modern /ingest path", buf.String())
 	}
 }
 

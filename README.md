@@ -201,6 +201,11 @@ recipients; if a message's `From` is off the allowed domain it is rewritten to
 No em/en-dashes in source, commits, or docs. Commits use conventional-commits
 (`feat(inbound): ...`, `fix(relay): ...`).
 
+Merges to `main` require the `ci`, `coverage`, CodeQL, and `code_quality` checks
+green, with the branch up to date with `main` (#419). There are 0 required
+approvals and no CODEOWNERS: this is a solo-maintainer project, so review theater
+would be dishonest gatekeeping; the checks above are the actual gate.
+
 ---
 
 ## Operating the reference deployment (skyphusion)

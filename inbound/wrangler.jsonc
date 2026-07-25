@@ -95,6 +95,15 @@
     //   "FILE_ALSO_UNDER": "abuse@example.com=owner@example.com",
     "FILE_ALSO_UNDER": "",
 
+    // OPTIONAL: role-address MEMBERSHIP for bound webmail sessions (#425). Comma-
+    // separated role=member+member entries, full addresses both sides; a member reads
+    // that role queue as its own view, with read state kept per member. MIRROR of the
+    // IMAP door POSTERN_IMAP_VIEWER_ROLES (same syntax, same refusals) -- keep the two
+    // equal, deploy this Worker before the door, and diff them with GET /api/roles.
+    // Any malformed entry drops the WHOLE map (fail-closed). Empty = feature off.
+    //   "POSTERN_VIEWER_ROLES": "abuse@example.com=ada@example.com+ben@example.com",
+    "POSTERN_VIEWER_ROLES": "",
+
     // Outbound send/reply defaults. DEFAULT_FROM must be on ALLOWED_FROM_DOMAIN.
     // OUTBOUND_TRANSPORT unset/"cf" = Cloudflare Email Sending (default).
     "DEFAULT_FROM": "noreply@example.com",

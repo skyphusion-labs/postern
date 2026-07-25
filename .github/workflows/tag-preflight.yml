@@ -1,0 +1,53 @@
+name: tag-preflight
+
+# The ONE gate every tag-triggered workflow runs before it does anything (#418).
+#
+# WHY THIS EXISTS: deploy, release, publish-pypi, relay-image and imap-image all
+# fire on the same `v*` tag as PEERS, with no shared gate and no ordering, and
+# npm-mcp does the same on `postern-mcp-v*`. So `git push origin vX.Y.Z` could
+# put PRODUCTION ahead of the release ledger: v1.0.5 is the live proof (deploy
+# succeeded and both door images built and roll-dispatched, while release and
+# PyPI failed downstream on the missing version pins). Every one of those
+# workflows now calls this reusable workflow as a `preflight` job that all their
+# other jobs list in `needs:`, so a tag-hostile state stops the whole fan-out
+# instead of half of it.
+#
+# WHY NOT ONLY IN ci.yml: nothing forces a tag to come from a merged release PR.
+# The ship path is "land the pins on main, THEN `git tag -a`", and a hand-cut tag
+# never touches a PR gate. The assert has to run on the tag itself.
+#
+# The checks live in .github/scripts/tag-preflight.sh (regression-tested by
+# .github/scripts/tests/tag-preflight.test.sh, run in ci.yml).
+
+on:
+  workflow_call:
+    inputs:
+      track:
+        description: "release (the v* train) or mcp (the postern-mcp-v* train)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the ancestry assert needs to reach origin/main.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # The track goes through the environment, never interpolated into the
+      # shell line, so the workflow expression cannot become shell input.
+      - name: Assert the tagged tree is shippable
+        env:
+          TRACK: ${{ inputs.track }}
+        run: bash .github/scripts/tag-preflight.sh "$TRACK"
