@@ -181,6 +181,13 @@
   .folders .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .folders .fcount { color: var(--muted); font-size: 12px; flex-shrink: 0; }
   .folders .fcount.unread { color: var(--accent); font-weight: 600; }
+  /* Role queues (#425): their own group, never mixed into the personal folders. */
+  .folders .fgroup {
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; padding: 10px 10px 4px; border-top: 1px solid var(--line);
+    margin-top: 6px;
+  }
+  .queue-note { color: var(--muted); font-size: 12px; margin-top: 8px; }
   .row-item.unread .from, .row-item.unread .subject { font-weight: 700; }
   .row-item .star { color: var(--muted); margin-right: 4px; }
   .row-item .star.on { color: #e5c07b; }
@@ -873,8 +880,28 @@
   // with, so the rail and the list agree. Token mode has no viewer: the API refuses a
   // viewerless lens, and the honest token-mode view IS the estate arrival view, so it
   // keeps filtering on the stored direction.
+  // Role queues (#425). A role folder id is "role:<address>"; the address is the QUEUE,
+  // and membership was decided server-side (the rail only ever lists queues this session
+  // is a member of, and every read is re-checked at the API). Read state stays keyed on
+  // the signed-in person, which the server derives -- the page never sends seenFor.
+  function roleAddress(folderId) {
+    return folderId && folderId.indexOf("role:") === 0 ? folderId.slice(5) : "";
+  }
+  function currentRole() {
+    return state.authMode === "session" ? roleAddress(state.folder) : "";
+  }
+
   function applyFolderScope(p) {
     var session = state.authMode === "session";
+    var role = currentRole();
+    if (role) {
+      // The queue arrival view, exactly as the IMAP door asks for it: to=R with the
+      // NAMED inbox lens (never direction=inbound, which would drop same-domain sends
+      // delivered TO the queue). No mailbox, no other lens: the server refuses those.
+      p.to = role;
+      p.lens = "inbox";
+      return;
+    }
     if (state.folder === "inbox") {
       if (session) p.lens = "inbox"; else p.direction = "inbound";
     } else if (state.folder === "sent") {
@@ -1034,7 +1061,7 @@
       { id: "junk", label: "Junk", count: 0, unread: 0 },
       { id: "archive", label: "Archive", count: 0, unread: 0 }
     ];
-    rows.forEach(function (f) {
+    function folderButton(f) {
       var countLabel = f.unread > 0 ? String(f.unread) : (f.count > 0 ? String(f.count) : "");
       var btn = el("button", {
         type: "button",
@@ -1045,6 +1072,7 @@
         el("span", { class: "fname", text: f.label || f.id }),
         el("span", { class: "fcount" + (f.unread > 0 ? " unread" : ""), text: countLabel })
       ]);
+      if (f.role) btn.setAttribute("title", f.role + " (shared queue)");
       btn.addEventListener("click", function () {
         if (state.folder === f.id) return;
         state.folder = f.id;
@@ -1053,13 +1081,38 @@
         renderFolderRail();
         resetAndLoad();
       });
-      nav.appendChild(btn);
+      return btn;
+    }
+    // Personal folders first, then the role queues under their own heading -- the same
+    // shape the IMAP door publishes (a Roles parent with one folder per queue), so the
+    // two human doors read the same way. A queue is never merged into Inbox.
+    rows.filter(function (f) { return !f.role; }).forEach(function (f) {
+      nav.appendChild(folderButton(f));
     });
+    var queues = rows.filter(function (f) { return !!f.role; });
+    if (queues.length) {
+      nav.appendChild(el("div", {
+        class: "fgroup",
+        text: "Roles",
+        title: "Shared queues you are a member of: read and mark-read only"
+      }));
+      queues.forEach(function (f) { nav.appendChild(folderButton(f)); });
+    }
   }
 
   function refreshFolders() {
     return api("/api/folders").then(function (body) {
       state.folders = body.folders || [];
+      // A queue can vanish (membership changed, or the operator map became unusable and
+      // the server now serves NO queue). Land back on Inbox rather than keep asking for
+      // a view the server will no longer scope: fail closed in the UI too.
+      var role = currentRole();
+      if (role && !state.folders.some(function (f) { return f.id === state.folder; })) {
+        state.folder = "inbox";
+        state.q = "";
+        resetAndLoad();
+        return;
+      }
       renderFolderRail();
     }).catch(function () {
       // Folder counts are best-effort; the rail still works from defaults.
@@ -1618,7 +1671,13 @@
       ])
     ]);
     var actions = [];
-    if (!m.isDraft) {
+    // Role queue (#425): read plus mark-read ONLY. Starring, filing and deleting would
+    // write shared state on behalf of every other member of the queue, so the API
+    // refuses them and the page must not offer them either -- an affordance that always
+    // errors is worse than no affordance. Reply/forward stay available: you answer the
+    // queue as YOURSELF, from your own identity, which is the honest semantic.
+    var inQueue = !!currentRole();
+    if (!m.isDraft && !inQueue) {
       var starBtn = el("button", { text: m.flagged ? "Unstar" : "Star" });
       starBtn.addEventListener("click", function () {
         var next = !m.flagged;
@@ -1690,6 +1749,13 @@
     }
     if (actions.length) {
       head.appendChild(el("div", { class: "msg-actions compose-actions" }, actions));
+    }
+    if (inQueue) {
+      head.appendChild(el("div", {
+        class: "queue-note",
+        text: "Shared queue: read and mark-read only. Marking read is yours alone, and a reply sends as "
+          + ((state.identity && state.identity.from) || "you") + "."
+      }));
     }
     r.appendChild(head);
 

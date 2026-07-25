@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .client import (
     Attachment,
+    OutboundAttachment,
     PosternAuthError,
     PosternClient,
     PosternError,
@@ -21,6 +22,7 @@ __all__ = [
     "PosternError",
     "PosternAuthError",
     "Attachment",
+    "OutboundAttachment",
     "from_env",
 ]
 
