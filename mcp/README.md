@@ -38,7 +38,7 @@ flowchart LR
 | Tool | What it does | Wraps |
 |---|---|---|
 | `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`, and `attachments` (each `content` base64 + optional `filename`, `mime_type`). The worker caps attachment count and total size and rejects an oversize set with a clear error. With a per-identity token the worker stamps `From` to the bound identity; any caller `from` is discarded. | `POST /api/send` |
-| `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`. **No attachments:** `/api/reply` does not carry them today (the worker `reply()` path ignores an `attachments` field), so the tool omits it rather than silently drop files; attach on `mailbox_send` instead. | `POST /api/reply` |
+| `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`, `mode` (`reply` default, or `replyAll` to include the original recipients, derived server-side from stored state), `quote_original`, and `attachments` (same shape and worker-enforced caps as `mailbox_send`; carried by `/api/reply` since #363). | `POST /api/reply` |
 
 Send tools are **MUTATING**: they deliver mail. They register only when a send token
 is present (see below). The server owns From-enforcement, DKIM signing, threading, and
@@ -150,8 +150,8 @@ This mirrors the server-side per-function token split (#85): the worker resolves
 `/api/reply` but `403` on `/api/search` and `/api/admin/*`. So even if a send token
 leaked, its blast radius is bounded to sending; it cannot read or administer.
 
-The boot-level gate is proven by `npm run smoke` and documented end to end in
-[`PROOF-per-identity-send.md`](PROOF-per-identity-send.md).
+The boot-level gate is proven by `npm run smoke` (`scripts/stdio-smoke.mjs`) and
+unit-covered in `test/send-tools.test.ts`.
 
 ## Per-identity send
 
@@ -210,8 +210,12 @@ npm run build && npm run smoke   # boots the built server over stdio and asserts
 env exposes exactly the five read tools, and adding `POSTERN_SEND_TOKEN` adds
 `mailbox_send` + `mailbox_reply`. Live request scope-gating (a read token gets `403` on
 send, a send token `403` on read) and the per-identity From-binding are enforced by the
-worker (#85, #138); the end-to-end proof is in
-[`PROOF-per-identity-send.md`](PROOF-per-identity-send.md).
+worker (#85, #138); the authoritative contract is
+[`docs/SEND-IDENTITIES.md`](../docs/SEND-IDENTITIES.md). The end-to-end
+verification (two-party, live worker: spoofed same-domain `from` overridden to
+the token's bound identity for every registered token, unknown token 401) was
+run 2026-06; the record is maintained in the operators' private infrastructure
+repository.
 
 ## License
 

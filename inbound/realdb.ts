@@ -8,7 +8,9 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import * as store from "./src/store";
 
-export function realEnv(): { env: Env; ctx: ExecutionContext; raw: DatabaseSync } {
+export function realEnv(
+  overrides: Record<string, unknown> = {},
+): { env: Env; ctx: ExecutionContext; raw: DatabaseSync } {
   const db = new DatabaseSync(":memory:");
   db.exec(readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
   const DB = {
@@ -39,6 +41,10 @@ export function realEnv(): { env: Env; ctx: ExecutionContext; raw: DatabaseSync 
     // Read-door token, so an API-surface test can drive handleApi against the
     // real engine instead of the fake store.
     POSTERN_API_TOKEN: "test-token",
+    // Overrides let a suite turn on a real feature gate (e.g.
+    // WEBMAIL_AUTH_BACKEND=native, so a REAL session can be minted against the
+    // real webmail_sessions table instead of a stand-in for one).
+    ...overrides,
   } as unknown as Env;
   const ctx = { waitUntil() {} } as unknown as ExecutionContext;
   return { env, ctx, raw: db };

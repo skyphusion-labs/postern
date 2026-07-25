@@ -139,3 +139,61 @@ describe("mailbox_send attachments", () => {
     expect(arg.attachments).toBeUndefined();
   });
 });
+
+// The worker's reply() has taken mode / quoteOriginal / attachments since #363
+// (ReplyRequest, mailbox.ts), but the MCP schema omitted all three, so an agent
+// could not use them and the README claimed attachments were impossible. These
+// assert the passthrough by the WORKER field names, so the shapes cannot drift.
+describe("mailbox_reply carries the full worker ReplyRequest surface (#363)", () => {
+  const tool = () => SEND_TOOLS.find((t) => t.name === "mailbox_reply")!;
+
+  it("forwards mode, quote_original and attachments in the worker shape", async () => {
+    const client: any = { reply: vi.fn().mockResolvedValue({ messageId: "m2", threadId: "t1" }) };
+    await tool().handler(client, {
+      message_id: "orig@id",
+      text: "thanks",
+      mode: "replyAll",
+      quote_original: true,
+      attachments: [{ content: "YmFzZTY0", filename: "report.pdf", mime_type: "application/pdf" }],
+    });
+    expect(client.reply).toHaveBeenCalledWith({
+      messageId: "orig@id",
+      text: "thanks",
+      html: undefined,
+      cc: undefined,
+      bcc: undefined,
+      from: undefined,
+      mode: "replyAll",
+      quoteOriginal: true,
+      // snake_case in, worker camelCase out -- the same mapping mailbox_send uses.
+      attachments: [{ content: "YmFzZTY0", filename: "report.pdf", mimeType: "application/pdf" }],
+    });
+  });
+
+  it("omits all three when unset, so a plain reply is the request it always was", async () => {
+    const client: any = { reply: vi.fn().mockResolvedValue({ messageId: "m2", threadId: "t1" }) };
+    await tool().handler(client, { message_id: "orig@id", text: "thanks" });
+    const sent = client.reply.mock.calls[0][0];
+    expect(sent.mode).toBeUndefined();
+    expect(sent.quoteOriginal).toBeUndefined();
+    expect(sent.attachments).toBeUndefined();
+  });
+
+  it("validates mode against the worker enum (a typo is refused, not forwarded)", () => {
+    const schema = tool().inputSchema as any;
+    expect(schema.mode.parse("reply")).toBe("reply");
+    expect(schema.mode.parse("replyAll")).toBe("replyAll");
+    expect(() => schema.mode.parse("reply_all")).toThrow();
+    expect(() => schema.mode.parse("replyall")).toThrow();
+    // and the other two are declared at all (the omission this fixes)
+    expect(schema.quote_original).toBeDefined();
+    expect(schema.attachments).toBeDefined();
+  });
+
+  it("still refuses an empty body with the new params present", async () => {
+    const client: any = { reply: vi.fn() };
+    await expect(tool().handler(client, { message_id: "m", mode: "replyAll", quote_original: true }))
+      .rejects.toThrow(/text.*html/);
+    expect(client.reply).not.toHaveBeenCalled();
+  });
+});

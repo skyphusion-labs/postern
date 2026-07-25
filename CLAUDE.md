@@ -27,7 +27,7 @@ Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/A
   POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP).
 - **`mcp/`** -- the MCP server (TypeScript) so agents speak the mailbox over MCP. Published on npm
   as **`@skyphusion/postern-mcp`** (`npx -y @skyphusion/postern-mcp`). **Per-identity send** is first-class here: each
-  human/agent sends under its OWN identity via per-identity creds (`mcp/PROOF-per-identity-send.md`).
+  human/agent sends under its OWN identity via per-identity creds (`docs/SEND-IDENTITIES.md`).
 - **`webmail/`** -- a single self-contained page (vanilla HTML/CSS/JS, no build step) served by the
   worker at **`/webmail`**. Read-only human door: list, read, threads, search. BYO-token in
   `sessionStorage` only, HTML rendered in a sandboxed iframe (no scripts/trackers), locked-down CSP.

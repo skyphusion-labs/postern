@@ -98,4 +98,13 @@ export interface ReplyInput {
   cc?: string | string[];
   bcc?: string | string[];
   from?: string;
+  /** replyAll derives the original To/Cc recipients server-side, excluding the
+   *  sender; default "reply" (worker ReplyRequest.mode). */
+  mode?: "reply" | "replyAll";
+  /** Append a server-built quote of the original, from stored state
+   *  (worker ReplyRequest.quoteOriginal). */
+  quoteOriginal?: boolean;
+  /** Same attachments shape as send (#363): base64 over JSON, worker-authoritative
+   *  caps. Omitted -> the reply is byte-for-byte the no-attachment request. */
+  attachments?: SendAttachmentInput[];
 }

@@ -745,8 +745,19 @@
         (light ? ";color:#1a1a1a;background:#ffffff" : ";color:#e7e9ee;background:#1c1f26;white-space:pre-wrap") +
         "}a{color:#6ea8fe}img{max-width:100%;height:auto}</style>";
     }
+    // Defense in depth for the message iframe (#409). sandbox="" (no scripts, no
+    // same-origin, no forms) is the primary isolation and the served-page CSP is
+    // inherited by this srcdoc document, but both are single points of failure that
+    // live OUTSIDE the document; this meta policy travels WITH the srcdoc, so the
+    // rendered mail body stays inert even if either one is ever loosened by mistake.
+    // style-src 'unsafe-inline' is required: baseStyle injects a <style> block and
+    // neutralizeRemoteHtml hoists the message own <style> elements into the body.
+    // img-src data: is required for the blocked-image placeholder (remote images are
+    // stripped before they reach here; nothing else may load).
+    var FRAME_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:";
     function frameFor(inner, light) {
-      var doc = '<!doctype html><html><head><meta charset="utf-8">' + baseStyle(light) +
+      var doc = '<!doctype html><html><head><meta charset="utf-8">' +
+        '<meta http-equiv="Content-Security-Policy" content="' + FRAME_CSP + '">' + baseStyle(light) +
         '</head><body>' + inner + '</body></html>';
       var f = document.createElement("iframe");
       f.className = "msg-body-frame";
@@ -942,7 +953,18 @@
     }).then(function (res) {
       $("siSubmit").disabled = false;
       if (res.status === 200 && res.body && res.body.ok) { $("siPass").value = ""; onSession(res.body); return; }
-      if (res.status === 429) { $("signinErr").textContent = "Too many attempts. Please wait and try again."; return; }
+      // Locked out by the mint throttle (#409): the server sends Retry-After and a
+      // retryAfter field, so tell the user how long instead of "wait a bit".
+      if (res.status === 429) {
+        var wait = res.body && res.body.retryAfter ? Number(res.body.retryAfter) : 0;
+        $("signinErr").textContent = wait > 0
+          ? "Too many attempts. Try again in " + Math.ceil(wait / 60) + " minute(s)."
+          : "Too many attempts. Please wait and try again.";
+        return;
+      }
+      // The throttle store is unreachable, so the server refuses rather than run the
+      // sign-in unthrottled (#409 fail-closed). Not a credential problem; say so.
+      if (res.status === 503) { $("signinErr").textContent = "Sign-in is temporarily unavailable. Try again shortly."; return; }
       $("signinErr").textContent = "Sign in failed. Check your username and password.";
     }).catch(function () {
       $("siSubmit").disabled = false;
@@ -1197,7 +1219,20 @@
       var m = body.message;
       renderReading(m);
       if (m && m.seen === false) {
-        apiOrganize("/api/messages/seen", { ids: [m.messageId], seen: true }).then(function () {
+        // #410: scope the mark-read to OUR viewer explicitly. With no "for" field
+        // this takes the estate path, which sets the row-level flag AND realigns
+        // every other recipient override -- so A opening a shared message would mark
+        // it read in B mailbox, the exact recipient boundary #350 exists to draw. The
+        // worker now binds the viewer server-side too (belt and braces), but sending
+        // it here also keeps a new page correct against an older worker, and it
+        // mirrors what the IMAP door already does (posternimap/client.py). BYO-token
+        // mode carries no bound identity in the page, so it sends no "for" and keeps
+        // the documented estate behavior for an operator holding an estate token.
+        var seenBody = { ids: [m.messageId], seen: true };
+        if (state.authMode === "session" && state.identity && state.identity.from) {
+          seenBody.for = state.identity.from;
+        }
+        apiOrganize("/api/messages/seen", seenBody).then(function () {
           m.seen = true;
           if (item) item.classList.remove("unread");
           state.items.forEach(function (it) {

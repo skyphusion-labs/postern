@@ -145,7 +145,10 @@ curl "https://<your-worker>.<account>.workers.dev/api/threads/<threadId>" \
 
 `direction` (`inbound`/`outbound`) filters the stored wire fact; `lens` (`inbox`/`sent`) asks
 for a viewer's VIEW and needs a viewer (`to=`). They cannot be combined, and an unknown value
-of either is a `400 E_VALIDATION_ERROR` rather than a quietly-dropped filter. `mode=fts` on
+of either is a `400 E_VALIDATION_ERROR` rather than a quietly-dropped filter. `seenFor=<address>`
+changes only WHOSE read/unread state is rendered (and what `seen=` filters on), never which rows
+come back: `?to=abuse@example.com&seenFor=you@example.com` is the role's mail as YOU have read it.
+A bound webmail session may only name its own address there (`403 E_FORBIDDEN` otherwise). `mode=fts` on
 `/api/search` requires EVERY word of the query to appear, so an empty result set is a real
 "not here" (CONTRACT sections 1 and 10.9).
 

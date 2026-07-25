@@ -177,7 +177,31 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         }
         forRecipient = body.for.trim().toLowerCase();
       }
-      const updated = await store.setSeen(env, body.ids as string[], body.seen, forRecipient);
+      // Viewer binding under SESSION auth (#410). This route was the one of its
+      // family of three that trusted `for` verbatim: its siblings (flags, move) and
+      // the single-message GET/DELETE/attachment routes all bind the session viewer.
+      // Under a session the viewer is the BOUND identity, never a caller-supplied
+      // address, so a webmail user can neither write another account read-state
+      // override (`for: someone-else@`) nor flip ROW-LEVEL messages.seen estate-wide
+      // by omitting `for`. A mismatched explicit `for` is refused rather than
+      // silently rewritten, so a confused client learns it is confused.
+      //
+      // BEARER-TOKEN CALLERS ARE UNTOUCHED, deliberately: the IMAP door passes `for`
+      // with a token and is legitimately estate-scoped (#350/#357). Nothing in this
+      // block runs unless resolution.viaSession.
+      let viewer: string | undefined;
+      if (resolution.viaSession && resolution.identity) {
+        const bound = resolution.identity.from.trim().toLowerCase();
+        if (forRecipient && forRecipient !== bound) {
+          return json(
+            { ok: false, error: "E_FORBIDDEN", message: "for must match the session identity" },
+            403,
+          );
+        }
+        forRecipient = bound;
+        viewer = bound;
+      }
+      const updated = await store.setSeen(env, body.ids as string[], body.seen, forRecipient, viewer);
       return json({ ok: true, updated });
     }
 
@@ -497,12 +521,15 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         url.searchParams,
         Boolean(sessionIdentity || url.searchParams.get("to")?.trim()),
       );
+      // Whose seen state to render (#404): same parameter, same rules, both endpoints.
+      const seenFor = parseSeenFor(url.searchParams, sessionIdentity);
       const page = await store.search(env, {
         q,
         mode: modeParam as "fts" | "substr" | "semantic" | "hybrid" | undefined,
         field: fieldParam === null ? undefined : fieldParam,
         direction: dirParam === null ? undefined : dirParam,
         lens,
+        seenFor,
         // Viewer scope (#350): recipient-relative INBOX + effective seen, mirroring
         // /api/messages?to=. Unvalidated like list's `to` (a bare address filter).
         to: url.searchParams.get("to") ?? undefined,
@@ -669,12 +696,42 @@ function parseViewLens(p: URLSearchParams, hasViewer: boolean): import("./store"
   return raw;
 }
 
+/** WHOSE seen state to render (#404), independent of which rows come back.
+ *
+ *  A folder view keyed to a role address (`to=R`) needs the HUMAN reader's read/unread
+ *  state, which the projection key (`viewer ?? to`) could not express. `seenFor` sets
+ *  that key only; the row predicate is untouched. Absent, every read is byte-identical
+ *  to before.
+ *
+ *  Authorization: a BOUND SESSION may only name ITSELF. Sessions are per-person, and
+ *  another person's read/unread state is theirs; letting a session pass an arbitrary
+ *  address would turn a rendering parameter into a peephole. Static tokens are
+ *  estate-scoped by construction (they already read every row), so they may name any
+ *  address, which is exactly what an operator/door read needs. */
+function parseSeenFor(p: URLSearchParams, sessionIdentity?: string): string | undefined {
+  const raw = p.get("seenFor");
+  if (raw === null) return undefined;
+  const value = raw.trim().toLowerCase();
+  if (!EMAIL_RE.test(value)) {
+    throw new MailboxError("E_VALIDATION_ERROR", "seenFor must be a bare email address");
+  }
+  if (sessionIdentity && value !== sessionIdentity.trim().toLowerCase()) {
+    throw new MailboxError(
+      "E_FORBIDDEN",
+      "seenFor must be the bound session identity: seen state belongs to its reader",
+      403,
+    );
+  }
+  return value;
+}
+
 function parseListQuery(url: URL, sessionIdentity?: string): import("./store").ListQuery {
   const p = url.searchParams;
   const mailbox = p.get("mailbox");
   const to = p.get("to") ?? undefined;
   return {
     to,
+    seenFor: parseSeenFor(p, sessionIdentity),
     from: p.get("from") ?? undefined,
     thread: p.get("thread") ?? undefined,
     direction: parseDirection(p),
