@@ -152,11 +152,12 @@ interface ListQuery {
   to?: string; from?: string; thread?: string;
   direction?: "inbound" | "outbound";  // the STORED wire fact, filtered exactly
   lens?: "inbox" | "sent";             // named viewer-relative view (needs a viewer)
+  seenFor?: string;                    // whose seen state to RENDER (projection only)
   q?: string;                         // FTS over subject + body
   limit?: number;                     // default 50, max 200
   cursor?: string;                    // opaque; encodes (date, id) of the last row
 }
-interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; limit?: number; cursor?: string }
+interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; seenFor?: string; limit?: number; cursor?: string }
 interface Page<T> { items: T[]; cursor: string | null }   // cursor=null means no more
 interface SearchHit { message: StoredMessageSummary; score?: number; snippet?: string }
 ```
@@ -306,11 +307,11 @@ none touches D1 directly (#25, #26).
 
 | Method | Route | Purpose | Milestone |
 |---|---|---|---|
-| GET | `/api/messages?to=&from=&thread=&direction=&lens=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `mailbox=archive\|trash\|junk\|all`, unset = arrival views) | M1 / webmail v2 (#352) / #403 |
+| GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views) | M1 / webmail v2 (#352) / #403 / #404 |
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
-| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&to=&from=&direction=&lens=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` mean exactly what they do on `/api/messages` (#403) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 |
+| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&to=&from=&direction=&lens=&seenFor=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` / `seenFor` mean exactly what they do on `/api/messages` (#403/#404) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 / #404 |
 | GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
@@ -1068,5 +1069,25 @@ VIEW tier (a deterrent), NOT a credential boundary: the door still reads with an
 estate-wide token, so per-user privacy stays the later credential work (#351 / D-AUTH-2).
 Flipping a live door bumps `POSTERN_IMAP_UIDVALIDITY` on the same roll (folder membership
 changes; RFC 3501). See `imap/README.md`.
+
+**Whose seen state a read RENDERS: `seenFor` (#404).** The projection key and the row
+predicate are SEPARATE axes. `to=` / the session identity select WHICH ROWS come back;
+the optional `seenFor=<bare address>` selects WHOSE `message_seen_by` row the effective-seen
+COALESCE reads, and nothing else. Absent, the key is the viewer exactly as above
+(session identity, else `to=`), so every pre-#404 read is byte-identical.
+
+It exists because a folder view keyed to a ROLE address (`to=abuse@`) has no human
+behind the key: the role owns no read/unread state, so before #404 such a view could
+only render `messages.seen`, the estate flag. With `seenFor=conrad@` the same rows come
+back rendered as their actual reader sees them. `seenFor` NEVER widens or narrows the
+row set; it also keys the `seen=` FILTER (search), so "R's mail that I have not read"
+is one query rather than a client-side subtraction. (`/api/messages` has no `seen=`
+filter at all; the filtered form is `/api/search` or `/api/folders`.)
+
+Authorization: a BOUND SESSION may only name ITSELF (`E_FORBIDDEN` otherwise) -- sessions
+are per-person and another person's read state is theirs, so a rendering parameter must
+not become a peephole. A static token is estate-scoped by construction (it already reads
+every row) and may name any address, which is what an operator or door read needs. A
+malformed address is `E_VALIDATION_ERROR`, never a silently-dropped parameter.
 
 `/api/folders` unread counts (#352) MUST use effective seen when they land.

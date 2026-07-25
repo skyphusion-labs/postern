@@ -116,6 +116,11 @@ export interface ListQuery {
    *  `direction`). Requires a viewer (`to` or `viewer`); mutually exclusive with
    *  `direction`. Validated at the API edge. */
   lens?: ViewLens;
+  /** WHOSE seen state this read renders (#404). Overrides the seen-projection key
+   *  ONLY; the row predicate stays keyed on `to` / `viewer`. Absent = today's
+   *  behavior exactly. Validated at the API edge (bare address; a bound session may
+   *  only name itself). */
+  seenFor?: string;
   mailbox?: MailboxFilter;
   /** Internal account boundary for a bound webmail session. Unlike public `to`,
    * this includes the viewer's authored Sent rows in All while keeping Inbox
@@ -147,6 +152,9 @@ export interface SearchQuery {
   // Named viewer-relative view (#403); requires a viewer (to/viewer), mutually
   // exclusive with direction. Same semantics as ListQuery.lens in every mode.
   lens?: ViewLens;
+  // Whose seen state to render (#404); same semantics as ListQuery.seenFor, in
+  // every mode (the SQL modes project it, semantic/hybrid hydrate it).
+  seenFor?: string;
   // Viewer address for recipient-scoped search (#350): delivered-set membership +
   // viewer-relative INBOX + effective (per-recipient) seen, same as ListQuery.to.
   to?: string;
@@ -1391,6 +1399,26 @@ export async function thread(env: Env, threadId: string, viewer?: string): Promi
  *  per-recipient override (message_seen_by) COALESCEd over the row-level
  *  messages.seen; without a viewer, the row-level flag as today. The bound `?`
  *  lives in the SELECT column list, so its bind MUST precede the WHERE binds. */
+/** WHOSE per-recipient seen state a read RENDERS (#404).
+ *
+ *  Independent of WHICH ROWS a read returns: `to` / `viewer` select the rows,
+ *  `seenFor` only picks the `message_seen_by` row the COALESCE reads. A folder view
+ *  keyed to a role address (`to=R`) can therefore render the human reader's seen
+ *  state without the predicate pretending R is the reader. Absent, the key is the
+ *  viewer as before (session identity, else `to`), so every existing read is
+ *  byte-identical.
+ *
+ *  It also keys the `seen=` FILTER, which shares this expression: "R's mail that I
+ *  have not read" is one query, not a client-side subtraction. */
+function seenKey(q: { seenFor?: string; viewer?: string; to?: string }): string | undefined {
+  return (
+    q.seenFor?.trim().toLowerCase() ||
+    q.viewer?.trim().toLowerCase() ||
+    q.to?.trim().toLowerCase() ||
+    undefined
+  );
+}
+
 function seenProjection(viewer: string | undefined): { expr: string; binds: unknown[] } {
   if (!viewer) return { expr: "m.seen", binds: [] };
   return {
@@ -1613,7 +1641,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   const limit = clampLimit(q.limit);
   const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const recipientViewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(accountViewer ?? recipientViewer);
+  const sp = seenProjection(seenKey(q));
   const seenExpr = sp.expr;
   const where: string[] = [];
   const binds: unknown[] = [...sp.binds];
@@ -1858,7 +1886,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
 
   const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const recipientViewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(accountViewer ?? recipientViewer);
+  const sp = seenProjection(seenKey(q));
   const seenExpr = sp.expr;
   // Seen bind (SELECT column) first, then the FTS match bind, then recipient/cursor.
   const binds: unknown[] = [...sp.binds, ftsExpr];
@@ -1968,7 +1996,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
 
   const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const recipientViewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(accountViewer ?? recipientViewer);
+  const sp = seenProjection(seenKey(q));
   const seenExpr = sp.expr;
 
   // Case-insensitivity is SQLite LIKE's native ASCII folding (CONTRACT 10.8);
@@ -2151,7 +2179,7 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
 
   const ranked = await nearestMessageIds(env, queryVec, limit);
-  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), accountViewer ?? viewer);
+  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), seenKey(q));
   const items: SearchHit[] = [];
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
@@ -2175,6 +2203,7 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     q: q.q,
     direction: q.direction,
     lens: q.lens,
+    seenFor: q.seenFor,
     to: q.to,
     from: q.from,
     mailbox: q.mailbox,
