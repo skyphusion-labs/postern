@@ -38,6 +38,10 @@ const DIRECTION = z.enum(["inbound", "outbound"]);
 // Needs `to` as the viewer address, and cannot be combined with `direction`.
 const LENS = z.enum(["inbox", "sent"]);
 const MODE = z.enum(["fts", "substr", "semantic", "hybrid"]);
+// How a reply picks its recipients (worker ReplyRequest.mode, mailbox.ts): 'reply' is
+// the sender only, 'replyAll' derives the original To/Cc server-side from STORED state,
+// excluding the sender. Named for the worker field, not the tool.
+const REPLY_MODE = z.enum(["reply", "replyAll"]);
 // Which column(s) the "substr" mode matches (worker /api/search field param);
 // ignored by the other modes.
 const FIELD = z.enum(["subject", "body", "text"]);
@@ -260,6 +264,8 @@ export const SEND_TOOLS: ToolDef[] = [
       "delivers mail as the estate. Provide 'message_id' and at least one of 'text' or " +
       "'html'. The server pulls the referenced message and fills to / subject / " +
       "In-Reply-To / References / thread, so the reply lands in the same conversation. " +
+      "Use mode 'replyAll' to include the original recipients, quote_original to append " +
+      "the quoted original, and attachments exactly as mailbox_send takes them. " +
       "Returns the new message id + thread id (shared with the original).",
     inputSchema: {
       message_id: z.string().min(1).describe("the message id being replied to (as returned by search/list/get)"),
@@ -268,6 +274,12 @@ export const SEND_TOOLS: ToolDef[] = [
       cc: ADDRESSES.optional().describe("cc address, or a list"),
       bcc: ADDRESSES.optional().describe("bcc address, or a list"),
       from: z.string().optional().describe("optional From override; must be on the allowed From domain, else the server rejects it"),
+      mode: REPLY_MODE.optional().describe("'reply' (default, sender only) or 'replyAll' (the server derives the original To/Cc, excluding the sender)"),
+      quote_original: z.boolean().optional().describe("append the server-built quote of the original message"),
+      attachments: z.array(ATTACHMENT).optional().describe(
+        "optional files to attach, each with base64 content (+ optional filename, mime_type). " +
+        "The server caps the count and total size and rejects an oversize set with a clear error.",
+      ),
     },
     handler: async (client, a) => {
       if (!a.text && !a.html) {
@@ -280,6 +292,9 @@ export const SEND_TOOLS: ToolDef[] = [
         cc: a.cc,
         bcc: a.bcc,
         from: a.from,
+        mode: a.mode,
+        quoteOriginal: a.quote_original,
+        attachments: mapAttachments(a.attachments),
       });
       return { sent: true, messageId: result.messageId, threadId: result.threadId, providerMessageId: result.providerMessageId ?? null };
     },
