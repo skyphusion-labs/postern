@@ -22,14 +22,6 @@ Both doors verify the **same** end-user credential against the **same** director
 so a credential can never drift between protocols. The directory is the same
 Authentik instance that backs crew SSH, so there is one identity per human.
 
-**Not in this contract: the webmail session mint.** `POST /api/session` (native mode)
-verifies `smtp_credentials`, not the directory, so it is out of scope here; its
-contract is `docs/design/webmail-v2-contracts.md` section 1. It is named only because
-it is a THIRD door in front of a shared credential store: since #409 it carries the
-same brute-force posture the two doors above have (`relay/throttle.go` #105,
-`imap/posternimap/throttle.py` #183) -- per-account keyed counters, enumeration-safe,
-fail-closed, backoff with lockout -- so no door undercuts the others.
-
 ## 2. The directory (verified ground truth)
 
 Authentik LDAP outpost on the **directory host** (`ghcr.io/goauthentik/ldap:<pinned-version>`),
@@ -413,6 +405,16 @@ in a deployment that has not provisioned the scoped secrets; they share one valu
 until it is split. The split is optional hardening to bound a leaked credential's
 blast radius (a stolen read-door token cannot send), never a per-principal or
 human-vs-agent two-tier default.
+
+**Webmail sessions (the third door).** `POST /api/session` (native mode) verifies
+`smtp_credentials`, NOT the directory, so its full contract lives in
+`docs/design/webmail-v2-contracts.md` section 1 rather than here. It belongs in this
+inventory only because it is a third door in front of a shared credential store: since
+#409 it carries the same brute-force posture the two doors above do
+(`relay/throttle.go` #105, `imap/posternimap/throttle.py` #183) -- keyed per-account
+counters, enumeration-safe, fail-closed, backoff with temporary lockout -- so no door
+undercuts the others' throttles. It holds no secret of its own; the session cookie is
+an opaque handle to a server-side row and only the sha256 hash is stored.
 
 ## 8. What is staged / gated for Conrad (do NOT do unattended)
 

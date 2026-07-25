@@ -204,6 +204,56 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.getByText("Hello from Alice")).toBeVisible();
   });
 
+  // #410: a mark-read must be scoped to the viewer, never the estate write that
+  // realigns every other recipient override (A opening a shared message would show it
+  // read in B mailbox). Session mode knows its bound identity and must send it; BYO
+  // token mode has no bound identity in the page and must keep the estate behavior.
+  async function markReadBody(page: Page, mode: "token" | "session"): Promise<Record<string, unknown> | null> {
+    await installMocks(page, mode);
+    // The shared single-message mock returns seen: true, which never triggers a
+    // mark-read; override it (a later route wins in Playwright) so the write fires.
+    await page.route("https://postern.test/api/messages/msg-1%40example.com", async (route) => {
+      await fulfillJson(route, {
+        ...SAMPLE_MESSAGE,
+        message: { ...SAMPLE_MESSAGE.message, seen: false },
+      });
+    });
+    let captured: Record<string, unknown> | null = null;
+    page.on("request", (req) => {
+      if (new URL(req.url()).pathname === "/api/messages/seen" && req.method() === "POST") {
+        captured = JSON.parse(req.postData() || "null");
+      }
+    });
+
+    await page.goto("https://postern.test/webmail");
+    if (mode === "token") {
+      await page.locator("#origin").fill("https://postern.test");
+      await page.locator("#token").fill("read-token");
+      await page.locator("#sendToken").fill("send-token");
+      await page.locator("#connect").click();
+    }
+    await expect(page.locator("#app")).toBeVisible({ timeout: 10_000 });
+    await page.getByText("Hello from Alice").click();
+    await expect(page.locator("#reading h2")).toHaveText("Hello from Alice");
+    await expect.poll(() => captured).not.toBeNull();
+    return captured;
+  }
+
+  test("session mark-read is scoped to the viewer (#410), never the estate write", async ({ page }) => {
+    const body = await markReadBody(page, "session");
+    expect(body).toMatchObject({
+      ids: ["msg-1@example.com"],
+      seen: true,
+      for: "conrad@skyphusion.org",
+    });
+  });
+
+  test("BYO token mark-read still sends NO viewer (estate behavior unchanged)", async ({ page }) => {
+    const body = await markReadBody(page, "token");
+    expect(body).toMatchObject({ ids: ["msg-1@example.com"], seen: true });
+    expect(body).not.toHaveProperty("for");
+  });
+
   test("compose opens when send token is present", async ({ page }) => {
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");

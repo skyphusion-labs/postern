@@ -1237,7 +1237,20 @@ export const WEBMAIL_HTML = `<!doctype html>
       var m = body.message;
       renderReading(m);
       if (m && m.seen === false) {
-        apiOrganize("/api/messages/seen", { ids: [m.messageId], seen: true }).then(function () {
+        // #410: scope the mark-read to OUR viewer explicitly. With no "for" field
+        // this takes the estate path, which sets the row-level flag AND realigns
+        // every other recipient override -- so A opening a shared message would mark
+        // it read in B mailbox, the exact recipient boundary #350 exists to draw. The
+        // worker now binds the viewer server-side too (belt and braces), but sending
+        // it here also keeps a new page correct against an older worker, and it
+        // mirrors what the IMAP door already does (posternimap/client.py). BYO-token
+        // mode carries no bound identity in the page, so it sends no "for" and keeps
+        // the documented estate behavior for an operator holding an estate token.
+        var seenBody = { ids: [m.messageId], seen: true };
+        if (state.authMode === "session" && state.identity && state.identity.from) {
+          seenBody.for = state.identity.from;
+        }
+        apiOrganize("/api/messages/seen", seenBody).then(function () {
           m.seen = true;
           if (item) item.classList.remove("unread");
           state.items.forEach(function (it) {

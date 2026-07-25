@@ -353,7 +353,9 @@ It is **`read`-scoped**, not send/admin: marking mail read is a side effect of R
 read door commonly holds only a read token, so a read token must be able to persist its own read state.
 It backs the IMAP `\Seen` flag (`postern-imap` STOREs it) and the webmail unread view. Inbound mail is
 stored unread; outbound sent copies are stored read. IMAP hard delete uses a dedicated `delete`
-token; read-only IMAP credentials can still mark `\Seen`.
+token; read-only IMAP credentials can still mark `\Seen`. The store writes those defaults at
+insert time (`store.put`); the column DEFAULT is `read`, so migration 0007 backfilled existing
+rows without resurfacing the whole historical mailbox as unread.
 
 **Viewer binding under session auth (#410).** For a BEARER caller the route behaves
 exactly as it always has: `for` is honored verbatim (the IMAP door is legitimately
@@ -366,9 +368,10 @@ filtered by the same accessibility predicate `flags` / `move` and the single-mes
 routes apply -- an id the session cannot see is skipped (it does not count toward
 `updated`), never written. This closes the gap where a session could write another
 account read-state or flip estate-wide read flags on messages it would be denied on
-read.
-stored unread and outbound sent copies read (`store.put`); the column DEFAULT is `read` so migration
-0007 backfills existing rows without resurfacing the whole historical mailbox as unread.
+read. **The webmail client also sends its own `for` in session mode** (the IMAP door
+already does the same, `posternimap/client.py`): belt and braces with the server
+binding, and correct against an older worker that lacks it. BYO-token webmail carries
+no bound identity in the page, so it sends none and keeps the estate behavior.
 
 `GET /api/mobileconfig` (#187) returns a per-user Apple configuration profile
 (`application/x-apple-aspen-config`) that sets up iOS Mail in one tap: IMAP
