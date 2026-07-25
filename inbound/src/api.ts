@@ -43,6 +43,7 @@ import {
   sessionCookieValue,
   webmailAuthBackend,
 } from "./session";
+import { roleMap, rolesForViewer } from "./roles";
 import { readBodyCapped, readBytesCapped, PayloadTooLargeError } from "./body";
 import { handleMobileconfig } from "./mobileconfig";
 import { handleMtaSts } from "./mtasts";
@@ -189,7 +190,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // BEARER-TOKEN CALLERS ARE UNTOUCHED, deliberately: the IMAP door passes `for`
       // with a token and is legitimately estate-scoped (#350/#357). Nothing in this
       // block runs unless resolution.viaSession.
-      let viewer: string | undefined;
+      let viewer: string | readonly string[] | undefined;
       if (resolution.viaSession && resolution.identity) {
         const bound = resolution.identity.from.trim().toLowerCase();
         if (forRecipient && forRecipient !== bound) {
@@ -199,7 +200,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           );
         }
         forRecipient = bound;
-        viewer = bound;
+        // Reachability is the SET (identity plus its role queues, #425) so a member can
+        // mark queue mail read; the override written is still keyed to the ONE person
+        // above. Widening what you may touch is not widening whose state you write.
+        viewer = sessionReadScope(env, resolution);
       }
       const updated = await store.setSeen(env, body.ids as string[], body.seen, forRecipient, viewer);
       return json({ ok: true, updated });
@@ -295,17 +299,40 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
       const sessionIdentity =
         resolution.viaSession && resolution.identity ? resolution.identity.from : undefined;
+      const role = roleReadScope(env, sessionIdentity, url.searchParams);
       const query = parseListQuery(url, sessionIdentity);
-      if (sessionIdentity) query.viewer = sessionIdentity;
+      if (role) applyRoleScope(query, role, sessionIdentity as string);
+      else if (sessionIdentity) query.viewer = sessionIdentity;
       const page = await store.list(env, query);
       return json({ ok: true, ...page });
+    }
+
+    // --- operator: the parsed role-membership map (#425) ---
+    // CONFIG, not mail: which addresses are queues and who is on them. It exists so an
+    // operator (or CI) can DIFF this Worker map against the door POSTERN_IMAP_VIEWER_ROLES
+    // instead of assuming the two agree, which is the named cost of keeping two vars.
+    // `both`-scoped like the other operator routes, so a webmail session can never reach
+    // it. An unusable config reports an EMPTY map, which is exactly what the read paths
+    // serve, so the diff can never claim a membership the mailbox is not honoring.
+    if (request.method === "GET" && path === "/api/roles") {
+      const roles = [...roleMap(env)].map(([address, members]) => ({
+        address,
+        members: [...members],
+      }));
+      return json({ ok: true, roles });
     }
 
     if (request.method === "GET" && path === "/api/folders") {
       // Viewer for unread counts: session-bound identity wins; BYO read tokens
       // (IMAP / operator) may pass ?to= the same way list/search do (#350/#352).
       const viewer = resolution.identity?.from ?? url.searchParams.get("to") ?? undefined;
-      return json({ ok: true, folders: await store.folders(env, viewer) });
+      // Role queues are enumerated ONLY for a bound session (#425). A static token is
+      // estate-scoped already and reads role mail through its own door, so handing it a
+      // role rail would add a concept without adding reach. This response is a
+      // convenience projection, never the authorization: every role read is checked
+      // again at its own route against the same membership map.
+      const roles = resolution.viaSession ? rolesForViewer(env, viewer) : [];
+      return json({ ok: true, folders: await store.folders(env, viewer, roles) });
     }
 
     // Dedicated IMAP-service write seam. The `imap` token authenticates the door;
@@ -517,12 +544,18 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // Viewer-relative view (#403), same rules as /api/messages: refuses an
       // unknown value, refuses lens+direction, refuses a lens with no viewer.
       const sessionIdentity = resolution.viaSession ? resolution.identity?.from : undefined;
-      const lens = parseViewLens(
-        url.searchParams,
-        Boolean(sessionIdentity || url.searchParams.get("to")?.trim()),
-      );
+      // Role queue (#425): searching INSIDE a role view stays scoped to the queue, with
+      // read state still keyed on the member -- the same swap the list route makes, so
+      // the two edges cannot drift apart on what a role view is.
+      const role = roleReadScope(env, sessionIdentity, url.searchParams);
+      const lens = role
+        ? ("inbox" as const)
+        : parseViewLens(
+            url.searchParams,
+            Boolean(sessionIdentity || url.searchParams.get("to")?.trim()),
+          );
       // Whose seen state to render (#404): same parameter, same rules, both endpoints.
-      const seenFor = parseSeenFor(url.searchParams, sessionIdentity);
+      const seenFor = role ? sessionIdentity : parseSeenFor(url.searchParams, sessionIdentity);
       const page = await store.search(env, {
         q,
         mode: modeParam as "fts" | "substr" | "semantic" | "hybrid" | undefined,
@@ -532,7 +565,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         seenFor,
         // Viewer scope (#350): recipient-relative INBOX + effective seen, mirroring
         // /api/messages?to=. Unvalidated like list's `to` (a bare address filter).
-        to: url.searchParams.get("to") ?? undefined,
+        to: role ?? url.searchParams.get("to") ?? undefined,
         // Sender filter (#366): same lower(from_addr) LIKE as /api/messages?from=.
         from: url.searchParams.get("from") ?? undefined,
         // Durable-folder scope (#352/#354), same values as /api/messages?mailbox=.
@@ -541,7 +574,9 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         before,
         hasAttachment: hasAttParam === null ? undefined : hasAttParam === "1" || hasAttParam === "true",
         seen: seenParam === null ? undefined : seenParam === "1" || seenParam === "true",
-        viewer: sessionIdentity,
+        // A role read drops the account viewer: the queue IS the scope, and the account
+        // boundary would otherwise intersect it down to the member own mail (#425).
+        viewer: role ? undefined : sessionIdentity,
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });
@@ -586,8 +621,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (attMatch) {
       const id = decodeURIComponent(attMatch[1]);
       const index = Number(attMatch[2]);
-      if (resolution.viaSession && resolution.identity &&
-          !(await store.messageAccessible(env, id, resolution.identity.from))) {
+      const attScope = sessionReadScope(env, resolution);
+      if (attScope && !(await store.messageAccessible(env, id, attScope))) {
         return json({ ok: false, error: "E_NOT_FOUND", message: "attachment not found" }, 404);
       }
       const att = await store.getAttachment(env, id, index);
@@ -625,8 +660,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && path.startsWith("/api/messages/")) {
       const id = decodeURIComponent(path.slice("/api/messages/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "message id required" }, 400);
-      if (resolution.viaSession && resolution.identity &&
-          !(await store.messageAccessible(env, id, resolution.identity.from))) {
+      // Read scope is the SET (#425): a message opened from a role view is reachable
+      // because the viewer is a MEMBER of that queue, not because the estate is open.
+      const readScope = sessionReadScope(env, resolution);
+      if (readScope && !(await store.messageAccessible(env, id, readScope))) {
         return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
       }
       const msg = await store.get(env, id);
@@ -638,11 +675,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && path.startsWith("/api/threads/")) {
       const id = decodeURIComponent(path.slice("/api/threads/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "thread id required" }, 400);
-      const messages = await store.thread(
-        env,
-        id,
-        resolution.viaSession ? resolution.identity?.from : undefined,
-      );
+      const messages = await store.thread(env, id, sessionReadScope(env, resolution));
       return json({ ok: true, threadId: id, messages });
     }
 
@@ -650,6 +683,85 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   } catch (err) {
     return errorResponse(err);
   }
+}
+
+/** Every address a bound session may READ under (#425): its own identity, plus each
+ *  role queue that identity is a member of.
+ *
+ *  Read paths only. The write paths (delete, flags, move) keep passing the single
+ *  identity on purpose: the #404 ruling makes a role view read plus \Seen ONLY, so a
+ *  member must not delete, file or flag mail on behalf of every other member. A role id
+ *  handed to one of those routes is simply not accessible, so it is skipped exactly as
+ *  an unknown id is, which is the same answer the IMAP door gives with a tagged NO. */
+function sessionReadScope(env: Env, resolution: AuthResolution): string[] | undefined {
+  if (!resolution.viaSession || !resolution.identity) return undefined;
+  const identity = resolution.identity.from;
+  return [identity, ...rolesForViewer(env, identity)];
+}
+
+/** The ROLE queue a bound session is asking to read, or null (#425).
+ *
+ *  Returns non-null ONLY when the session names a `to=` that is a role address the
+ *  session identity is genuinely a member of, per the server-side membership map. That
+ *  makes this a strict ADDITION to the session read path: every other `to=` value falls
+ *  through to the existing behavior untouched, so the open semantics decision in #422
+ *  (honor `to=` inside the account boundary vs refuse it) stays entirely open, and a
+ *  non-member learns nothing about whether an address is a queue -- the answer it gets
+ *  is the same one it would get for any address at all.
+ *
+ *  A role view is the ARRIVAL view of the queue and nothing else, matching the single
+ *  folder the door publishes: a role read that also names `lens=sent`, a `direction=`,
+ *  or a durable `mailbox=` is refused rather than quietly reinterpreted. */
+function roleReadScope(
+  env: Env,
+  sessionIdentity: string | undefined,
+  p: URLSearchParams,
+): string | null {
+  if (!sessionIdentity) return null;
+  const to = (p.get("to") ?? "").trim().toLowerCase();
+  if (!to || to === sessionIdentity.trim().toLowerCase()) return null;
+  if (!rolesForViewer(env, sessionIdentity).includes(to)) return null;
+  const lens = p.get("lens");
+  if (lens !== null && lens !== "inbox") {
+    throw new MailboxError("E_VALIDATION_ERROR", "a role view is the inbox lens only");
+  }
+  if (p.get("direction") !== null) {
+    throw new MailboxError(
+      "E_VALIDATION_ERROR",
+      "a role view is the inbox lens only: direction does not apply to a role queue",
+    );
+  }
+  if ((p.get("mailbox") ?? "").trim()) {
+    throw new MailboxError(
+      "E_VALIDATION_ERROR",
+      "a role queue has no durable folders: drop mailbox= from a role view",
+    );
+  }
+  return to;
+}
+
+/** Point a read at a role QUEUE while keeping read state on the MEMBER (#425).
+ *
+ *  This is the door call, expressed server-side: rows come from the role arrival view
+ *  (to=R, lens=inbox) and the effective-seen key is the member (seenFor=V), so
+ *  "Ada read it" never renders as "the queue is handled". The account viewer is
+ *  dropped, because the account boundary would otherwise intersect the queue down to
+ *  the member own mail. seenFor is derived HERE, never trusted from the client. */
+function applyRoleScope<
+  T extends {
+    to?: string;
+    lens?: import("./store").ViewLens;
+    direction?: "inbound" | "outbound";
+    seenFor?: string;
+    viewer?: string;
+  },
+>(query: T, role: string, member: string): T {
+  query.to = role;
+  query.lens = "inbox";
+  query.direction = undefined;
+  query.seenFor = member;
+  query.viewer = undefined;
+  return query;
 }
 
 function parseLimit(url: URL): number | undefined {
@@ -1214,6 +1326,9 @@ function requiredScope(method: string, path: string): RouteScope | null {
   if (method === "GET" && path === "/api/search") return "read";
   if (method === "GET" && path === "/api/recipients/recent") return "read";
   if (method === "GET" && path === "/api/folders") return "read";
+  // The role map is operator config (#425): `both` only, like reindex/reconcile. A read
+  // token reads MAIL; who is on which queue is a deployment fact, not a mailbox view.
+  if (method === "GET" && path === "/api/roles") return "admin";
   if (method === "GET" && path === "/api/mobileconfig") return "read";
   // Single message and the /attachments/{i} sub-route both live under here.
   if (method === "GET" && path.startsWith("/api/messages/")) return "read";

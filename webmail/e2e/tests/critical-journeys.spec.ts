@@ -269,4 +269,113 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#cmpTo")).toBeVisible();
     await expect(page.locator("#cmpSend")).toBeVisible();
   });
+  // --- role queues (#425): webmail parity with the IMAP door -------------------
+  // The #404 ruling gives a role address its OWN view per role, keeps INBOX personal,
+  // and makes a role view read plus mark-read only. These journeys assert the page
+  // asks the server the way the door does, and offers nothing the server refuses.
+  const ROLE = "abuse@skyphusion.org";
+  const QUEUE_LIST = {
+    ok: true,
+    items: [
+      {
+        messageId: "queue-1@skyphusion.org",
+        from: "reporter@example.com",
+        to: ROLE,
+        subject: "Abuse report",
+        date: "2026-07-25T09:00:00.000Z",
+        direction: "inbound",
+        seen: true,
+        flagged: false,
+        trusted: false,
+        attachmentCount: 0,
+        mailbox: null,
+        bodyText: "queue body",
+        hasHtml: false,
+      },
+    ],
+    cursor: null,
+  };
+
+  async function installRoleMocks(page: Page): Promise<URL[]> {
+    await installMocks(page, "session");
+    const listUrls: URL[] = [];
+    // Later routes win, so these override the shared session mocks above.
+    await page.route("https://postern.test/api/folders", async (route) => {
+      await fulfillJson(route, {
+        ok: true,
+        folders: [
+          { id: "inbox", label: "Inbox", count: 1, unread: 1 },
+          { id: "sent", label: "Sent", count: 0, unread: 0 },
+          { id: "drafts", label: "Drafts", count: 0, unread: 0 },
+          { id: `role:${ROLE}`, label: "abuse", role: ROLE, count: 1, unread: 1 },
+        ],
+      });
+    });
+    await page.route("https://postern.test/api/messages?**", async (route) => {
+      const url = new URL(route.request().url());
+      listUrls.push(url);
+      await fulfillJson(route, url.searchParams.get("to") === ROLE ? QUEUE_LIST : SAMPLE_LIST);
+    });
+    await page.route("https://postern.test/api/messages/queue-1%40skyphusion.org", async (route) => {
+      await fulfillJson(route, {
+        ok: true,
+        message: {
+          ...QUEUE_LIST.items[0],
+          bodyHtml: null,
+          attachments: [],
+          auth: { spf: "pass", dkim: "pass", dmarc: "pass" },
+          threadId: "tq",
+        },
+      });
+    });
+    return listUrls;
+  }
+
+  test("role queue is its own view: to=R with the inbox lens, never merged into Inbox", async ({ page }) => {
+    const listUrls = await installRoleMocks(page);
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#app")).toBeVisible({ timeout: 10_000 });
+
+    // The personal Inbox load must carry NO to=: the queue is not merged into it.
+    await expect.poll(() => listUrls.length).toBeGreaterThan(0);
+    expect(listUrls[0].searchParams.get("to")).toBeNull();
+    await expect(page.getByText("Hello from Alice")).toBeVisible();
+
+    // The queue appears under its own group heading, labelled by local part.
+    await expect(page.locator("#folders .fgroup")).toHaveText("Roles");
+    const queueBtn = page.locator("#folders button[data-folder=\"role:" + ROLE + "\"]");
+    await expect(queueBtn).toBeVisible();
+
+    await queueBtn.click();
+    await expect(page.getByText("Abuse report")).toBeVisible();
+    const queueLoad = listUrls[listUrls.length - 1];
+    expect(queueLoad.searchParams.get("to")).toBe(ROLE);
+    expect(queueLoad.searchParams.get("lens")).toBe("inbox");
+    // seenFor is derived SERVER-side from the session; the page never asserts it.
+    expect(queueLoad.searchParams.get("seenFor")).toBeNull();
+  });
+
+  test("a role view offers no star, file or delete, and says what it is", async ({ page }) => {
+    await installRoleMocks(page);
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#app")).toBeVisible({ timeout: 10_000 });
+    await page.locator("#folders button[data-folder=\"role:" + ROLE + "\"]").click();
+    await page.getByText("Abuse report").click();
+    await expect(page.locator("#reading h2")).toHaveText("Abuse report");
+
+    const actions = page.locator("#reading .msg-actions");
+    await expect(actions.getByRole("button", { name: "Star" })).toHaveCount(0);
+    await expect(actions.getByRole("button", { name: "Archive" })).toHaveCount(0);
+    await expect(actions.getByRole("button", { name: "Trash" })).toHaveCount(0);
+    await expect(actions.getByRole("button", { name: "Junk" })).toHaveCount(0);
+    await expect(page.locator("#reading .queue-note")).toContainText("Shared queue");
+
+    // The personal view still has them: the absence above is the role view, not a
+    // page-wide regression (POSITIVE CONTROL).
+    await page.locator("#folders button[data-folder=\"inbox\"]").click();
+    await page.getByText("Hello from Alice").click();
+    await expect(page.locator("#reading h2")).toHaveText("Hello from Alice");
+    await expect(page.locator("#reading .msg-actions").getByRole("button", { name: "Archive" }))
+      .toHaveCount(1);
+  });
 });

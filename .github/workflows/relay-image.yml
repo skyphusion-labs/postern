@@ -19,6 +19,13 @@ name: relay-image
 #     release tag whose commit did not itself change relay/**, since GitHub ANDs the
 #     paths filter onto tag pushes).
 #
+# ORDERING (#418): the shared `preflight` job runs first and every job below
+# depends on it (transitively), so a tag-hostile release cannot build and
+# roll-dispatch a door image while the release + publish workflows fail. On the
+# v1.0.5 cut, BOTH door images built and rolled off a tag that could not produce
+# a release. The per-job "is this commit on main" asserts this workflow used to
+# carry three copies of now live in that one gate.
+#
 # Runner: GitHub-hosted ubuntu-latest. PUBLIC repo -> fork-safe hosted runner, per
 # the house CI policy (matches ci.yml / deploy.yml / imap-image.yml). The image is a
 # slim Debian base, so no disk-reclaim step is needed.
@@ -47,12 +54,20 @@ env:
 
 jobs:
 
+  # Shared tag gate (#418): commit-on-main ancestry on every ref, plus the full
+  # tag lockstep (version pins, CHANGELOG section) when the ref is a v* tag.
+  preflight:
+    uses: ./.github/workflows/tag-preflight.yml
+    with:
+      track: release
+
   # Gate: the same core checks ci.yml runs for the relay (vet + build + the
   # race-enabled test suite, incl. the email-injection regression guards), so the
   # image is only built from code that passes the project gate. CI parity is the
   # house convention. The image is cgo-free (CGO_ENABLED=0), matching the Dockerfile
   # build, so `system`/PAM is intentionally not exercised here.
   gate:
+    needs: preflight
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -61,14 +76,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Assert built commit is on main (no publish/roll of an unmerged commit)
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish/roll an unreviewed image"
-            exit 1
-          fi
       - uses: actions/setup-go@v7
         with:
           # Track the relay go.mod toolchain so CI never drifts from the code.
@@ -87,14 +94,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Assert built commit is on main (no publish/roll of an unmerged commit)
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish/roll an unreviewed image"
-            exit 1
-          fi
 
       - name: Log in to GHCR
         if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
@@ -142,14 +141,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Assert built commit is on main (no publish/roll of an unmerged commit)
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::commit $GITHUB_SHA is not on origin/main; refusing to publish/roll an unreviewed image"
-            exit 1
-          fi
       - name: Dispatch postern-submission roll to fleet-chezmoi
         env:
           FLEET_DISPATCH_TOKEN: ${{ secrets.FLEET_DISPATCH_TOKEN }}

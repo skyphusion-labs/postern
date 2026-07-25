@@ -237,6 +237,46 @@ Settings (theme / density) live in `localStorage`. Remote images remain blocked
 by CSP (`img-src 'self' data:` only) plus body neutralization; the settings panel
 states that honestly (no fake toggle).
 
+## Role queues (#425)
+
+A role address (`abuse@`, `security@`, `support@`) belongs to a FUNCTION, so under
+per-viewer scoping it is nobody address and its mail is visible to no one. The ruling of
+2026-07-25 (#404) gives it its OWN view per role; the IMAP door shipped that first, and
+this is the webmail half, so both human doors show one person the same mail.
+
+Turn it on with `POSTERN_VIEWER_ROLES` on the Worker (`inbound/wrangler.jsonc` vars):
+
+```
+POSTERN_VIEWER_ROLES="abuse@example.org=ada@example.org+ben@example.org"
+```
+
+**It is a MIRROR of the door `POSTERN_IMAP_VIEWER_ROLES`** -- same syntax, same refusals.
+Keep the two equal. They are separate vars because the door parses membership at startup
+and must not depend on this Worker being reachable to do it; `GET /api/roles` (operator
+`both` token) prints the parsed Worker map so you can diff the two rather than assume
+they agree. Deploy the Worker first, then the door.
+
+What you get, signed in:
+
+- Each queue you are a member of appears in the rail under a **Roles** heading, labelled
+  by local part, with its own unread count. **Inbox stays personal**: queue mail is never
+  merged into it.
+- Opening a queue lists it with `to=<role>&lens=inbox`, the same request the IMAP door
+  makes. Search inside the view stays scoped to the queue.
+- **Read state is yours alone.** Marking a queue message read writes only your own
+  per-reader override, so "you read it" never renders to the other members as "the queue
+  is handled". Their unread counts are unaffected.
+- **A role view is read plus mark-read only.** Star, Archive, Trash, Junk and delete are
+  not offered and the API refuses them: each would write shared state on behalf of every
+  other member. That workflow is not modeled yet.
+- **You answer the queue as yourself.** Reply and forward send under your own identity,
+  not the role address, and the view says so. Sending AS a role address is a separate
+  send-identity question.
+- **Non-members see nothing**: no folder, no rows, no message, no thread. An unset or
+  malformed `POSTERN_VIEWER_ROLES` serves NO queue at all (one bad entry drops the whole
+  map, logged), because a half-applied membership map reads exactly like being quietly
+  taken off the queue.
+
 ## Release / upgrade
 
 Operator release notes (migrations 0010-0013, upgrade, rollback, smoke checklist):
