@@ -168,7 +168,19 @@ POST /api/session          (same-origin; no Authorization header)
 429  { "ok": false, "error": "E_RATE_LIMITED", "retryAfter": <seconds> }
      Retry-After: <seconds>                            (lockout; #409)
 503  { "ok": false, "error": "E_AUTH_UNAVAILABLE" }    (throttle store unreadable; #409)
+500  { "ok": false, "error": "E_INTERNAL_SERVER_ERROR",
+       "message": "session unavailable" }                (unexpected failure; #429)
 ```
+
+- **Every session answer is an API response, including the unexpected ones (#429).** The
+  session routes are dispatched BEFORE the token gate, so they used to sit outside the
+  try/catch that maps errors on every gated route: an unanticipated throw (a D1 outage
+  inside the session-row write, past the fail-closed throttle answer) escaped mapping
+  entirely instead of answering. It is now wrapped in the same envelope. The 500 carries a
+  FIXED message and the detail goes to the log: an infra failure is not the caller fault,
+  so it is not a 400, and internal error text is not something a sign-in form gets told.
+  The refusals above are RESPONSES rather than throws, so the wrapper cannot swallow them;
+  in particular the fail-closed `503` of 1.6.1 still answers `503`.
 
 - `SameSite=Lax` (not `Strict`) so a top-level navigation to `/webmail` still carries the
   cookie (Strict would drop it on the first cross-site link click into the app); state

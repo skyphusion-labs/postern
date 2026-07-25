@@ -346,14 +346,23 @@ describe("#425 fail-closed config, and the surfaces that stay untouched", () => 
     expect(await ids(list)).not.toContain(ROLE_MSG);
   });
 
-  it("POSITIVE CONTROL: the same read with roles unconfigured is byte-identical to before", async () => {
+  it("POSITIVE CONTROL: with roles unconfigured the read gets NO role behavior at all", async () => {
     const { env: e, ctx, raw } = env("");
     await seed(e, ctx);
     const ada = await signIn(e, raw, ADA);
     const list = await handleApi(get(`/api/messages?to=${ROLE}&lens=inbox`, ada), e, ctx);
-    // Pre-#425 session behavior: to= is not honored, the account boundary answers.
-    // Whatever #422 decides for this path, THIS suite must not be what changes it.
-    expect(await ids(list)).toEqual([ADA_MSG]);
+    // The property this control exists for: with no map, `to=abuse@` is just an
+    // address like any other and the queue stays invisible. Amended by #422, which
+    // was the open decision this case deliberately did not want to prejudge: a
+    // session `to=` is now honored as a recipient filter INSIDE the account
+    // boundary, so the answer is Ada's own mail delivered to abuse@, which is none.
+    // The role message must STILL be absent, which is the fail-closed half.
+    const seen = await ids(list);
+    expect(seen).toEqual([]);
+    expect(seen).not.toContain(ROLE_MSG);
+    // ... and the zero is the filter, not a dead path: the same session, same route,
+    // without the filter still sees its own mail.
+    expect(await ids(await handleApi(get("/api/messages?lens=inbox", ada), e, ctx))).toEqual([ADA_MSG]);
   });
 
   it("leaves the estate token path alone: it reads the queue as it always did", async () => {
