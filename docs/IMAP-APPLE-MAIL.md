@@ -6,14 +6,19 @@ behavior.
 ## Draft autosave
 
 Apple Mail issues `APPEND Drafts` repeatedly while a message is being composed.
-Postern advertises `Drafts` as the RFC 6154 `\Drafts` folder but has no server-side
-draft store. The IMAP door therefore acknowledges Drafts APPEND as a no-op:
+Drafts now has a real server-side store (`drafts` table, migrations 0011/0013;
+`POST /api/drafts`): the IMAP door persists every APPEND as a create-or-revise
+instead of a no-op.
 
-- Apple Mail keeps its local draft and does not show an APPEND failure dialog.
-- Postern writes no message bytes and makes no mailbox API call.
-- Drafts remains empty after reconnect; drafts do not roam between devices.
-- Trash, Junk, Archive, and Notes still reject APPEND because they have no backing
-  store (#109).
+- A first APPEND creates a new draft.
+- A later APPEND matching an existing draft (same recipient + normalized subject,
+  within a recency window) revises it in place under a NEW, higher per-folder UID
+  (RFC 3501 UID immutability: an existing UID is never rewritten).
+- Drafts persist across reconnect and roam between devices (identity-scoped, not
+  IMAP-session-local).
+- Trash, Junk, and Archive also persist a genuine new APPEND now (soft-placed via
+  the same import seam). Only Notes still rejects APPEND: it has no backing store
+  by design (#109, #218 Experiment A).
 
 ## What shipped (merged on `main`)
 
@@ -24,12 +29,7 @@ draft store. The IMAP door therefore acknowledges Drafts APPEND as a no-op:
 | [#292](https://github.com/skyphusion-labs/postern/pull/292) | `imap/`, crew-secrets, fleet | Dual-token IMAP: read + `POSTERN_API_TOKEN_DELETE` |
 | [#293](https://github.com/skyphusion-labs/postern/pull/293) | `imap/` | COPY-to-Trash delete; first attachment CTE attempt |
 | [#294](https://github.com/skyphusion-labs/postern/pull/294) | `imap/` | Attachment base64 **wire** bytes in FETCH; session Trash staging |
-
-**Open (merge when CI green):**
-
-| PR | What |
-|---|---|
-| [#295](https://github.com/skyphusion-labs/postern/pull/295) | Content-Type `name=` on attachments (PDF UTI); Trash staging **shared per username** across IMAP connections |
+| [#295](https://github.com/skyphusion-labs/postern/pull/295) | `imap/` | Content-Type `name=` on attachments (PDF UTI); Trash staging **shared per username** across IMAP connections |
 
 ## Deployment
 
@@ -41,39 +41,53 @@ for env vars and deployment.
 Apple Mail does **not** use `STORE \Deleted` + `EXPUNGE` in INBOX. It **COPY/MOVE**
 to the `\Trash` mailbox.
 
-Postern has **no Trash store**. The IMAP door:
+Trash, Junk, and Archive are **durable folders** (`mailbox_placement` +
+`mailbox_uid_counter`, migration 0011): COPY/MOVE to any of them is a **soft
+move**, not a delete. The IMAP door:
 
-1. Intercepts COPY/MOVE to Trash (`server.do_COPY` / `do_MOVE`).
-2. Stages the message summary in **process-wide Trash staging** (keyed by IMAP username; PR #295).
-3. Hard-deletes via `DELETE /api/messages/{id}` using **`POSTERN_API_TOKEN_DELETE`** (both scope).
-4. Removes the message from the source folder snapshot.
+1. Intercepts COPY/MOVE to Trash/Junk/Archive (`server.do_COPY` / `do_MOVE`,
+   classified via `Account.copyability`).
+2. Soft-places the message via `POST /api/messages/move` (sets the durable
+   `mailbox` column; the message stays in the store).
+3. Removes the message from the source folder live snapshot (it no longer matches
+   that folder filter).
+4. The message is recoverable: COPY/MOVE back to INBOX/Sent/All (a "restore") moves
+   it out of the placement folder again, direction-checked so an inbound message
+   cannot restore to Sent and vice versa.
+
+A message is only **permanently gone** when it is EXPUNGEd (flagged `\Deleted`
+then EXPUNGE, in INBOX or in Trash/Junk/Archive themselves): that hard-deletes via
+`DELETE /api/messages/{id}` using **`POSTERN_API_TOKEN_DELETE`** (#278).
 
 **COPY vs MOVE (RFC 6851, PR #304):** `MOVE` is advertised in CAPABILITY and
-implemented fully. Both verbs hard-delete from the source as above, but they differ in
-what the client is told about the source view:
+implemented fully. Both verbs soft-move identically, but differ in what the client is
+told about the source view:
 
 - **MOVE** additionally emits an untagged `EXPUNGE` for every moved message (message
   SEQUENCE numbers, high-to-low, per RFC 3501 7.4.1 and the #300/#301 fix) BEFORE the
-  tagged `OK`, so the client's source view updates in the same round-trip. No stale
-  view; no COPYUID is emitted (Trash has no backing store / persistent destination UIDs
-  and we do not advertise UIDPLUS, so a COPYUID would fabricate UIDs).
+  tagged `OK`, so the source view updates in the same round-trip. No COPYUID is
+  emitted (a soft-moved message keeps its own per-folder UID, minted fresh in the
+  destination; we do not advertise UIDPLUS, so a COPYUID would fabricate a shared
+  identity across folders).
 - **COPY** emits no untagged `EXPUNGE`; the client re-syncs the source on its next poll
   (the historical COPY-to-Trash client-view gap). Apple Mail prefers MOVE, so it now
   gets the immediate update.
 
 **Trash folder semantics:**
 
-- **Archive** is an empty placeholder; deletes never go there.
-- **Trash** shows staged summaries until EXPUNGE on Trash or imap process restart.
-- Messages are **already gone from the Postern store** after step 3; Trash is a
-  client-compat view, not recovery.
+- **Archive**, **Trash**, and **Junk** are durable per-folder placements, not empty
+  placeholders; a soft-moved message stays there until EXPUNGEd or moved again. Only
+  **Notes** is an empty placeholder (no backing store, #109).
+- EXPUNGE on Trash/Junk/Archive (or on INBOX for `\Deleted`-flagged messages) is the
+  only permanent delete; it hard-deletes as in step 4 above.
 
 **Tokens:**
 
 | Secret / env | Scope | Used for |
 |---|---|---|
-| `POSTERN_API_TOKEN` / read member | read | LIST, FETCH, seen, attachments |
-| `POSTERN_API_TOKEN_DELETE` / delete member | both | EXPUNGE, COPY/MOVE-to-Trash delete |
+| `POSTERN_API_TOKEN` / read member | read | LIST, FETCH, seen, attachments, COPY/MOVE soft-place |
+| `POSTERN_API_TOKEN_DELETE` / delete member | both | EXPUNGE (hard delete) only (#278) |
+| `POSTERN_API_TOKEN_IMAP` | imap | Drafts APPEND persist; Trash/Junk/Archive new-message APPEND import (#352) |
 
 ## Apple Mail attachments (#210)
 

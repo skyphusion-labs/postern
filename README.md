@@ -132,7 +132,8 @@ Full steps in [DEPLOY.md](DEPLOY.md). In short:
 cd inbound
 npx wrangler d1 create postern              # paste database_id into wrangler.jsonc
 npx wrangler r2 bucket create postern-attachments
-# edit wrangler.jsonc: database_id + DEFAULT_FROM / ALLOWED_FROM_DOMAIN
+# edit wrangler.jsonc: database_id + DEFAULT_FROM / ALLOWED_FROM_DOMAIN, and set
+# "workers_dev": true (default is false: no reachable URL to smoke without it)
 npx wrangler d1 execute postern --remote --file=schema.sql
 npx wrangler secret put POSTERN_API_TOKEN   # openssl rand -hex 32
 npm install && npm run deploy
@@ -208,9 +209,10 @@ These notes are specific to the maintainers' own deployment and are **not**
 required to run Postern. A stranger should follow [DEPLOY.md](DEPLOY.md) instead.
 
 The reference instance sends from `skyphusion.org` (and `.net`), both onboarded
-to Email Sending, and deploys the worker to Cloudflare via CI on every green
-build of `main`. No secrets live in the tree: `POSTERN_API_TOKEN` is a Worker
-secret, untouched by deploy.
+to Email Sending, and deploys the worker to Cloudflare via CI on a pushed
+SemVer tag (`v*`); a bare merge to `main` runs CI only and ships nothing. No
+secrets live in the tree: `POSTERN_API_TOKEN` is a Worker secret, untouched by
+deploy.
 
 ## Who this is for
 

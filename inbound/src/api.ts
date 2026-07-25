@@ -64,7 +64,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     return json({ ok: true, service: "postern" });
   }
 
-  // The read-only webmail (the human browser door, complementing the IMAP proxy).
+  // The webmail door (compose/reply/read, the human browser door, complementing the IMAP proxy).
   // Public: the page carries no secret; the operator enters their API origin +
   // token client-side and it is used only for the token-gated /api calls below.
   if (request.method === "GET" && (path === "/webmail" || path === "/webmail/")) {

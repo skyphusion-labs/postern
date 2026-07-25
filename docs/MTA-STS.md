@@ -1,5 +1,10 @@
 # MTA-STS + TLSRPT design (RFC 8461 / RFC 8460)
 
+> This is the maintainers' own reference-deployment record: the domain, MX hosts, and
+> rollout gate below are skyphusion.org's real values and change-control, not a template.
+> A self-hoster applies the same RFC 8461/8460 mechanics against their own domain and MX
+> hosts, under whatever change-control fits their own operation.
+
 Status: IMPLEMENTED in code (#197); DNS/LB deploy is Conrad-supervised (see the fleet-chezmoi CR).
 Nothing here mutates production from the repo alone; this document is the contract the CR implements.
 

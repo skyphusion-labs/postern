@@ -29,18 +29,20 @@ Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/A
   as **`@skyphusion/postern-mcp`** (`npx -y @skyphusion/postern-mcp`). **Per-identity send** is first-class here: each
   human/agent sends under its OWN identity via per-identity creds (`docs/SEND-IDENTITIES.md`).
 - **`webmail/`** -- a single self-contained page (vanilla HTML/CSS/JS, no build step) served by the
-  worker at **`/webmail`**. Read-only human door: list, read, threads, search. BYO-token in
-  `sessionStorage` only, HTML rendered in a sandboxed iframe (no scripts/trackers), locked-down CSP.
-- **`imap/`** -- a small Twisted server fronting the API as IMAP: read, plus the
-  `\Seen` read/unread flag and delete (via a `both`-scoped `POSTERN_API_TOKEN_DELETE`);
-  sending still only through the structured API. Thunderbird / mutt / iOS Mail can open
-  the mailbox.
+  worker at **`/webmail`**. Compose, reply, and read: list, read, threads, search, session
+  login, drafts, delete. BYO-token in `sessionStorage` only, HTML rendered in a sandboxed
+  iframe (no scripts/trackers), locked-down CSP.
+- **`imap/`** -- a small Twisted server fronting the API as IMAP: read, the
+  `\Seen` flag, delete (EXPUNGE, via a `both`-scoped `POSTERN_API_TOKEN_DELETE`), drafts, and
+  soft-move to Trash/Junk/Archive; sending still only through the structured API.
+  Thunderbird / mutt / iOS Mail can open the mailbox.
 - **`clients/python/`** -- a Python client + CLI for the API. Published on PyPI as
   **`postern-client`** (`pip install postern-client`).
 
-Human doors (webmail, imap) are **clients** of the API, never a second store: webmail is read-only;
-imap adds the `\Seen` flag and delete, both persisted through the API (not a local store). Sending always
-goes through the structured API.
+Human doors (webmail, imap) are **clients** of the API, never a second store: webmail composes,
+replies, and manages its own drafts/delete through the API; imap adds `\Seen`, delete, drafts,
+and soft-move to Trash/Junk/Archive, all persisted through the API (not a local store).
+Sending always goes through the structured API.
 
 ## Documentation map
 
@@ -60,8 +62,8 @@ When a change touches one of these areas, update the matching doc.
 ## Commands
 
 ```bash
-# inbound/  (the core Worker, Node 22)
-cd inbound && npm run dev          # wrangler dev (local)
+# inbound/  (the core Worker, Node 22; no `npm run dev` script -- use wrangler dev directly)
+cd inbound && npx wrangler dev --config wrangler.dev.jsonc   # local dev (local D1 + R2, no remote bindings)
 npm run deploy                     # wrangler deploy
 npm run typecheck                  # tsc --noEmit -- the CI gate; run before pushing
 npm run cf-typegen                 # regenerate Env types from wrangler.jsonc
@@ -75,8 +77,9 @@ npx wrangler d1 migrations apply postern   # apply D1 migrations
 ### Verifying changes
 
 The workers have vitest suites; the scripted v1.0 acceptance smoke is `inbound/smoke.mjs` (issue #25).
-End-to-end: verify against `npm run dev` + `curl` the mailbox API; verify the relay on the box with
-`swaks --server 127.0.0.1:2525 ...`. Always `npm run typecheck` first (it is not part of any test run).
+End-to-end: verify against `npx wrangler dev --config wrangler.dev.jsonc` + `curl` the mailbox API;
+verify the relay on the box with `swaks --server 127.0.0.1:2525 ...`. Always `npm run typecheck`
+first (it is not part of any test run).
 
 ## Architecture (load-bearing)
 

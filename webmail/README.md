@@ -109,8 +109,9 @@ WEBMAIL_SESSION_ABSOLUTE_SECONDS  = "43200"   # absolute cap (default 12 h)
 ```
 
 With `native`, a user signs in with the username + secret you provisioned via
-`POST /api/admin/smtp-credentials`. A native session is granted `read` + `send`
-(browse, compose, reply); hard delete stays operator-only for now. Directory
+`POST /api/admin/smtp-credentials`. A native session is granted `read` + `send` + `delete`
+(browse, compose, reply, delete its own mail); admin stays operator-only (never
+reindex or credential provisioning, held only by a `both` token). Directory
 (`ldap`/`system`) sign-in is designed but deferred and out of this phase; those
 deployments keep using BYO-token webmail.
 

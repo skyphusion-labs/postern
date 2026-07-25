@@ -95,7 +95,7 @@ maps MIME to the same send shape, and forwards to the worker. See [AUTH-CONTRACT
 
 ```mermaid
 flowchart LR
-    subgraph humans[Human read doors]
+    subgraph humans[Human doors]
         wb[webmail<br/>browser at /webmail]
         im[imap<br/>Thunderbird / iOS Mail]
     end
@@ -108,8 +108,8 @@ flowchart LR
 
     api[Mailbox API<br/>Bearer token or RPC]
 
-    wb -->|GET /api/*| api
-    im -->|GET /api/*| api
+    wb -->|GET /api/*, POST send/reply/session/drafts| api
+    im -->|GET /api/*, seen/delete/drafts/move| api
     mc -->|HTTPS| api
     cp -->|HTTPS| api
     wr -->|service binding| api
@@ -120,11 +120,11 @@ flowchart LR
 | `inbound/` | Core Worker: store, API, ingest, dispatch | yes (API) | -- |
 | `relay/` | Optional SMTP bridge: ingest, submission, BYO dispatch | via worker | -- |
 | `mcp/` | MCP tools for agents (`mailbox_search`, `mailbox_send`, ...) | opt-in send | [`@skyphusion/postern-mcp` on npm](https://www.npmjs.com/package/@skyphusion/postern-mcp) |
-| `webmail/` | Self-contained read UI served at `/webmail` | no (v1) | -- |
-| `imap/` | Read-only IMAP front for MUAs | no (v1) | -- |
+| `webmail/` | Compose/reply/read UI served at `/webmail` (session login, drafts, delete) | yes (compose/reply via API) | -- |
+| `imap/` | IMAP front for MUAs: read, `\Seen`, delete (EXPUNGE), drafts APPEND, soft-move to Trash/Junk/Archive | no (IMAP has no send verb) | -- |
 | `clients/python/` | Thin stdlib HTTP client + CLI | if token allows | [`postern-client` on PyPI](https://pypi.org/project/postern-client/) |
 
-Search modes on `/api/search`: `fts` (keyword), `semantic` (Vectorize), `hybrid` (both).
+Search modes on `/api/search`: `fts` (keyword), `semantic` (Vectorize), `hybrid` (both), `substr` (literal substring; pair with `field` = `subject`/`body`/`text`).
 MCP and webmail default to **hybrid** when Vectorize is bound.
 
 ## Repo layout

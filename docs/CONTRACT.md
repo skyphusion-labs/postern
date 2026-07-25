@@ -313,6 +313,8 @@ none touches D1 directly (#25, #26).
 | GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&to=&from=&direction=&lens=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` mean exactly what they do on `/api/messages` (#403) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 |
 | GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
+| GET/POST/DELETE | `/api/session` | webmail native session: POST signs in `{username,password}` -> `Set-Cookie` + identity + caps + CSRF token; GET is whoami/restore; DELETE signs out | webmail v2 (#352) |
+| POST | `/api/session/refresh` | explicit session extend (a sliding refresh also happens on any authed request) | webmail v2 (#352) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
@@ -413,6 +415,15 @@ The RPC entrypoint mirrors the read + write operations as typed methods (`list`,
 `POST /ingest` and `dispatch`-to-relay are infra seams, not API clients. They use a
 **separate** transport token (`POSTERN_TRANSPORT_TOKEN`), not the API token, so an API
 credential leak cannot inject mail and vice versa. (Decided, section 8.)
+
+**Webmail native sessions** are a separate auth path, cookie- not Bearer-based
+(design source: `docs/design/webmail-v2-contracts.md` section 1.5). `/api/session` mints an
+opaque session id in a `__Host-postern_session` cookie (`__Host-` forces `Secure`, `Path=/`,
+no `Domain`); the cookie is same-origin only (CORS never reflects credentials for these
+routes) and is revocable server-side (delete the row) rather than a self-contained JWT.
+CSRF is closed with SameSite + a required custom header + a synchronizer token. A native
+session carries its own capability set (read/send/delete; never admin), gated the same
+way as a Bearer token scope.
 
 ---
 
@@ -767,7 +778,7 @@ Contract details worth relying on:
 
 | property | behavior |
 | --- | --- |
-| ordering | the envelope recipient stays FIRST in the delivered list, so the 10.2 merge (which appends `deliveredList[0]`) still names the recipient that invocation was for |
+| ordering | filing is delivery-order independent (#407): the atomic upsert always merges in the envelope recipient for this invocation, and each additional owner (`FILE_ALSO_UNDER`) gets its own idempotent `UPDATE ... WHERE NOT LIKE` (`store.ts` :310/:405), so whichever delivery lands first no longer decides who gets filed |
 | hops | SINGLE. The map is consulted once against the delivered address; a target is never expanded, so no chain or cycle is expressible |
 | self-map / duplicate | no-op; the delivered set cannot carry an address twice |
 | malformed entry | skipped, with a `console.warn` naming the entry. Parsed on the DELIVERY path, so throwing would turn one typo into refused mail for every recipient |

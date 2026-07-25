@@ -1,7 +1,9 @@
 # Changelog
 
 Notable changes per release. SemVer-style: **v1.0.0** is the first production-ready
-Core v1.0 mailbox (M1 contract). Newest first.
+Core v1.0 mailbox (M1 contract). Newest first. This tracks the inbound Worker +
+`postern-client` release train; `@skyphusion/postern-mcp` (`mcp/`) tags and
+versions on its own npm publish cadence and does not get an entry here by convention.
 
 ## v1.0.6
 

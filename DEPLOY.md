@@ -47,10 +47,11 @@ npx wrangler d1 execute postern --remote --file=schema.sql
 
 ### CI deploy and D1 migrations (read this before wiring GitHub Actions)
 
-The push-to-`main` deploy workflow (`.github/workflows/deploy.yml`) runs
-`wrangler d1 migrations apply DB --remote` before every inbound deploy. Wrangler
-tracks which migration files have already run in a `d1_migrations` table and
-applies only the pending ones.
+The deploy workflow (`.github/workflows/deploy.yml`) is **tag-gated**: it
+runs on a pushed SemVer tag (`v*`), never on a merge to `main`. When it runs, it
+applies `wrangler d1 migrations apply DB --remote` before the inbound deploy, so
+a schema change ships with its code. Wrangler tracks which migration files have
+already run in a `d1_migrations` table and applies only the pending ones.
 
 **Fresh install via `schema.sql` (above):** the schema is already current, but
 `d1_migrations` is still empty. The first CI deploy will try to re-apply
@@ -60,29 +61,21 @@ catch this with a clearer message, but the fix is the same: **baseline-seed**
 `d1_migrations` once so the pipeline sees every migration through the current
 schema as already applied.
 
-After `schema.sql` succeeds, list the migration files under
-`inbound/migrations/` and insert each filename (exactly as on disk, including
-`.sql`) into `d1_migrations`:
+After `schema.sql` succeeds, run `d1 migrations list` first: the
+`d1_migrations` tracking table does not exist yet on a fresh store, and this
+is what creates it (wrangler makes the table on first list/apply against a
+database that lacks one). Only then insert each migration filename (exactly
+as on disk under `inbound/migrations/`) as already applied. Do not hand-copy the
+filename list (it drifts as migrations are added); generate the INSERTs from the files
+actually on disk:
 
 ```bash
 cd inbound
-npx wrangler d1 execute postern --remote --command "
-INSERT INTO d1_migrations (name) VALUES
-  ('0000_base_schema.sql'),
-  ('0001_attachments_fts_dmarc.sql'),
-  ('0002_direction_thread.sql'),
-  ('0003_body_html.sql'),
-  ('0004_smtp_credentials.sql'),
-  ('0005_messages_autoincrement_uid.sql'),
-  ('0006_envelope_v2.sql'),
-  ('0007_seen.sql'),
-  ('0008_vector_ledger.sql'),
-  ('0009_seen_by_recipient.sql'),
-  ('0010_webmail_sessions.sql'),
-  ('0011_durable_mailboxes.sql'),
-  ('0012_projected_size.sql'),
-  ('0013_draft_attachments.sql');
-"
+npx wrangler d1 migrations list postern --remote   # creates d1_migrations, lists all as pending
+for f in migrations/*.sql; do
+  name=$(basename "$f")
+  npx wrangler d1 execute postern --remote --command "INSERT OR IGNORE INTO d1_migrations (name) VALUES ('${name}')"
+done
 ```
 
 Verify nothing is pending:
@@ -114,9 +107,21 @@ When new migrations ship in the repo, CI applies only the ones not yet in
 ## 2. Set the API token and deploy
 
 ```bash
-npx wrangler secret put POSTERN_API_TOKEN   # generate one: openssl rand -hex 32
 npm install
-npm run deploy
+npm run deploy   # first deploy creates the Worker; secret put below needs it to exist
+npx wrangler secret put POSTERN_API_TOKEN   # generate one: openssl rand -hex 32
+```
+
+**Scoped tokens (optional).** `POSTERN_API_TOKEN` alone is a `both`-scoped key and works
+for everything below; split it only if you want narrower blast radius per consumer
+(the IMAP door in section 5 uses these two):
+
+```bash
+# EXPUNGE-only (hard delete), separate from the read token (#278)
+npx wrangler secret put POSTERN_API_TOKEN_DELETE
+# imap-scoped: durable Drafts + Trash/Junk/Archive APPEND import (#352);
+# unset means those writes refuse rather than silently no-op
+npx wrangler secret put POSTERN_API_TOKEN_IMAP
 ```
 
 With `workers_dev` enabled (above), `npm run deploy` prints the deployed URL, e.g.

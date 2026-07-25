@@ -14,6 +14,7 @@ Back up the durable state; the derived state you can always rebuild.
 | State | Where | Durable? | If lost |
 |---|---|---|---|
 | Messages (headers, bodies, flags, threads) | D1 `postern`, table `messages` (+ `attachments`, `smtp_credentials`, `vector_ledger`) | **DURABLE** | Gone unless backed up |
+| Per-recipient read state, drafts, folder placement, UID counters, webmail sessions | D1 `postern`, tables `message_seen_by`, `drafts`, `draft_attachments`, `mailbox_placement`, `mailbox_uid_counter`, `webmail_sessions` | **DURABLE** | Same-domain unread state, in-progress drafts, and Archive/Trash/Junk placement are gone; losing `mailbox_uid_counter` is a UIDVALIDITY-class event (RFC 3501) since a restore without it reissues folder UIDs from scratch, so an IMAP client must be told (bump UIDVALIDITY) to discard its cache instead of trusting stale UIDs |
 | Attachment bytes | R2 bucket `postern-attachments` | **DURABLE** | Gone unless backed up; `attachments.r2_key` rows would dangle |
 | Full-text search index | D1 virtual table `messages_fts` | Derived | Rebuilt from `messages` by the FTS triggers (see restore) |
 | Vectorize embeddings | Vectorize index | Derived | Rebuilt from D1 via `POST /api/admin/reindex` |
@@ -40,6 +41,8 @@ npx wrangler d1 export postern --remote \
   --no-schema \
   --table messages --table attachments \
   --table smtp_credentials --table vector_ledger \
+  --table message_seen_by --table drafts --table draft_attachments \
+  --table mailbox_placement --table mailbox_uid_counter --table webmail_sessions \
   --output postern-data-$(date +%Y%m%d-%H%M).sql
 ```
 

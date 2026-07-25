@@ -134,7 +134,8 @@ curl "https://<your-worker>.<account>.workers.dev/api/messages/<messageId>" \
 curl "https://<your-worker>.<account>.workers.dev/api/messages/<messageId>/attachments/0" \
   -H "Authorization: Bearer $POSTERN_API_TOKEN" -OJ
 
-# search (mode = fts | semantic | hybrid; semantic/hybrid need the AI+Vectorize bindings)
+# search (mode = fts | substr | semantic | hybrid; semantic/hybrid need the AI+Vectorize
+# bindings; substr is a literal substring match, pair with field=subject|body|text)
 curl "https://<your-worker>.<account>.workers.dev/api/search?q=invoice&mode=fts" \
   -H "Authorization: Bearer $POSTERN_API_TOKEN"
 
@@ -162,6 +163,9 @@ of either is a `400 E_VALIDATION_ERROR` rather than a quietly-dropped filter. `m
 | `cc` / `bcc` | string \| string[] | no | to+cc+bcc <= 50 |
 | `headers` | object | no | String values only; CR/LF rejected (no header injection) |
 
-`POST /api/reply` takes `{ messageId, html?, text? }`; core fills `to`,
-`subject` (`Re:`), `In-Reply-To`, `References`, and the `thread_id` from the
-stored message, so a reply cannot be pointed at an arbitrary thread.
+`POST /api/reply` takes `{ messageId, html?, text?, from?, cc?, bcc?, mode?, quoteOriginal?, attachments? }`;
+`mode` (`reply` | `replyAll`) derives original To/Cc recipients server-side
+(excluding the sender) when set; `quoteOriginal` appends a server-built quote from stored
+state; `attachments` takes the same shape as send (#363). Core fills `to` (unless `mode`
+derived it), `subject` (`Re:`), `In-Reply-To`, `References`, and the `thread_id` from
+the stored message, so a reply cannot be pointed at an arbitrary thread.
