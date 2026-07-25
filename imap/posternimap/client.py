@@ -40,6 +40,61 @@ class PosternAuthError(PosternError):
     """401 from the Postern API: the bearer token is missing or wrong."""
 
 
+# The worker answers every failure with a structured body: {ok: false, error, message}
+# (inbound/src/api.ts). The door used to parse that away and raise a bare
+# "Postern API error (HTTP 403)", so an operator staring at a tagged NO saw a status code
+# where the mailbox had already said "requires delete scope" (#416). Both sibling clients
+# surface it (mcp safeErrorMessage, clients/python), so the door was the odd one out, and
+# it is the one whose output a HUMAN reads at 2am in a mail client.
+_MAX_ERROR_DETAIL = 200
+
+
+def _wire_safe(text: str) -> str:
+    """Make worker text safe to splice into an IMAP tagged NO.
+
+    IMAP is a LINE-oriented protocol, so a body carrying CR/LF would not merely look
+    ugly: it would inject a line into the response stream. Every non-printable character
+    becomes a space, runs of whitespace collapse, and the result is truncated. The worker
+    does not emit such a body today; this is the door refusing to DEPEND on that, because
+    the trust boundary is the wire, not the current implementation on the other side.
+    """
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > _MAX_ERROR_DETAIL:
+        cleaned = cleaned[: _MAX_ERROR_DETAIL - 3].rstrip() + "..."
+    return cleaned
+
+
+def _safe_error_message(raw: bytes) -> str:
+    """Best-effort {ok: false, error, message} extraction; NEVER raises (#416).
+
+    Mirrors safeErrorMessage in mcp/src/client.ts: prefer message, fall back to error, and
+    yield "" for anything unparseable. An error path that can itself fail would turn a 500
+    into a traceback, so every failure mode here answers "no detail" and the caller still
+    raises the status-only error it always did.
+    """
+    try:
+        body = json.loads(raw.decode("utf-8")) if raw else None
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    for key in ("message", "error"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return _wire_safe(value)
+    return ""
+
+
+def _api_error(status: int, raw: bytes) -> PosternError:
+    """The status-plus-reason error every non-401 API failure raises (#416)."""
+    detail = _safe_error_message(raw)
+    message = "Postern API error (HTTP %d)" % status
+    if detail:
+        message += ": " + detail
+    return PosternError(message, status=status)
+
+
 class MissingFolderUidError(ValueError):
     """A durable-folder row (trash/junk/archive) has no valid folderUid (#352 review).
 
@@ -563,7 +618,7 @@ class PosternClient:
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
         if status >= 400:
-            raise PosternError(f"Postern API error (HTTP {status})", status=status)
+            raise _api_error(status, raw)
         mime = hdrs.get("content-type") or hdrs.get("Content-Type") or "application/octet-stream"
         disp = hdrs.get("content-disposition") or hdrs.get("Content-Disposition") or ""
         filename = _filename_from_disposition(disp) or f"attachment-{index}"
@@ -775,7 +830,7 @@ class PosternClient:
         if status == 409:
             raise PosternError("draft conflict (stale updatedAt)", status=409)
         if status >= 400:
-            raise PosternError(f"Postern API error (HTTP {status})", status=status)
+            raise _api_error(status, raw)
         try:
             body = json.loads(raw.decode("utf-8")) if raw else {}
         except (ValueError, UnicodeDecodeError) as e:
@@ -858,7 +913,7 @@ class PosternClient:
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
         if status >= 400:
-            raise PosternError(f"Postern API error (HTTP {status})", status=status)
+            raise _api_error(status, raw)
         try:
             return json.loads(raw.decode("utf-8")) if raw else {}
         except (ValueError, UnicodeDecodeError) as e:
@@ -887,7 +942,7 @@ class PosternClient:
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
         if status not in expect_status and status >= 400:
-            raise PosternError(f"Postern API error (HTTP {status})", status=status)
+            raise _api_error(status, raw)
         try:
             return json.loads(raw.decode("utf-8")) if raw else {}
         except (ValueError, UnicodeDecodeError) as e:
@@ -911,7 +966,7 @@ class PosternClient:
         if status == 404:
             raise PosternError("message not found", status=404)
         if status >= 400:
-            raise PosternError(f"Postern API error (HTTP {status})", status=status)
+            raise _api_error(status, raw)
 
 
 def _filename_from_disposition(disp: str) -> Optional[str]:
