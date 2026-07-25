@@ -1559,25 +1559,47 @@ function recipientWhere(
 
 /** Account-owned view for a bound webmail session. Same #403 split as
  *  recipientWhere: `lens` names the Inbox/Sent folder views, and `direction`
- *  filters the stored wire fact inside the account boundary. */
+ *  filters the stored wire fact inside the account boundary.
+ *
+ *  `recipient` is the caller's `to=` (#422). Under a session the ACCOUNT is the
+ *  viewer, so `to=` is no longer "whose mailbox is this"; it is an ordinary
+ *  recipient FILTER, and it is ANDed INSIDE the boundary, never widening it. It
+ *  used to be accepted and then dropped on the floor: a session asking for one
+ *  correspondent got the unfiltered page back with no way to tell (the #403
+ *  defect-2 family, a filter the answer was not filtered by).
+ *
+ *  It composes with the role branch (#425): a session `to=R` for a role R the
+ *  session is a member of is rewritten upstream into the ROLE boundary (to=R,
+ *  lens=inbox, seenFor=session) and reaches recipientWhere with no accountViewer,
+ *  so it never gets here. Everything else falls through to this rule. */
 function accountWhere(
   viewer: string,
   direction: "inbound" | "outbound" | undefined,
   lens?: ViewLens,
+  recipient?: string,
 ): { membership: string | null; membershipBinds: unknown[]; direction: string | null; directionBinds: unknown[] } {
   const delivered = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
+  // The recipient filter is delivered-set membership, exactly the predicate `to=`
+  // means on every other auth path (recipientWhere), so one address filters the
+  // same way whether the caller holds a session or a token.
+  const filtered = (base: string | null, binds: unknown[]) => {
+    if (!recipient) return { membership: base, membershipBinds: binds };
+    return base
+      ? { membership: `(${base}) AND ${delivered}`, membershipBinds: [...binds, recipient] }
+      : { membership: delivered, membershipBinds: [recipient] };
+  };
   if (lens === "inbox") {
     return {
-      membership: delivered,
-      membershipBinds: [viewer],
+      ...filtered(delivered, [viewer]),
       direction: "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))",
       directionBinds: [viewer],
     };
   }
   if (lens === "sent") {
+    // Sent is sender-based, so membership is free for the recipient filter to
+    // use: to=X under lens=sent is "my sent mail that went to X".
     return {
-      membership: null,
-      membershipBinds: [],
+      ...filtered(null, []),
       direction: "lower(m.from_addr) = ?",
       directionBinds: [viewer],
     };
@@ -1585,8 +1607,7 @@ function accountWhere(
   // Account boundary (delivered to V or authored by V), plus the exact stored
   // direction when one was asked for.
   return {
-    membership: `(${delivered} OR lower(m.from_addr) = ?)`,
-    membershipBinds: [viewer, viewer],
+    ...filtered(`(${delivered} OR lower(m.from_addr) = ?)`, [viewer, viewer]),
     direction: direction ? "m.direction = ?" : null,
     directionBinds: direction ? [direction] : [],
   };
@@ -1738,7 +1759,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   // AFTER from/thread so the bind order stays stable. ONE builder for list, fts,
   // and substr search.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction, q.lens)
+    ? accountWhere(accountViewer, q.direction, q.lens, recipientViewer)
     : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
@@ -2018,7 +2039,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   // Recipient view + named lens (#350/#178/#403); membership then direction, the
   // same order list/substr use, so fts shares the one view builder.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction, q.lens)
+    ? accountWhere(accountViewer, q.direction, q.lens, recipientViewer)
     : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
@@ -2132,7 +2153,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
 
   // Recipient view + named lens (#350/#178/#403), the same builder as list/fts.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction, q.lens)
+    ? accountWhere(accountViewer, q.direction, q.lens, recipientViewer)
     : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
@@ -2256,6 +2277,11 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
  *    EXACT stored direction (#403), never one silently standing in for the other.
  *  - lens=sent: sender-based (from == V), membership not required.
  *  - from= (#366): same lower(from_addr) substring match as list/fts/substr.
+ *  - accountViewer + to= (#422): the account boundary decides WHAT the caller may
+ *    see; `to=` is then an ordinary recipient filter ANDed inside it, matching the
+ *    accountWhere(recipient) predicate the SQL modes push down. This mirror is the
+ *    reason the filter is applied before the lens branches: semantic/hybrid must
+ *    not answer a filtered question with an unfiltered page either.
  */
 function passesViewerScope(
   m: StoredMessageSummary,
@@ -2271,6 +2297,10 @@ function passesViewerScope(
   }
   const bareFrom = (parseRecipients(m.from)[0] ?? "").toLowerCase();
   const scope = accountViewer ?? viewer;
+  // #422: under an account boundary, `viewer` here is the caller's to= RECIPIENT
+  // FILTER, not the viewer, so it applies on top of every branch below (including
+  // lens=sent, whose early return would otherwise swallow it).
+  if (accountViewer && viewer && !m.deliveredTo.some((a) => a.toLowerCase() === viewer)) return false;
   if (scope && lens === "sent") return bareFrom === scope;
   if (accountViewer) {
     const delivered = m.deliveredTo.map((a) => a.toLowerCase());
