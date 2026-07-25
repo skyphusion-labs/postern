@@ -86,6 +86,15 @@
     // index everything (only matters when the Vectorize/AI bindings are present).
     "VECTORIZE_FOR": "",
 
+    // OPTIONAL: role-address filing. Comma-separated recipient=alsoFileUnder pairs;
+    // a message delivered to the left address is ALSO recorded as delivered to the
+    // right one, so it appears in that mailbox view of the same stored message
+    // (nothing is copied, forwarded, or re-transmitted). Meant for shared role
+    // addresses on a deployment with per-account mailbox views, where an unowned
+    // address is stored but visible to nobody. Empty = unchanged behavior.
+    //   "FILE_ALSO_UNDER": "abuse@example.com=owner@example.com",
+    "FILE_ALSO_UNDER": "",
+
     // Outbound send/reply defaults. DEFAULT_FROM must be on ALLOWED_FROM_DOMAIN.
     // OUTBOUND_TRANSPORT unset/"cf" = Cloudflare Email Sending (default).
     "DEFAULT_FROM": "noreply@example.com",

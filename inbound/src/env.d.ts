@@ -72,6 +72,21 @@ interface Env {
    * Example: "conrad@skyphusion.org,alerts@skyphusion.org"
    */
   VECTORIZE_FOR: string;
+  /**
+   * Role-address filing map: comma-separated `recipient=alsoFileUnder` pairs. A
+   * message delivered to the left address is recorded as delivered to the right one as
+   * well, so it appears in that mailbox view of the SAME stored message. Nothing is
+   * copied, forwarded, or re-transmitted.
+   *
+   * For shared role addresses (`abuse@`, `security@`, `support@`) on a
+   * deployment whose mailbox views are scoped per account: with no owner, such an
+   * address is stored but appears in no human view.
+   *
+   * Single hop (a target is never expanded again); self-maps and duplicates are no-ops;
+   * malformed entries are skipped with a warning; empty changes nothing.
+   * Example: "abuse@example.com=owner@example.com,security@example.com=owner@example.com"
+   */
+  FILE_ALSO_UNDER: string;
 
   // --- Mailbox send/reply API (M2: #23/#26) ---
   /**

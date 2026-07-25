@@ -101,9 +101,19 @@ End-to-end: verify against `npm run dev` + `curl` the mailbox API; verify the re
 
 ## CI / deploy
 
-**GitHub Actions**. On push to `main`, `deploy.yml` deploys the inbound worker (`postern`) and runs
-`wrangler d1 migrations apply` first. Public repo -> GitHub-hosted `ubuntu-latest`. The relay is rebuilt
-and reinstalled on the directory host by hand (`go build` + `systemctl`); the pipeline does not ship the binary.
+**GitHub Actions**, and the deploy is **TAG-GATED**: `deploy.yml` runs on a pushed SemVer tag
+(`v*`), never on a merge. **A bare merge to `main` does NOT redeploy production** -- it runs CI only.
+Ship with `git tag -a vX.Y.Z -m ... && git push origin vX.Y.Z`; the workflow applies
+`wrangler d1 migrations apply` first, then `wrangler deploy`, so a schema change ships with its code.
+`workflow_dispatch` may run the gate, but the deploy step is guarded on a tag ref, so a manual
+dispatch from a branch never ships prod. Public repo -> GitHub-hosted `ubuntu-latest`.
+
+**Verify the ARTIFACT, not the pipeline**: the worker's `modified_on` (or a behavior probe against
+the live worker), never a green run. This paragraph previously claimed merges to `main` deploy, which
+was wrong and cost a sprint an assumption -- code merged is NOT code live here.
+
+The relay is rebuilt and reinstalled on the directory host by hand (`go build` + `systemctl`); the
+pipeline does not ship the binary.
 
 ## Conventions (SkyPhusion house style)
 

@@ -122,7 +122,7 @@ export async function ingest(
       vectorize,
       // The one bare lower-cased envelope recipient this invocation delivered to;
       // merged into an existing row's delivered_to on a same-Message-ID dedup (#178).
-      deliveredTo: [toAddr],
+      deliveredTo: [toAddr, ...fileAlsoUnder(toAddr, env.FILE_ALSO_UNDER)],
       cc: parsed.cc ?? null,
       sender: parsed.sender ?? null,
       replyTo: parsed.replyTo ?? null,
@@ -137,6 +137,54 @@ export async function ingest(
 }
 
 // --- Helpers ---
+
+/**
+ * Role addresses belong to a FUNCTION, not a person: nothing about `abuse@` says
+ * which human reads it. Per-account mailbox views scope every folder to the viewer
+ * address, so a role address with no owner lands in the store and appears in NO view
+ * at all -- delivered, stored, searchable through the API, and invisible in every mail
+ * client. For an abuse or security intake address, that is the whole point of
+ * publishing it, missed.
+ *
+ * FILE_ALSO_UNDER fixes the FILING rather than the transport: a matching message is
+ * recorded as delivered to the extra address TOO, so it appears in that mailbox view
+ * of the SAME stored message. Nothing is copied, nothing is re-transmitted, and no
+ * mail leaves the estate.
+ *
+ * FORMAT: `role@example.com=person@example.com,role2@example.com=person@example.com`
+ *
+ * DELIBERATE PROPERTIES:
+ * - SINGLE HOP. The map is consulted once, against the address the message was
+ *   actually delivered to; a target is never expanded again. A config saying a=b and
+ *   b=c files an a-message under b only, so no chain or cycle is expressible.
+ * - A SELF-MAP IS A NO-OP and duplicate targets collapse, so the delivered set can
+ *   never carry the same address twice.
+ * - A MALFORMED ENTRY IS SKIPPED AND LOGGED, and the valid entries still apply. This
+ *   is parsed on the DELIVERY path, so throwing would turn one typo into refused mail
+ *   for every recipient, which is strictly worse than the typo. The warning names the
+ *   offending entry (config text, never a credential).
+ * - UNSET OR EMPTY CHANGES NOTHING. An address that is not the left side of an entry
+ *   files exactly as before, which is what the suite asserts as its control.
+ */
+export function fileAlsoUnder(recipient: string, raw: string | undefined | null): string[] {
+  const bare = recipient.trim().toLowerCase();
+  if (!bare || !raw) return [];
+  const out: string[] = [];
+  for (const chunk of raw.split(",")) {
+    const entry = chunk.trim();
+    if (!entry) continue;
+    const eq = entry.indexOf("=");
+    const from = eq > 0 ? entry.slice(0, eq).trim().toLowerCase() : "";
+    const target = eq > 0 ? entry.slice(eq + 1).trim().toLowerCase() : "";
+    if (!from.includes("@") || !target.includes("@")) {
+      console.warn("FILE_ALSO_UNDER: ignoring malformed entry", entry);
+      continue;
+    }
+    if (from !== bare || target === bare) continue;
+    if (!out.includes(target)) out.push(target);
+  }
+  return out;
+}
 
 export async function sha256hex(input: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));

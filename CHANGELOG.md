@@ -1,3 +1,41 @@
+# Changelog
+
+Notable changes per release. SemVer-style: **v1.0.0** is the first production-ready
+Core v1.0 mailbox (M1 contract). Newest first.
+
+## v1.0.6
+
+Role-address filing correctness, and the release pins v1.0.5 shipped without.
+
+- **inbound:** `FILE_ALSO_UNDER` no longer depends on delivery ORDER (#407). Cloudflare invokes the
+  worker once per envelope recipient and that order is not ours; the merge path appended only the
+  envelope recipient, so mail addressed to a role address AND anything else was filed under the
+  owner only when the role address happened to arrive first. Every address beyond the envelope
+  recipient is now appended with an idempotent, delimiter-safe statement; the concurrency-critical
+  insert-or-merge (#178) is untouched. Proven against real SQLite in both orders, with idempotence
+  and substring-address controls.
+- **inbound:** the store FAKE learned the same statement, so an order-dependent bug can no longer
+  pass the fake-based suite green (it did, once).
+- **python:** `postern-client` version synced to 1.0.6 for the PyPI publish gate.
+- **operator note (no code):** the deployed operator config carries `d1_databases[0].database_name`
+  `skyphusion-mail` (the escrow value), not the public template placeholder. The `database_id` was
+  always correct, so nothing pointed at another database. Escrowed in `crew-secrets`.
+
+## v1.0.5
+
+Worker deploy only. The inbound Worker shipped; the PyPI and GitHub-release legs did NOT run,
+because the tag was cut without bumping `clients/python/pyproject.toml` or adding a CHANGELOG
+section (both are version-lockstep gates). Recorded rather than quietly re-tagged; v1.0.6 carries
+the pins.
+
+- **inbound:** `FILE_ALSO_UNDER` (#402) -- a `recipient=alsoFileUnder` map applied at ingest, so mail
+  to a shared role address is ALSO recorded as delivered to a named owner and appears in that
+  mailbox view of the SAME stored message. Filing, not transport: nothing is copied, forwarded, or
+  re-transmitted. Empty or unset changes nothing. Exists because per-account mailbox views leave an
+  unowned role address (an abuse intake, say) stored but visible to nobody.
+- **docs:** `CLAUDE.md` corrected -- the deploy is TAG-GATED and a merge to `main` ships nothing
+  (#405). The file had claimed the opposite, which is how merged code came to be treated as live.
+
 ## v1.0.4
 
 Security dependency overrides for Dependabot advisories (#394, #395).
@@ -12,11 +50,6 @@ Security dependency overrides for Dependabot advisories (#394, #395).
 ## v1.0.3
 
 Release sync bump (2026-07-21). No functional changes in this tag.
-
-# Changelog
-
-Notable changes per release. SemVer-style: **v1.0.0** is the first production-ready
-Core v1.0 mailbox (M1 contract). Newest first.
 
 ## v1.0.2
 
