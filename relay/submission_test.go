@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -197,6 +198,38 @@ func TestSubmission_ForwardsAttachments(t *testing.T) {
 	}
 }
 
+func TestSubmission_PartCountCapped(t *testing.T) {
+	// One more than MaxParts (20) attachment parts must be rejected 552 before
+	// ever reaching the worker (README part-cap claim, relay/README.md:216: the
+	// worker's own MAX_ATTACHMENTS would otherwise reject this as a 400, which
+	// mapSendError renders 550, not the documented 552).
+	var b strings.Builder
+	b.WriteString("From: alice@skyphusion.org\r\n")
+	b.WriteString("To: d@example.com\r\n")
+	b.WriteString("Subject: too many parts\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: multipart/mixed; boundary=BOUNDARY\r\n\r\n")
+	const partCount = MaxParts + 1
+	for i := 0; i < partCount; i++ {
+		b.WriteString("--BOUNDARY\r\n")
+		b.WriteString(fmt.Sprintf("Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"p%d.bin\"\r\nContent-Transfer-Encoding: base64\r\n\r\n", i))
+		b.WriteString(base64.StdEncoding.EncodeToString([]byte("x")))
+		b.WriteString("\r\n")
+	}
+	b.WriteString("--BOUNDARY--\r\n")
+
+	sub := &stubSubmitter{authFrom: "alice@skyphusion.org"}
+	s := newAuthedSession("alice@skyphusion.org", []string{"d@example.com"}, sub)
+
+	err := s.Data(strings.NewReader(b.String()))
+	if smtpCode(err) != 552 {
+		t.Fatalf("code = %d (err=%v), want 552", smtpCode(err), err)
+	}
+	if sub.sendCnt != 0 {
+		t.Errorf("Send called %d times, want 0 (the cap must reject before bridging to the worker)", sub.sendCnt)
+	}
+}
+
 func TestSubmission_RejectsOversizeMessage(t *testing.T) {
 	sub := &stubSubmitter{authFrom: "alice@skyphusion.org"}
 	s := &submissionSession{
@@ -279,7 +312,7 @@ func TestSubmission_SendErrorMapping(t *testing.T) {
 		wantCode int
 	}{
 		{"validation 400 -> 550", &sendError{status: 400, msg: "bad"}, 550},
-		{"sender not allowed 403 -> 550", &sendError{status: 403, msg: "nope"}, 550},
+		{"rotated/read-scoped token or WAF 403 -> 451 (transient, not a hard bounce)", &sendError{status: 403, msg: "nope"}, 451},
 		{"send token wrong 401 -> 451", &sendError{status: 401, msg: "unauth"}, 451},
 		{"too large 413 -> 552", &sendError{status: 413, msg: "big"}, 552},
 		{"upstream 502 -> 451", &sendError{status: 502, msg: "down"}, 451},
