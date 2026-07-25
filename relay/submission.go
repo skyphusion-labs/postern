@@ -20,6 +20,14 @@ import (
 // the password or the raw AUTH line. Off by default; a deploy-time troubleshooting aid.
 var submissionDebug = os.Getenv("SUBMISSION_DEBUG") != ""
 
+// MaxParts caps the number of MIME attachment/inline parts a submission may
+// carry, mirroring the worker's MAX_ATTACHMENTS (inbound/src/mailbox.ts). The
+// relay fails fast with the same 552 the size cap uses, rather than round-trip
+// to the worker only to bounce there (mapSendError would render that 400 as
+// 550, not 552, contradicting the documented part-cap error code). Kept in
+// sync with the worker constant by hand.
+const MaxParts = 20
+
 // sender is the worker /api/send bridge the session needs once a message is
 // authenticated + From-enforced. *SubmitClient is the production implementation;
 // tests substitute a stub (mirrors the Transport seam in http.go). Login
@@ -171,6 +179,13 @@ func (s *submissionSession) Data(r io.Reader) error {
 	env, err := enmime.ReadEnvelope(bytes.NewReader(raw))
 	if err != nil {
 		return &smtp.SMTPError{Code: 554, EnhancedCode: smtp.EnhancedCode{5, 6, 0}, Message: "parse failed: " + err.Error()}
+	}
+
+	// Part-count cap (mirrors the worker's MAX_ATTACHMENTS): fail fast with the
+	// documented 552 rather than let the worker be the one to reject it (which
+	// would render 550 via mapSendError, not the 552 the part cap documents).
+	if n := len(collectMIMEParts(env)); n > MaxParts {
+		return &smtp.SMTPError{Code: 552, EnhancedCode: smtp.EnhancedCode{5, 3, 4}, Message: fmt.Sprintf("too many parts (max %d, got %d)", MaxParts, n)}
 	}
 
 	// From-enforcement (the seam's core safety property): the header From MUST be
@@ -338,8 +353,11 @@ func lowerSet(rcpts []string) map[string]string {
 
 // mapSendError translates a worker /api/send failure into the right SMTP reply.
 // 4xx (validation / sender-not-allowed) is a permanent client problem (550); our
-// own misconfig (401) and upstream/transport failures (5xx, network) are transient
-// (451) so the client's MTA may retry while the operator fixes it.
+// own misconfig (401), a rejected/rotated/read-scoped token or an edge WAF block
+// (403), and upstream/transport failures (5xx, network) are transient (451) so
+// the client's MTA may retry while the operator fixes it. Treating 403 as a hard
+// 550 would drop mail permanently on a token rotation or a transient WAF trip;
+// 451 lets it queue instead.
 func mapSendError(p SendPayload, err error) error {
 	se, ok := err.(*sendError)
 	if !ok {
@@ -347,8 +365,8 @@ func mapSendError(p SendPayload, err error) error {
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "submission temporarily unavailable"}
 	}
 	switch {
-	case se.status == 401:
-		log.Printf("submission send rejected: worker rejected the send token (401): %s", se.msg)
+	case se.status == 401 || se.status == 403:
+		log.Printf("submission send rejected: worker returned %d (treated as transient -- token/WAF, not sender validation): %s", se.status, se.msg)
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "submission temporarily unavailable"}
 	case se.status == 413:
 		return &smtp.SMTPError{Code: 552, EnhancedCode: smtp.EnhancedCode{5, 3, 4}, Message: "message too large"}
