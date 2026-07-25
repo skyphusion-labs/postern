@@ -116,9 +116,22 @@ land the release PR with all four, THEN cut the tag. (`mcp/package.json` version
 `workflow_dispatch` may run the gate, but the deploy step is guarded on a tag ref, so a manual
 dispatch from a branch never ships prod. Public repo -> GitHub-hosted `ubuntu-latest`.
 
+**Every tag workflow runs ONE shared preflight first** (`.github/workflows/tag-preflight.yml` ->
+`.github/scripts/tag-preflight.sh`), and each lists it in `needs:`, so the tag fan-out is
+all-or-nothing. It asserts the tag equals all four pins, that `CHANGELOG.md` has a non-empty
+`## vX.Y.Z` section, and that the tag is on `origin/main`; `postern-mcp-v*` tags get the same gate
+against `mcp/package.json`. Before it existed the five `v*` workflows were peers with no ordering, so
+v1.0.5 deployed production and rolled both door images off a tag whose release + PyPI jobs failed.
+On a non-tag ref (dispatch, push to main) it asserts the pins agree with each other. It guards
+HAND-CUT tags, which a ci.yml-only assert cannot.
+
 **Verify the ARTIFACT, not the pipeline**: the worker's `modified_on` (or a behavior probe against
 the live worker), never a green run. This paragraph previously claimed merges to `main` deploy, which
-was wrong and cost a sprint an assumption -- code merged is NOT code live here.
+was wrong and cost a sprint an assumption -- code merged is NOT code live here. The tag deploy now
+enforces this itself: after `wrangler deploy` it reads the live deployment back through the API and
+asserts production serves the version just uploaded (`.github/scripts/verify-worker-deployment.mjs`),
+then runs `inbound/smoke.mjs` against the live instance when the `POSTERN_SMOKE_*` secrets are
+configured (and says so loudly when they are not).
 
 The relay is rebuilt and reinstalled on the directory host by hand (`go build` + `systemctl`); the
 pipeline does not ship the binary.

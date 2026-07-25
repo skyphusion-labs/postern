@@ -1,6 +1,14 @@
 name: release
 
 # Cut a GitHub Release when a v* tag is pushed (update CHANGELOG.md first).
+#
+# The release notes ARE the CHANGELOG section for the tag, extracted by the
+# shared matcher .github/scripts/changelog-section.sh -- the same one the tag
+# preflight uses to assert the section exists BEFORE production deploys (#418).
+# The private copy this workflow used to carry matched the heading with an exact
+# line compare, which cannot see the repo's own dated style
+# (`## v1.0.1 -- 2026-07-16`), so a dated release would have shipped empty notes
+# after prod was already live.
 on:
   push:
     tags:
@@ -10,24 +18,26 @@ permissions:
   contents: write
 
 jobs:
+  # Tag hostility (version pins, missing CHANGELOG section, a tag off main --
+  # release.yml was the ONE tag workflow with no ancestry assert at all) stops
+  # every job below, in the same gate the other tag workflows run. #418
+  preflight:
+    uses: ./.github/workflows/tag-preflight.yml
+    with:
+      track: release
+
   release:
     name: GitHub Release
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - name: Extract release notes from CHANGELOG
         run: |
+          set -eo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          awk -v ver="## v${VERSION}" '
-            $0 == ver { found=1; next }
-            found && /^## v/ { exit }
-            found { print }
-          ' CHANGELOG.md > release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "No CHANGELOG section for v${VERSION}" >&2
-            exit 1
-          fi
+          bash .github/scripts/changelog-section.sh "$VERSION" > release-notes.md
 
       - name: Create release
         uses: softprops/action-gh-release@v3

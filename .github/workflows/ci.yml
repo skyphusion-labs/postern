@@ -143,9 +143,26 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm test
 
+  # The release-gate scripts (#418): the tag preflight, the shared CHANGELOG
+  # matcher, and the post-deploy artifact check. They cannot be exercised by
+  # pushing tags, so their suites run here on every PR -- a gate whose refusals
+  # are never watched to fail is decoration. Both suites carry a positive control
+  # so a passing run cannot be a dead path.
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: tag-preflight + CHANGELOG matcher
+        run: bash .github/scripts/tests/tag-preflight.test.sh
+      - name: post-deploy artifact verification
+        run: bash .github/scripts/tests/verify-worker-deployment.test.sh
+
   ci:
     name: ci
-    needs: [inbound, relay, imap, clients-python, mcp, webmail-e2e]
+    needs: [inbound, relay, imap, clients-python, mcp, webmail-e2e, release-gate]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -157,3 +174,4 @@ jobs:
           test "${{ needs.clients-python.result }}" = "success"
           test "${{ needs.mcp.result }}" = "success"
           test "${{ needs.webmail-e2e.result }}" = "success"
+          test "${{ needs.release-gate.result }}" = "success"
