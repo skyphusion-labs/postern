@@ -31,13 +31,36 @@ export interface MessageSummary {
   answered: boolean;
   // Durable folder placement (#419 sync): mirrors StoredMessageSummary.mailbox.
   mailbox: MailboxPlacement;
+  // Soft-delete timestamp (Trash), null otherwise (#419 sync): mirrors
+  // StoredMessageSummary.trashedAt.
+  trashedAt: string | null;
+  // The durable-folder IMAP UID, present only once a message has actually been
+  // placed in a folder; null otherwise (#419 sync): mirrors
+  // StoredMessageSummary.folderUid.
+  folderUid: number | null;
+  // Envelope fidelity (M8 #189, #419 sync): raw RFC 5322 headers as they
+  // arrived (display names and all). All nullable: null on a pre-v2 row that
+  // predates these columns. Mirrors StoredMessageSummary.{cc,bcc,sender,
+  // replyTo}.
+  cc: string | null;
+  bcc: string | null;
+  sender: string | null;
+  replyTo: string | null;
   // Normalized envelope recipients (#419 sync): mirrors
   // StoredMessageSummary.deliveredTo.
   deliveredTo: string[];
   // Raw RFC822 byte size at intake, null on rows that predate the column
   // (#419 sync): mirrors StoredMessageSummary.wireSize.
   wireSize: number | null;
+  // Cached IMAP projection length + the renderer version that produced it,
+  // both null on rows that predate the projection cache (#419 sync): mirrors
+  // StoredMessageSummary.{projectedSize,projectionVersion}.
+  projectedSize: number | null;
+  projectionVersion: number | null;
   attachmentCount: number;
+  // True when the store holds a non-empty HTML body, without fetching the
+  // body itself (#419 sync): mirrors StoredMessageSummary.hasHtml.
+  hasHtml: boolean;
 }
 
 export interface AttachmentMeta {
@@ -46,11 +69,20 @@ export interface AttachmentMeta {
   size: number;
 }
 
-export interface Message extends Omit<MessageSummary, "attachmentCount"> {
+// Message (a full read, GET /api/messages/{id}) is NOT a strict superset of
+// MessageSummary: folderUid and hasHtml are list/search-summary conveniences
+// that StoredMessage (store.ts) itself does not carry (the full body makes
+// them redundant), so they are excluded here rather than falsely inherited.
+export interface Message extends Omit<MessageSummary, "attachmentCount" | "folderUid" | "hasHtml"> {
   bodyText: string;
   // Original HTML body when the message had one, else null (#419 sync):
   // mirrors StoredMessage.bodyHtml (inbound/src/store.ts).
   bodyHtml: string | null;
+  // Per-message auth results (SPF/DKIM/DMARC) as recorded at intake (#419
+  // sync): mirrors StoredMessage.auth. `trusted` above is the worker's
+  // derived summary judgment; this is the raw per-mechanism verdicts it was
+  // derived from.
+  auth: { spf: string; dkim: string; dmarc: string };
   attachments: AttachmentMeta[];
 }
 
