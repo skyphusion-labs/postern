@@ -149,16 +149,20 @@ class RoleFolderVisibilityTest(unittest.TestCase):
         # \\Noselect means exactly this: SELECT of the parent is refused.
         self.assertIsNone(acct.select("Roles"))
 
-    def test_percent_wildcard_reaches_the_parent(self):
+    def test_percent_wildcard_reaches_the_parent_and_stops_there(self):
         # A strictly-conforming client whose discovery is LIST "" "%" does not cross
         # the "/" delimiter, so without the parent node it could never learn the
-        # children exist. (This door matches a LIST wildcard with re.match, i.e.
-        # prefix-anchored, inherited from the Twisted account model, so in practice
-        # the children come back too. That looseness is pre-existing and deliberately
-        # NOT changed here: tightening it would alter estate-mode LIST output, which
-        # this change is required to keep byte-identical.)
+        # children exist. Since #427 the matcher is anchored end-to-end (RFC 3501
+        # 6.3.8), so "%" returns the parent and NOT the child, which is what the
+        # \Noselect + \HasChildren parent is for. (Before #427 this door matched
+        # with re.match and the child came back too; that looseness was recorded
+        # here rather than hidden, and #427 is where it was fixed, with the
+        # estate-mode blast radius as the subject of the change instead of a side
+        # effect of the role-folder feature.)
         acct, _ = self._acct("ada")
-        self.assertIn("Roles", self._names(acct, "%"))
+        names = self._names(acct, "%")
+        self.assertIn("Roles", names)
+        self.assertNotIn(ROLE_FOLDER, names)
 
     def test_non_member_sees_nothing_and_cannot_select(self):
         acct, _ = self._acct("carol")

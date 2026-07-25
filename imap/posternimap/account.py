@@ -54,6 +54,40 @@ from .measure import Meter
 
 _DURABLE_FOLDERS = ("archive", "trash", "junk", "drafts")
 
+def _wildcard_matcher(pattern: str, delim: str = "/") -> "re.Pattern[str]":
+    """Compile an RFC 3501 6.3.8 mailbox pattern (#427).
+
+    6.3.8 gives the pattern exactly TWO wildcards, and they are the only
+    characters with meaning:
+
+      ``*``  zero or more characters, INCLUDING the hierarchy delimiter
+      ``%``  zero or more characters, EXCLUDING the hierarchy delimiter
+
+    Every other character is LITERAL, and 6.3.8 matches the pattern against the
+    WHOLE mailbox name (callers use ``fullmatch``, never ``match``).
+
+    We do not use ``imap4.wildcardToRegexp`` because it gives us neither half of
+    that: it substitutes the two wildcards but hands every other character to the
+    regex engine, so ``IN.OX`` matched INBOX, ``Roles/(abuse)`` was a group rather
+    than a name, and an unbalanced paren raised re.error out of LIST instead of
+    listing nothing. Escaping character by character keeps the two wildcards and
+    makes the rest literal, which is what the RFC actually says.
+
+    ``re.I`` is kept from the inherited matcher: RFC 3501 5.1 makes INBOX
+    case-insensitive, and our other mailbox names are a fixed set, so this is the
+    pre-existing behavior, unchanged by #427.
+    """
+    parts = []
+    for ch in pattern:
+        if ch == "*":
+            parts.append("(?:.*?)")
+        elif ch == "%":
+            parts.append("(?:[^" + re.escape(delim) + "]*?)")
+        else:
+            parts.append(re.escape(ch))
+    return re.compile("".join(parts), re.I)
+
+
 # A loose but sufficient shape check for "does this login look like a mail
 # address" (#352 core unblocker: derive an IMAP-service identity from the
 # authenticated login in estate mode, where there is no per_account viewer).
@@ -393,16 +427,23 @@ class PosternAccount:
         if self._per_account and self._viewer is None:
             self._log_viewer_gap("LIST")
             return []
-        matcher = imap4.wildcardToRegexp(wildcard, "/")
+        # RFC 3501 6.3.8 matches the pattern against the WHOLE name, so fullmatch,
+        # never match: `LIST "" "IN"` used to return every folder because IN is a
+        # prefix of INBOX, and `LIST "" "%"` used to return children below the
+        # delimiter because the child's empty prefix satisfied the pattern (#427).
+        # This is the one matching site for both LIST and LSUB: Twisted's
+        # _listWork calls listMailboxes for either command and filters LSUB by
+        # subscription afterwards.
+        matcher = _wildcard_matcher(wildcard, "/")
         out: List[Tuple[str, imap4.IMailbox]] = []
         for name, folder in _MAILBOXES.items():
-            if matcher.match(name):
+            if matcher.fullmatch(name):
                 out.append((name, self._mailbox(folder, list_view=True)))  # type: ignore[arg-type]
         if self._role_folders:
-            if matcher.match(ROLE_FOLDER_PREFIX):
+            if matcher.fullmatch(ROLE_FOLDER_PREFIX):
                 out.append((ROLE_FOLDER_PREFIX, RolesParentNode()))  # type: ignore[arg-type]
             for name, folder in self._role_folders.items():
-                if matcher.match(name):
+                if matcher.fullmatch(name):
                     out.append((name, self._mailbox(folder, list_view=True)))  # type: ignore[arg-type]
         return out
 

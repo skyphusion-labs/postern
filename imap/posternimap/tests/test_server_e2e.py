@@ -701,6 +701,40 @@ class ServerE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
     @defer.inlineCallbacks
+    def test_list_and_lsub_match_the_whole_name_on_the_wire(self):
+        # #427 / RFC 3501 6.3.8: the mailbox pattern is matched against the WHOLE
+        # name, and only % and * are wildcards. Proven here at the WIRE, with a
+        # real IMAP client driving the real server, because the unit coverage in
+        # test_list_wildcard exercises the account decision and this exercises the
+        # command a client actually sends. Before #427 the first assertion returned
+        # every folder and the paren case raised re.error out of LIST.
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            partial = yield proto.list("", "IN")
+            self.assertEqual([m[2] for m in partial], [])
+            exact = yield proto.list("", "INBOX")
+            self.assertEqual([m[2] for m in exact], ["INBOX"])
+            # A regex metacharacter is a literal name character, not syntax.
+            dotted = yield proto.list("", "IN.OX")
+            self.assertEqual([m[2] for m in dotted], [])
+            # Unbalanced paren: an empty list, never a protocol error.
+            paren = yield proto.list("", "IN(BOX")
+            self.assertEqual([m[2] for m in paren], [])
+            # Control: the wildcards themselves still work.
+            full = yield proto.list("", "*")
+            self.assertIn("INBOX", {m[2] for m in full})
+            self.assertIn("Sent", {m[2] for m in full})
+            # LSUB rides the same matcher (Twisted's _listWork calls
+            # listMailboxes for either command), so it is anchored too.
+            subs_partial = yield proto.lsub("", "IN")
+            self.assertEqual([m[2] for m in subs_partial], [])
+            subs_exact = yield proto.lsub("", "INBOX")
+            self.assertEqual([m[2] for m in subs_exact], ["INBOX"])
+        finally:
+            yield proto.logout()
+
+    @defer.inlineCallbacks
     def test_list_empty_pattern_returns_delimiter_reply(self):
         # #218 / RFC 3501 6.3.8: LIST "" "" is a delimiter probe, not a wildcard.
         # iOS Mail / Evolution issue it to learn the hierarchy delimiter before they
