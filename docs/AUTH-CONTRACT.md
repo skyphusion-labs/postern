@@ -1,11 +1,16 @@
 # Unified mail-auth contract (IMAP read + SMTP submission, one login)
 
-Status: **contract / design of record**. The code that consumes it is tracked in
-skyphusion-labs/postern#76 (Go 587 submission server) and #77 (IMAP `ldap`/`pam`
-mode); the umbrella is #75. This document is the single source the two consumers
-read from, so a binding never gets invented per-component. It is reproducible from
-the docs alone (ICD discipline): every DN, base, filter, attribute, and token here
-was verified read-only against a reference Authentik directory.
+Status: **contract / design of record, portable**. This document is the single
+source both door consumers read from (the Go `relay/` submission server and the
+Python `imap/` proxy), so a binding never gets invented per-component. It is
+written for ANY operator: every value below is a placeholder (`example.org`,
+`directory.example.internal`, RFC 5737 addresses) that you substitute for your
+own. The reference deployment's directory-specific record (verified instance
+facts, staged rollout steps) is maintained out-of-tree in the operators' private
+infrastructure repository, with the same section skeleton as this file.
+
+Section numbers are load-bearing: code comments and sibling docs cite them
+("section 5b", "section 7"). Do not renumber.
 
 ## 1. The requirement
 
@@ -16,146 +21,148 @@ username and one password**, and it authenticates **both** doors:
 - **Send** door: SMTP submission on 587 (STARTTLS) and optionally 465 (implicit
   TLS), served by the Go `relay/` binary in its submission role. The port set is
   the operator's `SUBMISSION_LISTENERS` choice; edge exposure of any port is an
-  operator decision (hosting-provider port policy varies), not a daemon constraint.
+  operator decision (hosting-provider port policy varies), not a daemon
+  constraint.
 
-Both doors verify the **same** end-user credential against the **same** directory,
-so a credential can never drift between protocols. The directory is the same
-Authentik instance that backs crew SSH, so there is one identity per human.
+Both doors verify the **same** end-user credential against the **same**
+directory, so a credential can never drift between protocols. Pointing them at
+the directory that already backs your other logins (SSH, SSO) gives one identity
+per human.
 
-## 2. The directory (verified ground truth)
+Postern also has directory-free auth modes (the worker-native
+`smtp_credentials` store via `/api/smtp-auth`, and the IMAP proxy's
+`token`/`fixed` modes); this contract covers the directory-backed one-login
+model. Webmail's cookie-session door is section 7's last paragraph.
 
-Authentik LDAP outpost on the **directory host** (`ghcr.io/goauthentik/ldap:<pinned-version>`),
-published on the VLAN:
+## 2. The directory (what postern needs from it)
 
-| Fact | Value |
+Any LDAP directory (or a PAM stack that reaches one) works if it provides:
+
+| Need | Meaning |
 |---|---|
-| Primary LDAP URI | `ldap://192.0.2.10:389` (directory host) |
-| Failover LDAP URI | `ldap://192.0.2.11:389` (failover host) |
-| Transport offered | **plaintext 389 only** (no 636, no StartTLS today; see section 6) |
+| A per-user bind path | a DN template the door can bind as, e.g. `cn=<login>,ou=users,...` |
+| A mail attribute | the user's full address (`mail`); the submission door binds From to it |
+| An authorization group | membership gates "this account may use mail" (e.g. `cn=mail-users,ou=groups,...`) |
+| Group membership on self-read | the bound user can read its OWN entry's group attribute (`memberOf`) |
+
+Worked example (the default DIT shape of an Authentik LDAP outpost; substitute
+your directory's):
+
+| Fact | Example value |
+|---|---|
+| LDAP URI | `ldap://directory.example.internal:389` (192.0.2.10; failover 192.0.2.11) |
 | Base DN | `dc=ldap,dc=goauthentik,dc=io` |
-| Users OU | `ou=users,dc=ldap,dc=goauthentik,dc=io` |
-| Groups OU | `ou=groups,dc=ldap,dc=goauthentik,dc=io` |
 | User DN shape | `cn=<username>,ou=users,dc=ldap,dc=goauthentik,dc=io` |
-| Login attributes | `cn` (short username, == SSH login), `mail` (full address), `sAMAccountName` |
-| Bound-identity attribute | `mail` (e.g. `conrad@skyphusion.org`) |
-| Mailbox authorization group | `cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io` (gid 24352) |
-| Scoped-search group (exists) | `cn=authentik Read-only,ou=groups,...` |
-| Admin group (do NOT bind as) | `cn=authentik Admins,ou=groups,...` |
+| Login attributes | `cn` (short username), `mail` (full address) |
+| Bound-identity attribute | `mail` (e.g. `ada@example.org`) |
+| Mailbox authorization group | `cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io` |
 
-Anonymous bind is refused (`Insufficient access (50)`); the directory only answers
-an authenticated bind. The existing fleet bind account `cn=ldap-svc` is a member of
-**`authentik Admins`** and is used by nslcd/SSH; **it must not be reused as a mail
-bind account** (coupling mail to an admin-grade, SSH-critical credential violates
-per-function-key discipline and widens blast radius).
+Two rules that are contract, not taste:
 
-### Authorization gate
+- **Do not reuse an admin-grade or infrastructure-critical bind account as a
+  mail bind account.** Coupling mail to a credential your SSH/nss stack depends
+  on violates per-function-key discipline and widens blast radius. (Under the
+  direct-bind model in 5b no service account exists at all.)
+- **Membership in the authorization group is the gate** for "this account may
+  use mail". Both doors enforce it (sections 4/5); a valid directory password
+  for a non-member still cannot open a mail door. Adding a mailbox user = adding
+  them to the group.
 
-Membership in `cn=mail-users` is the gate for "this account may use mail." It is a
-real, nss-visible group (`getent group mail-users` resolves on the directory host) and today
-contains `conrad`. Adding a mailbox user = add them to `mail-users` (additive
-Authentik blueprint edit, supervised). Both doors enforce this gate (section 4/5).
-
-## 3. The two backends, and why PAM is the fleet default
+## 3. The two backends
 
 Both consumers can authenticate a user two ways. They are equivalent in result
 (same directory, same bound identity); they differ in the path to it.
 
-### 3a. PAM (`system` mode) -- the fleet default
+### 3a. PAM (`system` mode) -- when the host already speaks to the directory
 
-The box already speaks to the directory: the directory host runs `nslcd` (libpam-ldapd), and
-`/etc/pam.d/common-auth` chains `pam_unix` then `pam_ldap` (`minimum_uid=1000
-use_first_pass`). PAM auth for an Authentik account therefore flows
-**process -> pam_ldap -> nslcd -> LDAP bind**. nslcd already holds the bind
-credential, so:
+If the box already runs an LDAP-backed PAM stack (e.g. `nslcd` + `pam_ldap`
+chained in `common-auth`), PAM auth flows **process -> pam_ldap -> nslcd ->
+LDAP bind**. The PAM stack already holds the bind credential, so:
 
-- **No new mail bind service account** is needed (nslcd binds, not Postern).
-- **No TLS-to-directory mutation** is needed: nslcd uses plaintext 389 over the
-  trusted VLAN, the posture already accepted fleet-wide for nss/SSH.
-- The bind credential is the existing `ldap-svc` (already IaC, already rotatable
-  via the operator private infrastructure repository's LDAP bind-password rotation runbook).
+- **No new mail bind account** is needed (the PAM stack binds, not Postern).
+- **No TLS-to-directory work** is needed: the door inherits whatever posture the
+  host's PAM/LDAP stack already has.
 
-This is why **PAM is the recommended backend for both doors on the directory host**, and it
-is the posture Conrad asked for ("PAM on both doors"). The PAM service file is
-`/etc/pam.d/postern` (section 4).
+This is the recommended backend on a host that is already directory-joined. The
+PAM service file is `/etc/pam.d/postern` (section 4).
 
-Hardening note (load-bearing): the hardened unit runs `DynamicUser` +
-`NoNewPrivileges=yes`. That is compatible with the **pam_ldap** path (it only
-connects to the `nslcd` socket; no setuid, no `/etc/shadow` read). It is **not**
+Hardening note (load-bearing): a hardened unit running `DynamicUser` +
+`NoNewPrivileges=yes` is compatible with the **pam_ldap** path (it only connects
+to the `nslcd` socket; no setuid, no `/etc/shadow` read). It is **not**
 compatible with verifying a purely-local `/etc/shadow` password (that needs the
-setuid `unix_chkpwd` helper, which `NoNewPrivileges` blocks). On the fleet the mail
-accounts are LDAP accounts (uid >= 1000), so the pam_ldap path is the one taken and
-the hardening stands. Do not "fix" a local-shadow login by dropping
-`NoNewPrivileges`; mail accounts live in the directory.
+setuid `unix_chkpwd` helper, which `NoNewPrivileges` blocks). Keep mail accounts
+in the directory; do not "fix" a local-shadow login by dropping
+`NoNewPrivileges`.
 
-### 3b. Direct LDAP (`ldap` mode) -- portable / off-fleet
+### 3b. Direct LDAP (`ldap` mode) -- portable / standalone
 
-The Go relay (`auth_ldap.go`) and the Python proxy (#77) can also bind the
-directory directly (pure-Go `go-ldap`; Python `ldap3`/equivalent). This is the
-right path for a non-fleet operator (a clone with no nslcd). On the directory host it is the
-**alternative**, gated behind one IdP change: the relay's LDAP backend **mandates
-TLS** (`ldap auth requires TLS`), but the outpost offers plaintext 389 only.
-Enabling direct-LDAP on the fleet therefore requires section 6 (provision 636 + a
-cert on the LDAP provider) and a scoped read-only bind account. Until then, use
-PAM on the fleet.
-
-The direct-LDAP env (consumed identically by #76 and #77) is in section 5b.
+The Go relay (`auth_ldap.go`) and the Python proxy can bind the directory
+directly (pure-Go `go-ldap`; Python `ldap3`). This is the right path for a host
+with no PAM/LDAP stack. The LDAP backend **mandates TLS** (`ldap auth requires
+TLS`); if your directory offers plaintext 389 only, section 6 covers the two
+ways to close that gap. The env contract is section 5b/5c.
 
 ## 4. PAM service file (`/etc/pam.d/postern`)
 
-Tracked as IaC in the operator private infrastructure repository as the `postern` PAM service file (deployed to
-`/etc/pam.d/postern`, root 0644). Both doors name this service:
+Keep it in your configuration management (root 0644). Both doors name this
+service:
 
 - Go submission: `AUTH_SYSTEM_PAM_SERVICE=postern` (default).
-- Python IMAP `pam` mode (#77): the same service name.
+- Python IMAP `pam` mode: the same service name.
 
-Contents and rationale live with the file; the shape is: gate on
-`pam_succeed_if user ingroup mail-users`, then delegate to the system
-`common-auth` / `common-account` (which is where pam_ldap lives). Gating on
-`mail-users` means a valid directory password for a non-mail account still cannot
-open a mail door.
+The shape: gate on `pam_succeed_if user ingroup mail-users`, then delegate to
+the system `common-auth` / `common-account` (which is where pam_ldap lives).
+Gating on the group inside the PAM service means a valid directory password for
+a non-mail account still cannot open a mail door.
 
 ## 5. The exact bindings each consumer reads
 
-### 5a. PAM path (fleet default)
+### 5a. PAM path
 
 Go submission server (`relay/`, built `-tags pam`):
 
 ```
 AUTH_BACKEND=system
-AUTH_SYSTEM_DOMAIN=skyphusion.org      # bound identity = <login>@skyphusion.org
+AUTH_SYSTEM_DOMAIN=example.org         # bound identity = <login>@example.org
 AUTH_SYSTEM_PAM_SERVICE=postern        # -> /etc/pam.d/postern
 ```
 
-Python IMAP proxy (`imap/`, #77 `pam` mode): same PAM service `postern`, same
-resulting identity. The proxy still needs the store-read service token (section 7).
+Python IMAP proxy (`imap/`, `pam` mode): same PAM service `postern`, same
+resulting identity. The proxy still needs the store-read service token
+(section 7).
 
-Login: the user types their **short username** (`conrad`) or full address; PAM
-resolves it. Bound/From identity = `<login-localpart>@skyphusion.org`.
+Login: the user types their **short username** (`ada`) or full address; PAM
+resolves it. Bound/From identity = `<login-localpart>@AUTH_SYSTEM_DOMAIN`.
 
-### 5b. Direct-LDAP path: direct-bind + self-read (Option A; the fleet shape)
+### 5b. Direct-LDAP path: direct-bind + self-read (the model of record)
 
-**Model of record:** the door binds DIRECTLY to the directory as the
-authenticating user (`cn=<login>,ou=users,...` with the user's submitted
-password), and auth success IS bind success. There is **no privileged service
-account**: Authentik 2024.12.3 has no `search_group`, and only `is_superuser`
-confers full LDAP search, so a low-privilege account cannot do a search+bind. A
-bound NON-superuser is, however, permitted to read its OWN entry, so the door then
-**self-reads** that user's entry (base scope, the user's own DN) for:
+The door binds DIRECTLY to the directory as the authenticating user
+(`cn=<login>,ou=users,...` with the user's submitted password), and auth success
+IS bind success. There is **no privileged service account**. The door then
+**self-reads** the bound user's own entry (base scope, the user's own DN) for:
 
 - `mail` -- the authenticated From identity (the relay enforces `From == mail`).
-- `memberOf` -- the **`mail-users` authorization gate** (`LDAP_REQUIRE_GROUP`).
+- `memberOf` -- the **authorization-group gate** (`LDAP_REQUIRE_GROUP`).
 
-The gate is **fail-closed**: if the self-read errors, returns no entry, or returns
-an entry NOT carrying the required group, the login is DENIED (a valid directory
-password for a non-`mail-users` account still cannot open the mail door). Login is
-the **short username** (`conrad`), substituted into `LDAP_BIND_DN_TEMPLATE` exactly
-once (`fmt.Sprintf`, one `%s`).
+The gate is **fail-closed**: if the self-read errors, returns no entry, or
+returns an entry NOT carrying the required group, the login is DENIED. Login is
+the **short username**, substituted into `LDAP_BIND_DN_TEMPLATE` exactly once
+(`fmt.Sprintf`, one `%s`).
+
+Why this model: some directories (verified on Authentik 2024.12: no
+`search_group`, only `is_superuser` confers full search) give a low-privilege
+account no way to run a search+bind, but DO let a bound non-superuser read its
+own entry -- including its **complete** group set on a base-scope self-read.
+The whole model rests on that property. Validate it live at deploy (a real send
+through the door by a group member is the acceptance test); if a directory
+change ever stops returning the group attribute on self-read, the gate fails
+closed and logins stop until the model is revisited -- deny, never estate.
 
 ```
 AUTH_BACKEND=ldap                       # (Go) ; POSTERN_IMAP_AUTH_MODE=ldap (Python)
-LDAP_URL=ldap://192.0.2.10:389          # directory outpost; TLS mandatory, see section 6
+LDAP_URL=ldap://directory.example.internal:389   # TLS mandatory, see section 6
 LDAP_STARTTLS=true
-LDAP_TLS_PIN_SHA256=<leaf SHA-256>      # pin the outpost's default cert (section 6a); non-secret
+LDAP_TLS_PIN_SHA256=<leaf SHA-256>      # or LDAP_TLS_CA; section 6. Non-secret.
 LDAP_BIND_DN_TEMPLATE=cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io
 LDAP_REQUIRE_GROUP=cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io
 LDAP_MAIL_ATTR=mail                     # default
@@ -163,178 +170,134 @@ LDAP_GROUP_ATTR=memberOf                # default
 ```
 
 No `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` / `LDAP_SEARCH_*`: those configured the
-retired search+bind path and are GONE from BOTH doors (removed from the Go relay;
-the Python proxy refuses to start if any of them is set, so an old EnvironmentFile
-fails loud rather than silently changing auth -- #182). The `cn=postern-mail-ro`
-service account is **not created** (Option A eliminates it); the staged
-`POSTERN_LDAP_BIND_PASSWORD` secret is not needed.
-
-**Self-read returns the user's full group set (proven), so the gate composes.**
-The whole model rests on a non-superuser bind being able to read its own `memberOf`
-on a base-scoped self-read. What was **byte-proven** against the live outpost during
-bring-up: a real crew member self-bound as themselves and the base-scope self-read
-of their own DN returned both `mail` AND their **complete** `memberOf` set (every
-group DN they belong to) -- proven with an account that is NOT in `mail-users`, so
-it establishes that the mechanism returns ALL of a user's groups, not a curated
-subset. The `cn=mail-users`-specific ALLOW then follows **by composition**: a
-separate read confirmed `cn=mail-users` has exactly one member (`cn=conrad`), so by
-the same full-set mechanism conrad's self-read `memberOf` will include
-`cn=mail-users` and the gate allows. That composed step is **validated live at
-deploy** (a `conrad`-send through the door is the final acceptance test). If a
-future directory change stops returning `memberOf` on a self-read, the gate fails
-closed (denies), and it would need another path before mail logins work again.
+retired search+bind path and are GONE from BOTH doors (removed from the Go
+relay; the Python proxy refuses to start if any of them is set, so an old
+EnvironmentFile fails loud rather than silently changing auth -- #182).
 
 **Per-door difference.** The `mail`-attribute resolution is the **SMTP relay's**
-need: the relay uses `mail` as the authenticated From and enforces `From == mail`,
-so it MUST read it (`LDAP_MAIL_ATTR` is relay-only). The **IMAP proxy does NOT read
-`mail`** for identity: a successful BIND is its pass criterion and the store is read
-with `POSTERN_API_TOKEN`, not the directory identity. The `mail-users` gate applies
-to BOTH doors identically (#182): under direct-bind it is the same fail-closed
-`memberOf` self-read check (`LDAP_REQUIRE_GROUP` / `LDAP_GROUP_ATTR`), not a search
-filter -- implemented in `relay/auth_ldap.go` (selfRead) and
+need: it uses `mail` as the authenticated From and enforces `From == mail`, so
+it MUST read it (`LDAP_MAIL_ATTR` is relay-only). The **IMAP proxy does NOT read
+`mail`** for identity: a successful BIND is its pass criterion and the store is
+read with `POSTERN_API_TOKEN`, not the directory identity. The group gate
+applies to BOTH doors identically (#182): the same fail-closed `memberOf`
+self-read check, implemented in `relay/auth_ldap.go` (selfRead) and
 `imap/posternimap/auth.py` (LDAPBinder._group_gate), byte-symmetric semantics.
 
-**TLS is mandatory on BOTH doors for direct-LDAP.** The relay and the IMAP proxy
-each refuse a plaintext `ldap://192.0.2.10:389` bind unless `LDAP_STARTTLS=true` (or
-an `ldaps://` URL). A bind carries the password, so it never crosses cleartext. On
-the fleet the outpost publishes plaintext 389 only, so the StartTLS upgrade pins the
-outpost's default cert by leaf SHA-256 (`LDAP_TLS_PIN_SHA256`, section 6a); PAM
-(section 3a) needs none of it.
+**TLS is mandatory on BOTH doors for direct-LDAP.** Each refuses a plaintext
+`ldap://` bind unless `LDAP_STARTTLS=true` (or an `ldaps://` URL). A bind
+carries the password, so it never crosses cleartext. PAM (3a) needs none of
+this.
 
-Failover: the current Go backend dials a single `LDAP_URL`, so fleet HA for
-direct-LDAP (a second outpost at `192.0.2.11`) is a follow-up.
+Failover: the current Go backend dials a single `LDAP_URL`; HA across a second
+directory endpoint is a follow-up.
 
 ## 5c. Shared env namespace (cross-component contract)
 
-The Go relay (`relay/config.go`) and the Python IMAP proxy mirror the SAME env-var
-names, so these names ARE the contract. Deploy EnvironmentFiles MUST use them
-verbatim; do not rename per component.
+The Go relay (`relay/config.go`) and the Python IMAP proxy mirror the SAME
+env-var names, so these names ARE the contract. Deploy EnvironmentFiles MUST use
+them verbatim; do not rename per component.
 
 | Env knob | Read by | Meaning |
 |---|---|---|
 | `AUTH_BACKEND` (Go) / `POSTERN_IMAP_AUTH_MODE` (Python) | both | mode selector: `native`/`ldap`/`system` (Go), `token`/`fixed`/`ldap`/`pam` (Python). Proxy-local name differs because the Python proxy also has token/fixed modes. |
 | `AUTH_SYSTEM_PAM_SERVICE` | both | PAM service name. Value: **`postern`**. |
-| `AUTH_SYSTEM_DOMAIN` | Go (PAM) | bound identity domain. Value: **`skyphusion.org`**. |
+| `AUTH_SYSTEM_DOMAIN` | Go (PAM) | bound identity domain (your mail domain, e.g. `example.org`). |
 | `POSTERN_SMTP_AUTH_URL` | Go (native) | worker `/api/smtp-auth` endpoint (native backend). |
 | `POSTERN_TRANSPORT_TOKEN` | Go | transport-seam bearer (native auth + inbound). |
 | `POSTERN_SEND_TOKEN` / `POSTERN_SEND_URL` | Go (submission) | worker `/api/send` hand-off + its mailbox token. |
 | `POSTERN_API_TOKEN` | Python proxy | the proxy's per-function **store-read** service token (in `ldap`/`pam` mode). |
 | `POSTERN_API_URL` | Python proxy | the Postern store origin the proxy reads. |
-| `LDAP_URL` | both | `ldap://192.0.2.10:389` (+ `192.0.2.11` failover); `ldaps://directory.example.internal:636` when TLS is provisioned. |
-| `LDAP_STARTTLS` | both | upgrade an `ldap://` conn before binding (needs section 6). |
-| `LDAP_TLS_CA` | both (#182/#153) | PEM CA bundle to trust the directory cert; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots). The crew-ownable alternative to provisioning 636 + a chained cert (section 6): pin the outpost's existing self-signed CA, no IdP mutation. Strict verification against a pinned root, never an insecure-skip. |
-| `LDAP_TLS_SERVER_NAME` | both (#182/#153) | name verified against the cert SANs; set when `LDAP_URL` dials an IP (e.g. `192.0.2.10`) but the cert names a host. Go: defaults to the `LDAP_URL` host; required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). Python: an extra accepted cert name in CA mode (ldap3 otherwise checks the dialed host). |
-| `LDAP_TLS_PIN_SHA256` | both (#182/#153) | exact-leaf SHA-256 pin (hex, colons optional, any case), SAN-independent. THE mechanism for Authentik's default outpost cert (bare-`*` SAN, unverifiable by CA-pin). A NON-secret public value (plain env, not a swarm secret). Mutually exclusive with `LDAP_TLS_CA`. Under the hood: verification IS the exact-leaf hash check, run BEFORE any credential flows (Go: `InsecureSkipVerify` + `VerifyPeerCertificate`; Python: `CERT_NONE` channel + a pre-bind leaf-hash check) = stricter than a CA, not a bypass. Neither TLS knob set = the channel is encrypted but UNAUTHENTICATED; both doors keep working (back-compat) and the Python door logs a loud startup warning. |
-| `LDAP_BIND_DN_TEMPLATE` | both | **direct-bind** DN template (REQUIRED): **`cn=%s,ou=users,dc=ldap,dc=goauthentik,dc=io`** (single `%s` = the short login). |
-| `LDAP_REQUIRE_GROUP` | both | the group DN the bound user must carry in `LDAP_GROUP_ATTR` on self-read = the **`mail-users` authz gate**: **`cn=mail-users,ou=groups,dc=ldap,dc=goauthentik,dc=io`**. Empty = no gate. Fail-closed. |
+| `LDAP_URL` | both | the directory endpoint (`ldap://directory.example.internal:389`, or `ldaps://...:636` when TLS is provisioned). |
+| `LDAP_STARTTLS` | both | upgrade an `ldap://` conn before binding (section 6). |
+| `LDAP_TLS_CA` | both | PEM CA bundle to trust the directory cert; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots). The alternative to provisioning 636 + a chained cert (section 6): pin the directory's existing self-signed CA, no IdP mutation. Strict verification against a pinned root, never an insecure-skip. |
+| `LDAP_TLS_SERVER_NAME` | both | name verified against the cert SANs; set when `LDAP_URL` dials an IP but the cert names a host. Go: defaults to the `LDAP_URL` host; required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). Python: an extra accepted cert name in CA mode (ldap3 otherwise checks the dialed host). |
+| `LDAP_TLS_PIN_SHA256` | both | exact-leaf SHA-256 pin (hex, colons optional, any case), SAN-independent. THE mechanism for a cert whose SANs cannot verify (section 6a). A NON-secret public value (plain env, not a secret). Mutually exclusive with `LDAP_TLS_CA`. Under the hood: verification IS the exact-leaf hash check, run BEFORE any credential flows (Go: `InsecureSkipVerify` + `VerifyPeerCertificate`; Python: `CERT_NONE` channel + a pre-bind leaf-hash check) = stricter than a CA, not a bypass. Neither TLS knob set = the channel is encrypted but UNAUTHENTICATED; both doors keep working (back-compat) and the Python door logs a loud startup warning. |
+| `LDAP_BIND_DN_TEMPLATE` | both | **direct-bind** DN template (REQUIRED for `ldap` mode): single `%s` = the short login. |
+| `LDAP_REQUIRE_GROUP` | both | the group DN the bound user must carry in `LDAP_GROUP_ATTR` on self-read = the authorization gate. Empty = no gate. Fail-closed. |
 | `LDAP_GROUP_ATTR` | both | the attribute listing the user's groups for the gate. Default **`memberOf`**. |
-| `LDAP_MAIL_ATTR` | Go only | the self-read identity attribute. Default **`mail`** (the relay enforces `From == mail`). The IMAP proxy does not read `mail` (see the per-door difference, 5b) and ignores this knob. |
-| `LDAP_TIMEOUT` | both | integer **seconds**, default **`10`**; bounds the directory connect AND every bind/search. `0` disables (no timeout). Symmetric across both doors: Go relay sets the `net.Dialer` timeout + conn read deadline (`relay/auth_ldap.go`); Python proxy sets `connect_timeout` + `receive_timeout` (`imap/posternimap/auth.py`). |
+| `LDAP_MAIL_ATTR` | Go only | the self-read identity attribute. Default **`mail`** (the relay enforces `From == mail`). The IMAP proxy does not read `mail` (5b) and ignores this knob. |
+| `LDAP_TIMEOUT` | both | integer **seconds**, default **`10`**; bounds the directory connect AND every bind/search. `0` disables. Symmetric across both doors: Go relay sets the `net.Dialer` timeout + conn read deadline (`relay/auth_ldap.go`); Python proxy sets `connect_timeout` + `receive_timeout` (`imap/posternimap/auth.py`), rejects a negative value. |
 
-Crew-secrets storage labels are per-function and may differ from the env knob; the
-deploy maps label -> knob in the 0600 EnvironmentFile. Under direct-bind the LDAP
-path carries NO secret of its own (no bind password; the leaf pin is a non-secret
-public value). `POSTERN_API_TOKEN`, `POSTERN_SEND_TOKEN`, and
-`POSTERN_TRANSPORT_TOKEN` are stored and consumed under the same name.
+Secret-store labels are per-function and may differ from the env knob; the
+deploy maps label -> knob in a root-0600 EnvironmentFile. Under direct-bind the
+LDAP path carries NO secret of its own (no bind password; the leaf pin is a
+non-secret public value). The Python proxy additionally has
+`POSTERN_API_TIMEOUT` for the store API.
 
-Timeouts: the Python proxy has `POSTERN_API_TIMEOUT` (store API). `LDAP_TIMEOUT`
-(integer seconds, default `10`, `0` disables) bounds the directory auth path and is
-implemented on BOTH doors, keeping connect/bind/search bounded symmetrically: Go
-relay (`relay/config.go` + `relay/auth_ldap.go`) and Python proxy
-(`imap/posternimap/config.py` + `imap/posternimap/auth.py`). The Python side rejects
-a negative value (`LDAP_TIMEOUT must be >= 0`).
+## 6. TLS-to-directory (only for direct-LDAP)
 
-## 6. TLS-to-directory (only for direct-LDAP on the fleet)
+If your directory publishes plaintext 389 only and the direct-LDAP backend
+requires TLS, there are two ways to satisfy it. The first needs no IdP change.
 
-The outpost publishes `192.0.2.10:389` (plaintext) only, and the direct-LDAP backend
-requires TLS. There are two ways to satisfy that; the first is crew-ownable today.
+### 6a. Pin the directory cert in the door (no IdP mutation)
 
-### 6a. Pin the directory cert in the Go door (crew-ownable, no IdP mutation) -- BUILT
+Some directories serve StartTLS with a DEFAULT self-signed cert whose SANs
+cannot pass hostname verification (the known case: Authentik's LDAP outpost
+default cert has the single SAN `DNS:*`; in modern Go a bare `*` matches no DNS
+name and is not an IP SAN, so `crypto/tls` verification fails under EVERY
+`LDAP_TLS_SERVER_NAME`, and the CA-pin cannot verify that cert either).
 
-Authentik's LDAP outpost serves StartTLS on 389 with its DEFAULT self-signed cert:
-`CN=authentik default certificate`, and its ONLY SAN is the bare wildcard `DNS:*`.
-That SAN is the deciding constraint. In modern Go (verified on 1.26) a wildcard must
-be the left-most label of a `>=2`-label name (`*.example`); a BARE `*` matches no DNS
-name and is not an IP SAN. So `crypto/tls` hostname verification fails against this
-cert under EVERY `LDAP_TLS_SERVER_NAME` (single-label, multi-label, or IP), and an
-empty ServerName is not allowed without skipping verification. **The CA-pin
-(`LDAP_TLS_CA` + `LDAP_TLS_SERVER_NAME`) therefore cannot verify this exact cert.**
-
-The door-side mechanism for the default cert is the **fingerprint-pin**: pin the
+The door-side mechanism for such a cert is the **fingerprint-pin**: pin the
 EXACT leaf by its SHA-256, which is SAN-independent.
 
-1. Capture the leaf fingerprint -- a NON-secret public value, so it is a plain env,
-   not a swarm secret:
-   `openssl s_client -connect 192.0.2.10:389 -starttls ldap </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout`
-2. Set `LDAP_URL=ldap://192.0.2.10:389` + `LDAP_STARTTLS=true` and
-   `LDAP_TLS_PIN_SHA256=<the fingerprint>` (colon-separated or bare hex, any case).
-   Leave `LDAP_TLS_CA` unset (the two are mutually exclusive; setting both is a
-   startup error).
+1. Capture the leaf fingerprint -- a NON-secret public value, so it is a plain
+   env, not a managed secret:
+   `openssl s_client -connect directory.example.internal:389 -starttls ldap </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout`
+2. Set `LDAP_URL` + `LDAP_STARTTLS=true` and `LDAP_TLS_PIN_SHA256=<fingerprint>`
+   (colon-separated or bare hex, any case). Leave `LDAP_TLS_CA` unset (the two
+   are mutually exclusive; setting both is a startup error).
 
 Under the pin the door sets `InsecureSkipVerify=true` and installs a
-`VerifyPeerCertificate` callback that constant-time-compares the presented leaf's
-SHA-256 to the pin. **`InsecureSkipVerify` here is an EXACT PIN, not a bypass:** it
-trusts one specific certificate (stricter than CA verification, which trusts anything
-a CA signed) and is MITM-resistant -- a swapped cert fails the match. A gosec G402 or
-CodeQL `InsecureSkipVerify` finding at that call site is a JUSTIFIED suppression
-(annotated `#nosec G402` in `relay/auth_ldap.go`), expected, not a real issue.
+`VerifyPeerCertificate` callback that constant-time-compares the presented
+leaf's SHA-256 to the pin. **`InsecureSkipVerify` here is an EXACT PIN, not a
+bypass:** it trusts one specific certificate (stricter than CA verification,
+which trusts anything a CA signed) and is MITM-resistant -- a swapped cert fails
+the match. A gosec G402 or CodeQL `InsecureSkipVerify` finding at that call site
+is a JUSTIFIED suppression (annotated `#nosec G402` in `relay/auth_ldap.go`),
+expected, not a real issue.
 
-**Threat model.** The door dials the directory host's own `:389` from a container ON the directory host
-(same box, same VLAN), so this verification is belt-and-suspenders hardening, not
-load-bearing against a realistic MITM. The fingerprint-pin is cheap and strictly
-stronger than an unauthenticated `CERT_NONE` channel, so it is the go-live posture.
-The IMAP door carries the SAME `LDAP_TLS_CA` / `LDAP_TLS_PIN_SHA256` knobs
-(#153/#182); wiring the pin into its stack env is the deploy step that closes its
-`CERT_NONE` gap.
+**The pinning tradeoff.** A leaf pin breaks if the directory REGENERATES its
+cert (expiry, rotation, reinstall): the new leaf has a new SHA-256, the pin
+stops matching, and directory auth fails closed. Recovery is config-only:
+re-capture the fingerprint (step 1) and roll the door with the new
+`LDAP_TLS_PIN_SHA256`. This fragility is the accepted tradeoff for pinning a
+default cert without an IdP mutation; 6b removes it.
 
-**Re-pin runbook (the pinning tradeoff).** A leaf pin breaks if Authentik
-REGENERATES its default cert (expiry, rotation, reinstall): the new leaf has a new
-SHA-256, the pin stops matching, and 587 LDAP auth fails closed. This is DOOR-SIDE
-ONLY -- crew SSH rides the same outpost but does not pin, so it is unaffected.
-Recover (no code change, no IdP touch):
-1. Re-capture the leaf fingerprint (the `openssl ... -fingerprint -sha256` above).
-2. Update `LDAP_TLS_PIN_SHA256` in the 587 door's env and roll the service
-   (`docker service update --force postern-submission_postern-submission`).
-This fragility is the accepted tradeoff for pinning the default cert without an IdP
-mutation; 6b (a properly-named cert) removes it for both doors.
+For a directory cert with a USABLE name, use the CA-pin instead:
+`LDAP_TLS_CA=<PEM path>` (the PEM becomes the ONLY trust anchor) +
+`LDAP_TLS_SERVER_NAME=<the cert name>`. Strict verification against a private
+root, never an insecure-skip; no code change.
 
-For a directory cert with a USABLE name (the future 6b path), use the CA-pin instead:
-`LDAP_TLS_CA=/run/secrets/postern_ldap_ca` (the PEM becomes the ONLY trust anchor) +
-`LDAP_TLS_SERVER_NAME=<the cert name>`. Strict verification against a private root,
-never an insecure-skip; no relay code change.
+### 6b. Provision 636 + a chained cert (the cleaner long-term shape)
 
-### 6b. Provision 636 + a chained cert (later hardening, retires #87/#153) -- GATED
+1. Issue a cert with a SAN naming the directory host (an internal name via
+   DNS-01 is cleanest).
+2. Bind the keypair to the directory's LDAP endpoint and publish 636 (or enable
+   StartTLS on 389). This is an IdP configuration change; treat it as a
+   supervised change, not routine.
+3. Point `LDAP_URL` at `ldaps://directory.example.internal:636`; no door code
+   change.
 
-1. Issue an internal cert with SAN `directory.example.internal` (+ `192.0.2.10`); a real cert
-   via DNS-01 against the Cloudflare DNS API for an internal name is cleanest.
-2. Bind a certificate-keypair to the Authentik LDAP provider and publish 636 (or
-   enable StartTLS on 389): an edit to the IdP stack config in the operator private infrastructure repository (compose port
-   map + provider config) -- an **IdP-stack change, supervised**.
-3. Point `LDAP_URL` at `ldaps://directory.example.internal:636`; no relay code change.
+PAM (3a) needs neither path.
 
-6b is the cleaner long-term shape (it retires #87/#153 for BOTH doors) but is a
-Conrad-gated IdP mutation; 6a unblocks the Go door's Wave-B logins without it. PAM
-(section 3a) needs neither.
+## 7. Token / secret inventory (by function)
 
-## 7. Token / secret inventory (by function, by location)
+Every secret each component holds, labelled by function. Store values in an
+encrypted secret store and project them to root-0600 EnvironmentFiles at deploy;
+never commit one in cleartext. Presence-check with `${VAR:+SET}` only (a
+`${VAR:-...}` default echoes the value).
 
-Every secret each component holds, labelled by function. All values are
-age-encrypted in **crew-secrets** (PR, never direct-push) and projected to a
-root-`0600` EnvironmentFile at deploy. None is ever committed in cleartext.
-Presence-check with `${VAR:+SET}` only.
+| Secret (env var) | Function | Held by |
+|---|---|---|
+| `POSTERN_TRANSPORT_TOKEN` | transport seam (`/ingest`, `/dispatch`, native `/api/smtp-auth`) | relay (inbound + native submission) |
+| `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | submission door (587/465) |
+| `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store in `ldap`/`pam` mode | postern-imap |
+| `POSTERN_API_TOKEN_DELETE` (store-delete) | IMAP proxy EXPUNGE only (`DELETE /api/messages/{id}`) | postern-imap |
+| `POSTERN_API_TOKEN_IMAP` (service write) | identity-asserted Drafts + genuine APPEND import (`/api/imap/*`) | postern-imap |
+| `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname (587 + 465 share it) | submission door |
 
-| Secret (env var) | Function | Held by | Stored | Gate |
-|---|---|---|---|---|
-| `POSTERN_TRANSPORT_TOKEN` | transport seam (`/ingest`, `/dispatch`, native `/api/smtp-auth`) | relay (inbound + native submission) | crew-secrets -> `/etc/...env` 0600 | exists |
-| `POSTERN_SEND_TOKEN` | submission hand-off to worker `/api/send` (DKIM-sign + store) | submission door (587/465) | crew-secrets -> `/etc/postern-submission.env` 0600 | exists; holds a `send`-scoped value once provisioned (worker `POSTERN_API_TOKEN_SEND`, #85) |
-| `POSTERN_API_TOKEN` (store-read) | IMAP proxy reads the store (`/api/messages`, `/search`) in `ldap`/`pam` mode | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | exists; holds a `read`-scoped value once provisioned (worker `POSTERN_API_TOKEN_READ`, #85) |
-| `POSTERN_API_TOKEN_DELETE` (store-delete) | IMAP proxy EXPUNGE only (`DELETE /api/messages/{id}`) | postern-imap | crew-secrets minter tier -> swarm `postern_imap_delete_token` | dedicated worker `delete`-scope slot (#352); NOT read or `both` |
-| `POSTERN_API_TOKEN_IMAP` (service write) | identity-asserted Drafts + genuine APPEND import (`/api/imap/*`) | postern-imap | crew-secrets -> `/etc/postern-imap.env` 0600 | dedicated `imap` scope; cannot read, send, hard-delete, or administer |
-| ~~`POSTERN_LDAP_BIND_PASSWORD`~~ | **RETIRED** -- direct-bind (Option A, section 5b) uses no service account, so there is no search-bind password to hold. | -- | -- | -- |
-| `SUBMISSION_TLS_CERT` / `_KEY` | public TLS for the submission hostname (587 STARTTLS + 465 implicit share it) | submission door (587/465) | crew-secrets / cert store (staged) | **gated** (exposure) |
-
-**Worker-side scope secrets (#85).** The two consumer env vars above present a
-token VALUE; the inbound worker classifies that value by which of ITS secrets it
+**Worker-side scope secrets (#85).** The consumer env vars above present a token
+VALUE; the inbound worker classifies that value by which of ITS secrets it
 equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 
 | Worker secret | Scope | Reaches |
@@ -344,92 +307,84 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
 | `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
 | `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import` only; the authenticated door asserts the account identity |
-| `POSTERN_SEND_IDENTITIES` (registry, #28; a config VAR, not a secret -- #335) | `send` + bound From | send/reply and own-draft CRUD as the token's OWN identity |
+| `POSTERN_SEND_IDENTITIES` (registry, #28; a config VAR, not a secret -- hashes only) | `send` + bound From | send/reply and own-draft CRUD as the token's OWN identity |
 
-The five STATIC slots (`POSTERN_API_TOKEN`, `POSTERN_API_TOKEN_READ`,
-`POSTERN_API_TOKEN_SEND`, `POSTERN_API_TOKEN_DELETE`, `POSTERN_API_TOKEN_IMAP`) each hold a
-**comma-separated SET of tokens** (#154):
-entries are trimmed, empty entries (stray commas, whitespace) are ignored, and a
-bearer matching ANY member resolves to that slot's scope. A single bare value (no
-comma) is a one-element set -- the pre-#154 format, unchanged -- so existing
-deployments need no change. The point is per-CONSUMER tokens within one function:
-the IMAP door, the Postern MCP, and the webmail can each hold their OWN `read`
-member, so rotating or revoking one never strands the others. Matching stays
-constant-time per member with no early exit (which member matched does not leak via
-timing; per-token length may leak, the bytes must not). A comma is therefore not a
-valid character inside a token value. This format does NOT apply to
-`POSTERN_SEND_IDENTITIES`: the registry is a JSON map with its own shape (below),
-not a token list.
+The five STATIC slots each hold a **comma-separated SET of tokens** (#154):
+entries are trimmed, empty entries ignored, and a bearer matching ANY member
+resolves to that slot's scope. A single bare value (no comma) is a one-element
+set -- the pre-#154 format, unchanged. The point is per-CONSUMER tokens within
+one function: the IMAP door, the Postern MCP, and the webmail can each hold
+their OWN `read` member, so rotating or revoking one never strands the others.
+Matching stays constant-time per member with no early exit. A comma is therefore
+not a valid character inside a token value. This format does NOT apply to
+`POSTERN_SEND_IDENTITIES`: the registry is a JSON map with its own shape.
 
 Unknown token -> `401`; known token outside its scope -> `403`. Credential-admin
-(`/api/admin/smtp-credentials`) is reachable ONLY by a `both` token. Provisioning
-the scoped secrets is OPTIONAL and non-breaking: with only `POSTERN_API_TOKEN`
-set, every consumer keeps using that one `both` value exactly as before.
+(`/api/admin/smtp-credentials`) is reachable ONLY by a `both` token.
+Provisioning the scoped secrets is OPTIONAL and non-breaking: with only
+`POSTERN_API_TOKEN` set, every consumer keeps using that one `both` value
+exactly as before.
 
-**Per-identity send registry (#28) -- one scope, many identities.** The scope split
-above bounds a leaked token to a FUNCTION; the registry adds WHO. The optional worker
-config var `POSTERN_SEND_IDENTITIES` (a var, not a secret: it stores hashes, so it
-holds no credential and stays readable + mergeable, #335) is a JSON map of
-`sha256hex(token) -> { from, displayName? }`:
-many send-scoped tokens, each the SAME `send` scope but a DISTINCT, authoritative From.
-The worker hashes the presented Bearer, looks it up, and on `/api/send` + `/api/reply`
-OVERRIDES the From to the bound identity (a token cannot send as anyone else). It stores
-token HASHES, never raw tokens. Additive and back-compat: the static
-`POSTERN_API_TOKEN_SEND` keeps working as the un-bound send token (From falls back to the
-caller / `DEFAULT_FROM`). Full contract, JSON shape, and the operator registration
-recipe: **`docs/SEND-IDENTITIES.md`**.
+**Per-identity send registry (#28) -- one scope, many identities.** The scope
+split bounds a leaked token to a FUNCTION; the registry adds WHO. The optional
+worker config var `POSTERN_SEND_IDENTITIES` (a var, not a secret: it stores
+hashes, so it holds no credential and stays readable + mergeable) is a JSON map
+of `sha256hex(token) -> { from, displayName? }`: many send-scoped tokens, each
+the SAME `send` scope but a DISTINCT, authoritative From. The worker hashes the
+presented Bearer, looks it up, and on `/api/send` + `/api/reply` OVERRIDES the
+From to the bound identity (a token cannot send as anyone else). It stores token
+HASHES, never raw tokens. Additive and back-compat: the static
+`POSTERN_API_TOKEN_SEND` keeps working as the un-bound send token. Full
+contract, JSON shape, and the operator registration recipe:
+**`docs/SEND-IDENTITIES.md`**.
 
-**Token custody after the split (RATIFIED, Mackaye 2026-06-27).** Once the scoped
-values are provisioned (#85), the `both` `POSTERN_API_TOKEN` lives worker-side and in
-crew-secrets **minter-tier ONLY** -- never in any box EnvironmentFile. Each box holds
-ONLY its scoped value: the IMAP proxy and the Postern MCP hold the `read` value, the
-587 submission server holds the `send` value. The `both` token is reserved for
-credential-admin ops (`/api/admin/smtp-credentials`, the reindex route) run by
-Mackaye/crew, never projected onto a box -- so a leaked box EnvironmentFile is bounded
-to exactly one scope.
+**Custody after the split.** Once scoped values are provisioned, keep the `both`
+token OFF every door host: each box EnvironmentFile holds ONLY its scoped value
+(the IMAP proxy and the MCP hold `read`, the submission server holds `send`),
+and the `both` token is reserved for credential-admin operations run from the
+operator's own environment -- so a leaked box EnvironmentFile is bounded to
+exactly one scope.
 
-**Posture change to bake in (per #75).** The IMAP proxy moves from "holds no
+**Posture note.** In `ldap`/`pam` mode the IMAP proxy moves from "holds no
 secret" (token mode: each session carries the user's own token) to "holds a
-per-function service token" (`ldap`/`pam` mode: the proxy authenticates the human
-against the directory, then reads the store with its OWN labelled service token).
-This must be stated in the IMAP door deploy runbook (maintained out-of-tree) and its README (it is).
+per-function service token". Its README states this; keep your deploy notes
+honest about it too.
 
-**v1 reality vs end state (honest).** Postern is one mailbox, and the egalitarian
-single-key posture (one `both` token sends AND receives) is a first-class supported
-mode, not a deficiency. Worker-side per-function scoping landed in #85, so the
-"store-read" and "send" functions CAN now be two distinct, independently-rotatable
-secrets (`POSTERN_API_TOKEN_READ` / `POSTERN_API_TOKEN_SEND`). Until an operator
-provisions those distinct values, every consumer still presents the SAME single
-`POSTERN_API_TOKEN` (`both`) value -- so do not pretend the two labels are isolated
-in a deployment that has not provisioned the scoped secrets; they share one value
-until it is split. The split is optional hardening to bound a leaked credential's
-blast radius (a stolen read-door token cannot send), never a per-principal or
+**v1 reality vs end state (honest).** Postern is one mailbox, and the
+egalitarian single-key posture (one `both` token sends AND receives) is a
+first-class supported mode, not a deficiency. Until an operator provisions
+distinct scoped values, every consumer presents the SAME single
+`POSTERN_API_TOKEN` (`both`) value -- so do not pretend the labels are isolated
+in a deployment that has not split them. The split is optional hardening to
+bound a leaked credential's blast radius, never a per-principal or
 human-vs-agent two-tier default.
 
-**Webmail sessions (the third door).** `POST /api/session` (native mode) verifies
-`smtp_credentials`, NOT the directory, so its full contract lives in
-`docs/design/webmail-v2-contracts.md` section 1 rather than here. It belongs in this
-inventory only because it is a third door in front of a shared credential store: since
-#409 it carries the same brute-force posture the two doors above do
-(`relay/throttle.go` #105, `imap/posternimap/throttle.py` #183) -- keyed per-account
-counters, enumeration-safe, fail-closed, backoff with temporary lockout -- so no door
-undercuts the others' throttles. It holds no secret of its own; the session cookie is
-an opaque handle to a server-side row and only the sha256 hash is stored.
+**Webmail sessions (the third door).** Webmail can authenticate humans with a
+cookie session minted from the worker-native `smtp_credentials` store
+(`POST /api/session`; `WEBMAIL_AUTH_BACKEND` unset = OFF, `native` = explicit
+operator opt-in). Sessions carry the caps `read`/`send`/`delete`, never admin; a
+Bearer token always wins over a cookie on the same request; state-changing
+session requests are CSRF-gated. Since #409 the mint carries the same
+brute-force posture the two doors above do (`relay/throttle.go`,
+`imap/posternimap/throttle.py`): keyed per-account counters, enumeration-safe,
+fail-closed, backoff with temporary lockout, so no door undercuts the others'
+throttles. The full session contract lives in `docs/CONTRACT.md` and
+`docs/design/webmail-v2-contracts.md`; it composes with everything above without
+changing it.
 
-## 8. What is staged / gated for Conrad (do NOT do unattended)
+## 8. Staged exposure steps (operator-supervised)
 
-- Provision public **TLS certs** for the mail hostname(s); **open the submission
-  port(s) (587 and/or 465) + 993 in ufw**;
-  add **public DNS A records** for the mail host. (Exposure flip, #75/#76/#77 HARD
-  GATE.)
-- ~~Create the scoped `cn=postern-mail-ro` LDAP bind account~~ -- **NOT NEEDED**
-  (Option A direct-bind, section 5b, uses no service account). Tear down any staged
-  `postern-mail-ro` blueprint/secret.
-- Provision **636 + a cert** on the Authentik LDAP provider (section 6) -- only for
-  direct-LDAP on the fleet, and only as the cleaner alternative to the section 6a
-  leaf-pin (which already unblocks direct-bind on the fleet today).
-- The #74 deploy-drift fix (inbound rename + `postern.skyphusion.org` custom
-  domain): a downtime gate on live email.
+Buildable and testable with no exposure: the PAM file, hardened units, loopback
+builds, and every test in the tree. The steps that CHANGE YOUR EXPOSURE deserve
+explicit supervision, in this order:
 
-Everything else (PAM file, hardened units, deploy runbooks, the contract, loopback
-build + test) is buildable/testable now without touching exposure or the IdP.
+- Provision public **TLS certs** for the mail hostname(s).
+- **Open the submission port(s) (587 and/or 465) and 993** at your firewall /
+  edge.
+- Add **public DNS records** for the mail host (and MX/SPF/DKIM/DMARC per
+  `DEPLOY.md`).
+- If using direct-LDAP with 6b: the IdP cert/port provisioning is its own
+  supervised change.
+
+Treat each as a deliberate flip with a rollback path, not a side effect of a
+deploy.
