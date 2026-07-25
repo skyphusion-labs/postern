@@ -803,6 +803,41 @@ export async function getAttachment(
   return { body: obj.body, filename: row.filename, mime: row.mime, size: row.size };
 }
 
+/** Normalize one viewer address, or a viewer SET, to lower-cased unique addresses.
+ *
+ *  A bound webmail session is ONE person, but since #425 it can also read the role
+ *  queues that person is a member of, so every READ-side access check takes a set. The
+ *  single-address form stays exactly what it was. */
+function viewerList(viewer: string | readonly string[] | undefined): string[] {
+  if (!viewer) return [];
+  const raw = Array.isArray(viewer) ? viewer : [viewer as string];
+  const out: string[] = [];
+  for (const entry of raw) {
+    const value = entry?.trim().toLowerCase();
+    if (value && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+/** "delivered to V, or authored by V" for ANY address in the viewer set (#425).
+ *
+ *  One address produces the exact pre-#425 fragment, bind for bind, so every existing
+ *  call is byte-identical; a set produces a parenthesised OR of the same fragment, so a
+ *  role member reaches ROLE mail and nothing else widens. An EMPTY set produces no SQL,
+ *  and each call site decides what that means: estate for the optional-scope writers, a
+ *  flat refusal for messageAccessible. */
+function accessClause(viewers: readonly string[]): { sql: string; binds: string[] } {
+  if (viewers.length === 0) return { sql: "", binds: [] };
+  const one =
+    "(COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)";
+  const binds: string[] = [];
+  for (const viewer of viewers) binds.push(viewer, viewer);
+  return {
+    sql: viewers.length === 1 ? one : `(${viewers.map(() => one).join(" OR ")})`,
+    binds,
+  };
+}
+
 /**
  * Set the read state (#seen) on a set of messages by message_id, returning how many
  * rows changed. The single writer for the seen flag: the IMAP \Seen store, a webmail
@@ -816,22 +851,26 @@ export async function getAttachment(
  * SESSION-authed callers only; a Bearer caller (the IMAP door) omits it and keeps the
  * pre-#410 estate behavior byte for byte. An id the viewer cannot see is skipped, not
  * refused, exactly as an unknown id is.
+ *
+ * Since #425 it may be a SET (the session identity PLUS the role queues that identity
+ * belongs to), so a member can mark role mail read. `forRecipient` is unaffected and
+ * stays the ONE person the override belongs to: the widened set decides which messages
+ * are REACHABLE, never whose read state is written.
  */
 export async function setSeen(
   env: Env,
   messageIds: string[],
   seen: boolean,
   forRecipient?: string,
-  viewer?: string,
+  viewer?: string | readonly string[],
 ): Promise<number> {
   if (messageIds.length === 0) return 0;
   const placeholders = messageIds.map(() => "?").join(", ");
   // The viewer-accessibility predicate, identical to setFlags/moveMessages and to
   // messageAccessible: the message was delivered to the viewer, or the viewer sent it.
-  const access = viewer
-    ? " AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
-    : "";
-  const accessBinds = viewer ? [viewer.toLowerCase(), viewer.toLowerCase()] : [];
+  const clause = accessClause(viewerList(viewer));
+  const access = clause.sql ? ` AND ${clause.sql}` : "";
+  const accessBinds = clause.binds;
 
   // Scoped (#350): mark read/unread for ONE recipient -- upsert a sparse override
   // in message_seen_by, never touching messages.seen (the estate/legacy flag).
@@ -1289,19 +1328,29 @@ async function deleteAllDraftAttachments(env: Env, draftId: string, identity: st
     .run();
 }
 
+/** Can this viewer SEE this message at all?
+ *
+ *  `identity` may be ONE address or a SET (#425: a session identity plus the role
+ *  queues it belongs to), so a message opened from a role view resolves instead of
+ *  404ing. Write paths deliberately keep passing the single identity. */
 export async function messageAccessible(
   env: Env,
   id: string,
-  identity: string,
+  identity: string | readonly string[],
   requireTrash = false,
 ): Promise<boolean> {
+  const clause = accessClause(viewerList(identity));
+  // An EMPTY set is refused rather than read as estate: this runs only to SCOPE a
+  // caller, so "no addresses" can only mean the scope is unanswerable, and the
+  // fail-closed answer to that is no.
+  if (!clause.sql) return false;
   const row = await env.DB.prepare(
     "SELECT message_id FROM messages WHERE message_id = ? " +
-      "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?) " +
+      `AND ${clause.sql} ` +
       (requireTrash ? "AND mailbox = 'trash' " : "") +
       "LIMIT 1",
   )
-    .bind(id, identity.toLowerCase(), identity.toLowerCase())
+    .bind(id, ...clause.binds)
     .first<{ message_id: string }>();
   return !!row;
 }
@@ -1386,22 +1435,26 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
   return rowToMessage(row, await attachmentsFor(env.DB, messageId));
 }
 
-/** All messages in a thread, oldest first. */
-export async function thread(env: Env, threadId: string, viewer?: string): Promise<StoredMessage[]> {
-  const owner = viewer?.trim().toLowerCase();
+/** All messages in a thread, oldest first.
+ *
+ *  `viewer` may be ONE address or a SET (#425), matching messageAccessible: a thread
+ *  reached from a role view is scoped to the member PLUS its role queues. Absent =
+ *  estate, exactly as before. */
+export async function thread(
+  env: Env,
+  threadId: string,
+  viewer?: string | readonly string[],
+): Promise<StoredMessage[]> {
+  const clause = accessClause(viewerList(viewer));
   const res = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
             delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
             projected_size, projection_version,
             flagged, answered, mailbox, trashed_at
-       FROM messages WHERE thread_id = ? ${
-         owner
-           ? "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
-           : ""
-       } ORDER BY date, id`,
+       FROM messages WHERE thread_id = ? ${clause.sql ? `AND ${clause.sql}` : ""} ORDER BY date, id`,
   )
-    .bind(threadId, ...(owner ? [owner, owner] : []))
+    .bind(threadId, ...clause.binds)
     .all<MessageRow>();
   const rows = res.results ?? [];
   const out: StoredMessage[] = [];
@@ -1745,17 +1798,33 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   return { items, cursor };
 }
 
+export type SystemFolderId = "inbox" | "sent" | "all" | "drafts" | "trash" | "junk" | "archive";
+
 export interface FolderSummary {
-  id: "inbox" | "sent" | "all" | "drafts" | "trash" | "junk" | "archive";
+  /** A fixed personal folder, or `role:<address>` for a role queue (#425). */
+  id: SystemFolderId | `role:${string}`;
   label: string;
   count: number;
   unread: number;
   /** Authoritative durable-folder UIDVALIDITY; absent on arrival views. */
   uidValidity?: number;
+  /** The role ADDRESS this entry is the queue for (#425); absent on personal folders.
+   *  Its presence is what tells a client the view is a shared queue, so the client
+   *  never has to parse the id or carry its own list of role addresses. */
+  role?: string;
 }
 
-/** Server-authoritative folder counts using the same placement predicates as list. */
-export async function folders(env: Env, viewer?: string): Promise<FolderSummary[]> {
+/** Server-authoritative folder counts using the same placement predicates as list.
+ *
+ *  `roles` (#425) appends one entry per role queue the VIEWER may read, after the fixed
+ *  personal set and never merged into Inbox. Membership is decided by the caller
+ *  (api.ts), the only layer that knows the request is a bound session; this function
+ *  counts what it is handed and asserts nothing about who may see it. */
+export async function folders(
+  env: Env,
+  viewer?: string,
+  roles: readonly string[] = [],
+): Promise<FolderSummary[]> {
   const identity = viewer?.trim().toLowerCase() || undefined;
   const access = identity
     ? "(COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%' OR lower(m.from_addr) = ?)"
@@ -1812,6 +1881,37 @@ export async function folders(env: Env, viewer?: string): Promise<FolderSummary[
     unread: 0,
     uidValidity: draftCounter.uidvalidity,
   });
+  // Role queues (#425). The count is the role ARRIVAL view -- delivered to R, with the
+  // inbox lens taken relative to R (so a same-domain send TO the queue counts, and the
+  // queue own outbound does not) -- which is byte for byte the predicate the IMAP door
+  // role folder reads with. Read state is keyed on the MEMBER, so two members of one
+  // queue never inherit each other unread counts, and the rail agrees with the list.
+  //
+  // One query per configured role. The bound is the size of the operator config map
+  // (POSTERN_VIEWER_ROLES), never anything a caller sends, so the rail polling this
+  // endpoint cannot inflate the work.
+  for (const raw of identity ? roles : []) {
+    const role = raw.trim().toLowerCase();
+    if (!role) continue;
+    const roleSeen = seenProjection(identity);
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS count, SUM(CASE WHEN ${roleSeen.expr}=0 THEN 1 ELSE 0 END) AS unread
+         FROM messages m
+        WHERE m.mailbox IS NULL
+          AND COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'
+          AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))`,
+    )
+      .bind(...roleSeen.binds, role, role)
+      .first<{ count: number; unread: number | null }>();
+    const at = role.indexOf("@");
+    result.push({
+      id: `role:${role}`,
+      label: at > 0 ? role.slice(0, at) : role,
+      role,
+      count: Number(row?.count ?? 0),
+      unread: Number(row?.unread ?? 0),
+    });
+  }
   return result;
 }
 

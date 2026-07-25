@@ -87,6 +87,24 @@ interface Env {
    * Example: "abuse@example.com=owner@example.com,security@example.com=owner@example.com"
    */
   FILE_ALSO_UNDER: string;
+  /**
+   * Role-address MEMBERSHIP for bound webmail sessions (#425, the webmail half of the
+   * #404 ruling): comma-separated `role=member+member` entries, full mail addresses on
+   * both sides. A session identity that is a member of a role may read that role queue
+   * as its OWN view (never merged into the personal INBOX), with read state kept per
+   * MEMBER. Non-members see nothing.
+   *
+   * MIRRORS the IMAP door POSTERN_IMAP_VIEWER_ROLES verbatim (same syntax, same
+   * refusal set), so one membership decision configures both human doors; they are two
+   * vars today because the door must parse its own env at startup rather than depend on
+   * this Worker being reachable. Deploy the Worker first, then the door. GET /api/roles
+   * (operator token) prints the parsed map so the two can be diffed.
+   *
+   * Fail-closed: ANY malformed or ambiguous entry drops the WHOLE map (no role queue is
+   * served) rather than silently dropping one member. Empty/unset changes nothing.
+   * Example: "abuse@example.com=ada@example.com+ben@example.com"
+   */
+  POSTERN_VIEWER_ROLES?: string;
 
   // --- Mailbox send/reply API (M2: #23/#26) ---
   /**
