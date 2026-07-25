@@ -27,6 +27,15 @@ per-folder UIDs under stable folder UIDVALIDITY constants.
 
 Per-account view scoping (#357, POSTERN_IMAP_VIEWER_MODE=per_account): the real
 views become viewer-relative to the authenticated login's address V.
+
+Role queues (#404, POSTERN_IMAP_VIEWER_ROLES): a viewer resolves to a SET of
+addresses -- V, plus every role address V is a member of. Each role publishes as
+its OWN folder, Roles/<local part>, under a \\Noselect Roles parent; role mail is
+never merged into INBOX, which stays personal. A role folder filters on the ROLE
+address but keeps read state PER VIEWER (to=R with seenFor=V, and \\Seen STOREs
+write for=V), so "Ada read it" never renders as "the queue is handled" -- that
+workflow is deliberately not modeled yet, which is also why a role folder is read
+plus \\Seen only (no delete, no flags, no APPEND, no COPY/MOVE).
 """
 
 from __future__ import annotations
@@ -39,7 +48,7 @@ from zope.interface import implementer
 from twisted.mail import imap4
 
 from .client import PosternClient, PosternError
-from .config import Config
+from .config import ROLE_FOLDER_PREFIX, Config, role_folder_name
 from .mailbox import PosternMailbox
 from .measure import Meter
 
@@ -67,6 +76,7 @@ class _Folder:
         "viewer_to",
         "viewer_from",
         "viewer_seen",
+        "role",
     )
 
     def __init__(
@@ -83,6 +93,7 @@ class _Folder:
         viewer_to: bool = False,
         viewer_from: bool = False,
         viewer_seen: bool = False,
+        role: Optional[str] = None,
     ) -> None:
         self.direction = direction
         self.special_use = special_use
@@ -99,6 +110,9 @@ class _Folder:
         self.viewer_to = viewer_to
         self.viewer_from = viewer_from
         self.viewer_seen = viewer_seen
+        # #404: the role ADDRESS this folder is the queue for (None for the fixed
+        # personal set). Set = filter on to=<role>, key read state on the viewer.
+        self.role = role
 
 
 # name (as the client sees it) -> folder description.
@@ -148,6 +162,52 @@ _MAILBOXES: Dict[str, _Folder] = {
 }
 
 
+class RolesParentNode:
+    """The \\Noselect parent of the role hierarchy (#404, RFC 3501 7.2.2).
+
+    LIST is the only command that ever touches this object -- Twisted asks a listed
+    mailbox for getFlags + getHierarchicalDelimiter and nothing else. SELECT of the
+    parent goes through PosternAccount.select, which does not resolve the name and
+    answers NO: exactly what \\Noselect means. It deliberately does NOT claim
+    IMailbox, because there is no store behind it. Without this node a client whose
+    discovery is LIST "%" (which does not cross the "/" delimiter) would see no
+    Roles entry at all and could never reach the children.
+    """
+
+    def getFlags(self) -> List[str]:
+        return ["\\Noselect", "\\HasChildren"]
+
+    def getHierarchicalDelimiter(self) -> str:
+        return "/"
+
+
+def role_folders_for(
+    viewer: Optional[str], viewer_roles: Mapping[str, tuple]
+) -> Dict[str, _Folder]:
+    """The role folders THIS viewer may see: {folder name: folder} (#404).
+
+    Membership is checked against the viewer ADDRESS, so it composes with the 1:1
+    POSTERN_IMAP_VIEWER_MAP by construction (login -> V resolves first). A viewer of
+    None (estate mode, or per_account with an underivable login) yields NOTHING:
+    membership is unanswerable without V, and the fail-closed answer is no folders,
+    never a guess. Config order is preserved so LIST output is deterministic.
+    """
+    out: Dict[str, _Folder] = {}
+    if not viewer or not viewer_roles:
+        return out
+    for role, members in viewer_roles.items():
+        if viewer in members:
+            out[role_folder_name(role)] = _Folder(
+                "inbound",
+                [],
+                False,
+                windowed=True,
+                seen_writable=True,
+                role=role,
+            )
+    return out
+
+
 class ReadOnlyAccountError(imap4.MailboxException):
     """Raised for mutating account operations (the mailbox set is fixed in v1)."""
 
@@ -163,6 +223,12 @@ class PosternAccount:
             derive_viewer(username, cfg.viewer_domain, cfg.viewer_map)
             if self._per_account
             else None
+        )
+        # #404: the viewer resolves to a SET -- V plus every role V belongs to.
+        # Empty in estate mode and empty when the viewer is underivable, so the
+        # feature is unreachable outside a per_account login that is truly a member.
+        self._role_folders: Dict[str, _Folder] = role_folders_for(
+            self._viewer if self._per_account else None, cfg.viewer_roles
         )
         self._meter = Meter(cfg.measure)
         # #352 core unblocker 4: durable-folder UIDVALIDITY is read through from
@@ -243,16 +309,40 @@ class PosternAccount:
     def _mailbox(self, folder: _Folder, *, list_view: bool) -> PosternMailbox:
         delete_enabled = folder.delete_writable and self._cfg.service_delete_token is not None
         scoped = self._per_account and self._viewer is not None
-        # #403: with a viewer, an arrival view is the NAMED lens (lens=inbox), not
-        # direction=inbound -- the worker now filters `direction` on the stored wire
-        # fact, so an INBOX asking for direction=inbound would go blind to same-domain
-        # sends again (the fc#792 class #350 fixed). Estate mode has no viewer and
-        # keeps the stored-direction filter, which IS the honest estate arrival view.
-        lens = "inbox" if (scoped and folder.viewer_to and folder.direction == "inbound") else None
-        direction = None if lens else folder.direction
-        to = self._viewer if (scoped and folder.viewer_to) else None
-        from_addr = self._viewer if (scoped and folder.viewer_from) else None
-        viewer = self._viewer if (scoped and folder.viewer_seen) else None
+        to: Optional[str]
+        from_addr: Optional[str]
+        viewer: Optional[str]
+        seen_for: Optional[str]
+        lens: Optional[str]
+        direction: Optional[str]
+        if folder.role is not None:
+            # #404 role queue. The membership filter is the ROLE address; read state
+            # stays per-member (seen_for=V on reads, for=V on \\Seen writes), so two
+            # members of one queue never inherit each other unread counts. Only ever
+            # constructed for a member (role_folders_for), so no membership re-check
+            # belongs here. The queue arrival view is the NAMED lens (#403): filtering
+            # on direction=inbound would drop the same-domain sends delivered TO the
+            # queue, which is exactly the blindness class #350/#357 exist to fix.
+            lens = "inbox"
+            direction = None
+            to = folder.role
+            from_addr = None
+            viewer = self._viewer
+            seen_for = self._viewer
+        else:
+            # #403: with a viewer, an arrival view is the NAMED lens (lens=inbox), not
+            # direction=inbound -- the worker now filters `direction` on the stored wire
+            # fact, so an INBOX asking for direction=inbound would go blind to same-domain
+            # sends again (the fc#792 class #350 fixed). Estate mode has no viewer and
+            # keeps the stored-direction filter, which IS the honest estate arrival view.
+            lens = "inbox" if (scoped and folder.viewer_to and folder.direction == "inbound") else None
+            direction = None if lens else folder.direction
+            to = self._viewer if (scoped and folder.viewer_to) else None
+            from_addr = self._viewer if (scoped and folder.viewer_from) else None
+            viewer = self._viewer if (scoped and folder.viewer_seen) else None
+            # A personal lens keys read state off its own address, which IS `to`, so
+            # nothing extra goes on the wire (byte-identical to pre-#404).
+            seen_for = None
         # Durable folders get their own UIDVALIDITY (read through from the worker,
         # #352 core unblocker 4); arrival views (INBOX/Sent/All) keep config.
         if folder.mailbox in _DURABLE_FOLDERS:
@@ -264,6 +354,7 @@ class PosternAccount:
             direction=direction,
             lens=lens,
             to=to,
+            seen_for=seen_for,
             from_addr=from_addr,
             viewer=viewer,
             special_use=folder.special_use,
@@ -279,10 +370,22 @@ class PosternAccount:
             flags_writable=folder.flags_writable,
             delete_client=self._delete_client(),
             mailbox_filter=folder.mailbox,
+            role_queue=folder.role is not None,
             imap_client=self._imap_client(),
             identity=self._imap_identity(),
             draft_revisions=self._draft_revisions,
         )
+
+    def _folder_for(self, name: str) -> Optional[_Folder]:
+        """The folder behind a client-visible name: the fixed personal set plus the
+        role queues THIS login belongs to (#404). A non-member resolves nothing here,
+        so every name-keyed operation (SELECT, APPEND, COPY, subscription) answers
+        exactly as it would for a mailbox that does not exist -- no existence
+        disclosure, no estate fallback."""
+        folder = _MAILBOXES.get(_canonical(name))
+        if folder is not None:
+            return folder
+        return self._role_folders.get(name)
 
     # --- IAccount: read ---
 
@@ -295,19 +398,27 @@ class PosternAccount:
         for name, folder in _MAILBOXES.items():
             if matcher.match(name):
                 out.append((name, self._mailbox(folder, list_view=True)))  # type: ignore[arg-type]
+        if self._role_folders:
+            if matcher.match(ROLE_FOLDER_PREFIX):
+                out.append((ROLE_FOLDER_PREFIX, RolesParentNode()))  # type: ignore[arg-type]
+            for name, folder in self._role_folders.items():
+                if matcher.match(name):
+                    out.append((name, self._mailbox(folder, list_view=True)))  # type: ignore[arg-type]
         return out
 
     def select(self, name: str, rw: bool = True):
         if self._per_account and self._viewer is None:
             self._log_viewer_gap("SELECT")
             return None
-        folder = _MAILBOXES.get(_canonical(name))
+        folder = self._folder_for(name)
         if folder is None:
             return None
         return self._mailbox(folder, list_view=False)
 
     def isSubscribed(self, name: str) -> bool:
-        return _canonical(name) in _MAILBOXES
+        if name == ROLE_FOLDER_PREFIX:
+            return bool(self._role_folders)
+        return self._folder_for(name) is not None
 
     def appendability(self, name: str) -> str:
         """Classify a mailbox for APPEND (#352 §3.2 persist-or-refuse).
@@ -320,7 +431,7 @@ class PosternAccount:
           * "placeholder"-- Notes: reject cleanly (tagged NO).
           * "unknown"    -- no such mailbox -> NO [TRYCREATE].
         """
-        folder = _MAILBOXES.get(_canonical(name))
+        folder = self._folder_for(name)
         if folder is None:
             return "unknown"
         if folder.empty:
@@ -343,9 +454,14 @@ class PosternAccount:
           * "placeholder"-- Drafts/Notes: reject COPY.
           * "unknown"    -- no such mailbox.
         """
-        folder = _MAILBOXES.get(_canonical(name))
+        folder = self._folder_for(name)
         if folder is None:
             return "unknown"
+        if folder.role is not None:
+            # #404: a role queue is fed by delivery, never by another member COPY.
+            # Without this it would classify as "restore", and a COPY into it would
+            # clear the source message durable placement estate-wide.
+            return "placeholder"
         if folder.mailbox in ("trash", "junk", "archive"):
             return "soft_move"
         if folder.empty or folder.mailbox == "drafts":
@@ -354,7 +470,7 @@ class PosternAccount:
 
     def placement_mailbox(self, name: str) -> Optional[str]:
         """Return the durable placement key for a soft-move destination, or None."""
-        folder = _MAILBOXES.get(_canonical(name))
+        folder = self._folder_for(name)
         if folder is None:
             return None
         if folder.mailbox in ("trash", "junk", "archive"):
@@ -369,7 +485,7 @@ class PosternAccount:
         INBOX/Sent/All; any other name returns None (no constraint), which is safe
         because callers only consult this for the "restore" kind.
         """
-        folder = _MAILBOXES.get(_canonical(name))
+        folder = self._folder_for(name)
         if folder is None:
             return None
         return folder.direction

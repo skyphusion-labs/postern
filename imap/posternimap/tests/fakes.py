@@ -131,6 +131,14 @@ class FakeTransport:
         self.last_headers: dict[str, str] = {}
         # last decoded POST /api/messages/seen body (#357 per-recipient assert)
         self.last_seen_payload: Optional[Dict[str, Any]] = None
+        # message_seen_by (CONTRACT 10.9 / migration 0009): the SPARSE per-recipient
+        # seen override, {(message_id, recipient): seen}. Modeled for real because a
+        # fake that flips the ROW flag no matter what `for` says cannot tell a
+        # per-viewer write from an estate one -- every per-viewer assertion against
+        # such a fake passes by construction and proves nothing (#404 found exactly
+        # that blind spot: the read key and the write key can disagree and the old
+        # fake rendered it green).
+        self.seen_overrides: Dict[tuple, bool] = {}
         # #352 durable folders: in-memory drafts + move/flags call log
         self.drafts: List[Dict[str, Any]] = []
         self.last_move_payload: Optional[Dict[str, Any]] = None
@@ -223,7 +231,9 @@ class FakeTransport:
                 return len(self.messages) - i
         return 0
 
-    def _summary_of(self, m: Dict[str, Any]) -> Dict[str, Any]:
+    def _summary_of(
+        self, m: Dict[str, Any], seen_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         s = {
             k: v
             for k, v in m.items()
@@ -244,7 +254,24 @@ class FakeTransport:
             s["folderUid"] = m.get("folderUid")
         if m.get("trashedAt") is not None:
             s["trashedAt"] = m.get("trashedAt")
+        # Effective seen = COALESCE(override(id, key), messages.seen) (CONTRACT 10.9).
+        if seen_key is not None:
+            override = self.seen_overrides.get((m["messageId"], seen_key))
+            if override is not None:
+                s["seen"] = override
         return s
+
+    @staticmethod
+    def _seen_key(params: Dict[str, str]) -> Optional[str]:
+        """Which address effective seen is rendered FOR on this read (#350/#404).
+
+        The worker keys effective seen off the viewer it was given: the account
+        session viewer, else `to`. #404 adds `seenFor`, which decouples the key from
+        the membership filter so a shared role queue (to=R) can still render one
+        member read state (seenFor=V). Absent both -> the estate lens (row flag).
+        """
+        key = (params.get("seenFor") or params.get("to") or "").strip().lower()
+        return key or None
 
     def _delivered_set(self, m: Dict[str, Any]) -> str:
         """Comma-wrapped membership set (CONTRACT 10.3 / worker COALESCE predicate)."""
@@ -262,6 +289,7 @@ class FakeTransport:
         return "," + ",".join(addrs) + ","
 
     def _list(self, params):
+        seen_key = self._seen_key(params)
         direction = params.get("direction")
         # #403: `lens` names the viewer-relative view; `direction` is the stored
         # wire fact. The worker refuses both at once and refuses a viewerless lens,
@@ -309,7 +337,11 @@ class FakeTransport:
         chunk = rows[start : start + limit]
         nxt = start + limit
         cursor = str(nxt) if nxt < len(rows) else None
-        body = {"ok": True, "items": [self._summary_of(m) for m in chunk], "cursor": cursor}
+        body = {
+            "ok": True,
+            "items": [self._summary_of(m, seen_key) for m in chunk],
+            "cursor": cursor,
+        }
         return 200, json.dumps(body).encode()
 
     def _get(self, mid):
@@ -356,11 +388,25 @@ class FakeTransport:
         self.last_seen_payload = payload
         ids = set(payload.get("ids", []))
         seen = bool(payload.get("seen"))
+        for_addr = (payload.get("for") or "").strip().lower() or None
         updated = 0
         for m in self.messages:
-            if m["messageId"] in ids:
+            if m["messageId"] not in ids:
+                continue
+            if for_addr:
+                # Per-recipient write (CONTRACT 10.9): upsert the (id, for) override
+                # ONLY, never touching the row-level flag. This is what makes a
+                # read/write key mismatch VISIBLE instead of silently green.
+                self.seen_overrides[(m["messageId"], for_addr)] = seen
+            else:
+                # Legacy/estate write: the row flag, plus realignment of any
+                # existing overrides for that id, so the estate lens stays
+                # authoritative when it is the one being used.
                 m["seen"] = seen
-                updated += 1
+                for key in list(self.seen_overrides):
+                    if key[0] == m["messageId"]:
+                        self.seen_overrides[key] = seen
+            updated += 1
         return 200, json.dumps({"ok": True, "updated": updated}).encode()
 
     def _set_flags(self, req):
@@ -590,6 +636,7 @@ class FakeTransport:
         return 200, json.dumps({"ok": True, "threadId": tid, "messages": msgs}).encode()
 
     def _search(self, params):
+        seen_key = self._seen_key(params)
         q = params.get("q", "").lower()
         # Mirror the worker's substr field selector (CONTRACT 10.8 / #216): subject
         # matches the subject only, body the body only, text (the default) either.
@@ -642,7 +689,7 @@ class FakeTransport:
         chunk = rows[start : start + limit]
         nxt = start + limit
         cursor = str(nxt) if nxt < len(rows) else None
-        hits = [{"message": self._summary_of(m)} for m in chunk]
+        hits = [{"message": self._summary_of(m, seen_key)} for m in chunk]
         return 200, json.dumps({"ok": True, "items": hits, "cursor": cursor}).encode()
 
 

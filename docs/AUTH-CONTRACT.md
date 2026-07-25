@@ -364,9 +364,13 @@ cookie session minted from the worker-native `smtp_credentials` store
 (`POST /api/session`; `WEBMAIL_AUTH_BACKEND` unset = OFF, `native` = explicit
 operator opt-in). Sessions carry the caps `read`/`send`/`delete`, never admin; a
 Bearer token always wins over a cookie on the same request; state-changing
-session requests are CSRF-gated. The full session contract lives in
-`docs/CONTRACT.md` and `docs/design/webmail-v2-contracts.md`; it composes with
-everything above without changing it.
+session requests are CSRF-gated. Since #409 the mint carries the same
+brute-force posture the two doors above do (`relay/throttle.go`,
+`imap/posternimap/throttle.py`): keyed per-account counters, enumeration-safe,
+fail-closed, backoff with temporary lockout, so no door undercuts the others'
+throttles. The full session contract lives in `docs/CONTRACT.md` and
+`docs/design/webmail-v2-contracts.md`; it composes with everything above without
+changing it.
 
 ## 8. Staged exposure steps (operator-supervised)
 

@@ -152,11 +152,12 @@ interface ListQuery {
   to?: string; from?: string; thread?: string;
   direction?: "inbound" | "outbound";  // the STORED wire fact, filtered exactly
   lens?: "inbox" | "sent";             // named viewer-relative view (needs a viewer)
+  seenFor?: string;                    // whose seen state to RENDER (projection only)
   q?: string;                         // FTS over subject + body
   limit?: number;                     // default 50, max 200
   cursor?: string;                    // opaque; encodes (date, id) of the last row
 }
-interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; limit?: number; cursor?: string }
+interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; seenFor?: string; limit?: number; cursor?: string }
 interface Page<T> { items: T[]; cursor: string | null }   // cursor=null means no more
 interface SearchHit { message: StoredMessageSummary; score?: number; snippet?: string }
 ```
@@ -306,18 +307,18 @@ none touches D1 directly (#25, #26).
 
 | Method | Route | Purpose | Milestone |
 |---|---|---|---|
-| GET | `/api/messages?to=&from=&thread=&direction=&lens=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `mailbox=archive\|trash\|junk\|all`, unset = arrival views) | M1 / webmail v2 (#352) / #403 |
+| GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views) | M1 / webmail v2 (#352) / #403 / #404 |
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
-| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&to=&from=&direction=&lens=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` mean exactly what they do on `/api/messages` (#403) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 |
+| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&to=&from=&direction=&lens=&seenFor=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` / `seenFor` mean exactly what they do on `/api/messages` (#403/#404) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 / #404 |
 | GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | GET/POST/DELETE | `/api/session` | webmail native session: POST signs in `{username,password}` -> `Set-Cookie` + identity + caps + CSRF token; GET is whoami/restore; DELETE signs out | webmail v2 (#352) |
 | POST | `/api/session/refresh` | explicit session extend (a sliding refresh also happens on any authed request) | webmail v2 (#352) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
-| POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean}` (un)read; returns `{updated}` (READ-scoped, #seen) | (#seen) |
+| POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean, for?: address}` (un)read; returns `{updated}` (READ-scoped, #seen). Under SESSION auth the viewer is FORCED to the bound identity and a mismatched `for` is `403 E_FORBIDDEN` (#410) | (#seen) |
 | POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
 | POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
 | GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts; durable folders also return `uidValidity` | webmail v2 (#352) |
@@ -355,9 +356,25 @@ It is **`read`-scoped**, not send/admin: marking mail read is a side effect of R
 read door commonly holds only a read token, so a read token must be able to persist its own read state.
 It backs the IMAP `\Seen` flag (`postern-imap` STOREs it) and the webmail unread view. Inbound mail is
 stored unread; outbound sent copies are stored read. IMAP hard delete uses a dedicated `delete`
-token; read-only IMAP credentials can still mark `\Seen`.
-stored unread and outbound sent copies read (`store.put`); the column DEFAULT is `read` so migration
-0007 backfills existing rows without resurfacing the whole historical mailbox as unread.
+token; read-only IMAP credentials can still mark `\Seen`. The store writes those defaults at
+insert time (`store.put`); the column DEFAULT is `read`, so migration 0007 backfilled existing
+rows without resurfacing the whole historical mailbox as unread.
+
+**Viewer binding under session auth (#410).** For a BEARER caller the route behaves
+exactly as it always has: `for` is honored verbatim (the IMAP door is legitimately
+estate-scoped, #350/#357) and omitting it flips the row-level estate flag. For a
+SESSION-authed caller (webmail) the viewer is the session identity, never a
+caller-supplied address: an explicit `for` that is not the bound identity is refused
+with `403 { "error": "E_FORBIDDEN" }`, omitting `for` writes the caller OWN
+per-recipient override instead of the row-level `messages.seen`, and every write is
+filtered by the same accessibility predicate `flags` / `move` and the single-message
+routes apply -- an id the session cannot see is skipped (it does not count toward
+`updated`), never written. This closes the gap where a session could write another
+account read-state or flip estate-wide read flags on messages it would be denied on
+read. **The webmail client also sends its own `for` in session mode** (the IMAP door
+already does the same, `posternimap/client.py`): belt and braces with the server
+binding, and correct against an older worker that lacks it. BYO-token webmail carries
+no bound identity in the page, so it sends none and keeps the estate behavior.
 
 `GET /api/mobileconfig` (#187) returns a per-user Apple configuration profile
 (`application/x-apple-aspen-config`) that sets up iOS Mail in one tap: IMAP
@@ -1048,7 +1065,10 @@ layers beside message identity, it does not fork it.
   `for`: upsert the `(id, for)` override only, never touching `messages.seen`; unknown
   ids are skipped (as legacy). Without `for` (legacy callers): UPDATE `messages.seen`
   AND realign any EXISTING override rows for those ids, so the estate lens stays
-  authoritative when used. Old callers keep working unchanged. `read`-scoped as before.
+  authoritative when used. Old callers keep working unchanged. `read`-scoped as before. Since
+  #410 a SESSION-authed caller does not choose: `for` is forced to the bound identity
+  (a mismatch is `403 E_FORBIDDEN`) and both the override write and the estate write are
+  restricted to messages that viewer can see. Bearer callers are untouched.
 - **Read:** viewer-scoped `list`/`search` (`to=V`) render effective seen via the
   COALESCE join; unscoped reads render `messages.seen`. `/api/search` gains an optional
   `to=` mirroring `/api/messages` across ALL modes: `fts` and `substr` push the
@@ -1079,5 +1099,63 @@ VIEW tier (a deterrent), NOT a credential boundary: the door still reads with an
 estate-wide token, so per-user privacy stays the later credential work (#351 / D-AUTH-2).
 Flipping a live door bumps `POSTERN_IMAP_UIDVALIDITY` on the same roll (folder membership
 changes; RFC 3501). See `imap/README.md`.
+
+**Whose seen state a read RENDERS: `seenFor` (#404).** The projection key and the row
+predicate are SEPARATE axes. `to=` / the session identity select WHICH ROWS come back;
+the optional `seenFor=<bare address>` selects WHOSE `message_seen_by` row the effective-seen
+COALESCE reads, and nothing else. Absent, the key is the viewer exactly as above
+(session identity, else `to=`), so every pre-#404 read is byte-identical.
+
+It exists because a folder view keyed to a ROLE address (`to=abuse@`) has no human
+behind the key: the role owns no read/unread state, so before #404 such a view could
+only render `messages.seen`, the estate flag. With `seenFor=conrad@` the same rows come
+back rendered as their actual reader sees them. `seenFor` NEVER widens or narrows the
+row set; it also keys the `seen=` FILTER (search), so "R's mail that I have not read"
+is one query rather than a client-side subtraction. (`/api/messages` has no `seen=`
+filter at all; the filtered form is `/api/search` or `/api/folders`.)
+
+Authorization: a BOUND SESSION may only name ITSELF (`E_FORBIDDEN` otherwise) -- sessions
+are per-person and another person's read state is theirs, so a rendering parameter must
+not become a peephole. A static token is estate-scoped by construction (it already reads
+every row) and may name any address, which is what an operator or door read needs. A
+malformed address is `E_VALIDATION_ERROR`, never a silently-dropped parameter.
+
+**Role queues (#404, opt-in, per_account only).** A role address belongs to a FUNCTION,
+so under per-account scoping it is nobody viewer address and its mail is delivered,
+stored, searchable and visible in NO view. Ruling (2026-07-25): role mail gets its OWN
+folder per role address, never merged into a personal INBOX. The door gained
+`POSTERN_IMAP_VIEWER_ROLES` (`role=member+member`, full addresses both sides), which
+makes a viewer resolve to a SET of addresses: V plus every role V is a member of.
+`POSTERN_IMAP_VIEWER_MAP` stays 1:1 and membership is keyed on the RESOLVED address, so
+the two compose by construction (login -> V, then roles(V)).
+
+- **Folder shape:** each role publishes as `Roles/<local part>` under a `\Noselect`
+  `Roles` parent, in the existing personal namespace (delimiter `/`). Role folder names
+  are new, so introducing them needs no UIDVALIDITY bump; repointing an existing name at
+  a different address does.
+- **Predicate:** `to=<role address>` with `lens=inbox` -- the same named
+  viewer-relative view INBOX uses, applied to the role. It sends the LENS, never
+  `direction=inbound`: since #403 `direction` is the stored wire fact, so filtering
+  on it would drop same-domain sends delivered to the queue, and a reply sent AS the
+  role stays out of the view (`from = R`). INBOX keeps `to=V`, so the personal and
+  queue views never merge.
+- **Read state stays per MEMBER, not per queue:** a role read passes `seenFor=V` (the
+  projection key defined above) and a `\Seen` STORE writes `for=V`. Without it the
+  queue view would render `messages.seen`, i.e. QUEUE state, making "Ada read it"
+  indistinguishable from "the queue is handled" -- a shared-queue workflow this
+  contract does NOT model yet. The door reads with a static, estate-scoped service
+  token, which is the caller class allowed to name an address other than itself.
+- **Write posture:** read plus `\Seen` only. APPEND, COPY/MOVE, EXPUNGE, `\Flagged`
+  and `\Answered` on a role folder are refused (tagged NO): each would write
+  estate-wide state on behalf of every other member of the queue.
+- **Fail-closed:** a malformed, duplicated, self-referential or name-colliding role map
+  is a startup error; roles outside `per_account` are a startup error; a login with no
+  derivable V serves nothing, roles included. A non-member never sees the folder and
+  cannot SELECT it.
+- **Interaction with 10.2b:** `FILE_ALSO_UNDER` adds an owner to the DELIVERED SET at
+  ingest, so a deployment running both shows role mail in the owner INBOX as well as the
+  role folder. Once a role has a folder, drop it from `FILE_ALSO_UNDER`.
+- **Webmail** scopes to the bound session identity and does not model role membership
+  yet; parity is tracked separately.
 
 `/api/folders` unread counts (#352) MUST use effective seen when they land.

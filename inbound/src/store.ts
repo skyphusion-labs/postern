@@ -116,6 +116,11 @@ export interface ListQuery {
    *  `direction`). Requires a viewer (`to` or `viewer`); mutually exclusive with
    *  `direction`. Validated at the API edge. */
   lens?: ViewLens;
+  /** WHOSE seen state this read renders (#404). Overrides the seen-projection key
+   *  ONLY; the row predicate stays keyed on `to` / `viewer`. Absent = today's
+   *  behavior exactly. Validated at the API edge (bare address; a bound session may
+   *  only name itself). */
+  seenFor?: string;
   mailbox?: MailboxFilter;
   /** Internal account boundary for a bound webmail session. Unlike public `to`,
    * this includes the viewer's authored Sent rows in All while keeping Inbox
@@ -147,6 +152,9 @@ export interface SearchQuery {
   // Named viewer-relative view (#403); requires a viewer (to/viewer), mutually
   // exclusive with direction. Same semantics as ListQuery.lens in every mode.
   lens?: ViewLens;
+  // Whose seen state to render (#404); same semantics as ListQuery.seenFor, in
+  // every mode (the SQL modes project it, semantic/hybrid hydrate it).
+  seenFor?: string;
   // Viewer address for recipient-scoped search (#350): delivered-set membership +
   // viewer-relative INBOX + effective (per-recipient) seen, same as ListQuery.to.
   to?: string;
@@ -801,15 +809,29 @@ export async function getAttachment(
  * "mark (un)read", or any API client. Idempotent -- setting a row to its current state
  * is a no-op (SQLite reports 0 changes). Unknown ids are silently skipped (they simply
  * match no row). An empty id list is a no-op that never touches D1.
+ *
+ * `viewer` (#410) restricts every write to messages that viewer can actually SEE --
+ * the same delivered-to / from-addr predicate setFlags and moveMessages apply, and the
+ * same one messageAccessible uses for the single-message routes. It is passed for
+ * SESSION-authed callers only; a Bearer caller (the IMAP door) omits it and keeps the
+ * pre-#410 estate behavior byte for byte. An id the viewer cannot see is skipped, not
+ * refused, exactly as an unknown id is.
  */
 export async function setSeen(
   env: Env,
   messageIds: string[],
   seen: boolean,
   forRecipient?: string,
+  viewer?: string,
 ): Promise<number> {
   if (messageIds.length === 0) return 0;
   const placeholders = messageIds.map(() => "?").join(", ");
+  // The viewer-accessibility predicate, identical to setFlags/moveMessages and to
+  // messageAccessible: the message was delivered to the viewer, or the viewer sent it.
+  const access = viewer
+    ? " AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
+    : "";
+  const accessBinds = viewer ? [viewer.toLowerCase(), viewer.toLowerCase()] : [];
 
   // Scoped (#350): mark read/unread for ONE recipient -- upsert a sparse override
   // in message_seen_by, never touching messages.seen (the estate/legacy flag).
@@ -818,9 +840,9 @@ export async function setSeen(
   if (forRecipient) {
     const recipient = forRecipient.trim().toLowerCase();
     const existing = await env.DB.prepare(
-      `SELECT message_id FROM messages WHERE message_id IN (${placeholders})`,
+      `SELECT message_id FROM messages WHERE message_id IN (${placeholders})${access}`,
     )
-      .bind(...messageIds)
+      .bind(...messageIds, ...accessBinds)
       .all<{ message_id: string }>();
     const ids = (existing.results ?? []).map((r) => r.message_id);
     for (const id of ids) {
@@ -842,16 +864,25 @@ export async function setSeen(
   // per matched message row (trigger rows never appear), so results.length is the
   // true count of existing ids updated.
   const res = await env.DB.prepare(
-    `UPDATE messages SET seen = ? WHERE message_id IN (${placeholders}) RETURNING message_id`,
+    `UPDATE messages SET seen = ? WHERE message_id IN (${placeholders})${access} RETURNING message_id`,
   )
-    .bind(seen ? 1 : 0, ...messageIds)
+    .bind(seen ? 1 : 0, ...messageIds, ...accessBinds)
     .all<{ message_id: string }>();
-  await env.DB.prepare(
-    `UPDATE message_seen_by SET seen = ? WHERE message_id IN (${placeholders})`,
-  )
-    .bind(seen ? 1 : 0, ...messageIds)
-    .run();
-  return (res.results ?? []).length;
+  const touched = (res.results ?? []).map((r) => r.message_id);
+  // Realign the per-recipient overrides. WITHOUT a viewer this stays byte-identical
+  // to before #410 (every requested id, unknown ones matching nothing); WITH a viewer
+  // only the rows the viewer was actually allowed to touch are realigned, so the gate
+  // cannot be sidestepped through the override table.
+  const realignIds = viewer ? touched : messageIds;
+  if (realignIds.length > 0) {
+    const realign = realignIds.map(() => "?").join(", ");
+    await env.DB.prepare(
+      `UPDATE message_seen_by SET seen = ? WHERE message_id IN (${realign})`,
+    )
+      .bind(seen ? 1 : 0, ...realignIds)
+      .run();
+  }
+  return touched.length;
 }
 
 /** Persist \Flagged / \Answered beside the existing durable \Seen flag. */
@@ -1391,6 +1422,26 @@ export async function thread(env: Env, threadId: string, viewer?: string): Promi
  *  per-recipient override (message_seen_by) COALESCEd over the row-level
  *  messages.seen; without a viewer, the row-level flag as today. The bound `?`
  *  lives in the SELECT column list, so its bind MUST precede the WHERE binds. */
+/** WHOSE per-recipient seen state a read RENDERS (#404).
+ *
+ *  Independent of WHICH ROWS a read returns: `to` / `viewer` select the rows,
+ *  `seenFor` only picks the `message_seen_by` row the COALESCE reads. A folder view
+ *  keyed to a role address (`to=R`) can therefore render the human reader's seen
+ *  state without the predicate pretending R is the reader. Absent, the key is the
+ *  viewer as before (session identity, else `to`), so every existing read is
+ *  byte-identical.
+ *
+ *  It also keys the `seen=` FILTER, which shares this expression: "R's mail that I
+ *  have not read" is one query, not a client-side subtraction. */
+function seenKey(q: { seenFor?: string; viewer?: string; to?: string }): string | undefined {
+  return (
+    q.seenFor?.trim().toLowerCase() ||
+    q.viewer?.trim().toLowerCase() ||
+    q.to?.trim().toLowerCase() ||
+    undefined
+  );
+}
+
 function seenProjection(viewer: string | undefined): { expr: string; binds: unknown[] } {
   if (!viewer) return { expr: "m.seen", binds: [] };
   return {
@@ -1613,7 +1664,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   const limit = clampLimit(q.limit);
   const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const recipientViewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(accountViewer ?? recipientViewer);
+  const sp = seenProjection(seenKey(q));
   const seenExpr = sp.expr;
   const where: string[] = [];
   const binds: unknown[] = [...sp.binds];
@@ -1858,7 +1909,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
 
   const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const recipientViewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(accountViewer ?? recipientViewer);
+  const sp = seenProjection(seenKey(q));
   const seenExpr = sp.expr;
   // Seen bind (SELECT column) first, then the FTS match bind, then recipient/cursor.
   const binds: unknown[] = [...sp.binds, ftsExpr];
@@ -1968,7 +2019,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
 
   const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const recipientViewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(accountViewer ?? recipientViewer);
+  const sp = seenProjection(seenKey(q));
   const seenExpr = sp.expr;
 
   // Case-insensitivity is SQLite LIKE's native ASCII folding (CONTRACT 10.8);
@@ -2151,7 +2202,7 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
 
   const ranked = await nearestMessageIds(env, queryVec, limit);
-  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), accountViewer ?? viewer);
+  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), seenKey(q));
   const items: SearchHit[] = [];
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
@@ -2175,6 +2226,7 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     q: q.q,
     direction: q.direction,
     lens: q.lens,
+    seenFor: q.seenFor,
     to: q.to,
     from: q.from,
     mailbox: q.mailbox,

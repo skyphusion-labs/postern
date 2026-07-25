@@ -204,6 +204,15 @@ class Config:
     # An override wins over the rule; a login absent from the map falls back to the rule.
     # Keys and values are lower-cased. Empty in estate mode.
     viewer_map: Mapping[str, str] = field(default_factory=dict)
+    # POSTERN_IMAP_VIEWER_ROLES: role-address membership for shared intake queues
+    # (#404), {role_address: (member_address, ...)}. VIEWER_MAP stays 1:1 (one login,
+    # one personal address V); THIS map is what makes a viewer resolve to a SET: V
+    # plus every role V belongs to. Membership is keyed on the VIEWER ADDRESS, not the
+    # login, so it composes with VIEWER_MAP by construction -- the login resolves to V
+    # first (derive_viewer, override included), then roles(V) is looked up here. Each
+    # role publishes as its OWN folder (Roles/<local part>, see role_folder_name); role
+    # mail is never merged into a personal INBOX. per_account only; empty in estate mode.
+    viewer_roles: Mapping[str, tuple] = field(default_factory=dict)
 
     # --- auth brute-force throttle (#105) ---
     # RATIFIED cross-door contract: identical AUTH_THROTTLE_* knobs on the SMTP
@@ -372,6 +381,19 @@ class Config:
                 "POSTERN_IMAP_VIEWER_MODE=per_account requires POSTERN_IMAP_VIEWER_DOMAIN "
                 "(the mail domain the viewer address is built on)"
             )
+        # Role membership (#404). Parsed strictly and eagerly: a typo is a startup
+        # failure, never a silently dropped member (a dropped member reads exactly like
+        # "that person is not on the queue", which is the #404 failure mode again).
+        # Roles are meaningless without a viewer address to check membership against,
+        # so configuring them in estate mode is a loud error, not a setting that looks
+        # applied and quietly does nothing.
+        viewer_roles = _parse_viewer_roles(e.get("POSTERN_IMAP_VIEWER_ROLES") or "")
+        if viewer_roles and viewer_mode != "per_account":
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_ROLES requires POSTERN_IMAP_VIEWER_MODE=per_account "
+                "(role folders are a per-account view; estate mode has no viewer address "
+                "to check role membership against)"
+            )
 
         # Auth throttle (#105). Door-agnostic AUTH_THROTTLE_* names, integer seconds,
         # shared verbatim with the relay so one vocabulary configures both doors.
@@ -451,6 +473,7 @@ class Config:
             viewer_mode=viewer_mode,
             viewer_domain=viewer_domain,
             viewer_map=viewer_map,
+            viewer_roles=viewer_roles,
             throttle_enabled=throttle_enabled,
             throttle_max_failures=throttle_max_failures,
             throttle_lockout_seconds=throttle_lockout_seconds,
@@ -505,6 +528,95 @@ def _parse_viewer_map(raw: str) -> dict:
                 % entry
             )
         out[login] = addr
+    return out
+
+
+ROLE_FOLDER_PREFIX = "Roles"
+
+
+def role_folder_name(role_address: str) -> str:
+    """The IMAP folder name a role address is published under (#404).
+
+    abuse@example.org -> Roles/abuse, under the personal namespace whose hierarchy
+    delimiter is already "/". The local part alone keeps the name readable in a mail
+    client; _parse_viewer_roles refuses two roles that share a local part, so for any
+    config that starts the name maps back to exactly one address.
+    """
+    local = role_address.split("@", 1)[0]
+    return "%s/%s" % (ROLE_FOLDER_PREFIX, local)
+
+
+def _parse_viewer_roles(raw: str) -> dict:
+    """Parse POSTERN_IMAP_VIEWER_ROLES into {role_address: (member_address, ...)} (#404).
+
+    Syntax: role=member+member,role2=member -- commas separate roles, + separates
+    members, and BOTH sides are full mail addresses. Everything is lower-cased, and
+    whitespace around any token is tolerated (same shape as POSTERN_IMAP_VIEWER_MAP).
+
+    Every malformed or ambiguous shape is a loud ConfigError so the door refuses to
+    start rather than serve a half-parsed membership map. Refused: an entry without =,
+    an empty side, an address without @ on either side, a role listed twice, a role
+    that lists itself, an address used as both a role and a member, and two roles whose
+    local parts would collide on one folder name. Empty input -> empty map (the estate
+    default, where the whole feature is unreachable).
+    """
+    out: dict = {}
+    localparts: dict = {}
+    for chunk in raw.split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_ROLES entries must be role=member+member (got %r)" % entry
+            )
+        role, _, members_raw = entry.partition("=")
+        role = role.strip().lower()
+        if not role or "@" not in role:
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_ROLES entry %r needs a full role address on the left "
+                "(e.g. abuse@example.org=ada@example.org)" % entry
+            )
+        if role in out:
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_ROLES lists the role %r twice; put every member of a "
+                "role in ONE entry (role=a@x+b@x)" % role
+            )
+        local = role.split("@", 1)[0]
+        if local in localparts:
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_ROLES roles %r and %r share the local part %r, so both "
+                "would publish as the folder %s; give them distinct local parts"
+                % (localparts[local], role, local, role_folder_name(role))
+            )
+        members: list = []
+        for raw_member in members_raw.split("+"):
+            member = raw_member.strip().lower()
+            if not member or "@" not in member:
+                raise ConfigError(
+                    "POSTERN_IMAP_VIEWER_ROLES entry %r needs full member addresses on the "
+                    "right, separated by + (e.g. abuse@x.org=ada@x.org+ben@x.org)" % entry
+                )
+            if member == role:
+                raise ConfigError(
+                    "POSTERN_IMAP_VIEWER_ROLES role %r lists itself as a member" % role
+                )
+            if member not in members:
+                members.append(member)
+        if not members:
+            raise ConfigError(
+                "POSTERN_IMAP_VIEWER_ROLES role %r has no members; remove the role or give it "
+                "at least one member address" % role
+            )
+        localparts[local] = role
+        out[role] = tuple(members)
+    every_member = {m for ms in out.values() for m in ms}
+    both = sorted(set(out) & every_member)
+    if both:
+        raise ConfigError(
+            "POSTERN_IMAP_VIEWER_ROLES uses %s as BOTH a role address and a member address; "
+            "an address is either a queue or a person, never both" % ", ".join(both)
+        )
     return out
 
 
