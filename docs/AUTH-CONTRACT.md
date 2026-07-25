@@ -22,6 +22,14 @@ Both doors verify the **same** end-user credential against the **same** director
 so a credential can never drift between protocols. The directory is the same
 Authentik instance that backs crew SSH, so there is one identity per human.
 
+**Not in this contract: the webmail session mint.** `POST /api/session` (native mode)
+verifies `smtp_credentials`, not the directory, so it is out of scope here; its
+contract is `docs/design/webmail-v2-contracts.md` section 1. It is named only because
+it is a THIRD door in front of a shared credential store: since #409 it carries the
+same brute-force posture the two doors above have (`relay/throttle.go` #105,
+`imap/posternimap/throttle.py` #183) -- per-account keyed counters, enumeration-safe,
+fail-closed, backoff with lockout -- so no door undercuts the others.
+
 ## 2. The directory (verified ground truth)
 
 Authentik LDAP outpost on the **directory host** (`ghcr.io/goauthentik/ldap:<pinned-version>`),

@@ -147,6 +147,22 @@ CREATE TABLE IF NOT EXISTS webmail_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_identity ON webmail_sessions(identity);
 
+-- Webmail session-mint brute-force counters (#409, migration 0014). One row per
+-- throttle scope: "a:<lower-cased username>" per-account, "i:<client ip>" per client
+-- IP, "g:all" the optional global window (default OFF). Durable because a Worker
+-- isolate is not a single long-lived process, so the in-memory counter the
+-- submission relay uses (relay/throttle.go) has no equivalent here. locked_until is
+-- NULL until the threshold trips; POST /api/session answers a live lockout with 429
+-- plus Retry-After. See inbound/src/auththrottle.ts.
+CREATE TABLE IF NOT EXISTS webmail_auth_failures (
+  scope_key       TEXT PRIMARY KEY,
+  failures        INTEGER NOT NULL,
+  window_start_at TEXT NOT NULL,
+  last_failure_at TEXT NOT NULL,
+  locked_until    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_failures_last ON webmail_auth_failures(last_failure_at);
+
 -- Per-recipient read state (#350, migration 0009). Effective seen for viewer V =
 -- COALESCE(override(message_id, V), messages.seen); a sparse override layered over
 -- the row-level messages.seen so a same-domain send is unread for its recipient

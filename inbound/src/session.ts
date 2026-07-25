@@ -25,6 +25,8 @@
 import { authenticate } from "./smtpcreds";
 import { sha256Hex } from "./sendidentity";
 import type { BoundIdentity } from "./sendidentity";
+import { readBodyCapped, PayloadTooLargeError } from "./body";
+import { attemptKeys, gateAttempt, recordFailure, clearFailures } from "./auththrottle";
 
 export const SESSION_COOKIE = "__Host-postern_session";
 export const CSRF_COOKIE = "__Host-postern_csrf";
@@ -51,6 +53,14 @@ export function webmailAuthBackend(env: Env): AuthBackend {
 const DEFAULT_IDLE_S = 30 * 60;         // 30 minutes
 const DEFAULT_ABSOLUTE_S = 12 * 60 * 60; // 12 hours
 const REFRESH_THROTTLE_S = 60;
+
+// Body cap for the mint (#409 part 2). Every gated route funnels through readJson ->
+// readBodyCapped (api.ts, #196 audit F6); the ONE unauthenticated endpoint used to
+// skip it and call request.json() directly, which is exactly backwards: each attempt
+// costs a 210k-iteration PBKDF2, including for an unknown user (by design), so an
+// oversized body is the cheapest thing to reject. 4 KiB is ample for
+// { username, password } and mirrors the readJson 413 shape.
+const MAX_SESSION_BODY_BYTES = 4 * 1024;
 
 function idleSeconds(env: Env): number {
   return posInt(env.WEBMAIL_SESSION_IDLE_SECONDS, DEFAULT_IDLE_S);
@@ -280,9 +290,26 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
     if (backend === "off") {
       return sjson({ ok: false, error: "E_SESSIONS_DISABLED", authBackend: "off" }, 404);
     }
+    // Login CSRF (#409 part 3): a mint is state-changing and carries no token, so an
+    // attacker page could otherwise force a victim browser to log into the ATTACKER
+    // account (session fixation by proxy). Refuse anything the browser tells us is
+    // not same-origin. See crossSiteMint for the exact rule.
+    if (crossSiteMint(request, url)) {
+      return sjson({ ok: false, error: "E_CROSS_ORIGIN", message: "cross-site sign-in refused" }, 403);
+    }
+    // Body cap BEFORE any work (#409 part 2). Same 413 shape as api.ts readJson.
+    let rawBody: string;
+    try {
+      rawBody = await readBodyCapped(request, MAX_SESSION_BODY_BYTES);
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) {
+        return sjson({ ok: false, error: "E_PAYLOAD_TOO_LARGE", message: "request body too large" }, 413);
+      }
+      throw err;
+    }
     let body: { username?: unknown; password?: unknown };
     try {
-      body = (await request.json()) as typeof body;
+      body = JSON.parse(rawBody) as typeof body;
     } catch {
       return sjson({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
     }
@@ -291,11 +318,44 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
     if (!username || !password) {
       return sjson({ ok: false, error: "E_FIELD_MISSING", message: "username and password are required" }, 400);
     }
+
+    // Durable brute-force throttle (#409 part 1, ./auththrottle). A malformed request
+    // never reaches here, so a client bug cannot burn an account budget. The gate is
+    // ONE D1 read and no write; a clean successful login adds no write at all.
+    const keys = attemptKeys(request, username);
+    let gate;
+    try {
+      gate = await gateAttempt(env, keys);
+    } catch {
+      // FAIL-CLOSED: with the counters unreadable we cannot honestly claim the
+      // throttle holds, so we refuse rather than let the mint run unthrottled. This
+      // costs nothing real -- the mint needs the same D1 to write its session row.
+      return unavailable();
+    }
+    if (!gate.allowed) {
+      return throttled(gate.retryAfter);
+    }
+
+    // Only a definite credential REJECTION counts. An infra error inside
+    // mintNativeSession throws past this point without recording anything, so a D1
+    // outage cannot lock users out (the relay draws the same line).
     const minted = await mintNativeSession(env, username, password);
     if (!minted) {
+      try {
+        await recordFailure(env, keys, gate);
+      } catch {
+        return unavailable();
+      }
       // Constant-time verify + dummy-hash path (smtpcreds.authenticate) means a
       // bad user and a bad password are indistinguishable: one error, no enumeration.
+      // The throttle preserves that -- an unknown username is counted and locked out
+      // exactly like a known one -- so 429 never becomes an existence oracle.
       return sjson({ ok: false, error: "E_AUTH_FAILED" }, 401);
+    }
+    try {
+      await clearFailures(env, keys, gate);
+    } catch {
+      return unavailable();
     }
     const h = new Headers({ "content-type": "application/json" });
     h.append("set-cookie", sessionCookie(minted.rawId, idle));
@@ -376,6 +436,62 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
   }
 
   return sjson({ ok: false, error: "method_not_allowed", message: "unsupported method" }, 405);
+}
+
+// Is this mint request cross-site (#409 part 3)? The rule, in order:
+//   1. Sec-Fetch-Site, when the browser sent it, is authoritative: only same-origin
+//      passes. `none` (a direct user navigation / no initiator) also passes;
+//      `same-site` does NOT -- the session cookie is __Host- (host-scoped), so a
+//      sibling subdomain is a different security context for this endpoint.
+//   2. Otherwise, if an Origin header is present it must equal this request origin.
+//      A literal `null` Origin (sandboxed iframe, some redirect chains) therefore
+//      fails, which is the intent.
+//   3. Neither header: not a browser (curl, the Python client, the MCP server, the
+//      test suite). Login CSRF is a browser-only threat and every modern browser
+//      sends at least Origin on a POST, so allowing this is not a hole -- and
+//      refusing it would break every non-browser API client.
+function crossSiteMint(request: Request, url: URL): boolean {
+  const fetchSite = (request.headers.get("sec-fetch-site") || "").trim().toLowerCase();
+  if (fetchSite) return !(fetchSite === "same-origin" || fetchSite === "none");
+  const origin = (request.headers.get("origin") || "").trim();
+  if (origin) return origin.toLowerCase() !== url.origin.toLowerCase();
+  return false;
+}
+
+// A tripped lockout (#409 part 1). Retry-After is the standard signal and the
+// sign-in UI already handles 429 (webmail/index.html signIn).
+function throttled(retryAfter: number): Response {
+  const seconds = Math.max(1, Math.ceil(retryAfter));
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      // The code the design contract specifies for this response (webmail-v2-
+      // contracts.md 1.5.1). Distinct from the transport-side E_RATE_LIMIT_EXCEEDED
+      // in api.ts RETRYABLE, which is an upstream send condition, not an auth gate.
+      error: "E_RATE_LIMITED",
+      message: "too many failed sign-in attempts",
+      retryAfter: seconds,
+    }),
+    {
+      status: 429,
+      headers: { "content-type": "application/json", "retry-after": String(seconds) },
+    },
+  );
+}
+
+// The fail-closed answer when the throttle store itself is unreachable: refuse the
+// attempt, disclose nothing about the credential, and say so honestly rather than
+// returning E_AUTH_FAILED (which would read as a bad password) or proceeding
+// unthrottled (which would silently disable the control).
+function unavailable(): Response {
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      error: "E_AUTH_UNAVAILABLE",
+      message: "sign-in temporarily unavailable",
+    }),
+    { status: 503, headers: { "content-type": "application/json", "retry-after": "30" } },
+  );
 }
 
 function sjson(payload: unknown, status = 200): Response {

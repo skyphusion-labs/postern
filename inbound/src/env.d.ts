@@ -199,4 +199,28 @@ interface Env {
   WEBMAIL_SESSION_IDLE_SECONDS?: string;
   /** Session absolute lifetime cap in seconds. Default 43200 (12 h). Config var. */
   WEBMAIL_SESSION_ABSOLUTE_SECONDS?: string;
+
+  // --- Session-mint brute-force throttle (#409; inbound/src/auththrottle.ts) ---
+  /**
+   * Set to "off" to disable the POST /api/session throttle entirely. ON by default
+   * (a security control defaults to enabled); "off" exists for a self-host debug
+   * window, and turning it off leaves the one public password endpoint unguarded.
+   */
+  WEBMAIL_AUTH_THROTTLE?: string;
+  /** Consecutive failures on one key (account or client IP) before it locks. Default 5. */
+  WEBMAIL_AUTH_MAX_FAILURES?: string;
+  /** Base lockout in seconds, doubled per failure past the threshold. Default 60. */
+  WEBMAIL_AUTH_LOCKOUT_SECONDS?: string;
+  /** Backoff cap in seconds; also the idle-decay window. Default 3600. Clamped to >= the base lockout. */
+  WEBMAIL_AUTH_MAX_LOCKOUT_SECONDS?: string;
+  /**
+   * Optional GLOBAL layer: failures across ALL accounts within
+   * WEBMAIL_AUTH_GLOBAL_WINDOW_SECONDS before every mint cools down for one window.
+   * DEFAULT 0 (off): on a public endpoint a global cooldown is a login-denial lever
+   * any anonymous attacker can pull for everyone, and the per-client-IP layer already
+   * covers spread-spraying. Opt in only where that trade is understood.
+   */
+  WEBMAIL_AUTH_GLOBAL_MAX?: string;
+  /** Global-layer window in seconds (also the global cooldown length). Default 60. */
+  WEBMAIL_AUTH_GLOBAL_WINDOW_SECONDS?: string;
 }

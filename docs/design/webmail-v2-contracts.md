@@ -163,7 +163,11 @@ POST /api/session          (same-origin; no Authorization header)
   }
 
 401  { "ok": false, "error": "E_AUTH_FAILED" }
+403  { "ok": false, "error": "E_CROSS_ORIGIN" }        (cross-site mint; #409)
+413  { "ok": false, "error": "E_PAYLOAD_TOO_LARGE" }   (body over 4 KiB; #409)
 429  { "ok": false, "error": "E_RATE_LIMITED", "retryAfter": <seconds> }
+     Retry-After: <seconds>                            (lockout; #409)
+503  { "ok": false, "error": "E_AUTH_UNAVAILABLE" }    (throttle store unreadable; #409)
 ```
 
 - `SameSite=Lax` (not `Strict`) so a top-level navigation to `/webmail` still carries the
@@ -229,14 +233,54 @@ table yields no usable cookie. Resolution hashes the presented cookie and looks 
 
 | Threat | Mitigation |
 |---|---|
-| **XSS token theft** | HttpOnly cookie; JS cannot read the session credential. The rendered-email XSS surface stays sandboxed (existing srcdoc iframe + CSP); the session cannot leak even if a top-frame XSS ever landed, because it is not in JS-reachable storage. |
+| **XSS token theft** | HttpOnly cookie; JS cannot read the session credential. The rendered-email XSS surface stays sandboxed (existing srcdoc iframe + CSP), and since #409 the srcdoc carries its OWN `<meta http-equiv="Content-Security-Policy">` (`default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:`) so the `sandbox=""` attribute is not a single point of failure. The session cannot leak even if a top-frame XSS ever landed, because it is not in JS-reachable storage. |
 | **CSRF** | Double-submit + session binding. (1) SameSite=Lax on the session cookie; (2) every state-changing route (POST/PUT/DELETE, send, reply, flag, move, delete, draft) REQUIRES an `X-Postern-CSRF` header; the server checks it EQUALS the readable `__Host-postern_csrf` companion cookie (double-submit: a cross-site caller can neither read the companion cookie nor set a custom header, and a custom header forces a preflight the attacker origin fails) AND that it hashes to the session's stored `csrf_hash` (session binding). Both checks must pass. Reads are cookie+SameSite protected; writes need the header too. The companion cookie is re-set on login and on `GET /api/session` restore so a reload never strands writes. |
 | **Session fixation** | A fresh opaque id is minted on every successful `POST /api/session`; a client-supplied session id is never accepted or adopted. Re-auth mints a new id and revokes the old. |
-| **Credential stuffing / brute force** | Per-username AND per-IP throttle on `POST /api/session` with exponential backoff + temporary lockout (the auth-path slice of C8 rate-limiting gap). Counters keyed server-side; lockout returns `429` with `Retry-After`. |
+| **Credential stuffing / brute force** | **SHIPPED #409** (deferred at #351 to #355, which closed without it). Per-username AND per-client-IP throttle on `POST /api/session` with exponential backoff + temporary lockout; counters are DURABLE in D1 (`webmail_auth_failures`, migration 0014), keyed server-side; a live lockout returns `429` + `Retry-After` + `{ "error": "E_RATE_LIMITED", "retryAfter" }`. See 1.6.1. |
+| **Login CSRF (forced sign-in)** | **SHIPPED #409.** The mint is refused unless the browser reports same-origin: `Sec-Fetch-Site` must be `same-origin` or `none`, else (when absent) `Origin` must equal the request origin. A request with NEITHER header is a non-browser client and is allowed, so curl / the Python client / MCP keep working. `403 E_CROSS_ORIGIN`, refused before the verifier runs. |
+| **Unbounded unauthenticated body** | **SHIPPED #409.** The mint reads through `readBodyCapped` at 4 KiB (`413 E_PAYLOAD_TOO_LARGE`, the shape `readJson` uses elsewhere). It was the one route that skipped the project body cap while costing a 210k-iteration PBKDF2 per request. |
 | **Account enumeration** | Constant-time verify with a dummy-hash path for an unknown username (the pattern `POST /api/smtp-auth` already uses); identical error (`E_AUTH_FAILED`) and indistinguishable timing for bad-user vs bad-password. No user-not-found signal. |
 | **Cookie theft in transit** | `Secure` (enforced by `__Host-` prefix); TLS-only; not set on plaintext. |
 | **Clickjacking** | Served CSP keeps `frame-ancestors 'none'` (already the webmail posture, COMPOSE.md section 6). |
 | **Privilege via tampered cookie** | The cookie is an opaque random handle, not a claims blob; capabilities live only in the server-side row, so there is nothing in the cookie to tamper. |
+
+#### 1.6.1 The mint throttle as shipped (#409)
+
+`inbound/src/auththrottle.ts`, counters in D1 (`webmail_auth_failures`, migration
+0014, additive). The semantics are a deliberate PORT of the submission relay throttle
+(`relay/throttle.go`, #105) so the three doors in front of ONE credential store behave
+alike; the IMAP door has its own equivalent (`imap/posternimap/throttle.py`, #183).
+
+- **Keyed layers.** `a:<lower-cased username>` (per account, case variants share one
+  budget), `i:<client ip>` (from `CF-Connecting-IP`, when present), and an optional
+  `g:all` global window. Defaults: 5 consecutive failures locks a key for 60s, doubling
+  per further failure to a 3600s cap, with idle decay at the cap (a long-quiet key
+  starts fresh). Knobs: `WEBMAIL_AUTH_THROTTLE` (`off` disables the control),
+  `WEBMAIL_AUTH_MAX_FAILURES`, `WEBMAIL_AUTH_LOCKOUT_SECONDS`,
+  `WEBMAIL_AUTH_MAX_LOCKOUT_SECONDS`, `WEBMAIL_AUTH_GLOBAL_MAX`,
+  `WEBMAIL_AUTH_GLOBAL_WINDOW_SECONDS`.
+- **Two deviations from the relay, both environmental.** (1) The per-client-IP layer
+  EXISTS here: the relay dropped it because behind the bastion every connection
+  presents one source IP, while a Worker sees the real client. (2) The relay global
+  layer is present but DEFAULT-OFF (`WEBMAIL_AUTH_GLOBAL_MAX` unset = 0): on a public
+  endpoint a global cooldown is a login-denial lever any anonymous attacker can pull
+  for every user, and the per-IP layer already covers spread-spraying. Operators can
+  opt in where that trade is understood.
+- **Enumeration posture is UNCHANGED.** An unknown username is counted and locked out
+  exactly like a known one, and below the trip line every rejection is the same
+  `401 E_AUTH_FAILED`, so `429` never becomes an existence oracle (it only ever says
+  "this name has been failing", which the attacker already knows).
+- **Only real credential rejections count.** A validation error, an oversized body, a
+  cross-site refusal, a throttled attempt, and an infra error all record NOTHING, so a
+  client bug or a D1 outage cannot lock anyone out. A throttled attempt does not extend
+  its own lockout (the relay makes the same choice).
+- **Fail-CLOSED.** If the counter store cannot be read or written, the mint is refused
+  with `503 E_AUTH_UNAVAILABLE` instead of proceeding unthrottled. This costs nothing
+  real: the mint needs the same D1 to write its session row.
+- **Write cost.** One indexed read per attempt and NO write on a clean successful
+  login; a failure writes its keyed rows, and a success deletes only the ACCOUNT row
+  (never the client-IP row, else one valid credential would wipe an attacker spraying
+  budget at will). `pruneAuthFailures()` is exported for a scheduled sweep.
 
 ### 1.7 BYO-token mode preserved (the operator / self-host path)
 
