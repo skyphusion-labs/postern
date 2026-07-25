@@ -726,6 +726,37 @@ pre-0006 rows join the new world lazily and correctly.)
 - Outbound is untouched: we generate our own Message-IDs; `mailbox` writes `delivered_to`
   complete at insert (10.4).
 
+### 10.2b Role-address filing: FILE_ALSO_UNDER
+
+A role address (`abuse@`, `security@`, `support@`) belongs to a FUNCTION, not a person, so nothing in
+the message says which human reads it. On a deployment whose mailbox views are scoped per account
+(10.3: every view filters `delivered_to` by the viewer address), an unowned role address is stored,
+searchable through the API, and present in NO view at all. For a published abuse intake, that is the
+failure mode publishing it was meant to prevent.
+
+`FILE_ALSO_UNDER` is a comma-separated `recipient=alsoFileUnder` map applied at ingest. When a
+delivery matches the left address, the right one is added to the delivered set for that message:
+
+```
+FILE_ALSO_UNDER="abuse@example.com=owner@example.com,security@example.com=owner@example.com"
+```
+
+It changes FILING, not transport. One message, one row, one body, one search hit, one more view
+(exactly the 10.2 model). No copy is stored, nothing is re-transmitted, and no mail leaves the
+estate: contrast `FORWARD_TO` / `FORWARD_FOR`, which re-deliver the envelope to another address and
+would loop if pointed at an address on the same domain.
+
+Contract details worth relying on:
+
+| property | behavior |
+| --- | --- |
+| ordering | the envelope recipient stays FIRST in the delivered list, so the 10.2 merge (which appends `deliveredList[0]`) still names the recipient that invocation was for |
+| hops | SINGLE. The map is consulted once against the delivered address; a target is never expanded, so no chain or cycle is expressible |
+| self-map / duplicate | no-op; the delivered set cannot carry an address twice |
+| malformed entry | skipped, with a `console.warn` naming the entry. Parsed on the DELIVERY path, so throwing would turn one typo into refused mail for every recipient |
+| unset / empty | nothing changes; an unmapped address files exactly as before |
+| Vectorize | UNCHANGED. The RAG opt-in gate still keys on the envelope recipient only, so filing a role address under a person does not enrol that mail in their embeddings |
+
 ### 10.3 Read side: views filter on semantics, render fidelity
 
 Every place that answers "mail for X" (the `to=` filter in `ListQuery`, `/api/messages`,
