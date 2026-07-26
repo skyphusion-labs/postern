@@ -454,6 +454,7 @@ def build_portal(
     from zope.interface import implementer
 
     from .account import PosternAccount
+    from .threaded import ThreadedAccount, in_pool
     from .throttle import build_throttle, throttle_account
 
     if cfg.auth_mode in SERVICE_TOKEN_MODES:
@@ -493,23 +494,44 @@ def build_portal(
             # a throttled response is byte-identical to a normal auth failure).
             if not throttle.allow(account):
                 return defer.fail(error.UnauthorizedLogin("bad credentials"))
-            try:
-                identity = resolve_token(cfg, username, password, verify=verify, authenticate=authenticate)
-            except AuthError:
-                # A genuine bad credential: this counts toward the lockout.
-                throttle.fail(account)
-                return defer.fail(error.UnauthorizedLogin("bad credentials"))
-            except AuthBackendError as exc:
-                # A real backend fault (misconfig / unreachable): log it so the
-                # operator sees it, but still fail the login as plain bad creds so
-                # we never leak whether a username exists. Invariant 1: this is an
-                # infra error, so it must NOT count toward the lockout (no fail()).
-                log.err(exc, "postern-imap auth backend fault")
-                return defer.fail(error.UnauthorizedLogin("bad credentials"))
-            # Correct credential: clear any accumulated failure state, then carry
-            # the resolved identity to the realm.
-            throttle.success(account)
-            return defer.succeed(identity)
+            # #416: resolve_token BLOCKS -- native mode calls the worker, LDAP/PAM call
+            # the directory -- and Twisted invokes requestAvatarId through a Deferred
+            # seam, so the blocking half runs in the reactor threadpool. One slow or
+            # hung directory used to freeze every already-connected client mid-command.
+            #
+            # ONLY the backend call moves. The throttle stays on the reactor thread, in
+            # the callbacks below: its counters are the #105 lockout state, they are
+            # plain dicts with no lock, and deferToThread delivers callbacks via
+            # callFromThread, so keeping them here preserves the single-threaded
+            # semantics the lockout invariants were written against.
+            d = in_pool(
+                resolve_token, cfg, username, password, verify=verify, authenticate=authenticate
+            )
+
+            def _ok(identity):
+                # Correct credential: clear any accumulated failure state, then carry
+                # the resolved identity to the realm.
+                throttle.success(account)
+                return identity
+
+            def _bad(failure):
+                if failure.check(AuthError):
+                    # A genuine bad credential: this counts toward the lockout.
+                    throttle.fail(account)
+                    return failure_login()
+                if failure.check(AuthBackendError):
+                    # A real backend fault (misconfig / unreachable): log it so the
+                    # operator sees it, but still fail the login as plain bad creds so
+                    # we never leak whether a username exists. Invariant 1: this is an
+                    # infra error, so it must NOT count toward the lockout (no fail()).
+                    log.err(failure.value, "postern-imap auth backend fault")
+                    return failure_login()
+                return failure
+
+            return d.addCallbacks(_ok, _bad)
+
+    def failure_login():
+        raise error.UnauthorizedLogin("bad credentials")
 
     @implementer(portal.IRealm)
     class _Realm:
@@ -517,8 +539,12 @@ def build_portal(
             if imap4.IAccount not in interfaces:
                 raise NotImplementedError("postern-imap only serves IMAP accounts")
             account = PosternAccount(cfg, avatar_id.username, avatar_id.token)
+            # #416: this is the ONE place the threaded shell is installed. The account
+            # and its mailboxes stay plain synchronous objects everywhere else (their
+            # own suites drive them directly); production gets the shell that runs the
+            # blocking worker calls in the reactor threadpool.
             # (interface, avatar, logout-callable)
-            return imap4.IAccount, account, lambda: None
+            return imap4.IAccount, ThreadedAccount(account), lambda: None
 
     p = portal.Portal(_Realm())  # type: ignore[arg-type]
     p.registerChecker(_Checker())  # type: ignore[arg-type]

@@ -332,12 +332,21 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             return
         # sent / drafts / placement: select the mailbox object without emitting
         # EXISTS from a cold load in the stock path -- call addMessage directly.
-        mbox = self.account.select(name)
-        if mbox is None:
-            self.sendNegativeResponse(tag, b"[TRYCREATE] No such mailbox")
-            return
-        d = maybeDeferred(mbox.addMessage, message, flags or (), date)
-        d.addCallback(lambda _r: self.sendPositiveResponse(tag, b"APPEND complete"))
+        # #416: select now answers with a Deferred (it builds AND preloads in the reactor
+        # threadpool), so the tail chains off it. maybeDeferred keeps a plain synchronous
+        # account working through the identical path, which is what the account-level and
+        # mailbox-level suites drive.
+        def _selected(mbox):
+            if mbox is None:
+                self.sendNegativeResponse(tag, b"[TRYCREATE] No such mailbox")
+                return None
+            appended = maybeDeferred(mbox.addMessage, message, flags or (), date)
+            return appended.addCallback(
+                lambda _r: self.sendPositiveResponse(tag, b"APPEND complete")
+            )
+
+        d = maybeDeferred(self.account.select, name)
+        d.addCallback(_selected)
         d.addErrback(self._IMAP4Server__ebAppend, tag)
 
     # Route APPEND through the override in both states it is valid (authenticated +
@@ -405,17 +414,12 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         if src is None:
             self.sendNegativeResponse(tag, verb + b" failed: no mailbox selected")
             return
-        try:
-            mover = getattr(src, "soft_move_fetched_messages", None)
-            if callable(mover):
-                removed_seqs = mover(fetched, mailbox, required_direction=required_direction)
-            else:
-                removed_seqs = src.delete_fetched_messages(fetched)
-        except imap4.MailboxException as exc:
-            self.sendNegativeResponse(tag, verb + b" failed: " + networkString(str(exc)))
-        except Exception as exc:
-            self.sendBadResponse(tag, verb + b" failed: " + networkString(str(exc)))
-        else:
+        # #416: the move is a worker call, so it runs in the reactor threadpool and answers
+        # with a Deferred. maybeDeferred keeps a synchronous mailbox working through the
+        # identical path; the success and failure handling is unchanged and simply hangs
+        # off callbacks now, because a try/except cannot catch a failure that has not
+        # happened yet.
+        def _moved(removed_seqs):
             # #352 review: emit untagged EXPUNGE for whichever source rows the
             # move ACTUALLY removed from this view's live snapshot -- for BOTH
             # COPY and MOVE (there is no true dual-membership copy in this
@@ -426,6 +430,23 @@ class PosternIMAP4Server(imap4.IMAP4Server):
                 for seq in removed_seqs:
                     self.sendUntaggedResponse(b"%d EXPUNGE" % (seq,))
             self.sendPositiveResponse(tag, verb + b" completed")
+
+        def _failed(reason):
+            if reason.check(imap4.MailboxException):
+                self.sendNegativeResponse(
+                    tag, verb + b" failed: " + networkString(str(reason.value))
+                )
+            else:
+                self.sendBadResponse(
+                    tag, verb + b" failed: " + networkString(str(reason.value))
+                )
+
+        mover = getattr(src, "soft_move_fetched_messages", None)
+        if callable(mover):
+            d = maybeDeferred(mover, fetched, mailbox, required_direction=required_direction)
+        else:
+            d = maybeDeferred(src.delete_fetched_messages, fetched)
+        d.addCallbacks(_moved, _failed)
 
     # Back-compat alias for unit tests that call the pre-#352 callback name.
     _cbCopyToTrashDelete = _cbSoftMove

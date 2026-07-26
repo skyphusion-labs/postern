@@ -11,6 +11,7 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -450,7 +451,7 @@ class Draft:
 
 # The default transport: reuse ONE persistent HTTP(S) connection to the worker across
 # requests (keep-alive) instead of opening a fresh TCP+TLS connection per call like
-# urllib.urlopen did. During a session's message backfill that is one handshake instead
+# urllib.urlopen did. During a session message backfill that is one handshake instead
 # of one-per-message; on the live door (directory host -> CF edge over HTTPS) each avoided
 # handshake is ~2 RTT + a TLS negotiation, so this is a real per-message win over the
 # network even though it is ~invisible on loopback (#229 follow-up).
@@ -461,20 +462,49 @@ class Draft:
 # in auth.py are unchanged. A non-2xx HTTP response is returned as (status, bytes), NOT
 # raised (the caller maps status -> error), matching the old urllib behavior.
 #
-# Thread-safety: ONE connection, no lock. Safe under the proxy's current model -- every
-# call runs on the single reactor thread (blocking urllib was already reactor-blocking),
-# and one PosternClient is scoped to one mailbox/session, so its calls are serialized. A
-# future deferToThread change MUST add a lock or a per-thread connection before sharing a
-# transport across threads.
+# THREAD SAFETY (#416). This used to hold ONE connection with no lock, which was safe
+# only because every call ran on the single reactor thread. That is exactly what #416
+# changed: API calls now run in the reactor threadpool, so one client can be entered from
+# several threads. The connection, its host key and last_headers therefore live in
+# threading.local: each thread keeps its OWN keep-alive connection, so the #229 win is
+# preserved per thread while no two threads ever share a socket or a response.
+#
+# It is deliberately NOT a mutex. A lock would serialize every door call behind the
+# slowest one -- it frees the reactor but re-creates head-of-line blocking among callers,
+# and collapses keep-alive to a single connection under contention. Measured before
+# choosing (imap/bench/): six concurrent calls on ONE shared connection returned 2
+# successes and 4 failures (NoneType.makefile, "Idle", a full 15s timeout), so sharing was
+# not a degradation, it was corruption.
+#
+# The pool is bounded by the reactor threadpool (Twisted default max 10), so a hung worker
+# can consume at most that many threads and never unbounded ones; see threaded.py.
 class _HttpTransport:
     def __init__(self, timeout: float) -> None:
         self._timeout = timeout
-        self._conn: Optional[http.client.HTTPConnection] = None
-        self._key: Optional[Tuple[str, str, Optional[int]]] = None
-        self.last_headers: dict[str, str] = {}
+        # Per-THREAD connection state (#416): conn, its host key, and the headers of the
+        # last response on THIS thread. A shared connection across reactor-pool threads
+        # corrupts (measured, see the module note above).
+        self._local = threading.local()
+
+    @property
+    def last_headers(self) -> dict[str, str]:
+        # Headers of the last response ON THIS THREAD (#416). The caller reads this
+        # immediately after its own call, on the same thread, so per-thread state is not
+        # merely safe here, it is more correct than the single shared dict it replaces:
+        # two concurrent calls can no longer overwrite each other headers between the
+        # call and the read.
+        return dict(getattr(self._local, "last_headers", None) or {})
+
+    def _state(self):
+        local = self._local
+        if not hasattr(local, "conn"):
+            local.conn = None
+            local.key = None
+            local.last_headers = {}
+        return local
 
     def __call__(self, req: urllib.request.Request) -> Tuple[int, bytes]:
-        # A reused keep-alive connection may have been closed by the worker's idle
+        # A reused keep-alive connection may have been closed by the worker idle
         # timeout since the last call; if the attempt fails at the transport layer, drop
         # the connection and retry ONCE on a fresh one. Every request we make is
         # idempotent (GET, or an idempotent seen/auth POST), so a single retry is safe.
@@ -489,36 +519,38 @@ class _HttpTransport:
                 raise PosternError(f"request failed: {exc}") from exc
 
     def _attempt(self, req: urllib.request.Request) -> Tuple[int, bytes]:
+        state = self._state()
         parts = urllib.parse.urlsplit(req.full_url)
         host = parts.hostname or ""
         key = (parts.scheme, host, parts.port)
-        if self._conn is None or self._key != key:
+        if state.conn is None or state.key != key:
             self._close()
             if parts.scheme == "https":
-                self._conn = http.client.HTTPSConnection(host, parts.port or 443, timeout=self._timeout)
+                state.conn = http.client.HTTPSConnection(host, parts.port or 443, timeout=self._timeout)
             else:
-                self._conn = http.client.HTTPConnection(host, parts.port or 80, timeout=self._timeout)
-            self._key = key
+                state.conn = http.client.HTTPConnection(host, parts.port or 80, timeout=self._timeout)
+            state.key = key
         path = parts.path or "/"
         if parts.query:
             path += "?" + parts.query
-        self._conn.request(req.get_method(), path, body=req.data, headers=dict(req.header_items()))
-        resp = self._conn.getresponse()
+        state.conn.request(req.get_method(), path, body=req.data, headers=dict(req.header_items()))
+        resp = state.conn.getresponse()
         try:
-            self.last_headers = {k.lower(): v for k, v in resp.getheaders()}
+            state.last_headers = {k.lower(): v for k, v in resp.getheaders()}
         except AttributeError:
-            self.last_headers = {}
+            state.last_headers = {}
         # MUST fully read the body so the connection is left clean for reuse.
         return resp.status, resp.read()
 
     def _close(self) -> None:
-        if self._conn is not None:
+        state = self._state()
+        if state.conn is not None:
             try:
-                self._conn.close()
+                state.conn.close()
             except Exception:
                 pass
-        self._conn = None
-        self._key = None
+        state.conn = None
+        state.key = None
 
 
 class PosternClient:
