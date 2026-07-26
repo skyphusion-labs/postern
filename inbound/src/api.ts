@@ -311,8 +311,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
 
     // --- read: list / filter ---
     if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
-      const sessionIdentity =
-        resolution.viaSession && resolution.identity ? resolution.identity.from : undefined;
+      const sessionIdentity = sessionViewer(resolution);
       const role = roleReadScope(env, sessionIdentity, url.searchParams);
       const query = parseListQuery(url, sessionIdentity);
       if (role) applyRoleScope(query, role, sessionIdentity as string);
@@ -337,9 +336,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     }
 
     if (request.method === "GET" && path === "/api/folders") {
-      // Viewer for unread counts: session-bound identity wins; BYO read tokens
-      // (IMAP / operator) may pass ?to= the same way list/search do (#350/#352).
-      const viewer = resolution.identity?.from ?? url.searchParams.get("to") ?? undefined;
+      // Viewer for unread counts: ANY bound identity wins (a session, or a
+      // per-identity send token), and an unbound BYO read token (IMAP / operator) may
+      // pass ?to= the same way list/search do (#350/#352). The per-identity-token case
+      // is what makes this boundViewer and not sessionViewer; see both helpers.
+      const viewer = boundViewer(resolution) ?? url.searchParams.get("to") ?? undefined;
       // Role queues are enumerated ONLY for a bound session (#425). A static token is
       // estate-scoped already and reads role mail through its own door, so handing it a
       // role rail would add a concept without adding reach. This response is a
@@ -557,7 +558,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       }
       // Viewer-relative view (#403), same rules as /api/messages: refuses an
       // unknown value, refuses lens+direction, refuses a lens with no viewer.
-      const sessionIdentity = resolution.viaSession ? resolution.identity?.from : undefined;
+      const sessionIdentity = sessionViewer(resolution);
       // Role queue (#425): searching INSIDE a role view stays scoped to the queue, with
       // read state still keyed on the member -- the same swap the list route makes, so
       // the two edges cannot drift apart on what a role view is.
@@ -1388,6 +1389,37 @@ async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolu
     viaSession: true,
     csrfHash: session.csrfHash,
   };
+}
+
+/** WHOSE mail a read is bound to, when only a SESSION counts (#417).
+ *
+ *  A webmail session is one human in a browser, so the account boundary is theirs and
+ *  a caller-supplied `to=` is a filter INSIDE it (#422). A Bearer token, even one bound
+ *  to a send identity, is NOT treated as a viewer here: token callers (the IMAP door,
+ *  operators, agents) read the estate and say who they mean with `to=`. Used by
+ *  /api/messages and /api/search, which had two spellings of this same expression.
+ */
+function sessionViewer(resolution: AuthResolution): string | undefined {
+  return resolution.viaSession ? resolution.identity?.from : undefined;
+}
+
+/** WHOSE mail a read is bound to, counting ANY bound identity (#417).
+ *
+ *  Wider than sessionViewer by exactly one case: a per-identity send token resolves to
+ *  its own identity here. /api/folders uses this, so its unread counts are scoped to a
+ *  per-identity token automatically, while the same token reading /api/messages gets
+ *  the estate unless it passes `to=`. That difference is REAL and it is behavior that
+ *  shipped; it is named and tested here rather than left implicit in three different
+ *  expressions (the latent-lens-inconsistency finding on #417). It is also currently
+ *  UNREACHABLE, which viewer-binding.test.ts proves rather than assumes: the only
+ *  resolution that is identity-bound without being a session is a per-identity
+ *  registry token, which carries `send` scope and is refused by all three of these
+ *  read routes. Whether folders should narrow to sessionViewer, or list/search widen
+ *  to this, is therefore a semantics decision with no live consequence yet, and
+ *  nothing is changed while it is open.
+ */
+function boundViewer(resolution: AuthResolution): string | undefined {
+  return resolution.identity?.from;
 }
 
 // Authorize a resolution against a required route scope. A session carries an explicit

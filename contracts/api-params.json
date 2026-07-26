@@ -1,0 +1,81 @@
+{
+  "$comment": [
+    "The PARAMETER layer of the worker's HTTP contract (#417), the sibling of",
+    "api-routes.json. That file answers 'which routes exist and what scope does each",
+    "demand'; this one answers 'what may a caller SEND to one', which is the half the",
+    "published clients actually drifted on: a filter the worker honors that no client",
+    "can express, or a name a client sends that the worker never reads, are both",
+    "invisible to a suite that mocks its own idea of the worker.",
+    "",
+    "Keyed by the route `id` in api-routes.json, so the two files join and neither",
+    "repeats the other. A row here is a CLAIM, and inbound/route-params.test.ts is what",
+    "makes it true: every declared query parameter is proved LIVE against the real",
+    "handler over real SQLite (it must be strictly REFUSED when bogus, or demonstrably",
+    "CHANGE the answer), every name api.ts reads must be declared, and nothing declared",
+    "may be invented. An inert parameter is exactly the #413/#422 defect shape and fails",
+    "there, so this file cannot quietly describe a worker that does not exist.",
+    "",
+    "query: query-string names the route reads. body: top-level JSON keys it reads;",
+    "'set.x' names a nested key. Absent means the route takes none.",
+    "Adding a parameter means adding it here in the SAME commit: the worker-side test",
+    "fails on any name api.ts reads that no row covers."
+  ],
+  "version": 1,
+  "params": {
+    "send": {
+      "body": ["to", "cc", "bcc", "from", "replyTo", "subject", "text", "html", "headers", "attachments", "forwardMessageId"],
+      "note": "attachments are base64 over JSON (#70); forwardMessageId quotes a stored message, recipients stay caller-selected"
+    },
+    "send-alias": {
+      "body": ["to", "cc", "bcc", "from", "replyTo", "subject", "text", "html", "headers", "attachments", "forwardMessageId"],
+      "note": "back-compat alias: the same handler, so deliberately the same list"
+    },
+    "reply": {
+      "body": ["messageId", "cc", "bcc", "from", "text", "html", "mode", "quoteOriginal", "attachments"],
+      "note": "mode reply|replyAll derives the original recipients server-side (#363)"
+    },
+    "messages-list": {
+      "query": ["to", "from", "thread", "direction", "lens", "mailbox", "seenFor", "q", "limit", "cursor"],
+      "note": "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404)"
+    },
+    "search": {
+      "query": ["q", "mode", "field", "direction", "lens", "to", "from", "mailbox", "seenFor", "after", "before", "hasAttachment", "seen", "limit", "cursor"],
+      "note": "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder"
+    },
+    "recipients-recent": {
+      "query": ["viewer", "to", "limit"],
+      "note": "a bound identity wins; an unbound BYO token must name viewer= or to=, never an estate dump"
+    },
+    "folders": {
+      "query": ["to"],
+      "note": "to= scopes the unread counts; a bound identity wins over it server-side"
+    },
+    "messages-seen": {
+      "body": ["ids", "seen", "for"],
+      "note": "`for` writes a per-recipient override; under a session it must be the session identity (#410)"
+    },
+    "messages-flags": { "body": ["ids", "set", "set.flagged", "set.answered"] },
+    "messages-move": {
+      "body": ["ids", "mailbox"],
+      "note": "mailbox archive|trash|junk, or null to restore the direction-default view"
+    },
+    "drafts": {
+      "body": ["to", "cc", "bcc", "subject", "bodyText", "bodyHtml", "inReplyTo", "threadId", "composeMode", "sourceMessageId", "updatedAt"],
+      "note": "identity-owned: a static operator token gets E_IDENTITY_REQUIRED. PUT on an EXISTING draft requires its current updatedAt; an absent one is a conflict too, so an edit is read-modify-write"
+    },
+    "imap-drafts": {
+      "query": ["identity"],
+      "body": ["identity", "to", "cc", "bcc", "subject", "bodyText", "bodyHtml", "inReplyTo", "threadId", "composeMode", "sourceMessageId", "updatedAt"],
+      "note": "the IMAP service seam: the door has no ambient identity, so it asserts the already-authenticated one on every call"
+    },
+    "imap-import": {
+      "body": ["identity", "folder", "rawMime"],
+      "note": "folder sent|archive|trash|junk; rawMime is base64"
+    },
+    "smtp-auth": { "body": ["username", "password"] },
+    "session": { "body": ["username", "password"] },
+    "admin-smtp-credentials": { "body": ["username", "from", "password"] },
+    "admin-reindex": { "body": ["cursor", "limit", "dryRun"] },
+    "admin-reconcile": { "body": ["limit", "sample"] }
+  }
+}
