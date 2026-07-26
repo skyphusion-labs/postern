@@ -63,6 +63,14 @@ describe("mailbox_search", () => {
     expect(out.mailbox).toBe("archive");
     expect(out.seen).toBe(false);
   });
+
+  it("declares and forwards seenFor, the read-state projection key (#453)", async () => {
+    expect(Object.keys(tool("mailbox_search").inputSchema)).toContain("seenFor");
+    const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const out: any = await tool("mailbox_search").handler(client, { query: "x", seenFor: "ada@example.com" });
+    expect(client.search).toHaveBeenCalledWith(expect.objectContaining({ seenFor: "ada@example.com" }));
+    expect(out.seenFor).toBe("ada@example.com");
+  });
 });
 
 describe("mailbox_list", () => {
@@ -82,6 +90,18 @@ describe("mailbox_list", () => {
     const client: any = { list: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
     await tool("mailbox_list").handler(client, { mailbox: "junk" });
     expect(client.list).toHaveBeenCalledWith(expect.objectContaining({ mailbox: "junk" }));
+  });
+
+  it("declares and forwards seenFor, the read-state projection key (#453)", async () => {
+    expect(Object.keys(tool("mailbox_list").inputSchema)).toContain("seenFor");
+    const client: any = { list: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const out: any = await tool("mailbox_list").handler(client, {
+      to: "abuse@example.com",
+      lens: "inbox",
+      seenFor: "ada@example.com",
+    });
+    expect(client.list).toHaveBeenCalledWith(expect.objectContaining({ seenFor: "ada@example.com" }));
+    expect(out.seenFor).toBe("ada@example.com");
   });
 });
 

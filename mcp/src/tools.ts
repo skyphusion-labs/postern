@@ -98,7 +98,9 @@ export const READ_TOOLS: ToolDef[] = [
       "a message is NOT there). Also filter by sender (from), durable folder (mailbox), " +
       "date range (after/before, inclusive ISO), attachment presence (hasAttachment), " +
       "and read state (seen) -- e.g. seen=false plus mailbox=archive answers 'unread " +
-      "mail in Archive'. This is the primary tool for finding mail by topic.",
+      "mail in Archive'. seenFor names whose read state seen/results render, for a " +
+      "shared address (e.g. a role queue) with no single reader of its own. This is " +
+      "the primary tool for finding mail by topic.",
     inputSchema: {
       query: z.string().min(1).describe("the search text"),
       mode: MODE.optional().describe("search mode; defaults to hybrid. substr is a literal substring match (use with field)"),
@@ -113,6 +115,12 @@ export const READ_TOOLS: ToolDef[] = [
       before: z.string().optional().describe("inclusive ISO date upper bound on the message date"),
       hasAttachment: z.boolean().optional().describe("true = only messages with >=1 attachment; false = only messages with none"),
       seen: z.boolean().optional().describe("filter on read state: true = seen, false = unread"),
+      seenFor: z.string().optional().describe(
+        "whose read state seen/results render (the message rows returned are unchanged): " +
+          "an address whose message_seen_by row to project. For a shared/role address " +
+          "with no reader of its own (e.g. to=abuse@ with lens=inbox), pass the human " +
+          "reading it, e.g. seenFor=ada@example.com",
+      ),
       cursor: z.string().optional().describe("opaque pagination cursor from a previous page"),
     },
     handler: async (client, a) => {
@@ -133,6 +141,7 @@ export const READ_TOOLS: ToolDef[] = [
         before: a.before,
         hasAttachment: a.hasAttachment,
         seen: a.seen,
+        seenFor: a.seenFor,
       });
       return {
         query: a.query,
@@ -147,6 +156,7 @@ export const READ_TOOLS: ToolDef[] = [
         before: a.before ?? null,
         hasAttachment: a.hasAttachment ?? null,
         seen: a.seen ?? null,
+        seenFor: a.seenFor ?? null,
         count: page.items.length,
         cursor: page.cursor,
         results: page.items,
@@ -164,7 +174,8 @@ export const READ_TOOLS: ToolDef[] = [
       "it, and to=<addr> with lens=inbox is that address's INBOX view (arrivals plus " +
       "same-domain mail others sent it). `mailbox` filters by durable folder (archive, " +
       "trash, junk, or all). Use mailbox_search for topic search; use this to browse or " +
-      "filter by participant/folder.",
+      "filter by participant/folder. seenFor names whose read state the seen field " +
+      "renders, for a shared address (e.g. a role queue) with no single reader of its own.",
     inputSchema: {
       to: z.string().optional().describe("filter by recipient address"),
       from: z.string().optional().describe("filter by sender address"),
@@ -174,10 +185,16 @@ export const READ_TOOLS: ToolDef[] = [
       thread: z.string().optional().describe("filter to a thread id"),
       limit: z.number().int().positive().max(200).optional().describe("max results (default ~50)"),
       cursor: z.string().optional().describe("opaque pagination cursor"),
+      seenFor: z.string().optional().describe(
+        "whose read state the seen field renders (the message rows returned are " +
+          "unchanged): an address whose message_seen_by row to project. For a " +
+          "shared/role address with no reader of its own (e.g. to=abuse@ with " +
+          "lens=inbox), pass the human reading it, e.g. seenFor=ada@example.com",
+      ),
     },
     handler: async (client, a) => {
-      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, limit: a.limit, cursor: a.cursor });
-      return { count: page.items.length, cursor: page.cursor, messages: page.items };
+      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor });
+      return { count: page.items.length, cursor: page.cursor, seenFor: a.seenFor ?? null, messages: page.items };
     },
   },
   {

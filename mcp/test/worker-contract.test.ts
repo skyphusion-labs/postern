@@ -265,19 +265,19 @@ describe("#417 SOUNDNESS: everything the MCP client emits exists in the worker t
 // Parameters the worker honors that this client cannot send today. This list is a
 // LEDGER, not a permission: it must only ever shrink, and the test below fails if an
 // entry is stale, so closing a gap forces the entry out in the same PR.
+//
+// This ledger was written with the two list filters and seven search filters the
+// client could not send. #415 (PR #445) closed all but one; #453 closed the last one,
+// `seenFor` (the #404 read-state PROJECTION key: whose seen state a read renders,
+// independent of which rows come back). Decided #453: an MCP token is a static,
+// estate-scoped credential, exactly the caller class docs/CONTRACT.md 10.9 allows to
+// name any address via `seenFor`, so this client can and now does send it, matching
+// python (#413) and the imap door (#423). The path keys stay (values empty) so a
+// future declared param on either route that this client cannot reach is still
+// caught, rather than the routes dropping out of parity coverage entirely.
 const KNOWN_PARITY_GAPS: Record<string, string[]> = {
-  // This ledger was written with the two list filters and seven search filters the
-  // client could not send. #415 (PR #445) closed all but one while this branch was in
-  // flight, and the stale-entry test below FAILED on the rebase until those entries
-  // were removed: a gap cannot close quietly, and an entry cannot outlive its gap.
-  //
-  // What is left is `seenFor`, the #404 read-state PROJECTION key (whose seen state a
-  // read renders, independent of which rows come back). Whether MCP should carry it is
-  // a real question rather than an oversight to paper over: an agent holding a static
-  // token is estate-scoped and has no role-queue concept, so there may be nothing for
-  // it to project. Recorded here, owned by #415, so the answer is deliberate.
-  "/api/messages": ["seenFor"],
-  "/api/search": ["seenFor"],
+  "/api/messages": [],
+  "/api/search": [],
 };
 
 describe("#417 PARITY: what the worker honors, the client can reach", () => {

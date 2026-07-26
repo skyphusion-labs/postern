@@ -91,6 +91,26 @@ describe("#417 the derived requiredScope is equivalent to the if-chain it replac
     expect(disagreements).toEqual([]);
   });
 
+  it("CONTROL: the COMPARISON ITSELF can go red (not just the function it calls)", () => {
+    // joan's point, from a proxy that adapted to None and passed every test tonight:
+    // an assertion that cannot fail passes for the wrong reason. The loop above is the
+    // thing under test, so run it against a DELIBERATELY WRONG reference and require it
+    // to report the disagreement. Without this, a loop that compared nothing (an empty
+    // corpus, a swallowed exception, both sides broken the same way) would look green.
+    const wrongReference = (method: string, path: string): RouteScope | null =>
+      method === "GET" && path === "/api/folders" ? "admin" : referenceRequiredScope(method, path);
+
+    const disagreements: string[] = [];
+    for (const method of METHODS) {
+      for (const path of CORPUS) {
+        if (wrongReference(method, path) !== requiredScope(method, path)) {
+          disagreements.push(`${method} ${path}`);
+        }
+      }
+    }
+    expect(disagreements).toEqual(["GET /api/folders"]);
+  });
+
   it("CONTROL: the derivation can disagree, so agreement means something", () => {
     expect(requiredScope("GET", "/api/messages")).toBe("read");
     expect(requiredScope("GET", "/api/nothing-here")).toBeNull();
