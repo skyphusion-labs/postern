@@ -58,13 +58,17 @@ describe("ingest", () => {
     expect(res.threadId).toBe("root@example.com");
   });
 
-  it("hashes a Message-ID longer than 64 chars so it fits Vectorize's id limit", async () => {
+  // #486: the id is the header, verbatim. Full coverage (threading, the pre-fix-hash
+  // merge, the cap, the IMAP APPEND path) lives in message-id-verbatim.test.ts against
+  // real SQLite; this keeps the ingest suite honest about the same rule.
+  it("keeps a Message-ID longer than 64 chars verbatim rather than hashing it", async () => {
     const { env, ctx, settle } = makeFakeEnv();
-    const long = "x".repeat(80) + "@example.com";
+    const long = "skyphusion-labs/a-repository-name-that-is-long/issues/12345@github.com";
+    expect(long.length).toBeGreaterThan(64);
     const res = await ingest(env, baseMsg({ messageId: long }), ctx);
     await settle();
-    expect(res.messageId).toHaveLength(64);
-    expect(res.messageId).toMatch(/^[0-9a-f]{64}$/);
+    expect(res.messageId).toBe(long);
+    expect(res.messageId).not.toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("strips quoted lines and the signature block from the body", async () => {

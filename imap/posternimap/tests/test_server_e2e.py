@@ -759,6 +759,101 @@ class ServerE2ETest(twisted_unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class ServerQuietByDefaultE2ETest(twisted_unittest.TestCase):
+    """#467: nothing in any gate asserted the door stays QUIET, so un-gated
+    instrumentation (a stray print, an unconfigured stdlib logger falling through to
+    logging's default stderr handler, an unconditional twisted log.msg) cleared review,
+    every CI check, and a tag preflight, and shipped in v1.2.0 (#456, removed in #463).
+    This asserts the actual bytes written to stdout/stderr, not a code shape, so it
+    would have caught that regression without anyone knowing to look for it (the
+    property the issue asks for).
+
+    Drives the same LOGIN -> LIST -> SELECT -> FETCH -> SEARCH -> LOGOUT sequence as
+    ServerE2ETest, through the real IMAP4Server over a real socket (only the Postern API
+    is faked), with BOTH diagnostic levers left at their production default (unset =
+    off): POSTERN_IMAP_MEASURE and POSTERN_IMAP_WIRE_TRACE. That default-off posture is
+    the steady state every real deploy runs in, and it is what makes an assertion of
+    silence meaningful: the legitimate opt-in surfaces (measure, wire trace) are never
+    exercised here, so nothing SHOULD write. The sequence covers LOGIN and a threaded
+    SELECT/FETCH, which is exactly the in_pool() seam #456 shipped through.
+
+    Deliberately does NOT touch __main__.py's config-error print (a real caller of this
+    factory never goes through __main__) or server.run()'s log.startLogging(sys.stdout)
+    (this harness builds the factory directly, the same way the rest of this file's e2e
+    tests do, so startLogging is never invoked); those are the legitimate stdout/stderr
+    surfaces the issue names, and this test does not claim to gate them.
+    """
+
+    def setUp(self):
+        self.msgs = [
+            make_message("m2", subject="meeting tuesday", body="lunch?"),
+            make_message("m1", subject="welcome aboard", body="hello"),
+        ]
+        self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=2)
+        # Both levers left UNSET: the production default, not an explicit "off".
+        self.cfg = Config(
+            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+        )
+        self.factory, self._restore = _patched_factory(self.cfg, self.transport)
+        self.port = reactor.listenTCP(0, self.factory, interface="127.0.0.1")
+        self.addr = self.port.getHost()
+
+    def tearDown(self):
+        _restore_account(self._restore)
+        return self.port.stopListening()
+
+    @defer.inlineCallbacks
+    def _client(self):
+        cc = ClientCreator(reactor, imap4.IMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", self.addr.port)
+        defer.returnValue(proto)
+
+    @defer.inlineCallbacks
+    def test_normal_sequence_writes_nothing_to_stdout_or_stderr(self):
+        import contextlib
+        import io
+
+        from twisted.python import log
+
+        # twisted log.msg/log.err bypass the raw streams entirely (no observer, no
+        # side effect), so an un-gated log.msg is just as invisible to a stdout/stderr
+        # check alone as a bare print() is to a code-shape lint. Capture both classes
+        # of un-gated emission in the one test.
+        events = []
+        log.addObserver(events.append)
+        self.addCleanup(log.removeObserver, events.append)
+
+        out, err = io.StringIO(), io.StringIO()
+        proto = yield self._client()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                yield proto.login(b"agent@skyphusion.org", b"tok")
+                yield proto.list("", "*")
+                info = yield proto.select(b"INBOX")
+                self.assertEqual(info["EXISTS"], 2)
+                yield proto.fetchMessage("1:*")
+                yield proto.search(imap4.Query(all=True))
+        finally:
+            yield proto.logout()
+
+        self.assertEqual(out.getvalue(), "", "unexpected stdout: %r" % out.getvalue())
+        self.assertEqual(err.getvalue(), "", "unexpected stderr: %r" % err.getvalue())
+        # Twisted's own IMAP4Client logs a "cleartext" notice on the CLIENT side of
+        # every plaintext connection (twisted.mail.imap4, system="IMAP4Client,client")
+        # -- that is the test harness's stock client talking about itself, not the door
+        # under test, so it is excluded here. Anything from the door's own code (any
+        # other system tag, including the untagged default log.msg/log.err calls in
+        # server.py/mailbox.py/auth.py, or the "postern-imap"-tagged ones in
+        # threaded.py/measure.py/breaker.py) still fails the assertion below.
+        door_events = [e for e in events if not str(e.get("system", "")).startswith("IMAP4Client")]
+        self.assertEqual(
+            door_events,
+            [],
+            "unexpected twisted log event(s) on the quiet-by-default path: %r" % door_events,
+        )
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class SearchPushdownPredicateTest(unittest.TestCase):
     """Unit coverage for PosternIMAP4Server._pushable_substr_search (#148): which
     parsed SEARCH queries push to the substr endpoint and which fall back. Pure (no
