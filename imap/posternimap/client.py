@@ -18,6 +18,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple
 
+from .breaker import DISABLED as _DISABLED_BREAKER, CircuitBreaker
 from .measure import Meter
 
 _log = logging.getLogger(__name__)
@@ -564,9 +565,13 @@ class PosternClient:
         self,
         base_url: str,
         token: str,
-        timeout: float = 15.0,
+        # Kept in step with Config.api_timeout (#458): the door always passes the
+        # configured value, so this default only ever applies to a directly-built
+        # client (tests, one-off scripts). Two different numbers would be two stories.
+        timeout: float = 5.0,
         transport: Any = None,
         meter: Optional[Meter] = None,
+        breaker: Optional[CircuitBreaker] = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._token = token
@@ -574,6 +579,10 @@ class PosternClient:
         # A disabled Meter by default: all measurement hooks are no-ops unless an
         # enabled meter is injected (POSTERN_IMAP_MEASURE, threaded in from the account).
         self._meter = meter or Meter(False)
+        # #458: the SHARED per-endpoint breaker, injected by the account so every client
+        # it mints counts into ONE circuit. Unset = the always-allow instance, so a
+        # client built without one behaves exactly as it did before the breaker existed.
+        self._breaker = breaker or _DISABLED_BREAKER
 
     # --- API surface (mirrors CONTRACT section 4 read half) ---
 
@@ -854,9 +863,7 @@ class PosternClient:
         req.add_header("Accept", "application/json")
         req.add_header("Content-Type", "application/json")
         req.add_header("User-Agent", USER_AGENT)
-        with self._meter.timed("api_request", path=path) as span:
-            status, raw = self._transport(req)
-            span.set(status=status, bytes=len(raw))
+        status, raw = self._send(req, path)
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
         if status == 409:
@@ -924,15 +931,46 @@ class PosternClient:
 
     # --- internals ---
 
+    def _send(self, req: urllib.request.Request, path: str) -> Tuple[int, bytes]:
+        """The ONE transport choke point: breaker gate, measurement, outcome report.
+
+        Every request the client makes goes through here, so the breaker sees the whole
+        door -> Worker seam and cannot be bypassed by adding a method that calls
+        self._transport directly (there is nothing left that does).
+
+        It measures only the transport round-trip (the blocking-urllib I/O cost). The
+        path is the API endpoint, never a token or message content; on a transport error
+        the timed block still records the latency it took to fail. A call the breaker
+        fails fast emits NO api_request line, because no request was made -- an open
+        breaker must not look like a suspiciously fast Worker.
+        """
+        if not self._breaker.allow():
+            # Raised, never answered as empty: the caller maps this to the same tagged
+            # NO an unreachable Worker already produces (#458 fail-closed).
+            raise PosternError(self._breaker.reason())
+        try:
+            with self._meter.timed("api_request", path=path) as span:
+                status, raw = self._transport(req)
+                span.set(status=status, bytes=len(raw))
+        except Exception as exc:
+            # A PosternError CARRYING A STATUS is the Worker answering (a transport that
+            # chose to raise on an HTTP status); that is not a transport failure and must
+            # not trip the circuit. Everything else -- timeout, refused, reset, a fake
+            # transport raising OSError -- is.
+            if not (isinstance(exc, PosternError) and exc.status is not None):
+                self._breaker.record_transport_failure()
+            raise
+        # ANY status, including 401/403/5xx: the Worker ANSWERED, so the path works.
+        self._breaker.record_success()
+        return status, raw
+
     def _get_raw(self, path: str) -> tuple[int, dict[str, str], bytes]:
         url = self._base + path
         req = urllib.request.Request(url, method="GET")
         req.add_header("Authorization", f"Bearer {self._token}")
         req.add_header("Accept", "*/*")
         req.add_header("User-Agent", USER_AGENT)
-        with self._meter.timed("api_request", path=path) as span:
-            status, raw = self._transport(req)
-            span.set(status=status, bytes=len(raw))
+        status, raw = self._send(req, path)
         hdrs: dict[str, str] = {}
         if hasattr(self._transport, "last_headers"):
             hdrs = dict(getattr(self._transport, "last_headers") or {})
@@ -948,12 +986,7 @@ class PosternClient:
         req.add_header("Authorization", f"Bearer {self._token}")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", USER_AGENT)
-        # Measure only the transport round-trip (the blocking-urllib I/O cost). The
-        # path is the API endpoint, never a token or message content; on a transport
-        # error the timed block still records the latency it took to fail.
-        with self._meter.timed("api_request", path=path) as span:
-            status, raw = self._transport(req)
-            span.set(status=status, bytes=len(raw))
+        status, raw = self._send(req, path)
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
         if status >= 400:
@@ -980,9 +1013,7 @@ class PosternClient:
         req.add_header("Accept", "application/json")
         req.add_header("Content-Type", "application/json")
         req.add_header("User-Agent", USER_AGENT)
-        with self._meter.timed("api_request", path=path) as span:
-            status, raw = self._transport(req)
-            span.set(status=status, bytes=len(raw))
+        status, raw = self._send(req, path)
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
         if status not in expect_status and status >= 400:
@@ -1000,9 +1031,7 @@ class PosternClient:
         req.add_header("Authorization", f"Bearer {self._token}")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", USER_AGENT)
-        with self._meter.timed("api_request", path=path) as span:
-            status, raw = self._transport(req)
-            span.set(status=status, bytes=len(raw))
+        status, raw = self._send(req, path)
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
         if status == 403:

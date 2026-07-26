@@ -139,7 +139,11 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_PORT` | no | `1143` | listen port |
 | `POSTERN_IMAP_TLS_CERT` | no | -- | PEM cert path (set with key for IMAPS; listener enforces TLS 1.2+) |
 | `POSTERN_IMAP_TLS_KEY` | no | -- | PEM key path |
-| `POSTERN_API_TIMEOUT` | no | `15` | per-request timeout to the API, seconds |
+| `POSTERN_API_TIMEOUT` | no | `5` | per-request timeout to the API, seconds. Lowered from 15 on MEASUREMENT (#458, numbers below); must be `> 0` (a `0` makes every socket non-blocking, so the door refuses to start with it) |
+| `POSTERN_API_BREAKER_ENABLED` | no | `true` | master switch for the Worker circuit breaker (#458) |
+| `POSTERN_API_BREAKER_THRESHOLD` | no | `5` | CONSECUTIVE transport failures (timeouts / refused / reset -- never an HTTP status) before the circuit opens. `0` disables the breaker |
+| `POSTERN_API_BREAKER_COOLDOWN_SECONDS` | no | `30` | how long an open circuit fails fast before admitting ONE probe call. `0` disables the breaker |
+| `POSTERN_IMAP_POOL_LOG_SECONDS` | no | `60` | minimum seconds between "reactor threadpool saturated" log lines (#458). Log rate only; never changes dispatch |
 | `AUTH_THROTTLE_ENABLED` | no | `true` | master switch for the auth brute-force throttle (#105) |
 | `AUTH_THROTTLE_MAX_FAILURES` | no | `5` | consecutive failures per key before lockout. Key = the account in `native`/`ldap`/`system`; in `token`/`fixed` the key is the client SOURCE IP (the username there is attacker-chosen free text, #183) |
 | `AUTH_THROTTLE_LOCKOUT_SECONDS` | no | `60` | base lockout; doubles per failure past the threshold |
@@ -339,7 +343,7 @@ without Twisted:
 | `server.py` | yes | the `IMAP4Server` factory + reactor wiring |
 | `__main__.py` | -- | `python -m posternimap` entrypoint |
 
-## Concurrency (#416, #457)
+## Concurrency (#416, #457, #458)
 
 Worker calls run in the reactor threadpool, not on the reactor thread. Before this, one
 slow worker call stalled EVERY connected client for the duration of the call, and
@@ -381,6 +385,66 @@ door. Numbers, method and the re-runnable scripts: `imap/bench/`.
 - `test_reactor_nonblocking.py` asserts ZERO reactor-thread worker calls across every
   FETCH shape a real client sends, and pins #102 and #342 alongside, so a warm that
   bought its speed by over-fetching fails too.
+
+### Timeout, circuit breaker, and the saturation signal (#458)
+
+Moving the calls off the reactor thread removed the whole-door stall; it did not change
+what a dead Worker COSTS. Each call still paid a full `api_timeout`, per command, from
+every connected client, and each of those waits held one of the ten pool threads. Ten
+stalled threads is the pool exhausted, and the eleventh command queued behind them with
+nothing in the log saying why. Three changes, in that order:
+
+**1. `POSTERN_API_TIMEOUT` is 5s, not 15s.** Chosen from 680 live calls against the
+production Worker over a ten-minute window, made in the door's own call mix and through
+the door's own transport shape (keep-alive `http.client`, same UA, Bearer auth):
+
+| call | n | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| `GET /api/messages?limit=50` (warm) | 200 | 372ms | 485ms | 598ms | 626ms |
+| `GET /api/messages?limit=1` (warm) | 200 | 307ms | 350ms | 448ms | 1306ms |
+| `GET /api/messages/{id}` | 80 | 317ms | 344ms | 424ms | 424ms |
+| `GET /api/search` | 80 | 287ms | 320ms | 446ms | 446ms |
+| `GET /api/folders` | 80 | 2222ms | 2358ms | 2697ms | 2697ms |
+| `GET /api/messages?limit=50` (cold connection) | 40 | 415ms | 592ms | 673ms | 673ms |
+
+`/api/folders` is the one class that sets the floor: it is an order of magnitude slower
+than everything else the door calls, and very stable (max/p50 = 1.21, essentially no
+tail). 5s is therefore about 2.2x its slowest observed call and about 8x the p99 of
+every other class. A timeout that fires on a healthy-but-slow call is a self-inflicted
+outage, so the margin is deliberate -- but a caller now waits five seconds for a dead
+Worker, not fifteen.
+
+**2. A circuit breaker on the Worker endpoint** (`breaker.py`). After
+`POSTERN_API_BREAKER_THRESHOLD` CONSECUTIVE transport failures the door stops dialing
+for `POSTERN_API_BREAKER_COOLDOWN_SECONDS`, then admits exactly ONE probe: success
+closes the circuit, failure re-opens it. Open and close transitions are logged.
+
+- It counts TRANSPORT failures only: timeouts, refused connections, reset sockets. An
+  HTTP status is the Worker ANSWERING. A 4xx is a refusal (taking a mailbox offline
+  because a token lost a scope would be absurd), and a 5xx -- including a Cloudflare
+  edge 5xx while the Worker is down -- arrives in milliseconds, so there is no timeout
+  to save. Any response at all resets the counter.
+- It FAILS CLOSED. An open circuit makes the call raise, exactly like a timeout does, so
+  the door answers the same honest tagged NO it already gives for an unreachable Worker.
+  It never answers an empty mailbox: an empty INBOX because a breaker is open is the
+  #404 / #416 failure class, and `test_breaker.py` pins it at the mailbox layer AND over
+  the wire (SELECT INBOX with the circuit open answers `NO [UNAVAILABLE]` and dials
+  nothing).
+- The breaker is per ENDPOINT and process-wide, because the account mints a fresh client
+  per mailbox and per session; a per-client breaker would count to N in each and never
+  trip.
+- The defaults are deliberately conservative. Five consecutive failures with not one
+  successful call in between, each having burned a 5s timeout or failed to connect, is
+  roughly 25 seconds of a door that cannot reach the Worker at all -- not jitter. A
+  mis-tuned breaker that opens on normal variance is worse than no breaker, which is
+  also why `POSTERN_API_BREAKER_THRESHOLD=0` (off) is a supported setting.
+
+**3. Pool exhaustion is a log line, not an inference.** Every dispatch observes the
+reactor threadpool, and the first dispatch that finds every thread busy logs
+`reactor threadpool SATURATED: 10/10 threads busy`. Repeats are rate-limited to one line
+per `POSTERN_IMAP_POOL_LOG_SECONDS` and carry the number of dispatches that queued in
+between, and recovery logs once with what the episode cost. The watch never decides
+anything: a failure inside it cannot stop a dispatch (pinned by a test).
 
 ## Tests
 

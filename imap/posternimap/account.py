@@ -48,6 +48,7 @@ from zope.interface import implementer
 
 from twisted.mail import imap4
 
+from .breaker import breaker_for
 from .client import PosternClient, PosternError
 from .config import ROLE_FOLDER_PREFIX, Config, role_folder_name
 from .mailbox import PosternMailbox
@@ -276,6 +277,12 @@ class PosternAccount:
         # way, so nothing user-visible depends on resolving them any earlier.
         self._role_folders_cache: Optional[Dict[str, _Folder]] = None
         self._meter = Meter(cfg.measure)
+        # #458: the Worker circuit breaker is SHARED per endpoint, process-wide, and
+        # resolved once here. The account mints a fresh PosternClient per mailbox and
+        # per session, so a breaker owned by a client would count consecutive failures
+        # in isolation and never reach the threshold; the seam being watched is the
+        # door -> Worker path, which is one fact for the whole process.
+        self._breaker = breaker_for(cfg)
         # #352 core unblocker 4: durable-folder UIDVALIDITY is read through from
         # the worker's GET /api/folders (mailbox_uid_counter), not a client-side
         # hardcoded table. Cached per account/session (one login, one durable
@@ -294,7 +301,11 @@ class PosternAccount:
 
     def _client(self) -> PosternClient:
         return PosternClient(
-            self._cfg.api_url, self._token, timeout=self._cfg.api_timeout, meter=self._meter
+            self._cfg.api_url,
+            self._token,
+            timeout=self._cfg.api_timeout,
+            meter=self._meter,
+            breaker=self._breaker,
         )
 
     def _delete_client(self) -> Optional[PosternClient]:
@@ -306,6 +317,7 @@ class PosternAccount:
             delete_token,
             timeout=self._cfg.api_timeout,
             meter=self._meter,
+            breaker=self._breaker,
         )
 
     def _imap_client(self) -> Optional[PosternClient]:
@@ -321,7 +333,11 @@ class PosternAccount:
         if not imap_token:
             return None
         return PosternClient(
-            self._cfg.api_url, imap_token, timeout=self._cfg.api_timeout, meter=self._meter
+            self._cfg.api_url,
+            imap_token,
+            timeout=self._cfg.api_timeout,
+            meter=self._meter,
+            breaker=self._breaker,
         )
 
     def _ensure_role_folders(self) -> Dict[str, _Folder]:

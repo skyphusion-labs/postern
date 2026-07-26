@@ -140,8 +140,52 @@ class Config:
     pam_service: str = "postern"  # AUTH_SYSTEM_PAM_SERVICE, the PAM service name
     system_domain: Optional[str] = None  # AUTH_SYSTEM_DOMAIN, optional display suffix
 
-    # Per-request timeout to the Postern API, seconds.
-    api_timeout: float = 15.0
+    # Per-request timeout to the Postern API, seconds (POSTERN_API_TIMEOUT).
+    #
+    # 5s, lowered from 15s in #458 on MEASUREMENT, not taste. 680 live calls against the
+    # production Worker over a ten-minute window, in the door's own call mix and through
+    # the door's own transport shape (see the #458 PR for the full table):
+    #
+    #   GET /api/messages?limit=50   p50 372ms   p99 598ms   max 626ms   (n=200)
+    #   GET /api/messages?limit=1    p50 307ms   p99 448ms   max 1306ms  (n=200)
+    #   GET /api/messages/{id}       p50 317ms   p99 424ms   max 424ms   (n=80)
+    #   GET /api/search              p50 287ms   p99 446ms   max 446ms   (n=80)
+    #   GET /api/folders             p50 2222ms  p99 2697ms  max 2697ms  (n=80)
+    #   cold connection (TLS)        p50 415ms   p99 673ms   max 673ms   (n=40)
+    #
+    # /api/folders is the class that sets this floor: it is an order of magnitude slower
+    # than every other call the door makes, and remarkably STABLE (max/p50 = 1.21, no
+    # tail), so 5s is ~2.2x its slowest observed call and ~8x the p99 of everything else.
+    # A timeout that fires on a healthy-but-slow call is a self-inflicted outage, so the
+    # margin is deliberate; a caller staring at a spinner in Thunderbird nonetheless
+    # waits five seconds for a dead Worker now, not fifteen.
+    #
+    # It bounds ONE call. A cold SELECT pages, so a mailbox load can pay this per page;
+    # the breaker below is what bounds the REPEATED cost when the Worker is down.
+    api_timeout: float = 5.0
+
+    # --- Worker circuit breaker (#458) ---
+    # POSTERN_API_BREAKER_*: after N consecutive TRANSPORT failures (timeouts, refused
+    # or reset connections -- never an HTTP status, see breaker.py) to the Worker
+    # endpoint, fail fast for a cooldown instead of paying api_timeout per call, per
+    # command, from every connected client. An open breaker raises, so the door answers
+    # its usual honest tagged NO; it NEVER answers an empty mailbox.
+    #
+    # Defaults are deliberately conservative: a mis-tuned breaker that opens on normal
+    # jitter is worse than no breaker. 5 CONSECUTIVE failures with not one successful
+    # call in between, each of which took a full 5s timeout or failed to connect, is not
+    # jitter; it is roughly 25s of a door that cannot reach the Worker at all. A single
+    # answer of any kind (200, 401, even 503) resets the count.
+    breaker_enabled: bool = True
+    breaker_threshold: int = 5
+    breaker_cooldown: float = 30.0
+
+    # --- reactor threadpool saturation signal (#458) ---
+    # POSTERN_IMAP_POOL_LOG_SECONDS: minimum seconds between "pool saturated" log lines
+    # (the lines are rate-limited, and the suppressed count is carried into the next
+    # one, so an outage cannot flood the journal). 0 = log every saturated dispatch.
+    # This is a LOG-RATE knob only; it never changes dispatch behavior.
+    pool_log_seconds: float = 60.0
 
     # --- mailbox windowing + live refresh (#102 Stage 1) ---
     # POSTERN_IMAP_WINDOW: cap INBOX/Sent to the most-recent N messages at SELECT
@@ -367,6 +411,28 @@ class Config:
             raise ConfigError(
                 "POSTERN_IMAP_UIDVALIDITY must be a positive 32-bit integer (1..4294967295)"
             )
+        # #458. api_timeout was read inline and NEVER validated: a POSTERN_API_TIMEOUT of
+        # 0 makes every socket non-blocking (http.client passes it straight through), so
+        # every call fails instantly and the door serves nothing while looking configured.
+        # A negative value is the same class of nonsense. Both are now a loud startup
+        # refusal, like every other numeric knob here.
+        api_timeout = _float(e, "POSTERN_API_TIMEOUT", 5.0)
+        if api_timeout <= 0:
+            raise ConfigError("POSTERN_API_TIMEOUT must be > 0 seconds")
+        breaker_enabled = _bool(e, "POSTERN_API_BREAKER_ENABLED", True)
+        breaker_threshold = _int(e, "POSTERN_API_BREAKER_THRESHOLD", 5)
+        if breaker_threshold < 0:
+            raise ConfigError(
+                "POSTERN_API_BREAKER_THRESHOLD must be >= 0 (0 disables the breaker)"
+            )
+        breaker_cooldown = _float(e, "POSTERN_API_BREAKER_COOLDOWN_SECONDS", 30.0)
+        if breaker_cooldown < 0:
+            raise ConfigError(
+                "POSTERN_API_BREAKER_COOLDOWN_SECONDS must be >= 0 (0 disables the breaker)"
+            )
+        pool_log_seconds = _float(e, "POSTERN_IMAP_POOL_LOG_SECONDS", 60.0)
+        if pool_log_seconds < 0:
+            raise ConfigError("POSTERN_IMAP_POOL_LOG_SECONDS must be >= 0")
         measure = _bool(e, "POSTERN_IMAP_MEASURE", False)
         imap_wire_trace = _bool(e, "POSTERN_IMAP_WIRE_TRACE", False)
 
@@ -472,7 +538,11 @@ class Config:
             ldap_timeout=ldap_timeout,
             pam_service=pam_service,
             system_domain=system_domain,
-            api_timeout=_float(e, "POSTERN_API_TIMEOUT", 15.0),
+            api_timeout=api_timeout,
+            breaker_enabled=breaker_enabled,
+            breaker_threshold=breaker_threshold,
+            breaker_cooldown=breaker_cooldown,
+            pool_log_seconds=pool_log_seconds,
             imap_window=imap_window,
             imap_poll_seconds=imap_poll_seconds,
             imap_uidvalidity=imap_uidvalidity,

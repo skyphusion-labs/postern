@@ -76,8 +76,23 @@ class ConfigToEmitIntegrationTest(unittest.TestCase):
         self._real_client = account_mod.PosternClient
         transport = self.transport
 
-        def _factory(base_url: str, token: str, timeout: float = 15.0, meter: Any = None) -> Any:
-            return RealClient(base_url, token, timeout=timeout, transport=transport, meter=meter)
+        def _factory(
+            base_url: str,
+            token: str,
+            timeout: float = 5.0,
+            meter: Any = None,
+            breaker: Any = None,
+        ) -> Any:
+            # Mirrors the real PosternClient signature, breaker included (#458): the
+            # account passes its shared breaker to every client it builds.
+            return RealClient(
+                base_url,
+                token,
+                timeout=timeout,
+                transport=transport,
+                meter=meter,
+                breaker=breaker,
+            )
 
         account_mod.PosternClient = _factory  # type: ignore[assignment]
         self.addCleanup(setattr, account_mod, "PosternClient", self._real_client)

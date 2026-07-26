@@ -35,7 +35,7 @@ from .config import Config
 from .fetchwarm import fetch_reads
 from .mailbox import MailboxLoadError
 from .proxywrap import wrap_listener_factory
-from .threaded import in_pool
+from .threaded import configure_pool_watch, in_pool
 
 # The three SEARCH keys whose single-term form we can push to the store's substr
 # endpoint (#148). Maps the RFC 3501 search key to the /api/search field selector
@@ -895,6 +895,9 @@ def _build_tls_context_factory(cert_path: str, key_path: str):
 
 
 def build_factory(cfg: Config) -> PosternIMAPFactory:
+    # #458: apply the pool-saturation log rate here rather than in run(), so every path
+    # that actually builds a door (including the e2e tests) carries the configured value.
+    configure_pool_watch(cfg)
     return PosternIMAPFactory(cfg)
 
 

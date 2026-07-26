@@ -29,6 +29,9 @@ __pycache__/
 imap/*.egg-info/
 imap/_trial_temp/
 _trial_temp/
+# trial makes _trial_temp-N and a .lock when two runs overlap; same debris, same rule.
+_trial_temp-*/
+_trial_temp.lock
 
 # Python client
 clients/python/.venv/

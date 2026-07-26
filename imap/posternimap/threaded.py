@@ -30,7 +30,9 @@ hide that rather than fix it.
 
 from __future__ import annotations
 
-from typing import Any
+import threading
+import time
+from typing import Any, Callable, Optional
 
 from twisted.internet import defer, reactor, threads
 from twisted.python import failure
@@ -67,6 +69,13 @@ def in_pool(fn, *args, **kwargs):
     """
     if not reactor.running:
         return defer.execute(fn, *args, **kwargs)
+    # #458: observe the pool BEFORE dispatching, so exhaustion is a log line rather than
+    # something an operator has to infer from latency. Instrumentation never breaks
+    # dispatch: any failure reading the pool is swallowed.
+    try:
+        pool_watch().observe_pool(reactor.getThreadPool())
+    except Exception:
+        pass
     return threads.deferToThread(_flattened, fn, *args, **kwargs)
 
 
@@ -224,3 +233,103 @@ class ThreadedAccount:
 
     def __repr__(self) -> str:
         return "ThreadedAccount(%r)" % (object.__getattribute__(self, "_account"),)
+
+
+def _twisted_log(message: str) -> None:
+    from twisted.python import log
+
+    log.msg(message, system="postern-imap")
+
+
+class PoolSaturationWatch:
+    """Make reactor-threadpool exhaustion VISIBLE (#458).
+
+    #416 part 2 turned a hung Worker from a frozen door into a quiet one: the door stays
+    responsive and absorbs the stalls, so ten stalled threads is the pool exhausted and
+    the eleventh command queues behind them with nothing in the logs saying why. This
+    watches every dispatch and says so.
+
+    Saturated means "at the moment of dispatch, every thread the pool is allowed to run
+    was already working", which is exactly the condition under which THIS call waits in
+    the queue instead of starting. It is an observation, never a decision: nothing here
+    changes what is dispatched, and every log line is rate-limited so an outage cannot
+    flood the journal (the suppressed dispatches are counted and reported in the next
+    line and in the recovery line, so the rate limit hides no information).
+    """
+
+    def __init__(
+        self,
+        *,
+        log_interval: float = 60.0,
+        now: Optional[Callable[[], float]] = None,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self._interval = float(log_interval)
+        self._now = now or time.monotonic
+        self._log = log or _twisted_log
+        self._lock = threading.Lock()
+        self._saturated = False
+        self._since = 0.0
+        self._queued = 0
+        self._last_log = 0.0
+
+    def configure(self, *, log_interval: float) -> None:
+        with self._lock:
+            self._interval = float(log_interval)
+
+    def observe_pool(self, pool: Any) -> None:
+        """Observe a twisted ThreadPool: busy workers vs the ceiling it may grow to."""
+        self.observe(len(getattr(pool, "working", ()) or ()), int(getattr(pool, "max", 0) or 0))
+
+    def observe(self, busy: int, size: int) -> None:
+        if size <= 0:
+            return
+        now = self._now()
+        with self._lock:
+            if busy >= size:
+                self._queued += 1
+                if not self._saturated:
+                    self._saturated = True
+                    self._since = now
+                    self._queued = 1
+                    self._last_log = now
+                    message = (
+                        "postern-imap: reactor threadpool SATURATED: %d/%d threads busy, "
+                        "this worker call QUEUES behind them. Every stalled thread is one "
+                        "in-flight Worker call; if this persists the Worker is slow or "
+                        "down (see the circuit breaker), not the door." % (busy, size)
+                    )
+                elif (now - self._last_log) >= self._interval:
+                    self._last_log = now
+                    message = (
+                        "postern-imap: reactor threadpool STILL SATURATED: %d/%d threads "
+                        "busy, %d dispatches queued over the last %.0fs"
+                        % (busy, size, self._queued, now - self._since)
+                    )
+                else:
+                    return
+            else:
+                if not self._saturated:
+                    return
+                self._saturated = False
+                message = (
+                    "postern-imap: reactor threadpool RECOVERED: %d/%d threads busy after "
+                    "%.1fs saturated (%d dispatches queued while it was)"
+                    % (busy, size, now - self._since, self._queued)
+                )
+                self._queued = 0
+        # Logged OUTSIDE the lock: a log sink must never be able to serialize dispatch.
+        self._log(message)
+
+
+_POOL_WATCH = PoolSaturationWatch()
+
+
+def pool_watch() -> PoolSaturationWatch:
+    """The process-wide saturation watch (one reactor, one threadpool, one watch)."""
+    return _POOL_WATCH
+
+
+def configure_pool_watch(cfg) -> None:
+    """Apply POSTERN_IMAP_POOL_LOG_SECONDS. Called once at door startup."""
+    _POOL_WATCH.configure(log_interval=getattr(cfg, "pool_log_seconds", 60.0))

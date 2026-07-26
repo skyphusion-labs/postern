@@ -349,5 +349,83 @@ class ProxyProtocolConfigTest(unittest.TestCase):
         self.assertEqual(cfg.proxy_protocol.mode, "require")
 
 
+class ApiTimeoutTest(unittest.TestCase):
+    """#458: the per-call timeout, lowered on measurement and now VALIDATED."""
+
+    def test_default_is_the_measured_five_seconds(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x"})
+        self.assertEqual(cfg.api_timeout, 5.0)
+
+    def test_env_overrides(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_API_TIMEOUT": "2.5"})
+        self.assertEqual(cfg.api_timeout, 2.5)
+
+    def test_zero_or_negative_is_refused(self):
+        # A timeout of 0 makes every socket non-blocking, so the door would fail every
+        # call instantly while looking correctly configured. It used to be accepted.
+        for bad in ("0", "-1", "-0.5"):
+            with self.assertRaises(ConfigError):
+                Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_API_TIMEOUT": bad})
+
+    def test_non_numeric_is_refused(self):
+        with self.assertRaises(ConfigError):
+            Config.from_env({"POSTERN_API_URL": "https://x", "POSTERN_API_TIMEOUT": "soon"})
+
+
+class BreakerConfigTest(unittest.TestCase):
+    """#458 circuit-breaker knobs."""
+
+    def test_defaults(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x"})
+        self.assertTrue(cfg.breaker_enabled)
+        self.assertEqual(cfg.breaker_threshold, 5)
+        self.assertEqual(cfg.breaker_cooldown, 30.0)
+
+    def test_env_overrides(self):
+        cfg = Config.from_env(
+            {
+                "POSTERN_API_URL": "https://x",
+                "POSTERN_API_BREAKER_ENABLED": "false",
+                "POSTERN_API_BREAKER_THRESHOLD": "9",
+                "POSTERN_API_BREAKER_COOLDOWN_SECONDS": "45",
+            }
+        )
+        self.assertFalse(cfg.breaker_enabled)
+        self.assertEqual(cfg.breaker_threshold, 9)
+        self.assertEqual(cfg.breaker_cooldown, 45.0)
+
+    def test_negative_values_are_refused(self):
+        for name, bad in (
+            ("POSTERN_API_BREAKER_THRESHOLD", "-1"),
+            ("POSTERN_API_BREAKER_COOLDOWN_SECONDS", "-1"),
+        ):
+            with self.assertRaises(ConfigError):
+                Config.from_env({"POSTERN_API_URL": "https://x", name: bad})
+
+    def test_zero_threshold_is_accepted_as_the_off_switch(self):
+        cfg = Config.from_env(
+            {"POSTERN_API_URL": "https://x", "POSTERN_API_BREAKER_THRESHOLD": "0"}
+        )
+        self.assertEqual(cfg.breaker_threshold, 0)
+
+
+class PoolLogConfigTest(unittest.TestCase):
+    """#458 pool-saturation log rate."""
+
+    def test_default_and_override(self):
+        cfg = Config.from_env({"POSTERN_API_URL": "https://x"})
+        self.assertEqual(cfg.pool_log_seconds, 60.0)
+        cfg = Config.from_env(
+            {"POSTERN_API_URL": "https://x", "POSTERN_IMAP_POOL_LOG_SECONDS": "10"}
+        )
+        self.assertEqual(cfg.pool_log_seconds, 10.0)
+
+    def test_negative_is_refused(self):
+        with self.assertRaises(ConfigError):
+            Config.from_env(
+                {"POSTERN_API_URL": "https://x", "POSTERN_IMAP_POOL_LOG_SECONDS": "-1"}
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
