@@ -209,9 +209,37 @@ class PosternMailbox:
         self._poll: Optional["LoopingCall"] = None
         self._clock: Optional[Any] = clock
 
+    def preload(self) -> None:
+        """Load this mailbox snapshot NOW (#416).
+
+        The account calls this inside the reactor threadpool, before Twisted ever touches
+        the mailbox, so the synchronous IMailbox accessors that lazily load
+        (getMessageCount, getUIDNext, getUID, firstUnseen, getUnseenCount) become memory
+        reads. Those accessors have no Deferred seam to hang I/O on, so the load has to
+        happen before them or it happens ON the reactor thread.
+
+        A FAILED load is CAPTURED, not raised here. Preloading moved the load earlier in
+        the command flow, and raising at the new spot would move the error report with
+        it: a STATUS against an unreachable worker answered NO [UNAVAILABLE] from
+        requestStatus, and would have started answering the generic Twisted
+        select-failed text instead. The stored failure is re-raised by _ensure_loaded, so
+        every caller still sees the same exception from the same place -- without a
+        second, reactor-blocking attempt to produce it.
+        """
+        try:
+            self._ensure_loaded()
+        except Exception as exc:  # re-raised verbatim by _ensure_loaded
+            self._preload_error: Optional[BaseException] = exc
+
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
+        # A failure captured by preload() (#416) is re-raised HERE, which is where it
+        # would have been raised before preloading existed.
+        preload_error: Optional[BaseException] = getattr(self, "_preload_error", None)
+        if preload_error is not None:
+            self._preload_error = None
+            raise preload_error
         if self._empty:
             self._summaries = []
             self._loaded = True

@@ -321,6 +321,32 @@ without Twisted:
 | `server.py` | yes | the `IMAP4Server` factory + reactor wiring |
 | `__main__.py` | -- | `python -m posternimap` entrypoint |
 
+## Concurrency (#416)
+
+Worker calls run in the reactor threadpool, not on the reactor thread. Before this, one
+slow worker call stalled EVERY connected client for the duration of the call, and
+`api_timeout` defaults to 15s, so the worst case was a fifteen-second freeze of the whole
+door. Numbers, method and the re-runnable scripts: `imap/bench/`.
+
+- `threaded.py` holds the two Twisted-facing shells (`ThreadedAccount`, `ThreadedMailbox`).
+  They are installed ONCE, in the realm; the account and mailbox stay plain synchronous
+  objects that their own suites drive directly.
+- Only the seams Twisted invokes through `maybeDeferred` can answer with a Deferred
+  (select, listMailboxes, requestStatus, fetch, search, store, expunge, addMessage,
+  authenticateLogin). The synchronous IMailbox accessors cannot, so `select` PRELOADS the
+  mailbox inside the pool and they become memory reads.
+- The transport keeps one keep-alive connection PER THREAD (`threading.local`). Sharing
+  one connection across threads corrupts it; a mutex would have serialized every door
+  call behind the slowest one. Both measured.
+- The pool is bounded by the reactor threadpool default (10 threads), so a hung worker
+  consumes at most ten threads.
+- KNOWN RESIDUAL: per-message BODY hydration during FETCH still runs on the reactor
+  thread. Twisted renders a FETCH response by calling `IMessage` accessors straight from
+  the protocol, with no Deferred seam, and bodies are hydrated lazily on purpose so a
+  header scan never pays for them (#102). `test_reactor_nonblocking.py` asserts that
+  residual explicitly, and fails if it grows OR disappears without the exception being
+  removed.
+
 ## Tests
 
 ```bash
