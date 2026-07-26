@@ -155,6 +155,8 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_VIEWER_MAP` | no | -- | optional `login=addr,login2=addr2` overrides for directories where the login id is NOT the mail local part (e.g. `crockenhaus=conrad@example.org`). An override wins over the rule |
 | `POSTERN_IMAP_VIEWER_ROLES` | no | -- | role-address membership, `role=member+member,role2=member` (full addresses both sides). Each role publishes as its OWN folder `Roles/<local part>` for its members (#404). `per_account` only; any malformed or ambiguous entry is a startup failure |
 
+**`POSTERN_IMAP_VIEWER_ROLES` mirrors the Worker's `POSTERN_VIEWER_ROLES`** (#437, the webmail half of the #404 ruling): same syntax and the same refusal set, so a config one door refuses to start on is refused by the other too. Configure both with the SAME value, and **deploy the worker first** -- the door reads its own env at startup (a network fetch in front of a fail-closed startup would let one flake read as "nobody is on any queue"), so the two are diffable, not shared. `GET /api/roles` returns the worker's parsed map for exactly that diff.
+
 ### Per-account view scoping (#357)
 
 By default (`estate`) the door is one shared mailbox: every login sees the whole
