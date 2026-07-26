@@ -77,11 +77,20 @@ npx wrangler d1 migrations apply postern   # apply D1 migrations
 ### Verifying changes
 
 The workers have vitest suites; the scripted v1.0 acceptance smoke is `inbound/smoke.mjs` (issue #25).
-**Cross-seam routes live in `contracts/api-routes.json`** (route + method + required scope, as data):
-the worker validates itself against it (`inbound/route-contract.test.ts`, driving the real
-`handleApi`) and the MCP client asserts its emitted paths against it
-(`mcp/test/route-contract.test.ts`). A new or renamed route needs a row in the SAME commit, or those
-tests fail (#417).
+**The cross-seam route contract is GENERATED from `inbound/src/routes.ts`** (#417). That file is the
+single source: the live scope gate in `api.ts` CALLS the `requiredScope()` derived from those rows
+(the if-chain that used to live there is gone), so there is no second list to drift.
+`npm run routes:emit` (in `inbound/`) projects it to `contracts/api-routes.json` (route + method +
+required scope) and `contracts/api-params.json` (the query/body names each route reads, keyed by the
+same route id). **Add or rename a route by editing `inbound/src/routes.ts` and re-emitting in the
+SAME commit; never hand-edit the JSON.** Four tests keep it honest: `inbound/route-contract.test.ts`
+(the scope column against the real `handleApi`), `inbound/route-table.test.ts` (the derivation is
+equivalent to the if-chain it replaced, no row is shadowed, the committed JSON matches the source),
+`inbound/route-params.test.ts` (every declared parameter is REFUSED when bogus or demonstrably
+changes the answer, against the real handler), and one contract suite per client
+(`mcp/test/worker-contract.test.ts`, `clients/python/.../test_worker_contract.py`,
+`imap/posternimap/tests/test_worker_contract.py`) asserting each client emits only what the contract
+declares, and can reach everything it honors.
 End-to-end: verify against `npx wrangler dev --config wrangler.dev.jsonc` + `curl` the mailbox API;
 verify the relay on the box with `swaks --server 127.0.0.1:2525 ...`. Always `npm run typecheck`
 first (it is not part of any test run).

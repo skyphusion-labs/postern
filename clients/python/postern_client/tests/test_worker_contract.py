@@ -54,8 +54,15 @@ def match_route(method: str, path: str) -> Optional[dict[str, Any]]:
             continue
         if row["match"] == "exact":
             hit = path == row["path"]
+        elif row.get("exclude") and row["exclude"] in path:
+            hit = False
+        elif row.get("requireSeparator"):
+            # The bare path or a child under it, never a SIBLING: /api/drafts2 is not
+            # /api/drafts. The flag exists because a plain prefix cannot say that.
+            hit = path == row["path"] or path.startswith(row["path"] + "/")
         else:
-            hit = path.startswith(row["path"])
+            least = 1 if row.get("requireChild") else 0
+            hit = path.startswith(row["path"]) and len(path) - len(row["path"]) >= least
         if hit:
             return row
     return None

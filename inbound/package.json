@@ -6,6 +6,7 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
+    "routes:emit": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/emit-route-table.mjs",
     "sync-webmail": "node scripts/sync-webmail.mjs",
     "setup-email-routing": "node scripts/setup-email-routing.mjs",
     "test": "vitest run",

@@ -335,18 +335,34 @@ none touches D1 directly (#25, #26).
 | DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 
-**The table above has a machine-readable twin: `contracts/api-routes.json`** (#417). It carries every
-route with its method, match kind (exact or prefix), and the token scope it demands, as data that any
-seam can read. Two tests keep it honest, in both directions:
+**The table above has a machine-readable twin: `contracts/api-routes.json`** (#417), plus its
+parameter sibling `contracts/api-params.json` (the query names and body keys each route reads, keyed
+by the same route id). Both are GENERATED from `inbound/src/routes.ts` by `npm run routes:emit`, and
+**the worker's own scope gate calls the `requiredScope()` derived from those same rows** (there is no
+second copy of the mapping in `api.ts`), so the code and the contract cannot disagree by
+construction. Edit the source and re-emit; never hand-edit the JSON. Four tests keep it honest, in
+both directions:
 
 - `inbound/route-contract.test.ts` drives the REAL `handleApi` for every row: each route is called
   with every token scope that is NOT its own and must answer `403 forbidden ... scope`, then with a
   matching token as the positive control. A row the worker does not serve fails (the wrong-scope
   request sails past a gate that has no rule for it), and any `/api/...` path literal in `api.ts`
   with no row fails the coverage assertion. It found an undeclared route on its first run.
-- `mcp/test/route-contract.test.ts` records the URLs the MCP client actually emits and asserts each
-  one is a declared route, so a worker-side rename fails in the client instead of 404ing in
-  production. `clients/python` carries its own name-level guard over the worker source (#413/#440).
+- `inbound/route-table.test.ts` proves the DERIVATION: the derived `requiredScope` answers
+  identically to the if-chain it replaced over every route plus adversarial paths, no row is shadowed
+  by an earlier one, and the committed JSON equals the projection of the source. It caught three ways
+  a naive matcher silently moves the auth gate, including a plain prefix on `/api/drafts` swallowing
+  the sibling `/api/drafts2`, which is why two rows carry `requireSeparator`.
+- `inbound/route-params.test.ts` proves every declared PARAMETER against the real handler: each must
+  be strictly refused when bogus, or demonstrably change the result set. An inert declared parameter
+  is the #413/#422 defect shape (a filter the answer was not filtered by) and fails here, and a
+  declared parameter with no probe fails too.
+- One contract suite per client (`mcp/test/worker-contract.test.ts`,
+  `clients/python/postern_client/tests/test_worker_contract.py`,
+  `imap/posternimap/tests/test_worker_contract.py`) drives the REAL client and asserts it emits only
+  paths, methods, query names and body keys the contract declares (soundness), and can reach
+  everything the worker honors (parity). A worker-side rename fails in every client at once, instead
+  of 404ing in production.
 
 **Adding or renaming a route means editing that file in the same commit.** This exists because every
 suite used to mock its own idea of the worker, which is how the published clients drifted a full
