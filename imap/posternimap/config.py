@@ -199,9 +199,11 @@ class Config:
     # POSTERN_IMAP_POLL_SECONDS: while a mailbox is selected, re-poll the store
     # (summary-only, recent end only) on this interval and push untagged EXISTS so
     # new mail surfaces mid-session and IDLE is a real capability, not just an
-    # advertised one. The poll uses the same blocking urllib as fetch (one I/O model
-    # per stage); a deferToThread variant is a clean follow-up if measurement shows
-    # reactor stalls under concurrent SELECTs.
+    # advertised one. The refresh is a blocking urllib read like fetch, and like fetch it
+    # runs in the reactor THREADPOOL, never on the reactor thread (#485: measurement did
+    # show the stall this comment used to flag as hypothetical -- one tick froze every
+    # connected client for the read's duration). The untagged EXISTS push that follows it
+    # stays on the reactor, because it writes to the protocol transport.
     imap_poll_seconds: int = 30
 
     # POSTERN_IMAP_UIDVALIDITY: the mailbox UIDVALIDITY (RFC 3501), a positive 32-bit
@@ -216,8 +218,8 @@ class Config:
     # --- Stage-1 read-path measurement (#102 / GO-LIVE 0.6) ---
     # POSTERN_IMAP_MEASURE: when true, the proxy emits additive, structured
     # `@measure <event> {json}` lines (Twisted log -> journald) for cold-sync cost +
-    # window saturation, per-request API latency, the live-refresh poll's reactor-
-    # thread blocking time, and lazy-body hydration. OFF by default and behaviour-
+    # window saturation, per-request API latency, the live-refresh poll's refresh
+    # duration, and lazy-body hydration. OFF by default and behaviour-
     # neutral: disabled, every hook is a no-op, so the read path is byte-for-byte the
     # un-instrumented path. No message content or token is ever emitted -- only counts,
     # sizes, and timings. See measure.py + imap/MEASUREMENT.md for the event catalogue.

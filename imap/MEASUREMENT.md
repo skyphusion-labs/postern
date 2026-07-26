@@ -93,19 +93,24 @@ blocking-urllib I/O model cost per call."
 On a transport error the line is still emitted (latency-to-failure) without
 `status`/`bytes`.
 
-### `@measure poll_refresh` -- live-refresh poll reactor stall
+### `@measure poll_refresh` -- live-refresh poll duration
 
 Emitted once per poll tick while a mailbox is selected (`POSTERN_IMAP_POLL_SECONDS`).
-The poll runs blocking urllib in the reactor thread, so `elapsed_ms` **is** the
-per-tick reactor stall. Answers the config note that "a `deferToThread` variant is a
-clean follow-up if measurement shows reactor stalls under concurrent SELECTs."
+
+`elapsed_ms` USED TO BE the per-tick reactor stall, because the refresh ran blocking
+urllib on the reactor thread. That measurement is what got #485 filed, and #485 moved the
+refresh into the reactor threadpool (`PosternMailbox.refresh_now`), leaving only the
+untagged EXISTS push on the reactor. So `elapsed_ms` is now the refresh's own duration in
+a pool thread: still the right tuning signal for a slow store, no longer a door-wide
+freeze. A large value under concurrent SELECTs now means pool pressure -- watch it
+alongside the threadpool saturation lines (`POSTERN_IMAP_POOL_LOG_SECONDS`, #458).
 
 | field | meaning |
 |---|---|
 | `direction` | the polled view (`inbound` / `outbound` / `all`) |
 | `added` | new arrivals merged this tick (0 on a quiet tick) |
 | `listeners` | live listeners the EXISTS would push to |
-| `elapsed_ms` | wall-clock the poll held the reactor thread |
+| `elapsed_ms` | wall-clock of the refresh, in a pool thread (see above) |
 
 ### `@measure hydrate` -- lazy body hydration
 
@@ -147,7 +152,8 @@ the proxy log**:
 Tuning signals the window may surface: many sessions with `windowed: true` (real
 mailboxes routinely exceed 500 -> consider raising the window or the
 message-size-aware follow-up); `poll_refresh.elapsed_ms` large under concurrent
-SELECTs (-> the `deferToThread` follow-up the config note flags).
+SELECTs (-> the store is slow and the pool is carrying it; check the #458 saturation
+lines, since #485 the poll no longer stalls the reactor itself).
 
 ## Post-deploy emit-sanity gate (deploy-mechanism-agnostic)
 

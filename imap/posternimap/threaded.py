@@ -52,7 +52,17 @@ _DEFERRED_METHODS = (
     "requestStatus",
     "soft_move_fetched_messages",
     "copy",
+    # #485, and NOT a Twisted seam: do_NOOP is the door own override, and it chains the
+    # tagged OK behind this Deferred itself. It is the READ half of the live poll, so it
+    # belongs in the pool like every other worker call.
+    "refresh_now",
 )
+
+# DELIBERATELY ABSENT from the tuple above: PosternMailbox.notify_new_messages. It is the
+# NOTIFY half of the #485 split and it writes untagged EXISTS to the protocol transport, so
+# it must run ON the reactor thread. Pooling it would not move a stall, it would move a
+# transport write off the reactor, which is a corruption class. It is delegated untouched
+# by __getattr__ below, and test_reactor_surface asserts the thread it actually runs on.
 
 
 def in_pool(fn, *args, **kwargs):

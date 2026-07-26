@@ -345,18 +345,52 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     def do_NOOP(self, tag):
         """Refresh the selected mailbox on NOOP so new mail surfaces on demand (#102).
 
-        RFC 3501 6.1.2: NOOP is a client's explicit poll for status updates, and any
-        command may carry untagged status. Twisted's stock do_NOOP only acks, so a
+        RFC 3501 6.1.2: NOOP is a client explicit poll for status updates, and any
+        command may carry untagged status. Twisted stock do_NOOP only acks, so a
         NOOP-polling client (or any client between timed polls, or with the poll off)
-        never saw new mail. We refresh the mailbox first; poll_now pushes an untagged
-        EXISTS before the tagged OK when new mail arrived. Only meaningful in the
-        selected state (mbox set); harmless otherwise. The refresh is the same blocking
-        body-free store read the timed poll uses (this stage's I/O model)."""
+        never saw new mail.
+
+        THE REFRESH RUNS OFF THE REACTOR THREAD (#485). It is a blocking worker read, and
+        Thunderbird and Apple Mail send NOOP on a keep-alive cadence per connection, so
+        running it here stalled every OTHER connected client for the read duration (up to
+        api_timeout) on the door most frequent command. mbox.refresh_now goes through the
+        threadpool seam (ThreadedMailbox); the untagged EXISTS push stays on the reactor
+        because it writes to the protocol transport (mbox.notify_new_messages), which is
+        the whole reason this is a split and not a wrapper.
+
+        ORDER IS PRESERVED: the EXISTS is pushed from the callback, before the tagged OK
+        that addBoth appends, so a client still learns about new mail within the NOOP it
+        asked with. A failed refresh is logged and the NOOP still answers OK -- a store
+        blip is not a protocol error. Only meaningful in the selected state (mbox set);
+        every other state takes the stock synchronous path unchanged.
+        """
         mbox = getattr(self, "mbox", None)
-        poll_now = getattr(mbox, "poll_now", None)
-        if callable(poll_now):
-            poll_now()
-        imap4.IMAP4Server.do_NOOP(self, tag)
+        refresh = getattr(mbox, "refresh_now", None)
+        if not callable(refresh):
+            imap4.IMAP4Server.do_NOOP(self, tag)
+            return None
+        d = maybeDeferred(refresh)
+        d.addCallback(self._cbNoopRefresh, mbox)
+        d.addErrback(self._ebNoopRefresh)
+        d.addBoth(lambda _ignored: imap4.IMAP4Server.do_NOOP(self, tag))
+        return d
+
+    def _cbNoopRefresh(self, added, mbox):
+        """On the reactor thread: push the untagged EXISTS the refresh earned."""
+        notify = getattr(mbox, "notify_new_messages", None)
+        if added and callable(notify):
+            notify(added)
+        return added
+
+    def _ebNoopRefresh(self, failure):
+        """A refresh that failed must not fail the NOOP (pre-#485 behavior, kept).
+
+        poll_now used to swallow this itself; with the read in the pool the failure
+        arrives as a Failure instead, and it is consumed HERE so the tagged OK still goes
+        out and trial never sees an unhandled error.
+        """
+        log.err(failure, "postern-imap: NOOP refresh failed")
+        return 0
 
     # Rebind the command table entries so dispatchCommand (which reads the class-level
     # tuple, not getattr(self, "do_NOOP")) routes to the override above.

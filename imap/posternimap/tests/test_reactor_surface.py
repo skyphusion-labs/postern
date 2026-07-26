@@ -30,18 +30,16 @@ WHAT MAKES THIS MORE THAN A LONGER LIST. Two things.
     set was "would it have caught that mutation without anyone knowing to look for it",
     and the answer is asserted here rather than claimed.
 
-THE ONE DECLARED EXCEPTION, and it is a REAL defect rather than a carve-out for
-convenience. The live poll refreshes ON the reactor thread: PosternMailbox._refresh is a
-blocking worker read, and both callers reach it from the reactor. do_NOOP runs it on every
-NOOP a client sends against a selected mailbox, and the LoopingCall tick runs it every
-POSTERN_IMAP_POLL_SECONDS with no client command at all. It is the last blocking call site
-#416 part 2 left standing; config.py and mailbox.py both describe it as this stage's I/O
-model, and no test ever pinned it. The fix is not a wrapper: poll_now both READS the store
-and PUSHES untagged EXISTS to listeners, and a listener push writes to the protocol
-transport, which must happen on the reactor thread, so the read and the notify have to be
-split. That is a design change with its own review, filed as #485. LivePollReactorGapTest
-pins the CURRENT truth in BOTH callers, so the gap cannot be forgotten and a fix has to
-flip a test deliberately. A pin describes the door; it never blesses it.
+THERE IS NO LONGER AN EXCEPTION. This file used to carry one: the live poll refreshed ON
+the reactor thread, from do_NOOP (a command Thunderbird and Apple Mail send on a keep-alive
+cadence) and from the LoopingCall tick (no client command at all), and LivePollReactorGapTest
+PINNED that as the known gap. #485 fixed it, so the pin is gone and LivePollSplitTest
+asserts the fix instead. The fix was never a wrapper, which is why it needed its own issue:
+the poll both READS the store and PUSHES untagged EXISTS to listeners, and a listener push
+writes to the protocol transport, so wrapping the pair would have moved a transport write
+off the reactor -- a corruption class, not a stall. The two halves are therefore split, and
+BOTH halves are asserted here: refresh_now must run in the pool, notify_new_messages must
+run on the reactor, and the client must still see the EXISTS inside the NOOP that earned it.
 
 DECLARED, NOT ASSUMED. DrivenSurfaceDeclarationTest reads the door's own do_* overrides
 off PosternIMAP4Server and fails when one is neither driven here nor declared with a
@@ -205,19 +203,24 @@ class _SurfaceTest(twisted_unittest.TestCase):
             % (label, sorted({t for t, _m, _u in recording.calls})),
         )
 
-    def assertOnReactor(self, label, recording, expect=()):
-        """The inverse pin, for a call site KNOWN to block (#485; see the docstring)."""
-        routes = recording.routes()
-        for needle in expect:
-            self.assertTrue(
-                any(needle in route for route in routes),
-                "%s never reached %s (saw %r)" % (label, needle, routes),
-            )
+    def assertNotifiedOnReactor(self, threads, recording):
+        """The OTHER half of the #485 split: the EXISTS push stays ON the reactor.
+
+        A push recorded from a pool thread would be a transport write off the reactor,
+        which corrupts the protocol stream rather than merely stalling it. An EMPTY
+        recording fails too: it means no push happened, so the case proves nothing about
+        where one runs.
+        """
         self.assertTrue(
-            recording.on_reactor,
-            "%s no longer makes a worker call on the reactor thread. If that is the #485 "
-            "FIX, delete this pin and move the case into the off-reactor battery; do not "
-            "loosen it." % label,
+            threads,
+            "no untagged EXISTS was pushed at all, so this proves nothing about the "
+            "thread it runs on (did the drive forget to make new mail arrive?)",
+        )
+        self.assertEqual(
+            [recording.reactor_thread] * len(threads),
+            threads,
+            "the EXISTS push ran off the reactor thread: a Twisted transport write from "
+            "a pool thread corrupts the stream for every client on it",
         )
 
 
@@ -488,17 +491,38 @@ class RoleResolutionMutationControlTest(_SurfaceTest):
             self.assertOffReactor("mutated blind APPEND", rec)
 
 
-class LivePollReactorGapTest(_SurfaceTest):
-    """PINS the one path that DOES block: the live poll (#485).
+class LivePollSplitTest(_SurfaceTest):
+    """#485 FIXED: the live poll REFRESHES in the pool and NOTIFIES on the reactor.
 
-    Both callers are pinned, because they are two different failure shapes. do_NOOP
-    stalls the door on a command every client sends on a keep-alive cadence; the
-    LoopingCall stalls it with no client command at all, so an idle selected mailbox is
-    enough. These tests describe today's door; they do not bless it.
+    Both callers are driven, because they are two different failure shapes. do_NOOP stalled
+    the door on a command every client sends on a keep-alive cadence; the LoopingCall
+    stalled it with no client command at all, so an idle selected mailbox was enough. And
+    both halves are asserted on each, because either half alone can be made to pass: a poll
+    that never notifies is trivially off-reactor, and a poll that notifies from the pool
+    would satisfy an off-reactor assertion while corrupting the protocol stream.
     """
 
+    def _record_notify(self):
+        """Record the thread PosternMailbox.notify_new_messages actually runs on.
+
+        Patched on the CLASS, not injected into the drive, so it records the real door
+        pushing to the real protocol over the real socket.
+        """
+        from posternimap.mailbox import PosternMailbox
+
+        threads: list = []
+        original = PosternMailbox.notify_new_messages
+
+        def recording(mailbox, added):
+            threads.append(threading.current_thread().name)
+            return original(mailbox, added)
+
+        PosternMailbox.notify_new_messages = recording
+        self.addCleanup(setattr, PosternMailbox, "notify_new_messages", original)
+        return threads
+
     @defer.inlineCallbacks
-    def test_noop_refreshes_on_the_reactor_thread_known_gap(self):
+    def test_the_noop_refresh_runs_off_the_reactor_thread(self):
         @defer.inlineCallbacks
         def body(proto):
             yield proto.select(b"INBOX")
@@ -509,27 +533,59 @@ class LivePollReactorGapTest(_SurfaceTest):
             )
 
         rec = yield self._drive(body)
-        self.assertOnReactor("NOOP refresh", rec, expect=["GET https://x/api/messages?"])
+        self.assertOffReactor("NOOP refresh", rec, expect=["GET https://x/api/messages?"])
 
     @defer.inlineCallbacks
-    def test_the_timed_poll_refreshes_on_the_reactor_thread_known_gap(self):
-        # No client command at all: SELECT registers the listener, the LoopingCall fires
-        # on the reactor a second later, and the refresh it runs is a blocking worker
-        # call on that same thread. CLOSE stops the loop deterministically
-        # (removeListener -> _stop_poll), so no delayed call outlives the test.
+    def test_the_noop_exists_push_stays_on_the_reactor_and_precedes_the_tagged_ok(self):
+        threads = self._record_notify()
+
+        @defer.inlineCallbacks
+        def body(proto):
+            yield proto.select(b"INBOX")
+            # New mail arrives AFTER the snapshot loaded, so the refresh has something to
+            # notify about. Without it the push half never runs and the thread assertion
+            # would pass vacuously.
+            self.worker.messages.insert(0, make_message("m9", subject="fresh"))
+            lines = yield proto.noop()
+            exists = [ln for ln in lines if len(ln) == 2 and ln[1] == b"EXISTS"]
+            # ORDERING, from the client side: noop() returns the untagged lines the server
+            # sent BEFORE the tagged OK, so an EXISTS in here is an EXISTS the client got
+            # inside the NOOP it asked with. That is the property the split had to keep:
+            # the refresh moved to another thread, not to after the answer.
+            self.assertTrue(exists, "no untagged EXISTS on NOOP: %r" % (lines,))
+            self.assertEqual(4, int(exists[-1][0]))
+
+        rec = yield self._drive(body)
+        self.assertOffReactor("NOOP refresh", rec, expect=["GET https://x/api/messages?"])
+        self.assertNotifiedOnReactor(threads, rec)
+
+    @defer.inlineCallbacks
+    def test_the_timed_poll_refreshes_off_the_reactor_and_pushes_on_it(self):
+        # No client command at all: SELECT registers the listener, the LoopingCall fires on
+        # the reactor a second later, and the refresh it runs now goes to the pool while
+        # the EXISTS it produces comes back to the reactor. CLOSE stops the loop
+        # deterministically (removeListener -> _stop_poll), so no delayed call outlives
+        # the test.
+        threads = self._record_notify()
+
         @defer.inlineCallbacks
         def body(proto):
             yield proto.select(b"INBOX")
             before = len(self.worker.calls)
+            self.worker.messages.insert(0, make_message("m9", subject="fresh"))
             ticks = 60  # 60 * 100ms, far above the one-second interval
-            while ticks and len(self.worker.calls) == before:
+            while ticks and not threads:
                 ticks -= 1
                 yield task.deferLater(reactor, 0.1, lambda: None)
-            self.assertTrue(ticks, "the timed poll never fired")
+            self.assertTrue(ticks, "the timed poll never pushed")
+            self.assertGreater(
+                len(self.worker.calls), before, "the timed poll made no store read"
+            )
             yield proto.close()
 
         rec = yield self._drive(body, cfg=_config(imap_poll_seconds=1))
-        self.assertOnReactor("timed poll refresh", rec, expect=["GET https://x/api/messages?"])
+        self.assertOffReactor("timed poll refresh", rec, expect=["GET https://x/api/messages?"])
+        self.assertNotifiedOnReactor(threads, rec)
 
 
 class DrivenSurfaceDeclarationTest(unittest.TestCase):
@@ -549,7 +605,7 @@ class DrivenSurfaceDeclarationTest(unittest.TestCase):
         "do_COPY": "DoorCommandSurfaceTest (durable folders + restore)",
         "do_MOVE": "DoorCommandSurfaceTest",
         "do_ID": "DoorCommandSurfaceTest (must cost no worker call)",
-        "do_NOOP": "LivePollReactorGapTest (PINNED as the known gap, #485)",
+        "do_NOOP": "LivePollSplitTest (refresh in the pool, EXISTS push on the reactor)",
     }
     # command -> why it is not driven here. Empty on purpose: everything the door
     # overrides is driven. An entry belongs here only with a reason that survives review.
