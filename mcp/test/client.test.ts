@@ -75,6 +75,13 @@ describe("search", () => {
     // turn an unread-only search into an unfiltered one.
     expect(u.searchParams.get("seen")).toBe("false");
   });
+
+  it("forwards seenFor, the read-state projection key (#453)", async () => {
+    const calls = mockFetch(200, { ok: true, items: [], cursor: null });
+    await client().search({ q: "x", seenFor: "ada@example.com" });
+    const u = new URL(calls[0].url);
+    expect(u.searchParams.get("seenFor")).toBe("ada@example.com");
+  });
 });
 
 describe("list", () => {
@@ -92,6 +99,13 @@ describe("list", () => {
     await client().list({ mailbox: "trash" });
     const u = new URL(calls[0].url);
     expect(u.searchParams.get("mailbox")).toBe("trash");
+  });
+
+  it("forwards seenFor, the read-state projection key (#453)", async () => {
+    const calls = mockFetch(200, { ok: true, items: [], cursor: null });
+    await client().list({ to: "abuse@example.com", lens: "inbox", seenFor: "ada@example.com" });
+    const u = new URL(calls[0].url);
+    expect(u.searchParams.get("seenFor")).toBe("ada@example.com");
   });
 });
 

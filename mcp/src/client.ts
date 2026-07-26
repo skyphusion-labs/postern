@@ -63,6 +63,7 @@ export class PosternClient {
     before?: string;
     hasAttachment?: boolean;
     seen?: boolean;
+    seenFor?: string;
   }): Promise<Page<SearchHit>> {
     const params: Record<string, string> = { q: args.q };
     if (args.mode) params.mode = args.mode;
@@ -93,6 +94,12 @@ export class PosternClient {
     // (worker #354, api.ts) and 400s anything else.
     if (args.hasAttachment !== undefined) params.hasAttachment = String(args.hasAttachment);
     if (args.seen !== undefined) params.seen = String(args.seen);
+    // Read-state projection key (worker #404): whose message_seen_by row the
+    // effective-seen COALESCE reads, separate from which rows come back. An MCP
+    // token is a static, estate-scoped credential (docs/CONTRACT.md 10.9), the
+    // caller class the worker allows to name any address here, same as python
+    // and the imap door.
+    if (args.seenFor) params.seenFor = args.seenFor;
     const body = await this.requestGet("/api/search", params);
     return { items: (body.items as SearchHit[]) ?? [], cursor: body.cursor ?? null };
   }
@@ -107,6 +114,7 @@ export class PosternClient {
     q?: string;
     limit?: number;
     cursor?: string;
+    seenFor?: string;
   }): Promise<Page<MessageSummary>> {
     const params: Record<string, string> = {};
     if (args.to) params.to = args.to;
@@ -121,6 +129,9 @@ export class PosternClient {
     if (args.q) params.q = args.q;
     if (args.limit !== undefined) params.limit = String(args.limit);
     if (args.cursor) params.cursor = args.cursor;
+    // Read-state projection key (worker #404); see the matching comment in
+    // search() above.
+    if (args.seenFor) params.seenFor = args.seenFor;
     const body = await this.requestGet("/api/messages", params);
     return { items: (body.items as MessageSummary[]) ?? [], cursor: body.cursor ?? null };
   }
