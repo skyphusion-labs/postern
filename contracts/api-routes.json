@@ -1,0 +1,56 @@
+{
+  "$comment": [
+    "The worker's HTTP route table, as data (#417). This file is the one place a",
+    "route, its method, and the token scope it demands are written down where every",
+    "seam can read them: the worker validates itself against it (inbound/route-contract.test.ts,",
+    "which drives the REAL handleApi, so a drift between this file and the code fails",
+    "there), and a client suite can assert the paths it emits are paths the worker",
+    "actually serves. Before this, every suite mocked its own idea of the worker, which",
+    "is how the published clients drifted a feature generation behind with green tests.",
+    "Adding a route means adding a row here in the SAME commit; the worker-side test",
+    "fails on any /api path in api.ts that no row covers.",
+    "scope: the token scope requiredScope() demands. null means the route is not behind",
+    "the bearer scope gate at all, and `auth` says what guards it instead.",
+    "match: exact = the whole path; prefix = this path plus anything under it."
+  ],
+  "version": 1,
+  "routes": [
+    { "id": "health", "method": "GET", "path": "/health", "match": "exact", "scope": null, "auth": "public" },
+    { "id": "root", "method": "GET", "path": "/", "match": "exact", "scope": null, "auth": "public" },
+    { "id": "webmail", "method": "GET", "path": "/webmail", "match": "exact", "scope": null, "auth": "public" },
+    { "id": "mta-sts", "method": "GET", "path": "/.well-known/mta-sts.txt", "match": "exact", "scope": null, "auth": "public" },
+    { "id": "smtp-auth", "method": "POST", "path": "/api/smtp-auth", "match": "exact", "scope": null, "auth": "smtp-credential" },
+    { "id": "session", "method": "ANY", "path": "/api/session", "match": "exact", "scope": null, "auth": "session-mint" },
+    { "id": "session-refresh", "method": "ANY", "path": "/api/session/refresh", "match": "exact", "scope": null, "auth": "session-cookie" },
+    { "id": "ingest", "method": "POST", "path": "/ingest", "match": "exact", "scope": null, "auth": "transport-token" },
+
+    { "id": "send", "method": "POST", "path": "/api/send", "match": "exact", "scope": "send", "auth": "bearer" },
+    { "id": "send-alias", "method": "POST", "path": "/send", "match": "exact", "scope": "send", "auth": "bearer", "note": "back-compat alias of /api/send" },
+    { "id": "reply", "method": "POST", "path": "/api/reply", "match": "exact", "scope": "send", "auth": "bearer" },
+
+    { "id": "messages-list", "method": "GET", "path": "/api/messages", "match": "exact", "scope": "read", "auth": "bearer" },
+    { "id": "message-get", "method": "GET", "path": "/api/messages/", "match": "prefix", "scope": "read", "auth": "bearer", "note": "single message and its /attachments/{i} sub-route" },
+    { "id": "thread-get", "method": "GET", "path": "/api/threads/", "match": "prefix", "scope": "read", "auth": "bearer" },
+    { "id": "search", "method": "GET", "path": "/api/search", "match": "exact", "scope": "read", "auth": "bearer" },
+    { "id": "recipients-recent", "method": "GET", "path": "/api/recipients/recent", "match": "exact", "scope": "read", "auth": "bearer" },
+    { "id": "folders", "method": "GET", "path": "/api/folders", "match": "exact", "scope": "read", "auth": "bearer" },
+    { "id": "mobileconfig", "method": "GET", "path": "/api/mobileconfig", "match": "exact", "scope": "read", "auth": "bearer" },
+
+    { "id": "messages-seen", "method": "POST", "path": "/api/messages/seen", "match": "exact", "scope": "read", "auth": "bearer", "note": "marking read is a side effect of READING, so read-scoped on purpose" },
+    { "id": "messages-flags", "method": "POST", "path": "/api/messages/flags", "match": "exact", "scope": "read", "auth": "bearer" },
+    { "id": "messages-move", "method": "POST", "path": "/api/messages/move", "match": "exact", "scope": "read", "auth": "bearer" },
+
+    { "id": "message-delete", "method": "DELETE", "path": "/api/messages/", "match": "prefix", "scope": "delete", "auth": "bearer", "note": "not the /attachments/ sub-path" },
+
+    { "id": "drafts", "method": "ANY", "path": "/api/drafts", "match": "prefix", "scope": "send", "auth": "bearer", "note": "list/create/update/delete/send plus draft attachments" },
+
+    { "id": "imap-drafts", "method": "ANY", "path": "/api/imap/drafts", "match": "prefix", "scope": "imap", "auth": "bearer" },
+    { "id": "imap-import", "method": "POST", "path": "/api/imap/import", "match": "exact", "scope": "imap", "auth": "bearer" },
+
+    { "id": "admin-smtp-credentials", "method": "POST", "path": "/api/admin/smtp-credentials", "match": "exact", "scope": "admin", "auth": "bearer" },
+    { "id": "admin-smtp-credential-delete", "method": "DELETE", "path": "/api/admin/smtp-credentials/", "match": "prefix", "scope": "admin", "auth": "bearer" },
+    { "id": "admin-reindex", "method": "POST", "path": "/api/admin/reindex", "match": "exact", "scope": "admin", "auth": "bearer" },
+    { "id": "admin-roles", "method": "GET", "path": "/api/roles", "match": "exact", "scope": "admin", "auth": "bearer", "note": "the role map is operator config (#425): who is on which queue is a deployment fact, not a mailbox view, so a read token cannot see it" },
+    { "id": "admin-reconcile", "method": "POST", "path": "/api/admin/reconcile", "match": "exact", "scope": "admin", "auth": "bearer", "note": "read-only report, gated admin because it spans the whole estate" }
+  ]
+}

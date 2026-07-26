@@ -77,6 +77,11 @@ npx wrangler d1 migrations apply postern   # apply D1 migrations
 ### Verifying changes
 
 The workers have vitest suites; the scripted v1.0 acceptance smoke is `inbound/smoke.mjs` (issue #25).
+**Cross-seam routes live in `contracts/api-routes.json`** (route + method + required scope, as data):
+the worker validates itself against it (`inbound/route-contract.test.ts`, driving the real
+`handleApi`) and the MCP client asserts its emitted paths against it
+(`mcp/test/route-contract.test.ts`). A new or renamed route needs a row in the SAME commit, or those
+tests fail (#417).
 End-to-end: verify against `npx wrangler dev --config wrangler.dev.jsonc` + `curl` the mailbox API;
 verify the relay on the box with `swaks --server 127.0.0.1:2525 ...`. Always `npm run typecheck`
 first (it is not part of any test run).

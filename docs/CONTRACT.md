@@ -335,6 +335,23 @@ none touches D1 directly (#25, #26).
 | DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 
+**The table above has a machine-readable twin: `contracts/api-routes.json`** (#417). It carries every
+route with its method, match kind (exact or prefix), and the token scope it demands, as data that any
+seam can read. Two tests keep it honest, in both directions:
+
+- `inbound/route-contract.test.ts` drives the REAL `handleApi` for every row: each route is called
+  with every token scope that is NOT its own and must answer `403 forbidden ... scope`, then with a
+  matching token as the positive control. A row the worker does not serve fails (the wrong-scope
+  request sails past a gate that has no rule for it), and any `/api/...` path literal in `api.ts`
+  with no row fails the coverage assertion. It found an undeclared route on its first run.
+- `mcp/test/route-contract.test.ts` records the URLs the MCP client actually emits and asserts each
+  one is a declared route, so a worker-side rename fails in the client instead of 404ing in
+  production. `clients/python` carries its own name-level guard over the worker source (#413/#440).
+
+**Adding or renaming a route means editing that file in the same commit.** This exists because every
+suite used to mock its own idea of the worker, which is how the published clients drifted a full
+feature generation behind while every suite stayed green.
+
 `POST /api/admin/reindex` is the **backfill** (#116 ws4): it (re)embeds the EXISTING mailbox into
 the semantic index so history predating the live index -- and all historical outbound -- becomes
 queryable. It is `both`-scoped (admin, #85), so a read or send token gets `403`. Body
