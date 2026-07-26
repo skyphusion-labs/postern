@@ -30,10 +30,11 @@ const PASSWORD = "hunter2hunter2";
 const SECRET_DETAIL = "D1_ERROR: internal detail that must not reach a client";
 
 // TRUSTED_SENDER_DOMAINS is declared REQUIRED in Env and shipped as "" by both
-// wrangler configs, so production always has it; realEnv does not set it, and ingest()
-// reads it unguarded (isTrusted does allowlistEnv.split). Set it here so the /ingest
-// tests below fail on the INJECTED fault and not on an under-specified harness -- the
-// positive control is what caught that, which is exactly what it is for.
+// wrangler configs, so production always has it; realEnv does not set it. isTrusted()
+// now guards the read (#473), so an absent var no longer throws here, but this harness
+// still sets it EXPLICITLY: these tests must fail on the INJECTED fault and on nothing
+// else, and pinning the trust input keeps that true. The positive control is what
+// caught the original under-specification, which is exactly what it is for.
 function seamEnv() {
   return realEnv({ POSTERN_TRANSPORT_TOKEN: TT, TRUSTED_SENDER_DOMAINS: "" });
 }

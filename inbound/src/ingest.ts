@@ -226,8 +226,21 @@ export function bareAddress(from: string): string {
   return (angle ? angle[1] : from).trim().toLowerCase();
 }
 
-export function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string): boolean {
-  const domains = allowlistEnv
+/**
+ * Allowlist trust decision. `allowlistEnv` is `env.TRUSTED_SENDER_DOMAINS`, read on the
+ * INGEST path, so an ABSENT value must not throw (#473): a clean-install operator who
+ * prunes a var whose shipped value is empty anyway would otherwise fail EVERY inbound
+ * message, and as a TRANSIENT INFRA FAULT rather than a config message (the in-Worker
+ * email() handler lets the throw escape and CF retries; /ingest answers 500, which the
+ * relay maps to SMTP 451, so the sending MTA retries forever).
+ *
+ * Absent therefore reads exactly like the shipped "": an empty allowlist, so nothing is
+ * trusted, which is the fail-closed direction. Same guard as store.vectorizeAllowlist()
+ * (VECTORIZE_FOR) and the FORWARD_FOR read in index.ts; Env still declares the var
+ * REQUIRED, as it does for every sibling comma-list var, and every read guards.
+ */
+export function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string | undefined): boolean {
+  const domains = (allowlistEnv ?? "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);

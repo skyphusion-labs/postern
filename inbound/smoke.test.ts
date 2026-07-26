@@ -97,6 +97,14 @@ describe("isTrusted", () => {
     // ...and an off-allowlist sender is not, even wrapped in a friendly name.
     expect(isTrusted('"Skyphusion Support" <x@evil.example>', "pass", "pass", allow)).toBe(false);
   });
+
+  it("returns false when TRUSTED_SENDER_DOMAINS is absent, instead of throwing (#473)", () => {
+    // An operator who omits the var from their own wrangler config used to hit
+    // `undefined.split` here, on the INGEST path, so EVERY inbound message failed.
+    // Absent must read exactly like the shipped "": empty allowlist, nothing trusted.
+    expect(isTrusted("anyone@skyphusion.org", "pass", "pass", undefined)).toBe(false);
+    expect(isTrusted("cron@skyphusion.org", "none", "none", undefined)).toBe(false);
+  });
 });
 
 describe("bareAddress", () => {

@@ -51,6 +51,13 @@ interface Env {
    * Comma-separated list of trusted sender domains/addresses.
    * Only senders on this list that also pass SPF or DKIM get trusted=1.
    * Example: "skyphusion.org,example.net,github.com,healthchecks.io"
+   *
+   * Declared REQUIRED like every sibling comma-list var (FORWARD_FOR, VECTORIZE_FOR,
+   * FILE_ALSO_UNDER): this type describes a COMPLETE config, and both shipped wrangler
+   * configs set it. The runtime never leans on that promise -- isTrusted() guards the
+   * read the way vectorizeAllowlist() and the FORWARD_FOR read do, so an operator who
+   * prunes the var gets an empty allowlist (nothing trusted), never a throw on the
+   * ingest path (#473).
    */
   TRUSTED_SENDER_DOMAINS: string;
   /**
