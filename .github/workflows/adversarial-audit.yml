@@ -1,33 +1,41 @@
 name: Adversarial audit
 
 # LLM red-team advisory layer (CodeQL stays the gate).
-# Public repo: inline fleet-chezmoi script (cannot workflow_call private fleet-chezmoi).
 #   pr   -> @cf/moonshotai/kimi-k2.7-code on merge-base diff
 #   repo -> moonshotai/kimi-k3 full tree (workflow_dispatch only; needs CF_AIG_TOKEN)
 #
+# The audit scripts come from the PUBLIC repo skyphusion-labs/security-audit
+# (MIT), pinned by commit SHA below. They used to be checked out of the PRIVATE
+# fleet-chezmoi with a read-only deploy key (#436): on a `pull_request` trigger
+# GitHub runs the copy of THIS FILE that lives on the PR branch, so that key sat
+# in a job any write-access identity could rewrite. Public scripts need no key at
+# all, so the credential is simply gone rather than better guarded.
+#
 # Org secrets: ADVERSARIAL_AUDIT_CF_API_TOKEN (K2.7 /ai/run), CF_AIG_TOKEN (K3 repo mode)
 # Org vars:    CLOUDFLARE_ACCOUNT_ID, AI_GATEWAY_ID
-# Org secret:  FLEET_CHEZMOI_READ_TOKEN (read-only deploy key on fleet-chezmoi; fc#975)
 #
 # Use ADVERSARIAL_AUDIT_CF_API_TOKEN, not secrets.CLOUDFLARE_API_TOKEN: repos with a
 # repo-level deploy token for wrangler shadow the org name and lack Workers AI Read.
 #
-# TRUST MODEL (#420). What is deliberate and stays: `pull_request`, never
-# pull_request_target; fork PRs are skipped by the same-repo gate and get no
-# secrets regardless; advisory only, not a required check; nothing untrusted is
-# interpolated into a run: block.
+# DATA BOUNDARY (security-audit v0.2.0): `repo` mode ships the whole tracked tree,
+# and K3 is proxied to Moonshot's own API rather than run on Workers AI, so the
+# script only uses K3 when the repository is PUBLIC and otherwise runs the same
+# repo-mode prompt on K2.7 on Workers AI. It resolves visibility from the Actions
+# event payload and FAIL-SAFES to private, so nothing needs passing here; postern
+# is public, so `repo` mode does use K3.
 #
-# Third-party actions are pinned BY COMMIT SHA, not by a mutable major tag: a
-# major tag is a moving pointer, so an upstream repoint would reach this job's
-# secrets with no change here. The version each SHA corresponds to is in the
-# comment beside it; bump both together.
+# TRUST MODEL. Deliberate and load-bearing: `pull_request`, never
+# pull_request_target; fork PRs skipped by the same-repo gate and secretless
+# regardless; advisory only, never a required check; nothing untrusted reaches a
+# run: block. Third-party actions are pinned BY COMMIT SHA (a major tag is a
+# moving pointer); the version each SHA corresponds to is in the comment beside
+# it, and the two are bumped together.
 #
-# KNOWN RESIDUAL, tracked in #436: because the trigger is `pull_request`, GitHub
-# runs the copy of THIS FILE that lives on the PR branch, so any write-access
-# identity can land a branch that exfiltrates the fleet-chezmoi deploy key and
-# the two CF tokens. No in-file mitigation fixes that (the branch owns the file);
-# the fix is to stop taking the definition from the PR branch (workflow_run) or
-# to make the audit script public and drop the key. #436 carries both options.
+# RESIDUAL, still tracked in #436: the two CF tokens above remain in `env:` on a
+# job whose definition comes from the PR branch. They are function-scoped AI
+# tokens rather than a repo credential, which makes them a lower tier than the
+# deploy key that #436 removed, NOT a non-issue. Closing that class needs the
+# definition to stop coming from the PR branch (workflow_run).
 
 on:
   pull_request:
@@ -53,10 +61,10 @@ concurrency:
 
 jobs:
   audit:
-    # Skip dependabot by PR AUTHOR, not by github.actor (#420 item 3): actor is
-    # whoever triggered the latest run, so a human pushing one commit to a
-    # dependabot branch used to switch the full audit on for that branch. The
-    # author is a property of the PR and does not flip.
+    # Skip Dependabot by PR AUTHOR, not by github.actor (#420): actor is whoever
+    # triggered the latest run, so a human pushing one commit to a dependabot
+    # branch used to switch the full audit on for that branch. The author is a
+    # property of the PR and does not flip.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
@@ -64,38 +72,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # ONE place for the fleet-chezmoi pin (#420 item 2). It used to be written
-      # twice (the checkout ref and the verify step's expected value), so a bump
-      # needed two synchronized edits and a half-bump hard-failed the run.
-      # Bump via fleet-chezmoi system/ci/adversarial-audit-public.yml.
-      FLEET_CHEZMOI_PIN: c1cdb60815d90ecee1da5b99401e79c32d6e2fbf
+      # ONE place for the audit-scripts pin (#420), now pointing at the public
+      # scripts repo. PUBLIC IS NOT IMMUTABLE: a tag or branch there can move, so
+      # this is the v0.2.0 commit SHA, not `main` and not `v0.2.0`. Bump it to a
+      # newer tagged SHA from skyphusion-labs/security-audit deliberately.
+      AUDIT_SCRIPTS_PIN: ea6b68a80330385f2eecb0f4ec569040fba9c786 # v0.2.0
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Checkout audit script (fleet-chezmoi)
+      # No credential: skyphusion-labs/security-audit is public, so the default
+      # GITHUB_TOKEN reads it and the fleet-chezmoi deploy key is gone (#436).
+      - name: Checkout audit scripts (public)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: skyphusion-labs/fleet-chezmoi
-          ref: ${{ env.FLEET_CHEZMOI_PIN }}
-          path: fleet-chezmoi
-          ssh-key: ${{ secrets.FLEET_CHEZMOI_READ_TOKEN }}
+          repository: skyphusion-labs/security-audit
+          ref: ${{ env.AUDIT_SCRIPTS_PIN }}
+          path: security-audit
 
       # Read-back, not provenance: it confirms the tree on disk is the commit we
-      # asked for. Cheap, and it keeps the pin honest if the checkout step ever
-      # resolves something other than what the ref says.
-      - name: Verify fleet-chezmoi pin
-        working-directory: fleet-chezmoi
+      # asked for, before any of that tree's code executes.
+      - name: Verify audit-scripts pin
+        working-directory: security-audit
         run: |
           set -euo pipefail
           actual="$(git rev-parse HEAD)"
-          if [[ "$actual" != "$FLEET_CHEZMOI_PIN" ]]; then
-            echo "::error::fleet-chezmoi pin mismatch: expected ${FLEET_CHEZMOI_PIN} got ${actual}"
+          if [[ "$actual" != "$AUDIT_SCRIPTS_PIN" ]]; then
+            echo "::error::audit-scripts pin mismatch: expected ${AUDIT_SCRIPTS_PIN} got ${actual}"
             exit 1
           fi
-          echo "fleet-chezmoi pin OK (${actual:0:7})"
+          echo "audit-scripts pin OK (${actual:0:7})"
 
       - name: Run adversarial audit
         env:
@@ -121,7 +129,7 @@ jobs:
             exit 2
           fi
           args=(--mode "$mode" --output json --out-file audit.json --md-file audit-report.md --fail-on none)
-          node fleet-chezmoi/scripts/adversarial-audit/adversarial-audit.mjs "${args[@]}"
+          node security-audit/adversarial-audit.mjs "${args[@]}"
 
       - name: Post PR comment (advisory)
         if: github.event_name == 'pull_request'
@@ -129,12 +137,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          bash fleet-chezmoi/scripts/adversarial-audit/post-pr-comment.sh \
+          bash security-audit/post-pr-comment.sh \
             "$PR_NUMBER" \
             audit-report.md
 
-      # v4 still runs on the deprecated Node 20 runtime; v7 is the current major
-      # (same name/path inputs, so this is a runtime bump, not an API change).
+      # v4 runs on the deprecated Node 20 runtime; v7 is the current major (same
+      # name/path inputs, so this is a runtime bump, not an API change).
       - name: Upload audit artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
