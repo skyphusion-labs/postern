@@ -1835,12 +1835,36 @@ export interface FolderSummary {
   role?: string;
 }
 
+/** The four folders that carry their own UIDVALIDITY (#352): re-populated boxes whose
+ *  members arrive out of arrival order, so they cannot use messages.id as the IMAP UID. */
+const DURABLE_UID_FOLDERS = ["trash", "junk", "archive", "drafts"] as const;
+
 /** Server-authoritative folder counts using the same placement predicates as list.
  *
  *  `roles` (#425) appends one entry per role queue the VIEWER may read, after the fixed
  *  personal set and never merged into Inbox. Membership is decided by the caller
  *  (api.ts), the only layer that knows the request is a bound session; this function
- *  counts what it is handed and asserts nothing about who may see it. */
+ *  counts what it is handed and asserts nothing about who may see it.
+ *
+ *  ONE statement (#477). This used to issue fifteen statements for a bare viewer and one
+ *  more per role queue: six aggregate scans of `messages`, a drafts count, and an
+ *  INSERT-then-SELECT UID-counter init for each of the four durable folders, every one of
+ *  them awaited in series. Against a local SQLite that whole sequence is ~50ms at 50k
+ *  rows, so the scanning was never the cost; against D1 each statement is a network round
+ *  trip, which is what the measured ~2.2s p50 in production actually was (#477: 80
+ *  samples, max/p50 = 1.21, the signature of a fixed hop count rather than jitter).
+ *
+ *  So: the counts are conditional aggregates over ONE pass of `messages`, the per-viewer
+ *  read override is a join instead of a per-folder correlated subquery, and the drafts
+ *  count plus the four UIDVALIDITY values ride the same statement as uncorrelated scalar
+ *  subqueries. No index is added because none can help -- every folder count here is an
+ *  aggregate over the whole estate, which is a scan by definition. The answer is
+ *  unchanged: the predicates are the same strings in the same order, and
+ *  folders-one-statement.test.ts re-derives every number with the old per-folder SQL over
+ *  a seeded store and asserts the two agree.
+ *
+ *  The lazy UID-counter mint is preserved, but it now runs only for a folder that has no
+ *  counter row yet (once in the life of an estate) instead of on every read. */
 export async function folders(
   env: Env,
   viewer?: string,
@@ -1850,89 +1874,130 @@ export async function folders(
   const access = identity
     ? "(COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%' OR lower(m.from_addr) = ?)"
     : "1=1";
-  const definitions: Array<[FolderSummary["id"], string, string]> = [
-    ["inbox", "Inbox", identity
-      ? "m.mailbox IS NULL AND " + access +
-        " AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))"
-      : "m.mailbox IS NULL AND m.direction='inbound'"],
-    ["sent", "Sent", identity
-      ? "m.mailbox IS NULL AND lower(m.from_addr) = ?"
-      : "m.mailbox IS NULL AND m.direction='outbound'"],
-    ["all", "All", access],
-    ["trash", "Trash", `m.mailbox='trash' AND ${access}`],
-    ["junk", "Junk", `m.mailbox='junk' AND ${access}`],
-    ["archive", "Archive", `m.mailbox='archive' AND ${access}`],
-  ];
-  const result: FolderSummary[] = [];
-  for (const [id, label, predicate] of definitions) {
-    const binds: unknown[] = [];
-    if (identity) {
-      if (id === "sent") binds.push(identity);
-      else if (id === "inbox") binds.push(identity, identity, identity);
-      else binds.push(identity, identity);
-    }
-    const seen = seenProjection(identity);
-    const row = await env.DB.prepare(
-      `SELECT COUNT(*) AS count, SUM(CASE WHEN ${seen.expr}=0 THEN 1 ELSE 0 END) AS unread ` +
-        `FROM messages m WHERE ${predicate}`,
-    )
-      .bind(...seen.binds, ...binds)
-      .first<{ count: number; unread: number | null }>();
-    const durable = id === "trash" || id === "junk" || id === "archive"
-      ? await ensureFolderCounter(env, id)
-      : null;
-    result.push({
-      id,
-      label,
-      count: Number(row?.count ?? 0),
-      unread: Number(row?.unread ?? 0),
-      ...(durable ? { uidValidity: durable.uidvalidity } : {}),
-    });
+  // The per-recipient read override as a JOIN rather than the seenProjection()
+  // correlated subquery: message_seen_by is PRIMARY KEY (message_id, recipient), so with
+  // the recipient pinned the join matches at most one row per message and cannot inflate
+  // a count, and the effective flag becomes a plain column that every unread sum below
+  // shares instead of a lookup re-run per folder.
+  const seenExpr = identity ? "COALESCE(sb.seen, m.seen)" : "m.seen";
+
+  interface FolderSpec {
+    id: FolderSummary["id"];
+    label: string;
+    predicate: string;
+    binds: unknown[];
+    role?: string;
   }
-  const draftCounter = await ensureFolderCounter(env, "drafts");
-  const draftRow = identity
-    ? await env.DB.prepare("SELECT COUNT(*) AS count FROM drafts WHERE identity = ?")
-        .bind(identity)
-        .first<{ count: number }>()
-    : { count: 0 };
-  result.splice(3, 0, {
-    id: "drafts",
-    label: "Drafts",
-    count: Number(draftRow?.count ?? 0),
-    unread: 0,
-    uidValidity: draftCounter.uidvalidity,
-  });
+  const identityBinds = identity ? [identity, identity] : [];
+  const specs: FolderSpec[] = [
+    {
+      id: "inbox",
+      label: "Inbox",
+      predicate: identity
+        ? "m.mailbox IS NULL AND " + access +
+          " AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))"
+        : "m.mailbox IS NULL AND m.direction='inbound'",
+      binds: identity ? [identity, identity, identity] : [],
+    },
+    {
+      id: "sent",
+      label: "Sent",
+      predicate: identity
+        ? "m.mailbox IS NULL AND lower(m.from_addr) = ?"
+        : "m.mailbox IS NULL AND m.direction='outbound'",
+      binds: identity ? [identity] : [],
+    },
+    { id: "all", label: "All", predicate: access, binds: [...identityBinds] },
+    { id: "trash", label: "Trash", predicate: `m.mailbox='trash' AND ${access}`, binds: [...identityBinds] },
+    { id: "junk", label: "Junk", predicate: `m.mailbox='junk' AND ${access}`, binds: [...identityBinds] },
+    { id: "archive", label: "Archive", predicate: `m.mailbox='archive' AND ${access}`, binds: [...identityBinds] },
+  ];
   // Role queues (#425). The count is the role ARRIVAL view -- delivered to R, with the
   // inbox lens taken relative to R (so a same-domain send TO the queue counts, and the
   // queue own outbound does not) -- which is byte for byte the predicate the IMAP door
   // role folder reads with. Read state is keyed on the MEMBER, so two members of one
   // queue never inherit each other unread counts, and the rail agrees with the list.
   //
-  // One query per configured role. The bound is the size of the operator config map
-  // (POSTERN_VIEWER_ROLES), never anything a caller sends, so the rail polling this
-  // endpoint cannot inflate the work.
+  // These are extra aggregate COLUMNS, not extra statements. The bound is the size of the
+  // operator config map (POSTERN_VIEWER_ROLES), never anything a caller sends, so the rail
+  // polling this endpoint cannot inflate the work either way.
   for (const raw of identity ? roles : []) {
     const role = raw.trim().toLowerCase();
     if (!role) continue;
-    const roleSeen = seenProjection(identity);
-    const row = await env.DB.prepare(
-      `SELECT COUNT(*) AS count, SUM(CASE WHEN ${roleSeen.expr}=0 THEN 1 ELSE 0 END) AS unread
-         FROM messages m
-        WHERE m.mailbox IS NULL
-          AND COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'
-          AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))`,
-    )
-      .bind(...roleSeen.binds, role, role)
-      .first<{ count: number; unread: number | null }>();
     const at = role.indexOf("@");
-    result.push({
+    specs.push({
       id: `role:${role}`,
       label: at > 0 ? role.slice(0, at) : role,
       role,
-      count: Number(row?.count ?? 0),
-      unread: Number(row?.unread ?? 0),
+      predicate:
+        "m.mailbox IS NULL" +
+        " AND COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'" +
+        " AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))",
+      binds: [role, role],
     });
   }
+
+  // Binds are pushed in the order their placeholders appear in the finished SQL text:
+  // every spec column pair first (each predicate is written twice, so its binds go in
+  // twice), then the drafts subquery, then the counter subqueries, then the join.
+  const columns: string[] = [];
+  const binds: unknown[] = [];
+  specs.forEach((spec, i) => {
+    columns.push(`SUM(CASE WHEN (${spec.predicate}) THEN 1 ELSE 0 END) AS c${i}`);
+    binds.push(...spec.binds);
+    columns.push(`SUM(CASE WHEN (${spec.predicate}) AND ${seenExpr}=0 THEN 1 ELSE 0 END) AS u${i}`);
+    binds.push(...spec.binds);
+  });
+  // Uncorrelated scalar subqueries: SQLite evaluates each once for the whole statement,
+  // so folding them in costs one lookup, not a per-row cost. Without an identity there
+  // are no drafts to count (a draft is owned by a bound From), exactly as before.
+  if (identity) {
+    columns.push("(SELECT COUNT(*) FROM drafts WHERE identity = ?) AS drafts_count");
+    binds.push(identity);
+  } else {
+    columns.push("0 AS drafts_count");
+  }
+  for (const folder of DURABLE_UID_FOLDERS) {
+    columns.push(`(SELECT uidvalidity FROM mailbox_uid_counter WHERE folder = ?) AS uv_${folder}`);
+    binds.push(folder);
+  }
+  const from = identity
+    ? "FROM messages m LEFT JOIN message_seen_by sb" +
+      " ON sb.message_id = m.message_id AND sb.recipient = ?"
+    : "FROM messages m";
+  if (identity) binds.push(identity);
+
+  // A bare aggregate returns exactly one row, empty estate included, so the scalar
+  // subqueries still answer when there is not a single message stored.
+  const row = await env.DB.prepare(`SELECT ${columns.join(", ")} ${from}`)
+    .bind(...binds)
+    .first<Record<string, number | null>>();
+
+  const uidValidity: Record<string, number> = {};
+  for (const folder of DURABLE_UID_FOLDERS) {
+    const stored = row?.[`uv_${folder}`];
+    uidValidity[folder] = stored == null
+      ? (await ensureFolderCounter(env, folder)).uidvalidity
+      : Number(stored);
+  }
+
+  const result: FolderSummary[] = specs.map((spec, i) => ({
+    id: spec.id,
+    label: spec.label,
+    ...(spec.role ? { role: spec.role } : {}),
+    count: Number(row?.[`c${i}`] ?? 0),
+    unread: Number(row?.[`u${i}`] ?? 0),
+    ...(spec.id === "trash" || spec.id === "junk" || spec.id === "archive"
+      ? { uidValidity: uidValidity[spec.id] }
+      : {}),
+  }));
+  result.splice(3, 0, {
+    id: "drafts",
+    label: "Drafts",
+    count: Number(row?.drafts_count ?? 0),
+    unread: 0,
+    uidValidity: uidValidity.drafts,
+  });
   return result;
 }
 
