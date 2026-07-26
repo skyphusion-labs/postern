@@ -17,18 +17,28 @@ a worker without passing through it. But a total seam only ever sees the traffic
 GENERATES. The seam is total; the DRIVING is what bounds the claim.
 
 This suite drives LOGIN, LIST, SELECT, FETCH, SEARCH, STORE and LOGOUT, against a default
-token-mode Config with no viewer roles and no per_account. So the zero below is a real
-property of THOSE paths and is silent about the others: APPEND, COPY, soft-move to
-Trash/Junk/Archive, EXPUNGE/delete, STATUS, drafts, the live poll, per_account accounts,
-and role folders. A new blocking call site on a path this suite does not drive will NOT
-fail it.
+token-mode Config with no viewer roles and no per_account. The zero below is therefore a
+real property of THOSE paths and says nothing about any other. It is no longer the whole
+claim: #468 closed the driving gap in test_reactor_surface.py, which drives the rest of
+the command surface (APPEND, COPY, MOVE, restore, EXPUNGE/delete, STATUS, LSUB, the
+drafts lifecycle, ID) plus per_account sessions and role folders, with a control on each
+drive and a declaration test that fails when a new door command is driven by nobody. The
+two files are complements: this one walks the FETCH render path shape by shape, that one
+walks the command surface. Neither covers the other.
 
-That is not a theory. Working #438, joan mutated the role-membership lookup to resolve on
-a cache MISS -- exactly the regression this file used to claim it would catch -- and this
-suite stayed GREEN; her own tests caught it. A mutation is proof, so the old sentence
-("nothing can slip past it") was simply false, and it is corrected here rather than
-defended. Closing the driving gap is tracked as #468; do not read the zero below as
-door-wide until that lands.
+ONE path is known to block and is PINNED rather than fixed: the live poll refreshes on
+the reactor thread, both from do_NOOP and from the timed LoopingCall tick, because
+poll_now reads the store AND pushes untagged EXISTS to listeners, and the push must stay
+on the reactor. Splitting the two is filed as #485; test_reactor_surface.py asserts the
+current behavior in both callers so the fix has to flip a test deliberately.
+
+The driving gap was proven, not theorized. Working #438, joan mutated the role-membership
+lookup to resolve on a cache MISS -- exactly the regression this file used to claim it
+would catch -- and this suite stayed GREEN; her own tests caught it. A mutation is proof,
+so the old sentence ("nothing can slip past it") was simply false, and it is corrected
+here rather than defended. That same mutation is now an ASSERTED control in
+test_reactor_surface.py: it is reproduced there and the harness is required to go red on
+it, so the sensitivity of the new driving is measured instead of claimed.
 
 #457 closed the last one. Per-message BODY hydration used to run on the reactor thread
 because Twisted renders a FETCH by calling IMessage accessors straight from the protocol,

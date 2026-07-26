@@ -385,6 +385,18 @@ door. Numbers, method and the re-runnable scripts: `imap/bench/`.
 - `test_reactor_nonblocking.py` asserts ZERO reactor-thread worker calls across every
   FETCH shape a real client sends, and pins #102 and #342 alongside, so a warm that
   bought its speed by over-fetching fails too.
+- `test_reactor_surface.py` (#468) drives the REST of the command surface through the
+  same recording seam: APPEND (Sent import, Drafts persist, refusals), COPY, MOVE,
+  restore, `STORE \Deleted` + EXPUNGE, STATUS, LSUB, the drafts lifecycle, ID,
+  per_account sessions and role folders. Every case also asserts the worker routes it had
+  to reach, so a drive that stops exercising its path fails instead of passing on an
+  empty recording, and a declaration test fails when a new door command override is
+  driven by nobody. It also reproduces the #438 role-cache mutation and requires the
+  harness to go RED on it.
+- The one path that still blocks the reactor is the live poll (`do_NOOP` and the timed
+  tick both run the blocking refresh there). It is PINNED by that suite in both callers
+  and filed as #485; the fix has to split the store read from the listener push, since a
+  push writes to the protocol transport and must stay on the reactor thread.
 
 ### Timeout, circuit breaker, and the saturation signal (#458)
 
