@@ -32,7 +32,7 @@ class MailboxTest(unittest.TestCase):
         self.transport = FakeTransport(self.msgs, expected_token="t", page_size=2)
         self.client = PosternClient("https://x", "t", transport=self.transport)
 
-    def _mailbox(self, direction=None, *, window=0, poll_seconds=0, clock=None, seen_writable=False, delete_writable=False):
+    def _mailbox(self, direction=None, *, window=0, poll_seconds=0, clock=None, pool=None, seen_writable=False, delete_writable=False):
         from posternimap.mailbox import PosternMailbox
 
         return PosternMailbox(
@@ -42,6 +42,7 @@ class MailboxTest(unittest.TestCase):
             window=window,
             poll_seconds=poll_seconds,
             clock=clock,
+            pool=pool,
             seen_writable=seen_writable,
             delete_writable=delete_writable,
         )
@@ -840,30 +841,146 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(mb._listeners, [])
         self.assertEqual(dead.events, [])
 
-    def test_poll_now_refreshes_and_pushes_exists_with_poll_disabled(self):
-        # #102 NOOP path: poll_now must surface new mail ON DEMAND, working even when
-        # the timed poll is disabled (poll_seconds=0), and push an untagged EXISTS.
+    def test_refresh_now_then_notify_surfaces_new_mail_with_the_poll_disabled(self):
+        # #102 NOOP path in its #485 shape: the READ half grows the snapshot, the NOTIFY
+        # half pushes the untagged EXISTS, and both work with the timed poll disabled
+        # (poll_seconds=0) because do_NOOP drives them directly on the command.
         mb = self._mailbox(poll_seconds=0)
         mb.getMessageCount()  # force the initial snapshot (3)
         listener = _FakeListener()
         mb.addListener(listener)
         self.assertIsNone(mb._poll)  # poll disabled: no LoopingCall running
         self.msgs.insert(0, make_message("m4", subject="newest"))
-        self.assertEqual(mb.poll_now(), 1)
-        self.assertEqual(mb.getMessageCount(), 4)
-        self.assertEqual(listener.events, [(4, None)])  # untagged EXISTS pushed
-        # Idempotent: no new mail -> no spurious EXISTS, no renumbering.
-        self.assertEqual(mb.poll_now(), 0)
-        self.assertEqual(listener.events, [(4, None)])
 
-    def test_poll_now_before_load_is_a_safe_noop(self):
+        self.assertEqual(1, mb.refresh_now())
+        self.assertEqual(mb.getMessageCount(), 4)
+        # THE PROPERTY THAT MAKES THE READ HALF POOL-SAFE: on its own it touches no
+        # listener, so nothing it does can write to a protocol transport off the reactor.
+        self.assertEqual([], listener.events)
+
+        self.assertEqual(1, mb.notify_new_messages(1))
+        self.assertEqual([(4, None)], listener.events)  # untagged EXISTS pushed
+
+        # Idempotent: no new mail -> nothing to notify, no spurious EXISTS, no renumbering.
+        self.assertEqual(0, mb.refresh_now())
+        self.assertEqual(0, mb.notify_new_messages(0))
+        self.assertEqual([(4, None)], listener.events)
+
+    def test_refresh_now_before_load_is_a_safe_noop(self):
         # Called before the snapshot is loaded (a NOOP in the selected state races the
         # lazy load): no fetch, no push, no crash.
         mb = self._mailbox(poll_seconds=0)
         listener = _FakeListener()
         mb.addListener(listener)
-        self.assertEqual(mb.poll_now(), 0)
+        self.assertEqual(0, mb.refresh_now())
         self.assertEqual(listener.events, [])
+
+    def test_notify_skips_a_listener_whose_session_ended_mid_refresh(self):
+        # #485: the read half now finishes in a LATER reactor turn than the one that
+        # started it, so the client can disconnect while it is in the pool.
+        # IMAP4Server.connectionLost does not removeListener on an abrupt drop, so the
+        # notify half prunes instead of pushing at a transport that is gone.
+        mb = self._mailbox(poll_seconds=0)
+        mb.getMessageCount()
+        live, dropped = _FakeListener(), _FakeListener()
+        mb.addListener(live)
+        mb.addListener(dropped)
+        self.msgs.insert(0, make_message("m4", subject="newest"))
+        added = mb.refresh_now()
+        self.assertEqual(1, added)
+        dropped.transport.connected = 0  # the session ended while the read was in flight
+        self.assertEqual(1, mb.notify_new_messages(added))
+        self.assertEqual([(4, None)], live.events)
+        self.assertEqual([], dropped.events)
+        self.assertEqual([live], mb._listeners)
+
+    def test_a_slow_tick_does_not_stack_a_second_refresh(self):
+        # #485: _poll_tick RETURNS its Deferred, which is what stops overlapping ticks --
+        # LoopingCall does not schedule the next interval until the previous one fires.
+        # Without that return, a refresh slower than the interval would stack a second
+        # worker read on the same mailbox on top of the first.
+        from twisted.internet import defer
+        from twisted.internet.task import Clock
+
+        pending = []
+
+        def held_pool(fn):
+            # Dispatch that never completes on its own: the refresh is "still running".
+            d = defer.Deferred()
+            pending.append(d)
+            return d
+
+        clock = Clock()
+        mb = self._mailbox(poll_seconds=5, clock=clock, pool=held_pool)
+        mb.getMessageCount()
+        listener = _FakeListener()
+        mb.addListener(listener)
+
+        clock.advance(5)
+        self.assertEqual(1, len(pending))
+        clock.advance(5)  # a second interval elapses with the first refresh in flight
+        self.assertEqual(1, len(pending), "a second tick started while one was in flight")
+
+        pending[0].callback(0)  # the first refresh lands (nothing new)
+        clock.advance(5)
+        self.assertEqual(2, len(pending), "the loop did not resume after the refresh landed")
+
+        mb.removeListener(listener)
+        pending[1].callback(0)
+        self.assertIsNone(mb._poll)
+        self.assertEqual(clock.getDelayedCalls(), [])
+
+    def test_a_second_refresh_waits_for_the_one_in_flight(self):
+        # #485: refresh_now serializes against ITSELF. Two overlapping refreshes read the
+        # SAME boundary (_newest_id) and would each append the SAME arrival, duplicating
+        # sequence numbers in a live snapshot. This is reachable now that do_NOOP
+        # dispatches into the pool: a client pipelining NOOPs, or a NOOP landing while
+        # the timed tick is in flight, puts two refreshes on two pool threads at once.
+        import threading
+
+        from posternimap.mailbox import PosternMailbox
+
+        entered = threading.Event()
+        release = threading.Event()
+        armed = {"on": False}
+        inner = self.transport
+
+        def gate(req):
+            # Park the FIRST refresh read inside the worker call: precisely the window a
+            # second refresh would race.
+            if armed["on"]:
+                armed["on"] = False
+                entered.set()
+                release.wait(10)
+            return inner(req)
+
+        client = PosternClient("https://x", "t", transport=gate)
+        mb = PosternMailbox(client, page_size=2)
+        mb.getMessageCount()  # snapshot loaded with the gate disarmed
+        self.msgs.insert(0, make_message("m4", subject="newest"))
+        armed["on"] = True
+
+        results = []
+        first = threading.Thread(target=lambda: results.append(mb.refresh_now()))
+        first.start()
+        self.assertTrue(entered.wait(10), "the first refresh never reached the worker")
+
+        second = threading.Thread(target=lambda: results.append(mb.refresh_now()))
+        second.start()
+        second.join(0.5)
+        self.assertTrue(
+            second.is_alive(),
+            "the second refresh did not wait for the one in flight; both are reading the "
+            "same boundary and will append the same arrival twice",
+        )
+
+        release.set()
+        first.join(10)
+        second.join(10)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        # One arrival, counted once: the loser of the race sees the moved boundary.
+        self.assertEqual([0, 1], sorted(results))
+        self.assertEqual(4, mb.getMessageCount())
 
 
     # --- #102 fault F9: durable UID == store insertion key (uid-ordering) ---

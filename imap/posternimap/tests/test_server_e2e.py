@@ -1280,7 +1280,10 @@ if HAVE_TWISTED:
 class ServerNoopRefreshE2ETest(twisted_unittest.TestCase):
     """#102 over the wire: a NOOP must surface mail that arrived mid-session as an
     untagged EXISTS, EVEN with the timed poll disabled (poll_seconds=0). Proves the
-    do_NOOP override drives mailbox.poll_now()."""
+    do_NOOP override drives the refresh (mailbox.refresh_now) and pushes what it finds
+    (mailbox.notify_new_messages) BEFORE the tagged OK -- the ordering #485 had to keep
+    when it moved the read into the threadpool. Where each half runs is asserted in
+    test_reactor_surface.LivePollSplitTest; this is the behavior seen from a client."""
 
     def setUp(self):
         self.msgs = [
@@ -1289,7 +1292,7 @@ class ServerNoopRefreshE2ETest(twisted_unittest.TestCase):
         ]
         self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=2)
         # poll_seconds=0: no LoopingCall (keeps trial's reactor clean); NOOP must still
-        # surface new mail via the synchronous poll_now.
+        # surface new mail through its own refresh.
         self.cfg = Config(
             api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
         )
@@ -1324,6 +1327,44 @@ class ServerNoopRefreshE2ETest(twisted_unittest.TestCase):
             self.assertEqual(int(exists[-1][0]), 3)
         finally:
             yield proto.logout()
+
+    @defer.inlineCallbacks
+    def test_a_failed_refresh_still_answers_the_noop(self):
+        """#485: the refresh is a Deferred now, so its failure must be CONSUMED.
+
+        A store blip on a NOOP is not a protocol error: the client gets its tagged OK with
+        no untagged EXISTS, exactly as before the split (when the old poll_now swallowed
+        the exception itself). If the failure escaped instead, the client would see a BAD
+        on a keep-alive command and trial would see an unhandled error -- which is why the
+        error is asserted as LOGGED here, not merely as absent.
+        """
+        from posternimap.mailbox import PosternMailbox
+
+        original = PosternMailbox.refresh_now
+
+        def boom(mailbox):
+            raise RuntimeError("store unreachable")
+
+        PosternMailbox.refresh_now = boom
+        self.addCleanup(setattr, PosternMailbox, "refresh_now", original)
+
+        proto = yield self._client()
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            yield proto.select(b"INBOX")
+            self.transport.messages.insert(0, make_message("m3", subject="fresh"))
+            lines = yield proto.noop()  # must NOT raise: a tagged OK, not a BAD
+            self.assertEqual(
+                [], [ln for ln in lines if len(ln) == 2 and ln[1] == b"EXISTS"],
+                "a failed refresh pushed an EXISTS anyway: %r" % (lines,),
+            )
+        finally:
+            yield proto.logout()
+        self.assertEqual(
+            1,
+            len(self.flushLoggedErrors(RuntimeError)),
+            "the failed refresh was swallowed silently instead of logged",
+        )
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")

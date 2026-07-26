@@ -26,11 +26,12 @@ drive and a declaration test that fails when a new door command is driven by nob
 two files are complements: this one walks the FETCH render path shape by shape, that one
 walks the command surface. Neither covers the other.
 
-ONE path is known to block and is PINNED rather than fixed: the live poll refreshes on
-the reactor thread, both from do_NOOP and from the timed LoopingCall tick, because
-poll_now reads the store AND pushes untagged EXISTS to listeners, and the push must stay
-on the reactor. Splitting the two is filed as #485; test_reactor_surface.py asserts the
-current behavior in both callers so the fix has to flip a test deliberately.
+ONE path used to block and is now FIXED: the live poll refreshed on the reactor thread,
+both from do_NOOP and from the timed LoopingCall tick, because the poll read the store AND
+pushed untagged EXISTS to listeners and the push must stay on the reactor. #485 split the
+two (PosternMailbox.refresh_now in the pool, PosternMailbox.notify_new_messages on the
+reactor); test_reactor_surface.py drives both callers and asserts BOTH halves land where
+they belong.
 
 The driving gap was proven, not theorized. Working #438, joan mutated the role-membership
 lookup to resolve on a cache MISS -- exactly the regression this file used to claim it

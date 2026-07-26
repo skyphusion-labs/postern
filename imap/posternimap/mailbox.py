@@ -9,6 +9,12 @@ fetch() wraps each in a PosternIMAPMessage that hydrates its body ONLY on demand
 Windowing (#102 Stage 1): INBOX/Sent are capped to the most-recent W messages
 (POSTERN_IMAP_WINDOW); All is unbounded. Live refresh polls while selected.
 
+The live refresh is SPLIT across two threads (#485), and the split is load-bearing:
+refresh_now is a blocking worker read and runs in the reactor threadpool;
+notify_new_messages pushes untagged EXISTS to listeners, which writes to the protocol
+transport, and therefore stays on the reactor thread. Both callers (server.do_NOOP and the
+timed _poll_tick) drive the pair in that order.
+
 UID model: INBOX/Sent/All use messages.id under the config UIDVALIDITY. Durable
 folders (Trash/Junk/Archive/Drafts) use per-folder UIDs (#352 section 2.6).
 
@@ -23,6 +29,7 @@ from __future__ import annotations
 import email
 import email.utils
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from email.message import Message as PyMessage
@@ -140,6 +147,7 @@ class PosternMailbox:
         poll_seconds: int = 0,
         uidvalidity: int = _UID_VALIDITY,
         clock=None,
+        pool=None,
         meter: Optional[Meter] = None,
         writable_signal: bool = False,
         seen_writable: bool = False,
@@ -208,6 +216,21 @@ class PosternMailbox:
         self._listeners: list = []
         self._poll: Optional["LoopingCall"] = None
         self._clock: Optional[Any] = clock
+        # #485: HOW a blocking refresh gets off the reactor thread. None means the real
+        # seam (threaded.in_pool), which is what production always takes. It is injectable
+        # only so a test driving a virtual clock can make the dispatch synchronous, or
+        # hold one open on purpose; nothing in the door ever passes it, so there is
+        # exactly ONE production dispatch path and test_reactor_surface proves that one
+        # live, over a socket, against real thread identities.
+        self._pool = pool
+        # Serializes _refresh against ITSELF (#485). Two refreshes can now genuinely
+        # overlap -- a NOOP pipelined behind another, or a NOOP landing while the timed
+        # tick is in flight -- and both would read the same boundary (_newest_id) and
+        # append the SAME arrivals, duplicating sequence numbers in a live snapshot. Held
+        # across the worker read, so the second caller waits the first out (bounded by
+        # api_timeout, exactly like every other pooled call) rather than answering a
+        # client that explicitly asked for status with a stale zero.
+        self._refresh_lock = threading.Lock()
 
     def preload(self) -> None:
         """Load this mailbox snapshot NOW (#416).
@@ -343,10 +366,17 @@ class PosternMailbox:
         if not new_items:
             return 0
         new_items.sort(key=lambda s: s.uid)
+        # The high-water mark moves BEFORE the snapshot grows (#485). Every collected item
+        # has uid > the previous newest, so new_items[-1] IS the new mark and the value is
+        # identical either way; the ORDER only matters to a reader on another thread, and
+        # this one can briefly show UIDNEXT ahead of EXISTS, never EXISTS ahead of UIDNEXT
+        # (a client told about a message whose uid the mailbox does not admit yet). The
+        # snapshot is grown IN PLACE, never rebound: a concurrent expunge deleting from
+        # the same list must not be lost to a copy-then-replace.
+        self._newest_uid = new_items[-1].uid
+        self._newest_id = new_items[-1].message_id
         self._summaries.extend(new_items)
         self._summaries.sort(key=lambda s: s.uid)
-        self._newest_uid = self._summaries[-1].uid
-        self._newest_id = self._summaries[-1].message_id
         return len(new_items)
 
 
@@ -1011,30 +1041,66 @@ class PosternMailbox:
             self._stop_poll()
         return None
 
-    def poll_now(self) -> int:
-        """Refresh from the store now and push an untagged EXISTS if new mail arrived.
+    def refresh_now(self) -> int:
+        """BLOCKING: read the store, grow the snapshot, return how many arrived.
 
-        Called on NOOP / CHECK (see server.PosternIMAP4Server.do_NOOP): RFC 3501 6.1.2
-        makes NOOP a client's explicit poll for status, so new mail must surface on it
-        immediately, without waiting for the timed poll and EVEN when the timed poll is
-        disabled (POSTERN_IMAP_POLL_SECONDS=0). Same append-only, body-free refresh the
-        timed poll uses; a no-op before the snapshot is loaded or on an empty mailbox.
-        New arrivals grow EXISTS at the high end; existing sequence numbers and UIDs are
-        untouched (RFC 3501: no renumbering)."""
+        THE READ HALF of the live poll (#485), and the only half that talks to the worker.
+        It runs in the reactor THREADPOOL, never on the reactor thread: _refresh is a
+        body-free worker read, and #416 part 2 measured that one blocking worker call on
+        the single reactor thread stalls EVERY connected client for the call full
+        duration (up to api_timeout). Both callers reach it through that seam -- do_NOOP
+        through ThreadedMailbox (threaded._DEFERRED_METHODS), the timed tick through
+        _dispatch -- and nothing in here touches a listener or a transport, which is
+        precisely what makes running it off the reactor safe.
+
+        The same append-only, body-free refresh either caller wants: new arrivals grow
+        EXISTS at the high end, existing sequence numbers and UIDs are untouched (RFC 3501
+        forbids renumbering). A no-op before the snapshot is loaded (a NOOP racing the
+        lazy load) or on a folder that stores nothing.
+
+        Errors are NOT swallowed here. They cross the Deferred to the caller, which
+        decides: both callers log and carry on, because a transient store blip must never
+        fail a NOOP or tear down the poll loop.
+        """
         if not self._loaded or self._empty:
             return 0
-        try:
-            added = self._refresh()
-        except Exception:
-            from twisted.python import log
+        with self._refresh_lock:
+            return self._refresh()
 
-            log.err(None, "postern-imap: NOOP refresh failed")
+    def notify_new_messages(self, added: int) -> int:
+        """REACTOR THREAD ONLY: push untagged EXISTS for `added` new arrivals.
+
+        THE NOTIFY HALF of the split (#485). listener.newMessages writes to the protocol
+        transport, and a Twisted transport write from a pool thread is a corruption class
+        rather than a stall, so this half never moves off the reactor and is deliberately
+        absent from threaded._DEFERRED_METHODS (a proxy that pooled it would move the push
+        off the reactor, which is the failure the split exists to avoid).
+
+        Dead listeners are pruned FIRST: the read half now finishes in a later reactor
+        turn than the one it started in, so the client that triggered it can be gone by
+        the time this runs (IMAP4Server.connectionLost does not removeListener on an
+        abrupt drop). Returns `added` so it can sit unchanged in a Deferred chain.
+        """
+        if not added:
             return 0
-        if added:
-            count = len(self._summaries)
-            for listener in list(self._listeners):
-                listener.newMessages(count, None)
+        self._listeners = [l for l in self._listeners if _listener_alive(l)]
+        count = len(self._summaries)
+        for listener in list(self._listeners):
+            listener.newMessages(count, None)
         return added
+
+    def _dispatch(self, fn):
+        """Run a blocking mailbox read off the reactor thread; returns a Deferred.
+
+        threaded.in_pool is the real seam (and itself runs the work inline when no reactor
+        is running, so a reactor-less caller still gets an already-fired Deferred).
+        self._pool is the test-only override; see __init__.
+        """
+        if self._pool is not None:
+            return self._pool(fn)
+        from .threaded import in_pool
+
+        return in_pool(fn)
 
     def _maybe_start_poll(self) -> None:
         if (
@@ -1057,7 +1123,15 @@ class PosternMailbox:
             self._poll.stop()
         self._poll = None
 
-    def _poll_tick(self) -> None:
+    def _poll_tick(self):
+        """One timed poll: refresh in the pool, push EXISTS back on the reactor (#485).
+
+        RETURNS THE DEFERRED, and that return is what stops ticks from overlapping:
+        LoopingCall does not schedule the next interval until the previous call Deferred
+        fires, so a refresh slower than POSTERN_IMAP_POLL_SECONDS delays the next tick
+        instead of stacking a second worker read on top of the first. Returns None when
+        there is nothing to poll for, which LoopingCall treats as an instant tick.
+        """
         # IMAP4Server.connectionLost does NOT call removeListener on an abrupt
         # client disconnect (only CLOSE / SELECT-away / idle-timeout do), so the
         # poll prunes listeners whose transport is gone and stops itself when none
@@ -1065,33 +1139,48 @@ class PosternMailbox:
         self._listeners = [l for l in self._listeners if _listener_alive(l)]
         if not self._listeners:
             self._stop_poll()
-            return
-        # Blocking urllib in the reactor thread, matching fetch's I/O model for this
-        # stage (see config POSTERN_IMAP_POLL_SECONDS). Errors are swallowed so a
-        # transient store blip never tears down the LoopingCall or the session.
-        try:
-            # Time the blocking _refresh: this runs urllib in the reactor thread, so
-            # its duration IS the per-tick reactor stall (validates the "deferToThread
-            # if measurement shows reactor stalls" note in config).
-            with self._meter.timed("poll_refresh", direction=self._direction or "all") as span:
-                added = self._refresh()
-                span.set(added=added, listeners=len(self._listeners))
-        except Exception:
-            from twisted.python import log
+            return None
+        listeners = len(self._listeners)
 
-            log.err(None, "postern-imap: mailbox poll failed")
-            return
+        def refresh() -> int:
+            # Timed inside the POOL: elapsed_ms is the refresh own duration. Before #485
+            # it was also the per-tick reactor stall, which is exactly the measurement
+            # that got this split filed (see imap/MEASUREMENT.md).
+            with self._meter.timed("poll_refresh", direction=self._direction or "all") as span:
+                added = self.refresh_now()
+                span.set(added=added, listeners=listeners)
+                return added
+
+        d = self._dispatch(refresh)
+        d.addCallback(self._cb_poll_notify)
+        d.addErrback(self._eb_poll_failed)
+        return d
+
+    def _cb_poll_notify(self, added: int) -> int:
+        """Back on the reactor thread, with the read already done: push the EXISTS."""
         if not added:
-            return
+            return 0
         from twisted.python import log
 
         log.msg(
             "postern-imap: %d new message(s); pushing EXISTS to %d listener(s)"
             % (added, len(self._listeners))
         )
-        count = len(self._summaries)
-        for listener in list(self._listeners):
-            listener.newMessages(count, None)
+        return self.notify_new_messages(added)
+
+    def _eb_poll_failed(self, failure) -> int:
+        """A store blip must not tear down the loop (pre-#485 behavior, kept).
+
+        The failure is CONSUMED rather than re-raised: a Failure returned from here would
+        errback the LoopingCall own Deferred and stop the poll for the rest of the session
+        (_poll_crashed), turning one transient 5xx into a mailbox that never sees new mail
+        again. _poll_crashed stays for what it actually means -- the loop itself broke,
+        not a call inside it.
+        """
+        from twisted.python import log
+
+        log.err(failure, "postern-imap: mailbox poll failed")
+        return 0
 
     def _poll_crashed(self, failure) -> None:
         from twisted.python import log

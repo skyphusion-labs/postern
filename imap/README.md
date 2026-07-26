@@ -393,10 +393,20 @@ door. Numbers, method and the re-runnable scripts: `imap/bench/`.
   empty recording, and a declaration test fails when a new door command override is
   driven by nobody. It also reproduces the #438 role-cache mutation and requires the
   harness to go RED on it.
-- The one path that still blocks the reactor is the live poll (`do_NOOP` and the timed
-  tick both run the blocking refresh there). It is PINNED by that suite in both callers
-  and filed as #485; the fix has to split the store read from the listener push, since a
-  push writes to the protocol transport and must stay on the reactor thread.
+- The live poll was the last blocking call site, and #485 closed it. `do_NOOP` (a command
+  Thunderbird and Apple Mail send on a keep-alive cadence, per connection) and the timed
+  tick both ran the blocking refresh on the reactor thread. The fix is a SPLIT, not a
+  wrapper: the poll both reads the store and pushes untagged EXISTS to listeners, and a
+  push writes to the protocol transport, so pooling the pair would have moved a transport
+  write off the reactor -- corruption, not a stall. `PosternMailbox.refresh_now` (the read)
+  goes through the pool; `PosternMailbox.notify_new_messages` (the push) stays on the
+  reactor. `do_NOOP` chains its tagged OK behind both, so a client still sees the EXISTS
+  inside the NOOP that earned it, and `_poll_tick` RETURNS its Deferred so `LoopingCall`
+  cannot stack a second refresh on top of a slow one. `refresh_now` holds a lock across the
+  read: two refreshes that overlap (a pipelined NOOP, or a NOOP landing during a tick) read
+  the same boundary and would append the same arrival twice. A failed refresh is logged and
+  the NOOP still answers OK; a store blip never fails a keep-alive or stops the loop.
+  `test_reactor_surface.LivePollSplitTest` drives both callers and asserts BOTH halves.
 
 ### Timeout, circuit breaker, and the saturation signal (#458)
 
