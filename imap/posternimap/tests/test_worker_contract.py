@@ -137,6 +137,7 @@ def _emitted() -> list[dict[str, Any]]:
     run(lambda: c.update_imap_draft(identity, "d1", {"subject": "s2"}, updated_at="2026-07-26T00:00:00Z"))
     run(lambda: c.delete_imap_draft(identity, "d1"))
     run(lambda: c.import_message(identity, "sent", b"raw mime bytes"))
+    run(lambda: c.get_roles())
     run(lambda: c.ping())
 
     out: list[dict[str, Any]] = []
@@ -166,7 +167,10 @@ class FixtureTest(unittest.TestCase):
     def test_the_table_loaded_and_carries_the_door_routes(self):
         self.assertGreater(len(ROUTES), 20)
         self.assertGreater(len(PARAMS), 10)
-        for path in ("/api/messages", "/api/search", "/api/folders", "/api/imap/drafts", "/api/imap/import"):
+        for path in (
+            "/api/messages", "/api/search", "/api/folders", "/api/imap/drafts",
+            "/api/imap/import", "/api/imap/roles",
+        ):
             self.assertTrue(any(r["path"] == path for r in ROUTES), f"{path} missing from the table")
         # The two files must JOIN, or every param lookup below silently returns empty.
         self.assertTrue(accepted(match_route("GET", "/api/imap/drafts"), "query"))
@@ -179,6 +183,14 @@ class FixtureTest(unittest.TestCase):
         self.assertEqual(match_route("DELETE", "/api/messages/m1")["scope"], "delete")
         self.assertIsNone(match_route("GET", "/api/not-a-route"))
         self.assertIsNone(match_route("PUT", "/api/messages"))
+
+    def test_the_role_map_is_read_on_the_imap_seam_not_the_operator_route(self):
+        # #438: the door reads membership from the worker. It must land on the seam its
+        # own least-privilege token opens, NOT on the operator /api/roles, which is admin
+        # and would mean handing a proxy credential-provisioning and estate-delete power
+        # to learn who is on a queue.
+        self.assertEqual(match_route("GET", "/api/imap/roles")["scope"], "imap")
+        self.assertEqual(match_route("GET", "/api/roles")["scope"], "admin")
 
     def test_the_imap_seam_is_its_own_scope(self):
         # The door holds an `imap` token for the service seam and a read/delete token
@@ -197,6 +209,9 @@ class SoundnessTest(unittest.TestCase):
     def test_driving_the_door_emitted_requests(self):
         self.assertGreater(len(self.calls), 15)
         self.assertTrue(any(c["path"].startswith("/api/imap/") for c in self.calls))
+        # The door role read is on the wire here, so the soundness checks below cover it
+        # rather than passing because nobody drove it (#438).
+        self.assertTrue(any(c["path"] == "/api/imap/roles" for c in self.calls))
 
     def test_the_conditional_emissions_actually_fired(self):
         """seenFor and lens are sent CONDITIONALLY, so prove the fixture triggered them.

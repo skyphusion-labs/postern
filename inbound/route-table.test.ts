@@ -42,6 +42,10 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   if (path === "/api/drafts" || path.startsWith("/api/drafts/")) return "send";
   if (path === "/api/imap/drafts" || path.startsWith("/api/imap/drafts/")) return "imap";
   if (method === "POST" && path === "/api/imap/import") return "imap";
+  // #438 adds GET /api/imap/roles at `imap` scope. This reference is the recorded
+  // ORIGINAL chain plus every gate move made DELIBERATELY since; writing the row here is
+  // that deliberate act, and the corpus below then proves the derived gate agrees.
+  if (method === "GET" && path === "/api/imap/roles") return "imap";
   if (method === "POST" && path === "/api/admin/smtp-credentials") return "admin";
   if (method === "DELETE" && /^\/api\/admin\/smtp-credentials\/(.+)$/.test(path)) return "admin";
   if (method === "POST" && path === "/api/admin/reindex") return "admin";
@@ -66,7 +70,7 @@ const CORPUS = [
   "/api/threads/t1", "/api/search", "/api/folders", "/api/recipients/recent", "/api/mobileconfig",
   "/api/roles", "/api/drafts", "/api/drafts/", "/api/drafts/d1", "/api/drafts/d1/send",
   "/api/drafts/d1/attachments", "/api/drafts/d1/attachments/a1",
-  "/api/imap/drafts", "/api/imap/drafts/d1", "/api/imap/import",
+  "/api/imap/drafts", "/api/imap/drafts/d1", "/api/imap/import", "/api/imap/roles",
   "/api/admin/smtp-credentials", "/api/admin/smtp-credentials/", "/api/admin/smtp-credentials/bob",
   "/api/admin/reindex", "/api/admin/reconcile",
   // Pre-gate rows: they never reach the gate, and the table says so.

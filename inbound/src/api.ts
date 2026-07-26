@@ -326,18 +326,16 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     }
 
     // --- operator: the parsed role-membership map (#425) ---
-    // CONFIG, not mail: which addresses are queues and who is on them. It exists so an
-    // operator (or CI) can DIFF this Worker map against the door POSTERN_IMAP_VIEWER_ROLES
-    // instead of assuming the two agree, which is the named cost of keeping two vars.
-    // `both`-scoped like the other operator routes, so a webmail session can never reach
-    // it. An unusable config reports an EMPTY map, which is exactly what the read paths
-    // serve, so the diff can never claim a membership the mailbox is not honoring.
+    // CONFIG, not mail: which addresses are queues and who is on them. Since #438 this
+    // map is the SINGLE source (the door reads it through /api/imap/roles rather than
+    // parsing a mirror var), so this route is no longer a drift-diff surface; it is the
+    // operator read of the one map, which is what makes a membership question answerable
+    // without shelling into a container. `both`-scoped like the other operator routes, so
+    // a webmail session can never reach it. An unusable config reports an EMPTY map,
+    // exactly what every read path serves, so this can never claim a membership the
+    // mailbox is not honoring.
     if (request.method === "GET" && path === "/api/roles") {
-      const roles = [...roleMap(env)].map(([address, members]) => ({
-        address,
-        members: [...members],
-      }));
-      return json({ ok: true, roles });
+      return json({ ok: true, roles: roleProjection(env) });
     }
 
     if (request.method === "GET" && path === "/api/folders") {
@@ -362,6 +360,19 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     }
     if (request.method === "POST" && path === "/api/imap/import") {
       return await handleImapImport(request, env, ctx);
+    }
+
+    // --- the IMAP door reads MEMBERSHIP from here (#438) ---
+    // The door used to parse its own POSTERN_IMAP_VIEWER_ROLES, a verbatim mirror of
+    // POSTERN_VIEWER_ROLES, so one fact was configured twice and the two could disagree
+    // about who is on a queue. The Worker map is now the only source and the door reads
+    // it per login. Gated on the least-privilege `imap` door token, not `admin`: a proxy
+    // should not need credential-provisioning and estate-delete power to learn a
+    // membership. An unusable config projects an EMPTY map here just as it does on every
+    // read path, so the door inherits the whole-map refusal by construction instead of
+    // re-implementing it and drifting.
+    if (request.method === "GET" && path === "/api/imap/roles") {
+      return json({ ok: true, roles: roleProjection(env) });
     }
 
     // Server-side drafts are identity-owned. Static operator tokens are deliberately
@@ -1381,6 +1392,14 @@ function sessionViewer(resolution: AuthResolution): string | undefined {
  */
 function boundViewer(resolution: AuthResolution): string | undefined {
   return resolution.identity?.from;
+}
+
+// The parsed role map as its wire projection, shared by the two gated surfaces that
+// expose it: the operator GET /api/roles and the door GET /api/imap/roles (#438). ONE
+// function, because two hand-written copies of a shape is exactly how the Worker and the
+// door came to hold two copies of the MAP in the first place.
+function roleProjection(env: Env): Array<{ address: string; members: string[] }> {
+  return [...roleMap(env)].map(([address, members]) => ({ address, members: [...members] }));
 }
 
 // Authorize a resolution against a required route scope. A session carries an explicit

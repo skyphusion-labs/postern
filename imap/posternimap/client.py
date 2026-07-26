@@ -902,6 +902,18 @@ class PosternClient:
         body = self._get("/api/folders", params)
         return [FolderInfo.from_json(f) for f in body.get("folders", [])]
 
+    def get_roles(self) -> dict[str, Any]:
+        """GET /api/imap/roles -- the Worker role-membership map (#438).
+
+        Membership is single-sourced on the Worker (POSTERN_VIEWER_ROLES); the door
+        reads it here rather than parsing a mirror var of its own, which is what used to
+        let the two disagree about who is on a queue. Gated on the imap-scoped service
+        token: a proxy has no business holding the admin token the operator surface
+        (/api/roles) demands just to learn a membership. The body is returned raw and
+        validated in roles.py, which is where the door invariants live.
+        """
+        return self._get("/api/imap/roles", {})
+
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""
         try:

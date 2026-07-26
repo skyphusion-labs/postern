@@ -1,31 +1,30 @@
-// Role-address membership for BOUND WEBMAIL SESSIONS (#425, the webmail half of the
-// #404 ruling of 2026-07-25).
+// Role-address membership (#425 + #438), the SINGLE source for every door.
 //
 // A role address (abuse@, security@, support@) belongs to a FUNCTION, so under a
 // per-viewer door it is nobody address and its mail is delivered, stored, searchable
-// and visible to NO human. The IMAP door closed that with POSTERN_IMAP_VIEWER_ROLES
-// (PR #423): a viewer resolves to a SET -- its own address V plus every role V is a
-// member of -- and each role publishes as its OWN folder, never merged into INBOX.
-// Webmail scopes to the single bound session identity, so without this module the two
-// human doors disagree about what one person may see.
+// and visible to NO human. The IMAP door closed that first (PR #423): a viewer
+// resolves to a SET -- its own address V plus every role V is a member of -- and each
+// role publishes as its OWN folder, never merged into INBOX. Webmail scopes to the
+// single bound session identity, so without this module the two human doors disagree
+// about what one person may see.
 //
-// FORMAT (identical to the door, deliberately): role=member+member,role2=member --
-// commas separate roles, + separates members, and BOTH sides are full mail addresses.
-// Everything is lower-cased and whitespace around any token is tolerated.
+// FORMAT: role=member+member,role2=member -- commas separate roles, + separates
+// members, and BOTH sides are full mail addresses. Everything is lower-cased and
+// whitespace around any token is tolerated.
 //
-// WHY A SECOND VAR, AND WHAT IT COSTS. The door parses its own env at startup and
-// must keep doing so: making it fetch membership from the worker would put a network
-// dependency in front of a fail-closed startup, so one flake would read as "nobody is
-// on any queue". The repo precedent is the other direction and it works -- the
-// AUTH_THROTTLE_* knobs are ONE vocabulary configured verbatim on two doors. The cost
-// is operator DRIFT: POSTERN_VIEWER_ROLES here and POSTERN_IMAP_VIEWER_ROLES on the
-// door can disagree, which is the very divergence #425 exists to close. Three things
-// bound it: the refusal set below is a port of the door _parse_viewer_roles, so a
-// config the door refuses to START on is refused here too (one config is legal or
-// illegal identically on both doors); the mirroring rule and deploy ordering are
-// documented (docs/CONTRACT.md, webmail/README.md, imap/README.md); and GET /api/roles
-// exposes the parsed map to an operator token so the two can be DIFFED instead of
-// assumed. Single-source promotion is tracked as a follow-up, not done here.
+// THIS MAP IS THE SINGLE SOURCE (#438). #425 shipped it beside a verbatim MIRROR on the
+// door (POSTERN_IMAP_VIEWER_ROLES), reasoning that making the door FETCH membership
+// would put a network dependency in front of a fail-closed STARTUP, where one flake
+// reads as "nobody is on any queue". The cost was operator DRIFT: one fact configured
+// twice, and whichever side was broader showed a queue to someone the other did not --
+// the very divergence #425 exists to close. #438 removed the mirror. The startup
+// objection was about STARTUP only: the door is a PROXY, and every folder and message it
+// serves is already a call to this Worker, so it now reads this map per session (first
+// LIST or SELECT, inside its thread pool) from GET /api/imap/roles, gated on the
+// least-privilege imap door token rather than an admin one. A door that cannot read it
+// serves no queue and says so; the mailbox is unaffected, because a Worker it cannot
+// reach has no mail for it either. GET /api/roles stays the operator view of the same
+// map, and the retired door var is a startup refusal there, never silently ignored.
 //
 // FAIL-CLOSED, AND WHY IT DIFFERS FROM FILE_ALSO_UNDER. ANY malformed or ambiguous
 // entry drops the WHOLE map (not just that entry): a silently dropped member reads
@@ -33,7 +32,8 @@
 // again. FILE_ALSO_UNDER skips-and-logs per entry because it sits on the DELIVERY
 // path, where refusing costs MAIL; this sits on the READ path, where refusing costs
 // ACCESS only. Losing access to a queue is loud and reversible by fixing the config;
-// half a membership map is silent and is not.
+// half a membership map is silent and is not. Both doors inherit that refusal from
+// here now, which is what makes one refusal set a fact rather than a convention.
 
 /** A parse refusal. Never surfaced to a caller: it drops the map and is logged. */
 class RoleConfigError extends Error {}
@@ -49,12 +49,13 @@ const EMPTY: ReadonlyMap<string, readonly string[]> = new Map();
 /** Parse POSTERN_VIEWER_ROLES into {role: [member, ...]}, or THROW (#425).
  *
  *  Exported for the suite: the caller-facing entry point (roleMap) turns every throw
- *  into an empty map, so the refusal set is only assertable directly. The refusals are
- *  a port of imap/posternimap/config.py _parse_viewer_roles, entry for entry:
- *  no "=", an empty side, a missing "@" on either side, a role listed twice, a role
- *  that lists itself, an address used as BOTH a role and a member, a role with no
- *  members, and two roles whose local parts collide (which is a DOOR folder-naming
- *  constraint, kept here purely so both doors accept exactly the same configs). */
+ *  into an empty map, so the refusal set is only assertable directly. It is now the ONLY
+ *  membership parser in the repo (#438 deleted the door copy, which is the point: two
+ *  parsers of one syntax are two things to keep equal). Refused: no "=", an empty side,
+ *  a missing "@" on either side, a role listed twice, a role that lists itself, an
+ *  address used as BOTH a role and a member, a role with no members, and two roles whose
+ *  local parts collide -- that last one is a DOOR folder-naming constraint, enforced here
+ *  because the door builds Roles/<local part> out of whatever this map says. */
 export function parseViewerRoles(raw: string | undefined | null): Map<string, string[]> {
   const out = new Map<string, string[]>();
   if (!raw || !raw.trim()) return out;

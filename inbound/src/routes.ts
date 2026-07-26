@@ -134,6 +134,9 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "imap-import", method: "POST", path: "/api/imap/import", match: "exact", scope: "imap",
     auth: "bearer", body: ["identity", "folder", "rawMime"],
     note: "folder sent|archive|trash|junk; rawMime is base64" },
+  { id: "imap-roles", method: "GET", path: "/api/imap/roles", match: "exact", scope: "imap",
+    auth: "bearer",
+    note: "role membership is single-sourced on the Worker (#438): the door reads this map per login instead of parsing its own mirror var. Same projection as the operator /api/roles, gated on the least-privilege door token" },
 
   // --- operator / admin ---
   { id: "admin-smtp-credentials", method: "POST", path: "/api/admin/smtp-credentials", match: "exact",

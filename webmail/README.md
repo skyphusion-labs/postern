@@ -250,11 +250,13 @@ Turn it on with `POSTERN_VIEWER_ROLES` on the Worker (`inbound/wrangler.jsonc` v
 POSTERN_VIEWER_ROLES="abuse@example.org=ada@example.org+ben@example.org"
 ```
 
-**It is a MIRROR of the door `POSTERN_IMAP_VIEWER_ROLES`** -- same syntax, same refusals.
-Keep the two equal. They are separate vars because the door parses membership at startup
-and must not depend on this Worker being reachable to do it; `GET /api/roles` (operator
-`both` token) prints the parsed Worker map so you can diff the two rather than assume
-they agree. Deploy the Worker first, then the door.
+**This is the ONE place membership is configured** (#438). The IMAP door used to
+mirror it in `POSTERN_IMAP_VIEWER_ROLES` and READS this map instead, over its own
+`imap`-scoped token (`GET /api/imap/roles`), so the two human doors cannot hold
+different answers; a door still carrying the retired var refuses to start rather than
+ignore it. `GET /api/roles` (operator `both` token) prints the parsed map when you
+need to see it. Deploy the Worker first, then roll the door: a door ahead of the
+Worker serves no queue at all, fail-closed and loud.
 
 What you get, signed in:
 

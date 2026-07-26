@@ -28,8 +28,9 @@ per-folder UIDs under stable folder UIDVALIDITY constants.
 Per-account view scoping (#357, POSTERN_IMAP_VIEWER_MODE=per_account): the real
 views become viewer-relative to the authenticated login's address V.
 
-Role queues (#404, POSTERN_IMAP_VIEWER_ROLES): a viewer resolves to a SET of
-addresses -- V, plus every role address V is a member of. Each role publishes as
+Role queues (#404): a viewer resolves to a SET of addresses -- V, plus every
+role address V is a member of. Membership is single-sourced on the Worker
+(POSTERN_VIEWER_ROLES) and READ from it since #438, never configured here. Each role publishes as
 its OWN folder, Roles/<local part>, under a \\Noselect Roles parent; role mail is
 never merged into INBOX, which stays personal. A role folder filters on the ROLE
 address but keeps read state PER VIEWER (to=R with seenFor=V, and \\Seen STOREs
@@ -50,6 +51,7 @@ from twisted.mail import imap4
 from .client import PosternClient, PosternError
 from .config import ROLE_FOLDER_PREFIX, Config, role_folder_name
 from .mailbox import PosternMailbox
+from .roles import viewer_roles
 from .measure import Meter
 
 _DURABLE_FOLDERS = ("archive", "trash", "junk", "drafts")
@@ -258,12 +260,21 @@ class PosternAccount:
             if self._per_account
             else None
         )
-        # #404: the viewer resolves to a SET -- V plus every role V belongs to.
-        # Empty in estate mode and empty when the viewer is underivable, so the
-        # feature is unreachable outside a per_account login that is truly a member.
-        self._role_folders: Dict[str, _Folder] = role_folders_for(
-            self._viewer if self._per_account else None, cfg.viewer_roles
-        )
+        # #404: the viewer resolves to a SET -- V plus every role V belongs to. Empty in
+        # estate mode and empty when the viewer is underivable, so the feature is
+        # unreachable outside a per_account login that is truly a member.
+        #
+        # #438: that membership now comes FROM THE WORKER, so it is resolved lazily, on
+        # the first LIST or SELECT, and never in this constructor. Two reasons, both
+        # load-bearing. The constructor runs on the reactor thread (the realm builds the
+        # avatar during login), while LIST and SELECT are the entry points Twisted runs
+        # through the thread pool (threaded.ThreadedAccount), which is the only place a
+        # blocking Worker call belongs since #416. And the synchronous account accessors
+        # -- isSubscribed, appendability, _folder_for -- must stay pure: they read
+        # whatever this has already resolved and never fetch. A client cannot name a role
+        # folder it has not seen in a LIST, and a blind APPEND to one answers NO either
+        # way, so nothing user-visible depends on resolving them any earlier.
+        self._role_folders_cache: Optional[Dict[str, _Folder]] = None
         self._meter = Meter(cfg.measure)
         # #352 core unblocker 4: durable-folder UIDVALIDITY is read through from
         # the worker's GET /api/folders (mailbox_uid_counter), not a client-side
@@ -312,6 +323,33 @@ class PosternAccount:
         return PosternClient(
             self._cfg.api_url, imap_token, timeout=self._cfg.api_timeout, meter=self._meter
         )
+
+    def _ensure_role_folders(self) -> Dict[str, _Folder]:
+        """Resolve this session role folders, fetching the map at most once (#438).
+
+        Called only from LIST and SELECT, both of which run in the thread pool. The map
+        itself is cached process-wide with a TTL (roles.viewer_roles), so this is one
+        Worker call per TTL for the whole door, not one per login; the SNAPSHOT is taken
+        per session on purpose, so a queue cannot appear or vanish underneath a client
+        mid-session. A fetch that fails yields no role folders and says so loudly: the
+        fail-closed answer, unchanged from when the map was parsed at startup.
+        """
+        if self._role_folders_cache is None:
+            self._role_folders_cache = role_folders_for(
+                self._viewer if self._per_account else None,
+                viewer_roles(self._cfg, self._imap_client()),
+            )
+        return self._role_folders_cache
+
+    @property
+    def _role_folders(self) -> Dict[str, _Folder]:
+        """The role folders ALREADY resolved for this session; never a fetch.
+
+        Every synchronous, non-pooled caller reads through here (see _ensure_role_folders
+        for why that matters), so an unresolved session answers exactly as a login with
+        no queues does: nothing.
+        """
+        return self._role_folders_cache or {}
 
     def _imap_identity(self) -> Optional[str]:
         """The identity asserted on IMAP-service calls (drafts / import, #352).
@@ -427,6 +465,9 @@ class PosternAccount:
         if self._per_account and self._viewer is None:
             self._log_viewer_gap("LIST")
             return []
+        # In the pool (ThreadedAccount.listMailboxes), which is where the Worker read of
+        # the role map belongs (#438).
+        self._ensure_role_folders()
         # RFC 3501 6.3.8 matches the pattern against the WHOLE name, so fullmatch,
         # never match: `LIST "" "IN"` used to return every folder because IN is a
         # prefix of INBOX, and `LIST "" "%"` used to return children below the
@@ -451,6 +492,9 @@ class PosternAccount:
         if self._per_account and self._viewer is None:
             self._log_viewer_gap("SELECT")
             return None
+        # Also in the pool (ThreadedAccount.select), so a client that SELECTs a role
+        # folder without LISTing first still resolves membership (#438).
+        self._ensure_role_folders()
         folder = self._folder_for(name)
         if folder is None:
             return None

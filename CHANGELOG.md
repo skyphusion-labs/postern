@@ -11,6 +11,31 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+- **BREAKING (imap door + inbound): role membership is configured ONCE, on the Worker**
+  (#438). `POSTERN_IMAP_VIEWER_ROLES` is RETIRED: the door reads the parsed map from the
+  new `GET /api/imap/roles` (`imap` scope, the least-privilege door token) instead of
+  parsing a verbatim mirror of `POSTERN_VIEWER_ROLES`. Two configurations of one fact
+  could disagree, and the broader side showed a queue to someone the other did not, which
+  is the divergence #425 exists to close.
+  **Operator migration, in order:** move the same value to the Worker var
+  `POSTERN_VIEWER_ROLES`; provision `POSTERN_API_TOKEN_IMAP` if unset (role queues now
+  require it); deploy the WORKER; then roll the door with `POSTERN_IMAP_VIEWER_ROLES`
+  UNSET. A door that still sets it REFUSES TO START, naming those steps -- a var that
+  looks applied and does nothing is how a queue goes dark. A door rolled ahead of the
+  Worker serves no role queue (404 -> fail closed, loud) and mail is unaffected.
+  Membership is read per session on the first LIST/SELECT, inside the thread pool, and
+  cached process-wide for `POSTERN_IMAP_ROLES_TTL_SECONDS` (default 300, `0` disables).
+  That TTL is a REVOCATION bound: an expired map is DROPPED, never served as a fallback,
+  so a member removed from a queue loses it within the TTL even if the Worker is
+  unreachable. There is no on-disk last-known-good, deliberately (the door is a stateless
+  container, and a cache outliving the process would outlive a revocation).
+  The refusal set did not move: the Worker parser still drops the WHOLE map on any
+  malformed or ambiguous entry, and the door inherits that by construction, adding only
+  the structural checks the Worker cannot own (a response it will not build folders from,
+  two roles colliding on one folder name), also whole-map.
+
 ## v1.2.1
 
 Door patch: the v1.2.0 image shipped two defects in the FETCH hot path, both fixed here.

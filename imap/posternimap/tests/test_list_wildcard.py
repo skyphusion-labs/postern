@@ -27,6 +27,7 @@ import unittest
 
 from posternimap.client import PosternClient
 from posternimap.config import Config
+from posternimap.roles import reset_cache
 from posternimap.tests.fakes import FakeTransport
 
 try:
@@ -36,8 +37,9 @@ try:
 except ImportError:
     HAVE_TWISTED = False
 
-ROLES = "abuse@example.org=ada@example.org+ben@example.org"
+ROLE_MAP = {"abuse@example.org": ("ada@example.org", "ben@example.org")}
 ROLE_FOLDER = "Roles/abuse"
+IMAP_TOKEN = "itok"
 
 
 def _cfg(**over) -> Config:
@@ -53,16 +55,25 @@ class ListWildcardMatchTest(unittest.TestCase):
     def _acct(self, login="ada", roles=True):
         from posternimap.account import PosternAccount
 
-        over = {
-            "POSTERN_IMAP_VIEWER_MODE": "per_account",
-            "POSTERN_IMAP_VIEWER_DOMAIN": "example.org",
-        }
-        if roles:
-            over["POSTERN_IMAP_VIEWER_ROLES"] = ROLES
-        cfg = _cfg(**over)
-        transport = FakeTransport([], expected_token="tok", page_size=50)
+        cfg = _cfg(
+            POSTERN_IMAP_VIEWER_MODE="per_account",
+            POSTERN_IMAP_VIEWER_DOMAIN="example.org",
+            POSTERN_API_TOKEN_IMAP=IMAP_TOKEN,
+        )
+        # #438: membership comes from the worker, so the ROLES seed moved onto the fake
+        # worker. reset_cache keeps the process-wide map from leaking between cases (a
+        # roles=False case would otherwise inherit the map a roles=True case fetched).
+        reset_cache()
+        transport = FakeTransport(
+            [],
+            expected_token="tok",
+            token_scopes={"tok": "both", IMAP_TOKEN: "imap"},
+            roles=ROLE_MAP if roles else {},
+            page_size=50,
+        )
         acct = PosternAccount(cfg, login, "tok")
         acct._client = lambda: PosternClient("https://x", "tok", transport=transport)
+        acct._imap_client = lambda: PosternClient("https://x", IMAP_TOKEN, transport=transport)
         return acct
 
     def _names(self, wildcard, login="ada", roles=True):

@@ -7,7 +7,11 @@ to); INBOX stays personal; per-viewer seen (#350 message_seen_by) is KEPT, so
 explicitly not modeled yet).
 
 What is proven here, at the level the door actually decides:
-  * config: the ROLES map parses, and every malformed shape is a loud refusal.
+  * config: the door no longer CONFIGURES membership (#438). It reads the one map from
+    the worker, and the retired var is a loud startup refusal rather than a setting that
+    looks applied and does nothing. The fetch, its cache and its refusals live in
+    test_roles_fetch.py; what is proven here is that the folders built on top of a
+    fetched map behave exactly as they did when it was parsed from env.
   * a member sees Roles/<role>; a non-member cannot see or SELECT it.
   * the boundary in BOTH directions: the role folder excludes personal mail, and
     INBOX excludes role mail.
@@ -29,6 +33,7 @@ import unittest
 
 from posternimap.client import PosternClient
 from posternimap.config import Config, ConfigError, role_folder_name
+from posternimap.roles import reset_cache
 from posternimap.tests.fakes import FakeTransport, make_message
 
 try:
@@ -39,8 +44,9 @@ except ImportError:
     HAVE_TWISTED = False
 
 ROLE = "abuse@example.org"
-ROLES = "abuse@example.org=ada@example.org+ben@example.org"
+ROLE_MAP = {ROLE: ("ada@example.org", "ben@example.org")}
 ROLE_FOLDER = "Roles/abuse"
+IMAP_TOKEN = "itok"
 
 
 def _cfg(**over) -> Config:
@@ -50,11 +56,44 @@ def _cfg(**over) -> Config:
 
 
 def _per_account(**over) -> Config:
-    return _cfg(
-        POSTERN_IMAP_VIEWER_MODE="per_account",
-        POSTERN_IMAP_VIEWER_DOMAIN="example.org",
-        **over,
+    env = {
+        "POSTERN_IMAP_VIEWER_MODE": "per_account",
+        "POSTERN_IMAP_VIEWER_DOMAIN": "example.org",
+        # #438: role membership is read over the imap-scoped seam, so the per-function
+        # token is part of a role-serving deployment now.
+        "POSTERN_API_TOKEN_IMAP": IMAP_TOKEN,
+    }
+    env.update(over)
+    return _cfg(**env)
+
+
+def _worker(msgs=None, roles=None, **kw) -> FakeTransport:
+    """A fake worker that SERVES the role map, the way production does since #438.
+
+    It also drops the process-wide role cache. That cache is what makes the door pay one
+    fetch per TTL instead of one per login, and leaving it up between cases would let the
+    FIRST map in this file silently answer every case after it -- a suite that passes
+    because it never re-read anything.
+    """
+    reset_cache()
+    return FakeTransport(
+        msgs or [],
+        expected_token="tok",
+        token_scopes={"tok": "both", IMAP_TOKEN: "imap"},
+        roles=ROLE_MAP if roles is None else roles,
+        page_size=50,
+        **kw,
     )
+
+
+def _wire(acct, transport):
+    """Point an account at the fake worker with the SPLIT production runs: mailbox reads
+    on the service token, the role map on the imap-scoped token (roles is an imap-seam
+    route, and the fake enforces scopes, so a door that reached for the wrong client
+    would get a 403 here exactly as it would in production)."""
+    acct._client = lambda: PosternClient("https://x", "tok", transport=transport)
+    acct._imap_client = lambda: PosternClient("https://x", IMAP_TOKEN, transport=transport)
+    return acct
 
 
 def _role_message(message_id="r1", **over):
@@ -72,49 +111,37 @@ def _personal_message(message_id="p1", addr="ada@example.org", **over):
 
 
 class ConfigRolesTest(unittest.TestCase):
-    def test_estate_default_has_no_roles(self):
-        self.assertEqual(_cfg().viewer_roles, {})
+    """#438: this door configures no membership at all, and says so if you try."""
 
-    def test_parses_lowercases_and_tolerates_whitespace(self):
-        cfg = _per_account(
-            POSTERN_IMAP_VIEWER_ROLES=" Abuse@Example.ORG = Ada@example.org + ben@example.org ,"
-            " security@example.org=ada@example.org "
-        )
-        self.assertEqual(
-            cfg.viewer_roles,
-            {
-                "abuse@example.org": ("ada@example.org", "ben@example.org"),
-                "security@example.org": ("ada@example.org",),
-            },
-        )
+    def test_the_retired_door_var_is_a_startup_refusal(self):
+        # The alternative was ignoring it, which is the failure this repo refuses: a var
+        # that looks applied and quietly does nothing is how a queue goes dark without
+        # anyone learning why. The message has to carry the migration, since a
+        # crashlooping door with no explanation loses the queue just as silently.
+        with self.assertRaises(ConfigError) as caught:
+            _per_account(POSTERN_IMAP_VIEWER_ROLES=ROLE_FOLDER)
+        message = str(caught.exception)
+        self.assertIn("POSTERN_VIEWER_ROLES", message)
+        self.assertIn("POSTERN_API_TOKEN_IMAP", message)
 
-    def test_duplicate_member_is_collapsed_not_duplicated(self):
-        cfg = _per_account(
-            POSTERN_IMAP_VIEWER_ROLES="abuse@example.org=ada@example.org+ada@example.org"
-        )
-        self.assertEqual(cfg.viewer_roles, {"abuse@example.org": ("ada@example.org",)})
-
-    def test_malformed_shapes_are_loud(self):
-        bad = [
-            "noequals",
-            "abuse@example.org=",
-            "=ada@example.org",
-            "abuse@example.org=ada",
-            "abuse=ada@example.org",
-            "abuse@example.org=ada@example.org,abuse@example.org=ben@example.org",
-            "abuse@example.org=abuse@example.org",
-            "abuse@example.org=ada@example.org,security@example.org=abuse@example.org",
-            "abuse@example.org=ada@example.org,abuse@other.test=ben@example.org",
-        ]
-        for raw in bad:
-            with self.assertRaises(ConfigError, msg=raw):
-                _per_account(POSTERN_IMAP_VIEWER_ROLES=raw)
-
-    def test_roles_without_per_account_is_loud(self):
-        # Estate mode has no viewer address to check membership against, so a role map
-        # there would look configured and silently do nothing. Refuse at startup.
+    def test_it_is_refused_in_estate_mode_too(self):
+        # The old rule was "roles need per_account". The var is gone in BOTH modes now,
+        # so an estate deployment carrying it must not start quietly either.
         with self.assertRaises(ConfigError):
-            _cfg(POSTERN_IMAP_VIEWER_ROLES=ROLES)
+            _cfg(POSTERN_IMAP_VIEWER_ROLES=ROLE_FOLDER)
+
+    def test_an_empty_value_is_not_a_refusal(self):
+        # A deployment that unsets the var by emptying it (compose, systemd
+        # EnvironmentFile) HAS migrated; refusing that would be a false alarm.
+        self.assertEqual(_per_account(POSTERN_IMAP_VIEWER_ROLES="  ").roles_ttl, 300.0)
+
+    def test_the_cache_ttl_is_configurable_and_validated(self):
+        self.assertEqual(_per_account(POSTERN_IMAP_ROLES_TTL_SECONDS="30").roles_ttl, 30.0)
+        self.assertEqual(_per_account(POSTERN_IMAP_ROLES_TTL_SECONDS="0").roles_ttl, 0.0)
+        with self.assertRaises(ConfigError):
+            _per_account(POSTERN_IMAP_ROLES_TTL_SECONDS="-1")
+        with self.assertRaises(ConfigError):
+            _per_account(POSTERN_IMAP_ROLES_TTL_SECONDS="soon")
 
     def test_folder_name_is_the_local_part(self):
         self.assertEqual(role_folder_name(ROLE), ROLE_FOLDER)
@@ -125,11 +152,9 @@ class RoleFolderVisibilityTest(unittest.TestCase):
     def _acct(self, login, msgs=None, **over):
         from posternimap.account import PosternAccount
 
-        cfg = _per_account(POSTERN_IMAP_VIEWER_ROLES=ROLES, **over)
-        transport = FakeTransport(msgs or [], expected_token="tok", page_size=50)
-        acct = PosternAccount(cfg, login, "tok")
-        acct._client = lambda: PosternClient("https://x", "tok", transport=transport)
-        return acct, transport
+        cfg = _per_account(**over)
+        transport = _worker(msgs)
+        return _wire(PosternAccount(cfg, login, "tok"), transport), transport
 
     def _names(self, acct, wildcard="*"):
         return [name for name, _box in acct.listMailboxes("", wildcard)]
@@ -175,8 +200,26 @@ class RoleFolderVisibilityTest(unittest.TestCase):
 
     def test_member_subscription_covers_folder_and_parent(self):
         acct, _ = self._acct("ada")
+        # The order Twisted itself uses: LSUB is _listWork, which calls listMailboxes
+        # (through the thread pool, where the worker read of the membership map belongs)
+        # and only THEN isSubscribed per name (imap4._cbListWork). isSubscribed itself
+        # never fetches, which is what keeps I/O off the reactor thread (#416/#438).
+        acct.listMailboxes("", "*")
         self.assertTrue(acct.isSubscribed(ROLE_FOLDER))
         self.assertTrue(acct.isSubscribed("Roles"))
+
+    def test_subscription_before_any_list_does_no_io_and_claims_nothing(self):
+        # The named cost of reading membership from the worker (#438): a session that has
+        # not LISTed or SELECTed anything yet has no role folders resolved, so the
+        # SYNCHRONOUS accessors answer NO instead of blocking the reactor to find out.
+        # Twisted cannot actually reach this state (LSUB lists first, and a client cannot
+        # name a folder it has never been shown), and no-is the fail-closed answer anyway.
+        # Recorded as a test rather than a comment so it cannot drift into a fetch.
+        acct, transport = self._acct("ada")
+        self.assertFalse(acct.isSubscribed(ROLE_FOLDER))
+        self.assertEqual(transport.calls, [])
+        acct.listMailboxes("", "*")
+        self.assertTrue(acct.isSubscribed(ROLE_FOLDER))
 
     def test_map_override_decides_membership_by_address(self):
         # Membership is keyed on the viewer ADDRESS, so a login repointed by the 1:1
@@ -240,13 +283,11 @@ class RoleFolderBoundaryTest(unittest.TestCase):
     def _shared(self, msgs):
         from posternimap.account import PosternAccount
 
-        cfg = _per_account(POSTERN_IMAP_VIEWER_ROLES=ROLES)
-        transport = FakeTransport(msgs, expected_token="tok", page_size=50)
+        cfg = _per_account()
+        transport = _worker(msgs)
 
         def acct(login):
-            a = PosternAccount(cfg, login, "tok")
-            a._client = lambda: PosternClient("https://x", "tok", transport=transport)
-            return a
+            return _wire(PosternAccount(cfg, login, "tok"), transport)
 
         return acct, transport
 
@@ -306,13 +347,11 @@ class RoleQueueSeenIsolationTest(unittest.TestCase):
         from posternimap.account import PosternAccount
 
         self.msgs = [_role_message("r1")]
-        self.cfg = _per_account(POSTERN_IMAP_VIEWER_ROLES=ROLES)
-        self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=50)
+        self.cfg = _per_account()
+        self.transport = _worker(self.msgs)
 
         def acct(login):
-            a = PosternAccount(self.cfg, login, "tok")
-            a._client = lambda: PosternClient("https://x", "tok", transport=self.transport)
-            return a
+            return _wire(PosternAccount(self.cfg, login, "tok"), self.transport)
 
         self.acct = acct
 
@@ -375,12 +414,9 @@ class RoleQueueWritePostureTest(unittest.TestCase):
         from posternimap.account import PosternAccount
 
         self.msgs = [_role_message("r1")]
-        cfg = _per_account(POSTERN_IMAP_VIEWER_ROLES=ROLES)
-        self.transport = FakeTransport(self.msgs, expected_token="tok", page_size=50)
-        self.acct = PosternAccount(cfg, "ada", "tok")
-        self.acct._client = lambda: PosternClient(
-            "https://x", "tok", transport=self.transport
-        )
+        cfg = _per_account()
+        self.transport = _worker(self.msgs)
+        self.acct = _wire(PosternAccount(cfg, "ada", "tok"), self.transport)
         self.box = self.acct.select(ROLE_FOLDER)
         self.box.getMessageCount()
 

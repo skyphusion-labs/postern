@@ -94,11 +94,12 @@ interface Env {
    * as its OWN view (never merged into the personal INBOX), with read state kept per
    * MEMBER. Non-members see nothing.
    *
-   * MIRRORS the IMAP door POSTERN_IMAP_VIEWER_ROLES verbatim (same syntax, same
-   * refusal set), so one membership decision configures both human doors; they are two
-   * vars today because the door must parse its own env at startup rather than depend on
-   * this Worker being reachable. Deploy the Worker first, then the door. GET /api/roles
-   * (operator token) prints the parsed map so the two can be diffed.
+   * THE SINGLE SOURCE of role membership (#438). The IMAP door used to mirror this in
+   * POSTERN_IMAP_VIEWER_ROLES and now READS the parsed map from GET /api/imap/roles
+   * with its imap-scoped token, so one membership decision configures both human
+   * doors and neither can hold a different answer; a door still carrying the retired
+   * var refuses to start. Deploy the Worker first, then roll the door. GET /api/roles
+   * (operator token) is the same projection at admin scope.
    *
    * Fail-closed: ANY malformed or ambiguous entry drops the WHOLE map (no role queue is
    * served) rather than silently dropping one member. Empty/unset changes nothing.

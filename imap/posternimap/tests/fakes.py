@@ -25,6 +25,8 @@ def _required_scope(method: str, path: str) -> Optional[str]:
         return "imap"
     if method == "POST" and path == "/api/imap/import":
         return "imap"
+    if method == "GET" and path == "/api/imap/roles":
+        return "imap"
     if method == "DELETE" and path.startswith("/api/messages/") and "/attachments/" not in path:
         return "delete"
     if method == "GET" and path in ("/api/messages", "/api/messages/"):
@@ -110,8 +112,14 @@ class FakeTransport:
         expected_token: Optional[str] = "good-token",
         page_size: int = 2,
         token_scopes: Optional[Dict[str, str]] = None,
+        roles: Optional[Dict[str, tuple]] = None,
     ) -> None:
         self.messages = messages or []
+        # #438 role membership, served on the imap-scoped GET /api/imap/roles exactly as
+        # the worker projects it. It lives on the FAKE WORKER rather than in door config
+        # because that is where it lives in production now: a door test that seeded a
+        # config field would be testing a door that no longer exists.
+        self.roles: Dict[str, tuple] = dict(roles or {})
         self.expected_token = expected_token
         self.page_size = page_size
         # Scope-faithful auth (#352 core unblocker 6): token -> scope ("both" /
@@ -186,6 +194,8 @@ class FakeTransport:
         if path == "/api/messages/move" and method == "POST":
             return self._move(req)
 
+        if path == "/api/imap/roles" and method == "GET":
+            return self._roles()
         if path == "/api/imap/drafts" or path.startswith("/api/imap/drafts/"):
             return self._imap_drafts(path, method, params, req)
         if path == "/api/imap/import" and method == "POST":
@@ -212,6 +222,17 @@ class FakeTransport:
         if path == "/api/search":
             return self._search(params)
         return 404, json.dumps({"ok": False, "error": "not_found"}).encode()
+
+    def _roles(self):
+        """GET /api/imap/roles: the worker projection of the ONE role map (#438)."""
+        payload = {
+            "ok": True,
+            "roles": [
+                {"address": role, "members": list(members)}
+                for role, members in self.roles.items()
+            ],
+        }
+        return 200, json.dumps(payload).encode()
 
     def _uid_of(self, m: Dict[str, Any]) -> int:
         """The store's insertion key (rowid) for this message.

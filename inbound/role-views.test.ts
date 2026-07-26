@@ -19,7 +19,7 @@
 // test in roleReadScope, dropping the server-derived seenFor, and widening the WRITE
 // paths to the role set each make a test here fail.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { handleApi } from "./src/api";
 import * as store from "./src/store";
@@ -392,5 +392,85 @@ describe("#425 fail-closed config, and the surfaces that stay untouched", () => 
     const ada = await signIn(e, raw, ADA);
     const asSession = await handleApi(get("/api/roles", ada), e, ctx);
     expect(asSession.status).toBe(403);
+  });
+});
+
+// #438: the door stops parsing its own mirror var and READS this map, so the membership
+// the door acts on and the membership the session paths act on are the same object by
+// construction rather than two configs an operator keeps equal by hand. Three properties
+// carry that:
+//
+//   1. the door surface answers with EXACTLY the operator projection (one shape, one map);
+//   2. it is reachable by the least-privilege door token and by nothing else -- not a read
+//      token, not a webmail session, so moving membership onto the API did not widen who
+//      can read it;
+//   3. an unusable config projects EMPTY here, so the door inherits the whole-map refusal
+//      instead of re-deriving it and drifting.
+const DOOR_TOKEN = "imap-token";
+const READ_TOKEN = "read-token";
+
+function doorEnv(roles: string = ROLES) {
+  return realEnv({
+    WEBMAIL_AUTH_BACKEND: "native",
+    POSTERN_VIEWER_ROLES: roles,
+    POSTERN_API_TOKEN_IMAP: DOOR_TOKEN,
+    POSTERN_API_TOKEN_READ: READ_TOKEN,
+  });
+}
+
+describe("#438 the IMAP door reads the ONE role map from the Worker", () => {
+  it("answers the door token with exactly the operator projection", async () => {
+    const { env: e, ctx } = doorEnv();
+    const door = await handleApi(get("/api/imap/roles", { token: DOOR_TOKEN }), e, ctx);
+    const operator = await handleApi(get("/api/roles", { token: TOKEN }), e, ctx);
+    expect(door.status).toBe(200);
+    expect(operator.status).toBe(200);
+    const doorBody = await door.json();
+    expect(doorBody).toEqual(await operator.json());
+    // POSITIVE CONTROL: that equality is not two empty maps agreeing with each other.
+    expect(doorBody).toMatchObject({ ok: true, roles: [{ address: ROLE, members: [ADA, BEN] }] });
+  });
+
+  it("refuses a read token and a webmail session: the door token is the key, not any token", async () => {
+    const { env: e, ctx, raw } = doorEnv();
+    expect((await handleApi(get("/api/imap/roles", { token: READ_TOKEN }), e, ctx)).status).toBe(403);
+    const ada = await signIn(e, raw, ADA);
+    expect((await handleApi(get("/api/imap/roles", ada), e, ctx)).status).toBe(403);
+    // CONTROL: the same env DOES serve the door token, so those two 403s are the scope
+    // gate answering, not a broken env answering.
+    expect((await handleApi(get("/api/imap/roles", { token: DOOR_TOKEN }), e, ctx)).status).toBe(200);
+  });
+
+  it("projects an EMPTY map when the config is unusable, so the door fails closed with it", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { env: e, ctx, raw } = doorEnv(ROLES + ",broken-entry-without-eq");
+    await seed(e, ctx);
+    const res = await handleApi(get("/api/imap/roles", { token: DOOR_TOKEN }), e, ctx);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, roles: [] });
+    // ... and the SESSION half of the same map serves no queue either. One map, one
+    // refusal, both doors dark together: the divergence #425 exists to close cannot
+    // reopen through a half-applied config.
+    const ada = await signIn(e, raw, ADA);
+    const folders = (await (await handleApi(get("/api/folders", ada), e, ctx)).json()) as {
+      folders: Array<{ role?: string }>;
+    };
+    expect(folders.folders.some((f) => f.role)).toBe(false);
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it("POSITIVE CONTROL: the usable map serves the queue on BOTH halves", async () => {
+    const { env: e, ctx, raw } = doorEnv();
+    await seed(e, ctx);
+    const door = (await (await handleApi(get("/api/imap/roles", { token: DOOR_TOKEN }), e, ctx)).json()) as {
+      roles: Array<{ address: string }>;
+    };
+    expect(door.roles.map((r) => r.address)).toEqual([ROLE]);
+    const ada = await signIn(e, raw, ADA);
+    const folders = (await (await handleApi(get("/api/folders", ada), e, ctx)).json()) as {
+      folders: Array<{ role?: string }>;
+    };
+    expect(folders.folders.filter((f) => f.role).map((f) => f.role)).toEqual([ROLE]);
   });
 });

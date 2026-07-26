@@ -120,7 +120,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_AUTH_MODE` | no | `token` | `token`, `fixed`, `native`, `ldap`, or `system` (`pam` aliases `system`) |
 | `POSTERN_API_TOKEN` | in `fixed`/`native`/`ldap`/`system` | -- | the token the proxy presents: the login token in `fixed`, the per-function **service** token in `native`/`ldap`/`system` |
 | `POSTERN_API_TOKEN_DELETE` | no | -- | optional `both`-scoped member for EXPUNGE only (#278); separate from the read token |
-| `POSTERN_API_TOKEN_IMAP` | no | -- | optional `imap`-scoped service token (#352) for durable Drafts / APPEND import; own worker slot, unset = those writes refuse |
+| `POSTERN_API_TOKEN_IMAP` | in `per_account` with role queues | -- | `imap`-scoped service token (#352) for durable Drafts / APPEND import AND the role-membership read (#438); own worker slot, unset = those writes refuse and NO role queue is served |
 | `POSTERN_IMAP_USERNAME` | in `fixed` | -- | the login username in `fixed` mode |
 | `POSTERN_TRANSPORT_TOKEN` | in `native` | -- | transport-seam bearer for `POST /api/smtp-auth` (mirrors the relay) |
 | `POSTERN_SMTP_AUTH_URL` | no | `${POSTERN_API_URL}/api/smtp-auth` | the `native` auth endpoint |
@@ -153,9 +153,12 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_VIEWER_MODE` | no | `estate` | `estate` = the whole shared mailbox (historical door, byte-identical). `per_account` = scope every real folder to the login's viewer address V (see below). A **view** tier, not a credential boundary (#357) |
 | `POSTERN_IMAP_VIEWER_DOMAIN` | in `per_account` | -- | the mail domain V is built on: `V = localpart(login)@THIS`. REQUIRED when `per_account` (startup fails loud without it, never a silent fall-back to the estate view) |
 | `POSTERN_IMAP_VIEWER_MAP` | no | -- | optional `login=addr,login2=addr2` overrides for directories where the login id is NOT the mail local part (e.g. `crockenhaus=conrad@example.org`). An override wins over the rule |
-| `POSTERN_IMAP_VIEWER_ROLES` | no | -- | role-address membership, `role=member+member,role2=member` (full addresses both sides). Each role publishes as its OWN folder `Roles/<local part>` for its members (#404). `per_account` only; any malformed or ambiguous entry is a startup failure |
+| `POSTERN_IMAP_ROLES_TTL_SECONDS` | no | `300` | how long a fetched role map is reused before the door re-reads it (#438). A REVOCATION bound, not a tuning knob: an operator removing a member from a queue waits at most this long. `0` = read once per login |
+| `POSTERN_IMAP_VIEWER_ROLES` | **RETIRED** | -- | membership moved to the Worker (#438). Still set? The door REFUSES TO START and names the migration; it is never ignored |
 
-**`POSTERN_IMAP_VIEWER_ROLES` mirrors the Worker's `POSTERN_VIEWER_ROLES`** (#437, the webmail half of the #404 ruling): same syntax and the same refusal set, so a config one door refuses to start on is refused by the other too. Configure both with the SAME value, and **deploy the worker first** -- the door reads its own env at startup (a network fetch in front of a fail-closed startup would let one flake read as "nobody is on any queue"), so the two are diffable, not shared. `GET /api/roles` returns the worker's parsed map for exactly that diff.
+**Role membership is configured on the WORKER, once** (`POSTERN_VIEWER_ROLES`, #438). It used to be configured here too, verbatim, and one fact configured twice drifts: whichever side was broader showed a queue to someone the other did not, which is the exact divergence #425 exists to close. The door reads the map from `GET /api/imap/roles` with its `imap`-scoped token, on the first LIST or SELECT of a session, cached for `POSTERN_IMAP_ROLES_TTL_SECONDS`.
+
+Migrating a door that still sets `POSTERN_IMAP_VIEWER_ROLES`: move the SAME value to the Worker var, provision `POSTERN_API_TOKEN_IMAP` if it is unset, **deploy the Worker first**, then roll the door with the old var UNSET. A door still carrying it will not start, loudly and with those steps in the error, because a var that looks applied and silently does nothing is how a queue goes dark. A door rolled BEFORE the Worker gets a 404 for the map, which is fail-closed: no role folders, a loud log, mail untouched.
 
 ### Per-account view scoping (#357)
 
@@ -199,9 +202,13 @@ ruling (2026-07-25): role mail gets its OWN FOLDER per role address, never merge
 anyone INBOX.
 
 ```
+# On the DOOR: the view mode, plus the token the membership read needs (#438).
 POSTERN_IMAP_VIEWER_MODE=per_account
 POSTERN_IMAP_VIEWER_DOMAIN=example.org
-POSTERN_IMAP_VIEWER_ROLES="abuse@example.org=ada@example.org+ben@example.org,security@example.org=ada@example.org"
+POSTERN_API_TOKEN_IMAP=...
+
+# On the WORKER (inbound/wrangler.jsonc vars): the membership itself, configured ONCE.
+POSTERN_VIEWER_ROLES="abuse@example.org=ada@example.org+ben@example.org,security@example.org=ada@example.org"
 ```
 
 Ada then sees `Roles/abuse` and `Roles/security` beside her own INBOX; Ben sees
@@ -232,21 +239,30 @@ repointed by the map carries its roles with it.
   NO, never a silent OK. Those would all write estate-wide state on behalf of every
   other member.
 
-**Fail-closed, no exceptions.** A malformed, duplicated, self-referential or
-name-colliding `POSTERN_IMAP_VIEWER_ROLES` entry is a startup ConfigError (the door does
-not start, rather than serving a half-parsed membership map, where a dropped member
-reads exactly like "that person is not on the queue"). Setting it outside `per_account`
-is also a startup error. A login with no derivable V serves nothing at all, roles
-included: membership is unanswerable without V.
+**Fail-closed, no exceptions.** The Worker refuses a malformed, duplicated,
+self-referential or name-colliding map ENTIRE (`POSTERN_VIEWER_ROLES`: one bad entry
+drops the whole map), so an unusable config reaches this door as an EMPTY map and no
+queue is served -- the door inherits that refusal instead of re-deriving it. On top of
+that the door refuses any response it will not build folders from (a shape it cannot
+parse, or two roles colliding on one folder name), again whole-map. Every way the read
+can fail -- unreachable Worker, timeout, wrong token, a Worker older than #438, an
+unparseable body -- serves NO queue, says so in the log, and is retried on the next
+login; a map that outlives its TTL is DROPPED rather than reused, so a removed member
+loses the queue within the TTL. A login with no derivable V serves nothing at all,
+roles included: membership is unanswerable without V. Estate mode never reads the map
+(no viewer address to check it against); it still applies on the Worker, where webmail
+reads it.
 
 **Operator rules.**
 
-- **Worker dependency + deploy ORDERING.** Per-member read state needs the worker to
-  accept `seenFor` on `GET /api/messages` and `GET /api/search` (it otherwise keys
-  effective seen off `to`, i.e. the ROLE, and a member `\Seen` would not stick). The
-  worker ignores unknown query params, so an out-of-order deploy degrades SILENTLY to
-  queue-level read state: ship and verify the worker FIRST, then the door, then flip
-  membership on.
+- **Worker dependency + deploy ORDERING.** Two reasons now. Per-member read state
+  needs the worker to accept `seenFor` on `GET /api/messages` and `GET /api/search`
+  (it otherwise keys effective seen off `to`, i.e. the ROLE, and a member `\Seen`
+  would not stick), and the worker ignores unknown query params, so an out-of-order
+  deploy degrades SILENTLY to queue-level read state. Since #438 the door also READS
+  membership from the worker, so a door rolled first finds no `/api/imap/roles` and
+  serves no queue at all, loudly, with mail unaffected. Ship and verify the worker
+  FIRST, then the door.
 - **UIDVALIDITY.** Introducing role folders needs NO bump: the names are new, so no
   cached UID map can be invalidated, and existing folders are untouched. Repointing an
   existing role folder name at a different address (or renaming a local part) IS a
@@ -254,8 +270,10 @@ included: membership is unanswerable without V.
 - **`FILE_ALSO_UNDER` overlap.** That ingest map (CONTRACT 10.2b) adds an owner to the
   DELIVERED SET, so on a deployment running both, role mail appears in the owner INBOX
   as well as the role folder. Once a role has a folder, drop it from `FILE_ALSO_UNDER`.
-- **Webmail** scopes to the bound session identity and does not yet know about role
-  membership; parity is tracked separately.
+- **Webmail** reads the same map from the same place (#425/#438), so the two human
+  doors cannot disagree about what one person may see. `GET /api/roles` (operator
+  `both` token) prints the parsed map when a membership question needs answering
+  without shelling into a container.
 
 
 ## Run it

@@ -1177,11 +1177,12 @@ malformed address is `E_VALIDATION_ERROR`, never a silently-dropped parameter.
 **Role queues (#404, opt-in, per_account only).** A role address belongs to a FUNCTION,
 so under per-account scoping it is nobody viewer address and its mail is delivered,
 stored, searchable and visible in NO view. Ruling (2026-07-25): role mail gets its OWN
-folder per role address, never merged into a personal INBOX. The door gained
-`POSTERN_IMAP_VIEWER_ROLES` (`role=member+member`, full addresses both sides), which
-makes a viewer resolve to a SET of addresses: V plus every role V is a member of.
-`POSTERN_IMAP_VIEWER_MAP` stays 1:1 and membership is keyed on the RESOLVED address, so
-the two compose by construction (login -> V, then roles(V)).
+folder per role address, never merged into a personal INBOX. Membership is ONE map on
+the Worker, `POSTERN_VIEWER_ROLES` (`role=member+member`, full addresses both sides),
+which makes a viewer resolve to a SET of addresses: V plus every role V is a member of.
+The IMAP door READS that map (`GET /api/imap/roles`, #438) rather than configuring its
+own copy. `POSTERN_IMAP_VIEWER_MAP` stays 1:1 and membership is keyed on the RESOLVED
+address, so the two compose by construction (login -> V, then roles(V)).
 
 - **Folder shape:** each role publishes as `Roles/<local part>` under a `\Noselect`
   `Roles` parent, in the existing personal namespace (delimiter `/`). Role folder names
@@ -1203,17 +1204,23 @@ the two compose by construction (login -> V, then roles(V)).
   and `\Answered` on a role folder are refused (tagged NO): each would write
   estate-wide state on behalf of every other member of the queue.
 - **Fail-closed:** a malformed, duplicated, self-referential or name-colliding role map
-  is a startup error; roles outside `per_account` are a startup error; a login with no
-  derivable V serves nothing, roles included. A non-member never sees the folder and
-  cannot SELECT it.
+  is refused ENTIRE by the Worker parser, so every consumer sees an EMPTY map and no
+  queue at all; the door inherits that refusal instead of re-deriving it, and refuses
+  on its own only what the Worker cannot own (a response shape it will not build
+  folders from, or two roles colliding on one folder name), again whole-map. A door
+  that cannot READ the map (unreachable Worker, wrong token, a Worker older than #438)
+  serves no queue and logs it; an expired cached map is dropped, never reused, so the
+  cache TTL bounds revocation. A login with no derivable V serves nothing, roles
+  included. A non-member never sees the folder and cannot SELECT it.
 - **Interaction with 10.2b:** `FILE_ALSO_UNDER` adds an owner to the DELIVERED SET at
   ingest, so a deployment running both shows role mail in the owner INBOX as well as the
   role folder. Once a role has a folder, drop it from `FILE_ALSO_UNDER`.
 - **Webmail (#425)** reaches the same queues, so the two human doors cannot disagree
-  about what one person may see. The Worker gained `POSTERN_VIEWER_ROLES`, a MIRROR of
-  `POSTERN_IMAP_VIEWER_ROLES`: same `role=member+member` syntax, same refusal set, read
-  at the SESSION layer. They are two vars because the door must parse membership at
-  startup and must not depend on the Worker being reachable to do it.
+  about what one person may see. `POSTERN_VIEWER_ROLES` is read at the SESSION layer
+  here and, since #438, is the SINGLE source: the door reads the same parsed map over
+  the imap-scoped seam instead of mirroring it in a var of its own. One map, one
+  refusal set, one deploy artifact; the retired door var is a startup refusal, never
+  ignored.
   - **Membership answer:** `GET /api/folders` under a bound session appends one entry per
     role that identity is a member of -- `{ id: "role:<address>", label: <local part>,
     role: <address>, count, unread }` -- after the fixed personal set. Enumeration is
@@ -1241,8 +1248,11 @@ the two compose by construction (login -> V, then roles(V)).
     person is not on the queue"), logged once naming the offending entry. Contrast
     `FILE_ALSO_UNDER` (10.2b), which skips per entry because it sits on the DELIVERY
     path where refusing costs mail; this is a READ path, where refusing costs access.
-  - **Operator:** `GET /api/roles` (`both` scope) prints the parsed map, so the Worker
-    map and the door map can be DIFFED instead of assumed. Keep the two equal; deploy the
-    Worker first, then the door, the same ordering rule the door half already documents.
+  - **Operator:** `GET /api/roles` (`both` scope) prints the parsed map, which is how a
+    membership question is answered without shelling into a container. `GET
+    /api/imap/roles` is the same projection at `imap` scope: the door credential reads
+    membership, and only membership, without holding the admin token the operator
+    route demands. Deploy ordering is unchanged and now enforced by the read itself:
+    Worker first, then the door.
 
 `/api/folders` unread counts (#352) MUST use effective seen when they land.
