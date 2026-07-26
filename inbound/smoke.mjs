@@ -27,7 +27,8 @@
 //   7. /api/folders answers with server-authoritative counts, and the count moves
 //      when this run files its own message.
 //   8. Attachments: a send WITH an attachment, then the bytes read back byte-for-byte
-//      from /api/messages/{id}/attachments/0.
+//      from /api/messages/{id}/attachments/0. The read-back is POLLED (bounded): the
+//      store persists attachment rows + bytes out of band, after the send answers.
 //   9. Drafts are identity-owned: a static operator token must be REFUSED
 //      (E_IDENTITY_REQUIRED). With POSTERN_IDENTITY_TOKEN set, the full draft
 //      lifecycle runs and cleans up after itself.
@@ -134,6 +135,39 @@ async function summary(id) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tag = `postern-smoke ${new Date().toISOString()} ${Math.random().toString(36).slice(2, 10)}`;
+
+/**
+ * Poll a stored message until it reports at least `want` attachments.
+ *
+ * A send answers BEFORE its attachments are persisted: store.put hands
+ * storeAttachments (the D1 metadata rows + the R2 objects) to ctx.waitUntil, which by
+ * definition runs after the response returns. So an immediate read-back can honestly
+ * see attachments: [] on a message that is about to have them, which is exactly what
+ * the v1.3.0 deploy hit -- leg 8 read ~125ms after the 200 and saw none, while the same
+ * messageId carried its part when probed minutes later. The unit suite cannot catch
+ * this: makeFakeEnv settle() awaits precisely those waitUntil promises, and the live
+ * probe has no settle. Same property holds for inbound attachments; it is a property of
+ * the store, not of the send path, and the deferral is deliberate (the send stays fast).
+ *
+ * Bounded on purpose: a REAL persistence failure must still fail this leg rather than
+ * hang it, so we return whatever the last read saw once the deadline passes and let the
+ * caller assertion speak. Returns how long we waited so the latency is visible in the
+ * run rather than hidden inside a green line.
+ *
+ * This also covers the bytes fetch that follows: storeAttachments writes each part R2
+ * object BEFORE inserting its metadata row, so a row visible here means its bytes are
+ * already fetchable at that index.
+ */
+async function waitForAttachments(id, want, timeoutMs = 10000, intervalMs = 250) {
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  let got = await summary(id);
+  while ((got?.attachments?.length ?? 0) < want && Date.now() < deadline) {
+    await sleep(intervalMs);
+    got = await summary(id);
+  }
+  return { got, waitedMs: Date.now() - started };
+}
 
 async function main() {
   console.log(`Postern smoke against ${cfg.baseUrl}`);
@@ -330,7 +364,8 @@ async function main() {
     assert(send.status === 200 && send.json?.ok === true, "POST /api/send with an attachment is 200 ok:true", send);
     attachmentId = send.json?.messageId;
 
-    const got = await summary(attachmentId);
+    const { got, waitedMs } = await waitForAttachments(attachmentId, 1);
+    console.log(`   waited ${waitedMs}ms for the sent copy attachment rows to land`);
     assert((got?.attachments?.length ?? 0) >= 1, "the stored sent copy reports an attachment", got);
 
     const bytes = await apiBytes(`/api/messages/${encodeURIComponent(attachmentId)}/attachments/0`);
