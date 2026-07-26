@@ -1028,6 +1028,27 @@ Sent view (`lower(from_addr) = V`), never delivered-set based. Unscoped queries 
 are unchanged. **Edge (accepted, documented):** a true self-send (V to V only) stays
 Sent-only for V, born seen; correct, you wrote it.
 
+**`to=` under a bound SESSION is a recipient FILTER, not the viewer (#422).** With a
+session the ACCOUNT is the viewer (the boundary is "delivered to V or authored by V"),
+so `to=` no longer answers "whose mailbox is this". It is applied as ordinary
+delivered-set membership ANDed INSIDE that boundary, which is the same predicate `to=`
+means on every other auth path:
+
+```sql
+-- session viewer V, caller filter to=X
+(<account boundary for V>) AND COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || :X || ',%'
+```
+
+It can only ever NARROW the answer: a session asking `to=` another account's address gets
+an empty page, never that account's mail. It composes with `lens` (`lens=sent&to=X` is "my
+sent mail that went to X") and with `direction`, and it does NOT move the seen projection
+key, which stays the session identity unless `seenFor` says otherwise. Before #422 the
+parameter was accepted and then dropped: a session that filtered by correspondent got the
+UNFILTERED page back with no way to tell (the same false-PASS family as the swallowed
+`direction` in section 1). Role addresses are handled ahead of this rule: a session
+`to=R` for a role R the session is a member of is rewritten into the role boundary
+(#425) and never reaches the account-boundary path.
+
 **Why it moved (#403).** As first shipped, this predicate was implicit: `to=V` +
 `direction=inbound` WAS the lens. That made the plain filter unexpressible -- a caller asking
 "what actually arrived for `abuse@`" got the stored SENT copy of a message addressed to
@@ -1155,7 +1176,40 @@ the two compose by construction (login -> V, then roles(V)).
 - **Interaction with 10.2b:** `FILE_ALSO_UNDER` adds an owner to the DELIVERED SET at
   ingest, so a deployment running both shows role mail in the owner INBOX as well as the
   role folder. Once a role has a folder, drop it from `FILE_ALSO_UNDER`.
-- **Webmail** scopes to the bound session identity and does not model role membership
-  yet; parity is tracked separately.
+- **Webmail (#425)** reaches the same queues, so the two human doors cannot disagree
+  about what one person may see. The Worker gained `POSTERN_VIEWER_ROLES`, a MIRROR of
+  `POSTERN_IMAP_VIEWER_ROLES`: same `role=member+member` syntax, same refusal set, read
+  at the SESSION layer. They are two vars because the door must parse membership at
+  startup and must not depend on the Worker being reachable to do it.
+  - **Membership answer:** `GET /api/folders` under a bound session appends one entry per
+    role that identity is a member of -- `{ id: "role:<address>", label: <local part>,
+    role: <address>, count, unread }` -- after the fixed personal set. Enumeration is
+    session-only (a static token is estate-scoped already and reads the queue directly).
+    The response is a projection for the rail, NEVER the authorization: every role read
+    is checked again at its own route against the same map.
+  - **Read:** a session read naming `to=R`, where R is a role that session is a member
+    of, swaps the account boundary for the role ARRIVAL view (`to=R` + `lens=inbox`) with
+    `seenFor=V` derived SERVER-side, which is byte for byte the call the door makes. Any
+    OTHER `to=` value keeps its existing behavior untouched (see #422), so a non-member
+    gets the same answer for a role address as for any address: the refusal is never an
+    existence oracle. A role read that also names `lens=sent`, a `direction=`, or a
+    durable `mailbox=` is `E_VALIDATION_ERROR` -- a queue has one view, not a folder set.
+  - **Single message, attachment and thread** reads resolve against the SET (V plus its
+    roles); `search` takes the same swap. The WRITE paths (delete, flags, move) stay on V
+    alone, so a queue message is simply not accessible to them and is skipped -- the same
+    read-plus-`\Seen` posture the door enforces with a tagged NO.
+  - **Seen:** a webmail mark-read writes `for=V` (#410) and never touches `messages.seen`
+    for a queue message, so one member reading is never the queue being handled.
+  - **You answer the queue as YOURSELF.** Reply and forward from a role view send under
+    the session identity, not the role address; sending AS a role address is a send-
+    identity question this contract does not model. The page states this in the view.
+  - **Fail-closed:** an unset or UNPARSEABLE map serves no queue at all -- one bad entry
+    drops the WHOLE map (a half-applied membership map is indistinguishable from "that
+    person is not on the queue"), logged once naming the offending entry. Contrast
+    `FILE_ALSO_UNDER` (10.2b), which skips per entry because it sits on the DELIVERY
+    path where refusing costs mail; this is a READ path, where refusing costs access.
+  - **Operator:** `GET /api/roles` (`both` scope) prints the parsed map, so the Worker
+    map and the door map can be DIFFED instead of assumed. Keep the two equal; deploy the
+    Worker first, then the door, the same ordering rule the door half already documents.
 
 `/api/folders` unread counts (#352) MUST use effective seen when they land.

@@ -29,8 +29,16 @@ export POSTERN_API_TOKEN=<read-scoped token>
 and the env vars above. Full tool list, send opt-in, and per-identity send:
 [mcp/README.md](../mcp/README.md).
 
-**Python:** CLI (`postern ping`, `postern list`, `postern search`, `postern send`, ...)
-and importable `PosternClient`. Details: [clients/python/README.md](../clients/python/README.md).
+**Python:** CLI (`postern ping`, `postern list`, `postern search`, `postern send`,
+`postern folders`, `postern seen`, `postern flags`, `postern move`, `postern delete`,
+`postern drafts ...`) and importable `PosternClient`. It covers the whole token-gated
+surface: send/reply with attachments (base64 over JSON), the full search filter set
+(`mode` incl. `substr` + `field`, `direction`/`lens`, `to`/`from`, `mailbox`, `seenFor`,
+`after`/`before`, `hasAttachment`, `seen`), durable folders and read state
+(`/api/messages/seen`, `/flags`, `/move`, `/api/folders`), hard delete, and the
+identity-owned drafts box (`/api/drafts`, which needs a token bound to an identity, see
+[SEND-IDENTITIES.md](SEND-IDENTITIES.md); a static operator token is refused with
+`E_IDENTITY_REQUIRED`). Details: [clients/python/README.md](../clients/python/README.md).
 
 Release mechanics: push tag `postern-mcp-v*` for npm (`.github/workflows/npm-mcp.yml`);
 push tag `v*` with `clients/python/pyproject.toml` synced to the same version for PyPI

@@ -38,6 +38,10 @@ const DIRECTION = z.enum(["inbound", "outbound"]);
 // Needs `to` as the viewer address, and cannot be combined with `direction`.
 const LENS = z.enum(["inbox", "sent"]);
 const MODE = z.enum(["fts", "substr", "semantic", "hybrid"]);
+// Durable-folder scope (worker #352/#354, api.ts mailbox= param): "all" = every
+// placement, archive|trash|junk = that placement only; omitted = the default
+// (unfoldered) placement, unchanged.
+const MAILBOX = z.enum(["archive", "trash", "junk", "all"]);
 // How a reply picks its recipients (worker ReplyRequest.mode, mailbox.ts): 'reply' is
 // the sender only, 'replyAll' derives the original To/Cc server-side from STORED state,
 // excluding the sender. Named for the worker field, not the tool.
@@ -91,7 +95,10 @@ export const READ_TOOLS: ToolDef[] = [
       "fact, so an inbound filter never returns a sent copy. For one address's own " +
       "view pass to=<address> plus lens=inbox|sent. mode 'fts' is exact keyword " +
       "matching: every word must appear, so no match means no result (use it to prove " +
-      "a message is NOT there). This is the primary tool for finding mail by topic.",
+      "a message is NOT there). Also filter by sender (from), durable folder (mailbox), " +
+      "date range (after/before, inclusive ISO), attachment presence (hasAttachment), " +
+      "and read state (seen) -- e.g. seen=false plus mailbox=archive answers 'unread " +
+      "mail in Archive'. This is the primary tool for finding mail by topic.",
     inputSchema: {
       query: z.string().min(1).describe("the search text"),
       mode: MODE.optional().describe("search mode; defaults to hybrid. substr is a literal substring match (use with field)"),
@@ -99,38 +106,77 @@ export const READ_TOOLS: ToolDef[] = [
       limit: z.number().int().positive().max(200).optional().describe("max results (default server-side ~50)"),
       direction: DIRECTION.optional().describe("filter on the STORED direction: received (inbound) or sent (outbound)"),
       to: z.string().optional().describe("viewer address: scope the search to one address's mail"),
+      from: z.string().optional().describe("filter by sender address"),
       lens: LENS.optional().describe("viewer view (needs to=): inbox = delivered to them and not written by them; sent = written by them. Not combinable with direction"),
+      mailbox: MAILBOX.optional().describe("filter by durable folder placement: archive, trash, junk, or all (every placement); omitted = the default unfoldered placement"),
+      after: z.string().optional().describe("inclusive ISO date lower bound on the message date"),
+      before: z.string().optional().describe("inclusive ISO date upper bound on the message date"),
+      hasAttachment: z.boolean().optional().describe("true = only messages with >=1 attachment; false = only messages with none"),
+      seen: z.boolean().optional().describe("filter on read state: true = seen, false = unread"),
       cursor: z.string().optional().describe("opaque pagination cursor from a previous page"),
     },
     handler: async (client, a) => {
       const mode: SearchMode = a.mode ?? "hybrid";
       const field: SearchField | undefined = a.field;
-      const page = await client.search({ q: a.query, mode, field, limit: a.limit, cursor: a.cursor, direction: a.direction, to: a.to, lens: a.lens });
-      return { query: a.query, mode, field: field ?? null, direction: a.direction ?? null, to: a.to ?? null, lens: a.lens ?? null, count: page.items.length, cursor: page.cursor, results: page.items };
+      const page = await client.search({
+        q: a.query,
+        mode,
+        field,
+        limit: a.limit,
+        cursor: a.cursor,
+        direction: a.direction,
+        to: a.to,
+        from: a.from,
+        lens: a.lens,
+        mailbox: a.mailbox,
+        after: a.after,
+        before: a.before,
+        hasAttachment: a.hasAttachment,
+        seen: a.seen,
+      });
+      return {
+        query: a.query,
+        mode,
+        field: field ?? null,
+        direction: a.direction ?? null,
+        to: a.to ?? null,
+        from: a.from ?? null,
+        lens: a.lens ?? null,
+        mailbox: a.mailbox ?? null,
+        after: a.after ?? null,
+        before: a.before ?? null,
+        hasAttachment: a.hasAttachment ?? null,
+        seen: a.seen ?? null,
+        count: page.items.length,
+        cursor: page.cursor,
+        results: page.items,
+      };
     },
   },
   {
     name: "mailbox_list",
     scope: "read",
     description:
-      "List messages with optional filters (to, from, direction, thread) newest-first, " +
-      "paginated via cursor. `direction` is the STORED fact, so to=<addr> with " +
-      "direction=inbound answers 'what actually ARRIVED for this address' and never " +
-      "returns our own sent copy; to=<addr> alone returns everything delivered to it, " +
-      "and to=<addr> with lens=inbox is that address's INBOX view (arrivals plus " +
-      "same-domain mail others sent it). Use mailbox_search for topic search; use this " +
-      "to browse or filter by participant/folder.",
+      "List messages with optional filters (to, from, direction, thread, mailbox) " +
+      "newest-first, paginated via cursor. `direction` is the STORED fact, so to=<addr> " +
+      "with direction=inbound answers 'what actually ARRIVED for this address' and " +
+      "never returns our own sent copy; to=<addr> alone returns everything delivered to " +
+      "it, and to=<addr> with lens=inbox is that address's INBOX view (arrivals plus " +
+      "same-domain mail others sent it). `mailbox` filters by durable folder (archive, " +
+      "trash, junk, or all). Use mailbox_search for topic search; use this to browse or " +
+      "filter by participant/folder.",
     inputSchema: {
       to: z.string().optional().describe("filter by recipient address"),
       from: z.string().optional().describe("filter by sender address"),
       direction: DIRECTION.optional().describe("filter on the STORED direction: inbound (received) or outbound (sent)"),
       lens: LENS.optional().describe("viewer view (needs to=): inbox = delivered to them and not written by them; sent = written by them. Not combinable with direction"),
+      mailbox: MAILBOX.optional().describe("filter by durable folder placement: archive, trash, junk, or all (every placement); omitted = the default unfoldered placement"),
       thread: z.string().optional().describe("filter to a thread id"),
       limit: z.number().int().positive().max(200).optional().describe("max results (default ~50)"),
       cursor: z.string().optional().describe("opaque pagination cursor"),
     },
     handler: async (client, a) => {
-      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, thread: a.thread, limit: a.limit, cursor: a.cursor });
+      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, limit: a.limit, cursor: a.cursor });
       return { count: page.items.length, cursor: page.cursor, messages: page.items };
     },
   },

@@ -803,6 +803,41 @@ export async function getAttachment(
   return { body: obj.body, filename: row.filename, mime: row.mime, size: row.size };
 }
 
+/** Normalize one viewer address, or a viewer SET, to lower-cased unique addresses.
+ *
+ *  A bound webmail session is ONE person, but since #425 it can also read the role
+ *  queues that person is a member of, so every READ-side access check takes a set. The
+ *  single-address form stays exactly what it was. */
+function viewerList(viewer: string | readonly string[] | undefined): string[] {
+  if (!viewer) return [];
+  const raw = Array.isArray(viewer) ? viewer : [viewer as string];
+  const out: string[] = [];
+  for (const entry of raw) {
+    const value = entry?.trim().toLowerCase();
+    if (value && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+/** "delivered to V, or authored by V" for ANY address in the viewer set (#425).
+ *
+ *  One address produces the exact pre-#425 fragment, bind for bind, so every existing
+ *  call is byte-identical; a set produces a parenthesised OR of the same fragment, so a
+ *  role member reaches ROLE mail and nothing else widens. An EMPTY set produces no SQL,
+ *  and each call site decides what that means: estate for the optional-scope writers, a
+ *  flat refusal for messageAccessible. */
+function accessClause(viewers: readonly string[]): { sql: string; binds: string[] } {
+  if (viewers.length === 0) return { sql: "", binds: [] };
+  const one =
+    "(COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)";
+  const binds: string[] = [];
+  for (const viewer of viewers) binds.push(viewer, viewer);
+  return {
+    sql: viewers.length === 1 ? one : `(${viewers.map(() => one).join(" OR ")})`,
+    binds,
+  };
+}
+
 /**
  * Set the read state (#seen) on a set of messages by message_id, returning how many
  * rows changed. The single writer for the seen flag: the IMAP \Seen store, a webmail
@@ -816,22 +851,26 @@ export async function getAttachment(
  * SESSION-authed callers only; a Bearer caller (the IMAP door) omits it and keeps the
  * pre-#410 estate behavior byte for byte. An id the viewer cannot see is skipped, not
  * refused, exactly as an unknown id is.
+ *
+ * Since #425 it may be a SET (the session identity PLUS the role queues that identity
+ * belongs to), so a member can mark role mail read. `forRecipient` is unaffected and
+ * stays the ONE person the override belongs to: the widened set decides which messages
+ * are REACHABLE, never whose read state is written.
  */
 export async function setSeen(
   env: Env,
   messageIds: string[],
   seen: boolean,
   forRecipient?: string,
-  viewer?: string,
+  viewer?: string | readonly string[],
 ): Promise<number> {
   if (messageIds.length === 0) return 0;
   const placeholders = messageIds.map(() => "?").join(", ");
   // The viewer-accessibility predicate, identical to setFlags/moveMessages and to
   // messageAccessible: the message was delivered to the viewer, or the viewer sent it.
-  const access = viewer
-    ? " AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
-    : "";
-  const accessBinds = viewer ? [viewer.toLowerCase(), viewer.toLowerCase()] : [];
+  const clause = accessClause(viewerList(viewer));
+  const access = clause.sql ? ` AND ${clause.sql}` : "";
+  const accessBinds = clause.binds;
 
   // Scoped (#350): mark read/unread for ONE recipient -- upsert a sparse override
   // in message_seen_by, never touching messages.seen (the estate/legacy flag).
@@ -1289,19 +1328,29 @@ async function deleteAllDraftAttachments(env: Env, draftId: string, identity: st
     .run();
 }
 
+/** Can this viewer SEE this message at all?
+ *
+ *  `identity` may be ONE address or a SET (#425: a session identity plus the role
+ *  queues it belongs to), so a message opened from a role view resolves instead of
+ *  404ing. Write paths deliberately keep passing the single identity. */
 export async function messageAccessible(
   env: Env,
   id: string,
-  identity: string,
+  identity: string | readonly string[],
   requireTrash = false,
 ): Promise<boolean> {
+  const clause = accessClause(viewerList(identity));
+  // An EMPTY set is refused rather than read as estate: this runs only to SCOPE a
+  // caller, so "no addresses" can only mean the scope is unanswerable, and the
+  // fail-closed answer to that is no.
+  if (!clause.sql) return false;
   const row = await env.DB.prepare(
     "SELECT message_id FROM messages WHERE message_id = ? " +
-      "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?) " +
+      `AND ${clause.sql} ` +
       (requireTrash ? "AND mailbox = 'trash' " : "") +
       "LIMIT 1",
   )
-    .bind(id, identity.toLowerCase(), identity.toLowerCase())
+    .bind(id, ...clause.binds)
     .first<{ message_id: string }>();
   return !!row;
 }
@@ -1386,22 +1435,26 @@ export async function get(env: Env, messageId: string): Promise<StoredMessage | 
   return rowToMessage(row, await attachmentsFor(env.DB, messageId));
 }
 
-/** All messages in a thread, oldest first. */
-export async function thread(env: Env, threadId: string, viewer?: string): Promise<StoredMessage[]> {
-  const owner = viewer?.trim().toLowerCase();
+/** All messages in a thread, oldest first.
+ *
+ *  `viewer` may be ONE address or a SET (#425), matching messageAccessible: a thread
+ *  reached from a role view is scoped to the member PLUS its role queues. Absent =
+ *  estate, exactly as before. */
+export async function thread(
+  env: Env,
+  threadId: string,
+  viewer?: string | readonly string[],
+): Promise<StoredMessage[]> {
+  const clause = accessClause(viewerList(viewer));
   const res = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
             delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
             projected_size, projection_version,
             flagged, answered, mailbox, trashed_at
-       FROM messages WHERE thread_id = ? ${
-         owner
-           ? "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
-           : ""
-       } ORDER BY date, id`,
+       FROM messages WHERE thread_id = ? ${clause.sql ? `AND ${clause.sql}` : ""} ORDER BY date, id`,
   )
-    .bind(threadId, ...(owner ? [owner, owner] : []))
+    .bind(threadId, ...clause.binds)
     .all<MessageRow>();
   const rows = res.results ?? [];
   const out: StoredMessage[] = [];
@@ -1506,25 +1559,47 @@ function recipientWhere(
 
 /** Account-owned view for a bound webmail session. Same #403 split as
  *  recipientWhere: `lens` names the Inbox/Sent folder views, and `direction`
- *  filters the stored wire fact inside the account boundary. */
+ *  filters the stored wire fact inside the account boundary.
+ *
+ *  `recipient` is the caller's `to=` (#422). Under a session the ACCOUNT is the
+ *  viewer, so `to=` is no longer "whose mailbox is this"; it is an ordinary
+ *  recipient FILTER, and it is ANDed INSIDE the boundary, never widening it. It
+ *  used to be accepted and then dropped on the floor: a session asking for one
+ *  correspondent got the unfiltered page back with no way to tell (the #403
+ *  defect-2 family, a filter the answer was not filtered by).
+ *
+ *  It composes with the role branch (#425): a session `to=R` for a role R the
+ *  session is a member of is rewritten upstream into the ROLE boundary (to=R,
+ *  lens=inbox, seenFor=session) and reaches recipientWhere with no accountViewer,
+ *  so it never gets here. Everything else falls through to this rule. */
 function accountWhere(
   viewer: string,
   direction: "inbound" | "outbound" | undefined,
   lens?: ViewLens,
+  recipient?: string,
 ): { membership: string | null; membershipBinds: unknown[]; direction: string | null; directionBinds: unknown[] } {
   const delivered = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
+  // The recipient filter is delivered-set membership, exactly the predicate `to=`
+  // means on every other auth path (recipientWhere), so one address filters the
+  // same way whether the caller holds a session or a token.
+  const filtered = (base: string | null, binds: unknown[]) => {
+    if (!recipient) return { membership: base, membershipBinds: binds };
+    return base
+      ? { membership: `(${base}) AND ${delivered}`, membershipBinds: [...binds, recipient] }
+      : { membership: delivered, membershipBinds: [recipient] };
+  };
   if (lens === "inbox") {
     return {
-      membership: delivered,
-      membershipBinds: [viewer],
+      ...filtered(delivered, [viewer]),
       direction: "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))",
       directionBinds: [viewer],
     };
   }
   if (lens === "sent") {
+    // Sent is sender-based, so membership is free for the recipient filter to
+    // use: to=X under lens=sent is "my sent mail that went to X".
     return {
-      membership: null,
-      membershipBinds: [],
+      ...filtered(null, []),
       direction: "lower(m.from_addr) = ?",
       directionBinds: [viewer],
     };
@@ -1532,8 +1607,7 @@ function accountWhere(
   // Account boundary (delivered to V or authored by V), plus the exact stored
   // direction when one was asked for.
   return {
-    membership: `(${delivered} OR lower(m.from_addr) = ?)`,
-    membershipBinds: [viewer, viewer],
+    ...filtered(`(${delivered} OR lower(m.from_addr) = ?)`, [viewer, viewer]),
     direction: direction ? "m.direction = ?" : null,
     directionBinds: direction ? [direction] : [],
   };
@@ -1685,7 +1759,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   // AFTER from/thread so the bind order stays stable. ONE builder for list, fts,
   // and substr search.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction, q.lens)
+    ? accountWhere(accountViewer, q.direction, q.lens, recipientViewer)
     : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
@@ -1745,17 +1819,33 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   return { items, cursor };
 }
 
+export type SystemFolderId = "inbox" | "sent" | "all" | "drafts" | "trash" | "junk" | "archive";
+
 export interface FolderSummary {
-  id: "inbox" | "sent" | "all" | "drafts" | "trash" | "junk" | "archive";
+  /** A fixed personal folder, or `role:<address>` for a role queue (#425). */
+  id: SystemFolderId | `role:${string}`;
   label: string;
   count: number;
   unread: number;
   /** Authoritative durable-folder UIDVALIDITY; absent on arrival views. */
   uidValidity?: number;
+  /** The role ADDRESS this entry is the queue for (#425); absent on personal folders.
+   *  Its presence is what tells a client the view is a shared queue, so the client
+   *  never has to parse the id or carry its own list of role addresses. */
+  role?: string;
 }
 
-/** Server-authoritative folder counts using the same placement predicates as list. */
-export async function folders(env: Env, viewer?: string): Promise<FolderSummary[]> {
+/** Server-authoritative folder counts using the same placement predicates as list.
+ *
+ *  `roles` (#425) appends one entry per role queue the VIEWER may read, after the fixed
+ *  personal set and never merged into Inbox. Membership is decided by the caller
+ *  (api.ts), the only layer that knows the request is a bound session; this function
+ *  counts what it is handed and asserts nothing about who may see it. */
+export async function folders(
+  env: Env,
+  viewer?: string,
+  roles: readonly string[] = [],
+): Promise<FolderSummary[]> {
   const identity = viewer?.trim().toLowerCase() || undefined;
   const access = identity
     ? "(COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%' OR lower(m.from_addr) = ?)"
@@ -1812,6 +1902,37 @@ export async function folders(env: Env, viewer?: string): Promise<FolderSummary[
     unread: 0,
     uidValidity: draftCounter.uidvalidity,
   });
+  // Role queues (#425). The count is the role ARRIVAL view -- delivered to R, with the
+  // inbox lens taken relative to R (so a same-domain send TO the queue counts, and the
+  // queue own outbound does not) -- which is byte for byte the predicate the IMAP door
+  // role folder reads with. Read state is keyed on the MEMBER, so two members of one
+  // queue never inherit each other unread counts, and the rail agrees with the list.
+  //
+  // One query per configured role. The bound is the size of the operator config map
+  // (POSTERN_VIEWER_ROLES), never anything a caller sends, so the rail polling this
+  // endpoint cannot inflate the work.
+  for (const raw of identity ? roles : []) {
+    const role = raw.trim().toLowerCase();
+    if (!role) continue;
+    const roleSeen = seenProjection(identity);
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS count, SUM(CASE WHEN ${roleSeen.expr}=0 THEN 1 ELSE 0 END) AS unread
+         FROM messages m
+        WHERE m.mailbox IS NULL
+          AND COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'
+          AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))`,
+    )
+      .bind(...roleSeen.binds, role, role)
+      .first<{ count: number; unread: number | null }>();
+    const at = role.indexOf("@");
+    result.push({
+      id: `role:${role}`,
+      label: at > 0 ? role.slice(0, at) : role,
+      role,
+      count: Number(row?.count ?? 0),
+      unread: Number(row?.unread ?? 0),
+    });
+  }
   return result;
 }
 
@@ -1918,7 +2039,7 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   // Recipient view + named lens (#350/#178/#403); membership then direction, the
   // same order list/substr use, so fts shares the one view builder.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction, q.lens)
+    ? accountWhere(accountViewer, q.direction, q.lens, recipientViewer)
     : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
@@ -2032,7 +2153,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
 
   // Recipient view + named lens (#350/#178/#403), the same builder as list/fts.
   const rv = accountViewer
-    ? accountWhere(accountViewer, q.direction, q.lens)
+    ? accountWhere(accountViewer, q.direction, q.lens, recipientViewer)
     : recipientWhere(recipientViewer, q.direction, q.lens);
   if (rv.membership) {
     where.push(rv.membership);
@@ -2156,6 +2277,11 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
  *    EXACT stored direction (#403), never one silently standing in for the other.
  *  - lens=sent: sender-based (from == V), membership not required.
  *  - from= (#366): same lower(from_addr) substring match as list/fts/substr.
+ *  - accountViewer + to= (#422): the account boundary decides WHAT the caller may
+ *    see; `to=` is then an ordinary recipient filter ANDed inside it, matching the
+ *    accountWhere(recipient) predicate the SQL modes push down. This mirror is the
+ *    reason the filter is applied before the lens branches: semantic/hybrid must
+ *    not answer a filtered question with an unfiltered page either.
  */
 function passesViewerScope(
   m: StoredMessageSummary,
@@ -2171,6 +2297,10 @@ function passesViewerScope(
   }
   const bareFrom = (parseRecipients(m.from)[0] ?? "").toLowerCase();
   const scope = accountViewer ?? viewer;
+  // #422: under an account boundary, `viewer` here is the caller's to= RECIPIENT
+  // FILTER, not the viewer, so it applies on top of every branch below (including
+  // lens=sent, whose early return would otherwise swallow it).
+  if (accountViewer && viewer && !m.deliveredTo.some((a) => a.toLowerCase() === viewer)) return false;
   if (scope && lens === "sent") return bareFrom === scope;
   if (accountViewer) {
     const delivered = m.deliveredTo.map((a) => a.toLowerCase());

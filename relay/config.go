@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -365,6 +366,16 @@ func loadConfig() (Config, error) {
 		return c, fmt.Errorf("nothing to do: set POSTERN_INGEST_URL (inbound), SUBMISSION_LISTENERS (submission), or POSTERN_RELAY_HTTP_LISTEN (dispatch)")
 	}
 
+	// Loud startup warning for the legacy inbound path (#414): with
+	// POSTERN_INGEST_URL unset and EMAIL_WORKER_URL set, every SMTP-received
+	// message is POSTed to the worker's legacy /send (OUTBOUND) endpoint instead
+	// of /ingest -- i.e. received mail is misrouted out the send door. The path
+	// stays supported this release (existing deployments keep working through
+	// the rename), but it must not go silent.
+	if w := c.legacyInboundWarning(); w != "" {
+		log.Print(w)
+	}
+
 	return c, nil
 }
 
@@ -384,6 +395,28 @@ func (c Config) inboundMode() string {
 		return "ingest"
 	}
 	return "legacy-send"
+}
+
+// legacyInboundWarning returns the startup deprecation warning to emit when the
+// relay is configured on the legacy inbound path (POSTERN_INGEST_URL unset,
+// EMAIL_WORKER_URL set): every SMTP-received message is posted to the worker's
+// /send (OUTBOUND) endpoint instead of /ingest, i.e. inbound mail is misrouted
+// out the send door (#414). Returns "" when the modern /ingest seam is
+// configured, or when inbound is not active at all, so the caller only logs
+// when this is non-empty.
+func (c Config) legacyInboundWarning() string {
+	if !c.inboundActive() || c.IngestURL != "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"DEPRECATED: POSTERN_INGEST_URL is unset but EMAIL_WORKER_URL=%q is set -- "+
+			"inbound mail received by this relay is POSTed to the worker's legacy "+
+			"/send (OUTBOUND) endpoint instead of /ingest, i.e. RECEIVED mail is being "+
+			"misrouted out the send door. Set POSTERN_INGEST_URL (+ "+
+			"POSTERN_TRANSPORT_TOKEN) to use the modern /ingest seam; this legacy "+
+			"path is deprecated and may be removed in a future release.",
+		c.WorkerURL,
+	)
 }
 
 func env(key, def string) string {

@@ -8,7 +8,7 @@ import (
 	"net/http"
 )
 
-const userAgent = "skyphusion-email-relay/0.2.0"
+const userAgent = "postern-relay"
 
 // EmailPayload mirrors the worker's legacy EmailRequest JSON shape (the pre-M3
 // /send path, kept for back-compat).
