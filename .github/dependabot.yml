@@ -60,6 +60,17 @@ updates:
           - "vitest"
           - "@vitest/*"
         update-types: ["minor", "patch"]
+  - package-ecosystem: npm
+    directory: /webmail/e2e
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: gomod
     directory: /relay
     schedule:

@@ -11,6 +11,23 @@ name: Adversarial audit
 #
 # Use ADVERSARIAL_AUDIT_CF_API_TOKEN, not secrets.CLOUDFLARE_API_TOKEN: repos with a
 # repo-level deploy token for wrangler shadow the org name and lack Workers AI Read.
+#
+# TRUST MODEL (#420). What is deliberate and stays: `pull_request`, never
+# pull_request_target; fork PRs are skipped by the same-repo gate and get no
+# secrets regardless; advisory only, not a required check; nothing untrusted is
+# interpolated into a run: block.
+#
+# Third-party actions are pinned BY COMMIT SHA, not by a mutable major tag: a
+# major tag is a moving pointer, so an upstream repoint would reach this job's
+# secrets with no change here. The version each SHA corresponds to is in the
+# comment beside it; bump both together.
+#
+# KNOWN RESIDUAL, tracked in #436: because the trigger is `pull_request`, GitHub
+# runs the copy of THIS FILE that lives on the PR branch, so any write-access
+# identity can land a branch that exfiltrates the fleet-chezmoi deploy key and
+# the two CF tokens. No in-file mitigation fixes that (the branch owns the file);
+# the fix is to stop taking the definition from the PR branch (workflow_run) or
+# to make the audit script public and drop the key. #436 carries both options.
 
 on:
   pull_request:
@@ -36,35 +53,46 @@ concurrency:
 
 jobs:
   audit:
+    # Skip dependabot by PR AUTHOR, not by github.actor (#420 item 3): actor is
+    # whoever triggered the latest run, so a human pushing one commit to a
+    # dependabot branch used to switch the full audit on for that branch. The
+    # author is a property of the PR and does not flip.
     if: >-
-      github.actor != 'dependabot[bot]' &&
-      (github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # ONE place for the fleet-chezmoi pin (#420 item 2). It used to be written
+      # twice (the checkout ref and the verify step's expected value), so a bump
+      # needed two synchronized edits and a half-bump hard-failed the run.
+      # Bump via fleet-chezmoi system/ci/adversarial-audit-public.yml.
+      FLEET_CHEZMOI_PIN: c1cdb60815d90ecee1da5b99401e79c32d6e2fbf
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Checkout audit script (fleet-chezmoi)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: skyphusion-labs/fleet-chezmoi
-          # Pinned merge SHA; bump via fleet-chezmoi system/ci/adversarial-audit-public.yml
-          ref: c1cdb60815d90ecee1da5b99401e79c32d6e2fbf
+          ref: ${{ env.FLEET_CHEZMOI_PIN }}
           path: fleet-chezmoi
           ssh-key: ${{ secrets.FLEET_CHEZMOI_READ_TOKEN }}
 
+      # Read-back, not provenance: it confirms the tree on disk is the commit we
+      # asked for. Cheap, and it keeps the pin honest if the checkout step ever
+      # resolves something other than what the ref says.
       - name: Verify fleet-chezmoi pin
         working-directory: fleet-chezmoi
         run: |
           set -euo pipefail
-          expected="c1cdb60815d90ecee1da5b99401e79c32d6e2fbf"
           actual="$(git rev-parse HEAD)"
-          if [[ "$actual" != "$expected" ]]; then
-            echo "::error::fleet-chezmoi pin mismatch: expected ${expected} got ${actual}"
+          if [[ "$actual" != "$FLEET_CHEZMOI_PIN" ]]; then
+            echo "::error::fleet-chezmoi pin mismatch: expected ${FLEET_CHEZMOI_PIN} got ${actual}"
             exit 1
           fi
           echo "fleet-chezmoi pin OK (${actual:0:7})"
@@ -99,13 +127,16 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           bash fleet-chezmoi/scripts/adversarial-audit/post-pr-comment.sh \
-            "${{ github.event.pull_request.number }}" \
+            "$PR_NUMBER" \
             audit-report.md
 
+      # v4 still runs on the deprecated Node 20 runtime; v7 is the current major
+      # (same name/path inputs, so this is a runtime bump, not an API change).
       - name: Upload audit artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: adversarial-audit
           path: |

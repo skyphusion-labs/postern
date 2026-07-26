@@ -11,10 +11,18 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same ref supersedes an in-flight run (matches
+# relay-image.yml / imap-image.yml / corpus-notify.yml): rapid pushes stop
+# stacking duplicate 6-job matrices.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
 
   inbound:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: inbound
@@ -26,11 +34,17 @@ jobs:
           cache: npm
           cache-dependency-path: inbound/package-lock.json
       - run: npm ci
+      # Vulnerability gate (#419): mirrors the govulncheck/pip-audit convention on
+      # the npm surfaces, which previously had none (Dependabot HIGH alerts could
+      # sit open with nothing in CI able to see them).
+      - name: npm audit (dependency vulnerability gate)
+        run: npm audit --audit-level=high
       - run: npm run typecheck
       - run: npm test
 
   relay:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: relay
@@ -58,6 +72,7 @@ jobs:
 
   imap:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: imap
@@ -87,6 +102,7 @@ jobs:
 
   clients-python:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: clients/python
@@ -113,6 +129,7 @@ jobs:
 
   mcp:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: mcp
@@ -122,6 +139,9 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
+      # Vulnerability gate (#419): mirrors the govulncheck/pip-audit convention.
+      - name: npm audit (dependency vulnerability gate)
+        run: npm audit --audit-level=high
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
@@ -129,6 +149,7 @@ jobs:
   # Webmail v2 phase 6 (#355): Playwright critical journeys (mocked /api).
   webmail-e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: webmail/e2e
@@ -140,6 +161,9 @@ jobs:
           cache: npm
           cache-dependency-path: webmail/e2e/package-lock.json
       - run: npm ci
+      # Vulnerability gate (#419): mirrors the govulncheck/pip-audit convention.
+      - name: npm audit (dependency vulnerability gate)
+        run: npm audit --audit-level=high
       - run: npx playwright install --with-deps chromium
       - run: npm test
 
@@ -150,6 +174,7 @@ jobs:
   # so a passing run cannot be a dead path.
   release-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -165,6 +190,7 @@ jobs:
     needs: [inbound, relay, imap, clients-python, mcp, webmail-e2e, release-gate]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require all component jobs
         run: |
