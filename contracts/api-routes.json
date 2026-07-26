@@ -163,7 +163,7 @@
       "match": "exact",
       "scope": "imap",
       "auth": "bearer",
-      "note": "folder sent|archive|trash|junk; rawMime is base64"
+      "note": "folder sent|archive|trash|junk; rawMime is base64, refused 413 E_PAYLOAD_TOO_LARGE (before parse) past 22 MiB decoded (#493)"
     },
     {
       "id": "imap-roles",

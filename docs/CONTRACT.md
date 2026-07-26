@@ -347,7 +347,7 @@ none touches D1 directly (#25, #26).
 | DELETE | `/api/drafts/{id}/attachments/{attachmentId}` | remove one staged attachment and its R2 bytes | webmail v2 (#353) |
 | POST | `/api/drafts/{id}/send` | load staged attachments, send through the one send core, then remove the draft and staging only after success | webmail v2 (#352/#353) |
 | GET/POST/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity | webmail v2 (#352) |
-| POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it | webmail v2 (#352) |
+| POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it; `rawMime` decoding past **22 MiB** is `413 E_PAYLOAD_TOO_LARGE` BEFORE the MIME is parsed | webmail v2 (#352/#493) |
 | DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope) | (#278/#352) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
@@ -386,6 +386,18 @@ both directions:
 **Adding or renaming a route means editing that file in the same commit.** This exists because every
 suite used to mock its own idea of the worker, which is how the published clients drifted a full
 feature generation behind while every suite stayed green.
+
+`POST /api/imap/import` carries a whole message as base64 `rawMime`, and the DECODED size is
+capped at **22 MiB** (`MAX_IMPORT_MIME_BYTES` in `inbound/src/api.ts`), checked BEFORE the MIME is
+parsed (#493). Past it the answer is `413 { ok:false, error:"E_PAYLOAD_TOO_LARGE" }`, which the IMAP
+door turns into a tagged `NO` on the APPEND; it is never a 5xx, because 5xx on these seams means
+transient infra and is load-bearing for relay retry semantics (#429/#442). The number is derived,
+not arbitrary: `rawMime` rides inside the JSON body, which is bounded at 30 MiB, and base64 spends 4
+bytes per 3, so the largest payload that can reach the handler already decodes to about 22.5 MiB.
+22 MiB therefore refuses nothing that can arrive today while giving the parser a STATED bound rather
+than an arithmetic side effect of the body cap, and it stays reachable, so the refusal is provable
+against the real handler instead of being dead code. A larger APPEND ceiling means raising the body
+cap and this together, in that order.
 
 `POST /api/admin/reindex` is the **backfill** (#116 ws4): it (re)embeds the EXISTING mailbox into
 the semantic index so history predating the live index -- and all historical outbound -- becomes

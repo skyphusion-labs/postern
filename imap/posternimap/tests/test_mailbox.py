@@ -416,6 +416,62 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(self.transport.drafts[0]["subject"], "draft")
         self.assertEqual(self.transport.drafts[0]["identity"], "a@example.com")
 
+    def test_append_over_the_import_size_cap_is_a_loud_refusal(self):
+        # #493: the worker refuses an oversized APPEND with 413 E_PAYLOAD_TOO_LARGE
+        # (never a 5xx, which stays reserved for transient infra). The door must turn
+        # that into an AppendRejectedError -- a tagged IMAP NO -- so the client is
+        # told, rather than the message being silently dropped or the refusal being
+        # read as a retryable server fault. The cap number itself is owned and proved
+        # in inbound/; here the size is lowered so the MAPPING is what is under test.
+        from posternimap.mailbox import AppendRejectedError, PosternMailbox
+        from posternimap.tests.fakes import MAX_IMPORT_MIME_BYTES
+
+        # Control: the fake defaults to the production ceiling, so this test cannot
+        # pass against a fake that is more permissive than the worker.
+        self.assertEqual(self.transport.max_import_mime_bytes, MAX_IMPORT_MIME_BYTES)
+        self.transport.max_import_mime_bytes = 64
+
+        mb = PosternMailbox(
+            self.client,
+            mailbox_filter="trash",
+            imap_client=self.client,
+            identity="a@example.com",
+        )
+        raw = (
+            b"From: a@example.com\r\nTo: b@example.com\r\nSubject: huge\r\n\r\n"
+            + b"p" * 256
+        )
+        d = mb.addMessage(raw, flags=["\\Seen"], date=None)
+        errs = []
+        d.addErrback(errs.append)
+        self.assertEqual(len(errs), 1)
+        self.assertTrue(errs[0].check(AppendRejectedError))
+        self.assertIn("413", str(errs[0].value))
+
+    def test_append_under_the_import_size_cap_still_persists(self):
+        # The positive control for the refusal above: the same APPEND, under the
+        # (lowered) cap, still lands. Without this the test above would pass even if
+        # the door refused every import.
+        from posternimap.mailbox import PosternMailbox
+
+        self.transport.max_import_mime_bytes = 4096
+
+        mb = PosternMailbox(
+            self.client,
+            mailbox_filter="trash",
+            imap_client=self.client,
+            identity="a@example.com",
+        )
+        raw = (
+            b"From: a@example.com\r\nTo: b@example.com\r\nSubject: small\r\n\r\n"
+            + b"p" * 256
+        )
+        d = mb.addMessage(raw, flags=["\\Seen"], date=None)
+        out = []
+        d.addCallback(out.append)
+        self.assertEqual(out, [None])
+        self.assertEqual(self.transport.last_import_payload["folder"], "trash")
+
     def test_append_to_other_placeholder_folder_is_rejected(self):
         # Notes stays a placeholder: APPEND is a loud NO (#109 / #352).
         from twisted.internet import defer

@@ -13,6 +13,13 @@ import re
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
+# LOCKSTEP with inbound/src/api.ts MAX_IMPORT_MIME_BYTES (#493): the worker refuses
+# an /api/imap/import whose rawMime decodes past this, with 413 E_PAYLOAD_TOO_LARGE
+# and before it parses anything. The number itself is owned by the worker and proved
+# there; this copy exists so a door test cannot pass against a fake that is more
+# permissive than production. Change both together.
+MAX_IMPORT_MIME_BYTES = 22 * 1024 * 1024
+
 # Mirrors inbound/src/api.ts requiredScope() for the routes this door calls (#352
 # core unblocker 6): scope-faithful fakes so a test using the WRONG token for a
 # route gets the same 403 the real worker would give, instead of silently working.
@@ -152,6 +159,10 @@ class FakeTransport:
         self.last_move_payload: Optional[Dict[str, Any]] = None
         self.last_flags_payload: Optional[Dict[str, Any]] = None
         self.last_import_payload: Optional[Dict[str, Any]] = None
+        # #493: the worker decoded-MIME ceiling for /api/imap/import. Defaults to the
+        # production number; a test may lower it to exercise the door handling of the
+        # refusal without building a 22 MiB payload.
+        self.max_import_mime_bytes: int = MAX_IMPORT_MIME_BYTES
         self._draft_uid = 1
         # Durable-folder UIDVALIDITY (#352 core unblocker 4): minted once per
         # folder on first touch, like the worker's mailbox_uid_counter, so
@@ -578,6 +589,11 @@ class FakeTransport:
             raw = base64.b64decode(payload.get("rawMime", ""))
         except Exception:
             return 400, json.dumps({"ok": False, "error": "E_VALIDATION_ERROR"}).encode()
+        if len(raw) > self.max_import_mime_bytes:
+            # #493: the decoded-size refusal, checked before anything is parsed.
+            return 413, json.dumps(
+                {"ok": False, "error": "E_PAYLOAD_TOO_LARGE", "message": "over the import limit"}
+            ).encode()
         headers = _parse_raw_mime(raw)
         from_hdr = headers.get("from", "")
         from_addr = _bare_address(from_hdr)

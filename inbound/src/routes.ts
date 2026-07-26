@@ -133,7 +133,7 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     note: "the door has no ambient identity, so it asserts the already-authenticated one on every call" },
   { id: "imap-import", method: "POST", path: "/api/imap/import", match: "exact", scope: "imap",
     auth: "bearer", body: ["identity", "folder", "rawMime"],
-    note: "folder sent|archive|trash|junk; rawMime is base64" },
+    note: "folder sent|archive|trash|junk; rawMime is base64, refused 413 E_PAYLOAD_TOO_LARGE (before parse) past 22 MiB decoded (#493)" },
   { id: "imap-roles", method: "GET", path: "/api/imap/roles", match: "exact", scope: "imap",
     auth: "bearer",
     note: "role membership is single-sourced on the Worker (#438): the door reads this map per login instead of parsing its own mirror var. Same projection as the operator /api/roles, gated on the least-privilege door token" },

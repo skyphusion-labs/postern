@@ -62,6 +62,18 @@ const RETRYABLE = new Set(["E_RATE_LIMIT_EXCEEDED", "E_DELIVERY_FAILED", "E_INTE
 // still passes.
 const MAX_BODY_BYTES = 30 * 1024 * 1024;
 
+// The DECODED size an /api/imap/import APPEND may carry (#493). Checked BEFORE
+// PostalMime parses, so what the parser can be handed is bounded by a stated
+// number instead of by 4/3 of the JSON body cap. Sized to refuse nothing that can
+// reach this handler today: rawMime rides inside the JSON body (bounded by
+// MAX_BODY_BYTES) and base64 spends 4 bytes per 3, so the largest payload that can
+// arrive at all already decodes to about 22.5 MiB. 22 MiB sits just under that,
+// which also keeps the guard REACHABLE -- a request that clears the body cap can
+// still cross it -- so the refusal is provable through the real handler instead of
+// being dead code. Raising the APPEND ceiling means moving MAX_BODY_BYTES and this
+// together, in that order.
+export const MAX_IMPORT_MIME_BYTES = 22 * 1024 * 1024;
+
 export async function handleApi(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -1030,6 +1042,20 @@ async function handleImapImport(
     raw = base64ToArrayBuffer(body.rawMime);
   } catch {
     throw new MailboxError("E_VALIDATION_ERROR", "rawMime is not valid base64");
+  }
+  // Bound the PARSER, not just the transport (#493). The cap is read off the
+  // DECODED bytes and lands BEFORE parse: decoding is one linear pass the body cap
+  // already bounds, while PostalMime walks the whole MIME tree and allocates per
+  // part. The refusal reuses the envelope the body cap itself answers with, so the
+  // door has one refusal to map, and 413 is a refusal the door turns into a tagged
+  // IMAP NO -- never a 5xx, which stays reserved for transient infra and is
+  // load-bearing for relay retry semantics (#429/#442).
+  if (raw.byteLength > MAX_IMPORT_MIME_BYTES) {
+    throw new MailboxError(
+      "E_PAYLOAD_TOO_LARGE",
+      `rawMime decodes to ${raw.byteLength} bytes, over the ${MAX_IMPORT_MIME_BYTES} byte import limit`,
+      413,
+    );
   }
   const parsed = await new PostalMime().parse(raw);
   const header = (name: string): string =>
