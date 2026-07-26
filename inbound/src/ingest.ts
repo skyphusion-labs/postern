@@ -223,6 +223,14 @@ const LEGACY_COLLAPSE_ABOVE = 64;
 
 const TE = new TextEncoder();
 
+/** A CR or LF inside a stored id cannot survive the RFC822 projection (#494).
+ *  `rfc822Project` neutralizes both to a space before it emits the header (correct, and
+ *  the reason this is NOT header injection), so an IMAP client is served an id that
+ *  differs from the stored one, replies with an `In-Reply-To` that can never match it,
+ *  and forks the thread. Tested on the TRIMMED form: trim() already removes leading and
+ *  trailing breaks, so only an INTERIOR break can reach the header. */
+const LINE_BREAK = /[\r\n]/;
+
 /**
  * The ONE place a Message-ID header becomes a stored id (#486). Both ingest paths (the
  * inbound transport seam here, and the IMAP APPEND import in api.ts) call it, so the two
@@ -257,6 +265,18 @@ export async function normalizeMessageId(env: Env, raw: string | undefined | nul
     const legacy = await sha256hex(bare);
     if (await store.messageExists(env, legacy)) return legacy;
   }
+  // Second trigger for the SAME collapse the byte budget uses (#494): an id we cannot
+  // serve back faithfully is stored as its sha256, which is plain ASCII hex and so
+  // round-trips the projection exactly. One rule to state: verbatim unless the id
+  // cannot be represented -- either it does not fit the budget, or it cannot survive a
+  // header.
+  //
+  // Deliberately AFTER the legacy lookup, not folded into the budget branch above: a
+  // pre-#486 row already lives under sha256(bare), and jumping the queue would fork a
+  // second row for the same header instead of merging into it (#178). The legacy hash
+  // is hex too, so returning it satisfies the round-trip guarantee just as well. Both
+  // existing branches are left exactly as they were.
+  if (LINE_BREAK.test(stripped)) return await sha256hex(stripped);
   return stripped;
 }
 

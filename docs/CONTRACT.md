@@ -55,6 +55,20 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
   ASCII, so bytes and characters agree for every real id. #486 removed an earlier 64-char collapse
   whose stated Vectorize reason was stale: vector ids are derived BY HASH from the message id
   at any length (section 5), so the store never needed a short id.
+- **An id that cannot survive a header collapses too** (#494). The RFC822 projection
+  neutralizes CR and LF into spaces before emitting `Message-ID:`, so an id carrying an
+  interior break is served back DIFFERENT from the way it is stored; a client replying
+  from the projected message quotes the mangled form, matches nothing, and forks the
+  thread. Such an id is stored as its sha256 hex, which round-trips a header exactly.
+  One rule: **verbatim unless the id cannot be represented**, either because it does not
+  fit the budget above or because it cannot survive a header. The collapse runs AFTER the
+  legacy existence check, so a redelivery of a header already stored under the pre-#486
+  hash still merges (#178) instead of forking; that hash is hex too, so the round-trip
+  guarantee holds on either answer. RFC 5322 `msg-id` has no control characters and a
+  folded header is unfolded by the parser before we see it, so this decides malformed
+  input only. As with #486 there is NO backfill: the raw header was never persisted, the
+  hash is one-way, and existing rows stay readable.
+
 - `attachments` and the FTS5 triggers are untouched. The triggers only read
   `subject` / `body_text`, which both directions populate.
 
