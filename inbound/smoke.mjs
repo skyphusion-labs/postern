@@ -331,7 +331,7 @@ async function main() {
     attachmentId = send.json?.messageId;
 
     const got = await summary(attachmentId);
-    assert((got?.attachmentCount ?? 0) >= 1, "the stored sent copy reports an attachment", got);
+    assert((got?.attachments?.length ?? 0) >= 1, "the stored sent copy reports an attachment", got);
 
     const bytes = await apiBytes(`/api/messages/${encodeURIComponent(attachmentId)}/attachments/0`);
     assert(bytes.status === 200 && bytes.bytes.equals(payload),
