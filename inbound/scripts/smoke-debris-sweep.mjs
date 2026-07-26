@@ -147,8 +147,10 @@ async function findCandidates() {
       seen.set(m.messageId, { messageId: m.messageId, subject: m.subject, date: m.date, direction: m.direction });
       if (seen.size >= limit) return [...seen.values()];
     }
-    cursor = res.json.nextCursor;
-    if (!cursor) break;
+    // Page<T>.cursor is string|null; null (not an absent nextCursor field) is
+    // the documented no-more-pages signal (store.ts Page<T> / #497 review).
+    cursor = res.json.cursor;
+    if (cursor === null || cursor === undefined) break;
   }
   return [...seen.values()];
 }
