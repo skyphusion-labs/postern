@@ -106,6 +106,12 @@ def _emitted() -> list[dict[str, Any]]:
         except Exception:  # noqa: BLE001 - see the docstring: the wire is the contract
             pass
 
+    # `to` and `seen_for` MUST differ here. The door sends seenFor ONLY when it differs
+    # from `to` (deliberate, so every pre-#404 call stays byte-identical on the wire),
+    # so a fixture where they match would capture no seenFor at all and the parity check
+    # below would report a gap the door does not have. Same conditional shape for
+    # `lens`, which the door sends instead of direction= for arrival views since #403.
+    # A role folder is exactly the case that makes both fire, so the fixture is one.
     run(lambda: c.list_messages(
         to="role@skyphusion.org", seen_for=identity, from_addr="b@x.com", thread="t1",
         direction="inbound", mailbox="archive", q="hi", limit=5, cursor="c1",
@@ -191,6 +197,19 @@ class SoundnessTest(unittest.TestCase):
     def test_driving_the_door_emitted_requests(self):
         self.assertGreater(len(self.calls), 15)
         self.assertTrue(any(c["path"].startswith("/api/imap/") for c in self.calls))
+
+    def test_the_conditional_emissions_actually_fired(self):
+        """seenFor and lens are sent CONDITIONALLY, so prove the fixture triggered them.
+
+        Without this, a later edit that makes `to` equal `seen_for` would silently stop
+        capturing seenFor, and the parity check would start reporting a gap the door
+        does not have. Verified by mutation: setting to == seen_for makes this fail with
+        "the fixture never made the door send seenFor", alongside the parity failure it
+        is there to explain.
+        """
+        emitted = {name for c in self.calls for name in c["query"]}
+        self.assertIn("seenFor", emitted, "the fixture never made the door send seenFor")
+        self.assertIn("lens", emitted, "the fixture never made the door send lens")
 
     def test_every_emitted_path_and_method_is_routed(self):
         unrouted = [
