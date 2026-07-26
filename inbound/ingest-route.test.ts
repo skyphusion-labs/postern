@@ -131,3 +131,54 @@ describe("POST /ingest validation", () => {
     expect((await res.json() as { error: string }).error).toBe("E_PAYLOAD_TOO_LARGE");
   });
 });
+
+// #473: TRUSTED_SENDER_DOMAINS is read on the INGEST path, so a clean-install operator
+// who omits it from their own wrangler config used to TypeError on EVERY inbound
+// message. The throw surfaced as a TRANSIENT INFRA FAULT, not a config message: the
+// in-Worker email() handler lets it escape (CF retries the delivery), and /ingest
+// answers a fixed 500 that relay/client.go maps to SMTP 451, so the sending MTA queues
+// and retries forever. Both are the right answers to an unexpected failure, which is
+// why the fix belongs at the source. Absent must behave exactly like the shipped "":
+// an empty allowlist, nothing trusted, message still stored.
+describe("POST /ingest with TRUSTED_SENDER_DOMAINS absent (#473)", () => {
+  /** A config that never declares the var at all, not one that sets it empty. */
+  function envWithoutAllowlist() {
+    const made = makeFakeEnv({ POSTERN_TRANSPORT_TOKEN: TT });
+    delete (made.env as unknown as Record<string, unknown>).TRUSTED_SENDER_DOMAINS;
+    return made;
+  }
+
+  const message = (messageId: string) => ({
+    messageId,
+    from: "boss@example.com",
+    to: "support@skyphusion.org",
+    subject: "clean install",
+    text: "hello from an operator who pruned the var",
+  });
+
+  it("stores the message untrusted rather than failing the delivery", async () => {
+    const { env, ctx, settle } = envWithoutAllowlist();
+    // Control on the harness itself: the var must really be gone, or this proves nothing.
+    expect("TRUSTED_SENDER_DOMAINS" in (env as unknown as Record<string, unknown>)).toBe(false);
+
+    const res = await handleApi(ingestReq(message("no-allowlist@example.com"), { token: TT }), env, ctx);
+    expect(res.status).toBe(200);
+    await settle();
+
+    const msg = await store.get(env, "no-allowlist@example.com");
+    expect(msg?.messageId).toBe("no-allowlist@example.com");
+    expect(msg?.trusted).toBe(false);
+  });
+
+  it("still trusts the SAME sender when the var IS set (positive control)", async () => {
+    // Without this, a guard that broke the trust decision outright would pass the case
+    // above: only the allowlist value differs between the two.
+    const { env, ctx, settle } = makeFakeEnv({ POSTERN_TRANSPORT_TOKEN: TT, TRUSTED_SENDER_DOMAINS: "example.com" });
+    const res = await handleApi(ingestReq(message("allowlisted@example.com"), { token: TT }), env, ctx);
+    expect(res.status).toBe(200);
+    await settle();
+
+    const msg = await store.get(env, "allowlisted@example.com");
+    expect(msg?.trusted).toBe(true);
+  });
+});
