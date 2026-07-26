@@ -30,6 +30,10 @@ interface RouteRow {
   match: "exact" | "prefix";
   scope: string | null;
   auth: string;
+  exclude?: string;
+  requireChild?: boolean;
+  requireSeparator?: boolean;
+  template?: string;
   note?: string;
 }
 
@@ -46,7 +50,13 @@ const PARAMS: Record<string, { query?: string[]; body?: string[]; note?: string 
 function matchRoute(method: string, path: string): RouteRow | null {
   for (const row of ROUTES) {
     if (row.method !== "ANY" && row.method !== method) continue;
-    const hit = row.match === "exact" ? path === row.path : path.startsWith(row.path);
+    let hit: boolean;
+    if (row.match === "exact") hit = path === row.path;
+    else if (row.exclude && path.includes(row.exclude)) hit = false;
+    // The bare path or a child under it, never a SIBLING: /api/drafts2 is not
+    // /api/drafts. The flag exists because a plain prefix cannot say that.
+    else if (row.requireSeparator) hit = path === row.path || path.startsWith(`${row.path}/`);
+    else hit = path.startsWith(row.path) && path.length - row.path.length >= (row.requireChild ? 1 : 0);
     if (hit) return row;
   }
   return null;
@@ -185,6 +195,33 @@ describe("#417 the route table fixture is usable and this matcher agrees with it
     expect(matchRoute("DELETE", "/api/messages/m1")?.scope).toBe("delete");
     expect(matchRoute("GET", "/api/not-a-route")).toBeNull();
     expect(matchRoute("PUT", "/api/messages")).toBeNull();
+  });
+});
+
+describe("#417 COVERAGE: no client method can skip this file", () => {
+  // Folded in from the route-contract suite this file replaces (#449, strummer): the
+  // emission driver above is only as good as its list of calls, so reflect over the
+  // client and require every public method to be exercised. A new method with a new
+  // path or parameter cannot slip past by simply not being called here.
+  const NON_EMITTING = new Set(["request", "requestGet", "requestPost", "asSendResult"]);
+
+  it("every public client method is either exercised or declared request-free", async () => {
+    const methods = Object.getOwnPropertyNames(PosternClient.prototype).filter(
+      (n) => n !== "constructor" && typeof (PosternClient.prototype as never)[n] === "function",
+    );
+    const exercised = new Set((await emissions()).map((e) => e.label));
+    const missing = methods.filter((m) => !exercised.has(m) && !NON_EMITTING.has(m));
+    expect(missing, `client methods with no contract exercise: ${missing.join(", ")}`).toEqual([]);
+  });
+
+  it("CONTROL: the reflection sees real methods, and the allowlist is not a blanket", async () => {
+    const methods = Object.getOwnPropertyNames(PosternClient.prototype);
+    expect(methods).toContain("search");
+    expect(methods).toContain("list");
+    expect(methods.length).toBeGreaterThan(5);
+    // A method that emits nothing AND is not allowlisted would fail the test above,
+    // which is what makes it a gate rather than a formality.
+    expect(NON_EMITTING.has("search")).toBe(false);
   });
 });
 
