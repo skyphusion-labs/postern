@@ -208,6 +208,44 @@ class BreakerRegistryTest(unittest.TestCase):
         b = breaker_for(self._Cfg("https://other.test"))
         self.assertIsNot(a, b)
 
+    def test_spellings_of_one_origin_share_one_circuit(self):
+        # A trailing slash or an upper-case host is the SAME Worker. Two circuits over
+        # one origin would each count toward the threshold separately and neither would
+        # ever trip, which is the failure the process-wide registry exists to prevent.
+        a = breaker_for(self._Cfg("https://worker.test"))
+        for spelling in ("https://worker.test/", "https://WORKER.test", "HTTPS://worker.test/"):
+            self.assertIs(breaker_for(self._Cfg(spelling)), a, spelling)
+
+    def test_credentials_in_the_url_never_reach_the_key_or_the_log(self):
+        # A misconfigured https://user:pass@host must not put a password in a log line.
+        lines = []
+        clean = breaker_for(self._Cfg("https://worker.test"))
+        dirty = breaker_for(
+            self._Cfg("https://svc:hunter2@worker.test"), now=_Clock(), log=lines.append
+        )
+        self.assertIs(dirty, clean)  # same origin, same circuit
+        # Drive it open so it logs, then read every line it produced.
+        b = CircuitBreaker(
+            enabled=True,
+            threshold=1,
+            cooldown=5.0,
+            endpoint=breaker_mod.safe_endpoint("https://svc:hunter2@worker.test"),
+            now=_Clock(),
+            log=lines.append,
+        )
+        b.record_transport_failure()
+        blob = " ".join(lines)
+        self.assertTrue(lines)
+        self.assertNotIn("hunter2", blob)
+        self.assertNotIn("svc:", blob)
+        self.assertIn("worker.test", blob)
+
+    def test_an_unparseable_endpoint_is_not_fatal(self):
+        # A breaker is not the place to reject a URL (Config validates the real one);
+        # it must key on SOMETHING and keep working.
+        b = breaker_for(self._Cfg("not a url"))
+        self.assertTrue(b.allow())
+
 
 class ClientIntegrationTest(unittest.TestCase):
     """The breaker as PosternClient actually uses it, through the real _send path."""

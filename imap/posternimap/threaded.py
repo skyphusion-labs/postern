@@ -71,11 +71,12 @@ def in_pool(fn, *args, **kwargs):
         return defer.execute(fn, *args, **kwargs)
     # #458: observe the pool BEFORE dispatching, so exhaustion is a log line rather than
     # something an operator has to infer from latency. Instrumentation never breaks
-    # dispatch: any failure reading the pool is swallowed.
+    # dispatch -- but a broken watch is not allowed to be INVISIBLE either, so the
+    # failure is swallowed and reported once (see _report_watch_failure).
     try:
         pool_watch().observe_pool(reactor.getThreadPool())
     except Exception:
-        pass
+        _report_watch_failure()
     return threads.deferToThread(_flattened, fn, *args, **kwargs)
 
 
@@ -239,6 +240,34 @@ def _twisted_log(message: str) -> None:
     from twisted.python import log
 
     log.msg(message, system="postern-imap")
+
+
+# Set once if the saturation watch ever raises, so a broken diagnostic reports itself
+# exactly once instead of either taking mail offline or vanishing (#458 audit).
+_watch_failed = False
+
+
+def _report_watch_failure() -> None:
+    """Report a watch that raised, ONCE per process, and never re-raise.
+
+    Swallowing silently would hide a regression in the very instrument that exists to
+    stop a silent failure mode; reporting every dispatch would turn one broken watch
+    into a log flood during exactly the incident it was meant to describe. Once is the
+    honest amount. The report itself is wrapped, because a diagnostic that can raise
+    from an except block is the same bug one level up.
+    """
+    global _watch_failed
+    if _watch_failed:
+        return
+    _watch_failed = True
+    try:
+        _twisted_log(
+            "postern-imap: the threadpool saturation watch raised while observing the "
+            "pool; dispatch is UNAFFECTED, but the saturation signal may be incomplete "
+            "for this process (reported once)"
+        )
+    except Exception:
+        pass
 
 
 class PoolSaturationWatch:

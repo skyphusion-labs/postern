@@ -42,6 +42,7 @@ per route -- the fact being tracked is "can this door reach that origin".
 from __future__ import annotations
 
 import threading
+import urllib.parse
 from typing import Callable, Dict, Optional
 
 CLOSED = "closed"
@@ -50,6 +51,38 @@ HALF_OPEN = "half_open"
 
 LogFn = Callable[[str], None]
 ClockFn = Callable[[], float]
+
+
+def safe_endpoint(url: str) -> str:
+    """The registry key AND the log label for one Worker origin.
+
+    Two jobs, both small, both done at the boundary rather than hoped for:
+
+      * NORMALIZE. The key is what makes the breaker process-wide, so two spellings of
+        one origin (a trailing slash, an upper-case host) must not mint two independent
+        circuits that each count toward N separately and never trip.
+      * STRIP CREDENTIALS. `hostname` drops any userinfo, so a misconfigured
+        https://user:pass@host API URL cannot reach a log line through this module. The
+        door never logs secrets, and that rule does not get an exception for a typo.
+
+    Anything unparseable comes back trimmed rather than raising: a breaker is not the
+    place to reject a URL, and Config already validates the real one at startup.
+    """
+    raw = (url or "").strip()
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return raw.rstrip("/")
+    if not parts.scheme or not host:
+        return raw.rstrip("/")
+    return "%s://%s%s%s" % (
+        parts.scheme.lower(),
+        host,
+        ":%d" % port if port else "",
+        parts.path.rstrip("/"),
+    )
 
 
 def _twisted_log(message: str) -> None:
@@ -240,11 +273,16 @@ def breaker_for(
 ) -> CircuitBreaker:
     """The process-wide breaker for cfg's Worker endpoint, created on first use.
 
-    Keyed on the endpoint alone: one door process runs one config, and the fact being
-    tracked belongs to the origin, not to whoever asked. Callers hold the returned
-    object; they never re-key per call.
+    Keyed on the NORMALIZED endpoint alone (safe_endpoint): one door process runs one
+    config, and the fact being tracked belongs to the origin, not to whoever asked.
+    Callers hold the returned object; they never re-key per call.
+
+    The instance is created once per endpoint and keeps the parameters it was built
+    with. This door has no config reload -- a settings change is a restart, so a new
+    process and a new registry -- so there is deliberately no re-parameterize path; one
+    would only add a way for a live circuit to change shape mid-outage.
     """
-    endpoint = getattr(cfg, "api_url", "") or ""
+    endpoint = safe_endpoint(getattr(cfg, "api_url", "") or "")
     with _registry_lock:
         breaker = _registry.get(endpoint)
         if breaker is None:

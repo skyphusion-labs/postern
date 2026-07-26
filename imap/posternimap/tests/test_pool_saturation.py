@@ -181,5 +181,32 @@ class InPoolObservesTheRealPoolTest(twisted_unittest.TestCase):
         yield defer.gatherResults(held + [queued])
 
 
+    @defer.inlineCallbacks
+    def test_instrumentation_failure_never_breaks_dispatch_and_is_reported_once(self):
+        # The watch is an observation. If reading the pool throws, the door still runs
+        # the call: a diagnostic must not be able to take mail offline. It must also not
+        # VANISH -- a silently broken watch hides the very failure mode it exists to
+        # surface -- so it reports itself once per process, not once per call.
+        from posternimap import threaded
+
+        reported = []
+        yield self._reactor_is_running()
+
+        class _Exploding:
+            def observe_pool(self, pool):
+                raise RuntimeError("boom")
+
+        self.patch(threaded, "_POOL_WATCH", _Exploding())
+        self.patch(threaded, "_watch_failed", False)
+        self.patch(threaded, "_twisted_log", reported.append)
+
+        first = yield threaded.in_pool(lambda: "still ran")
+        second = yield threaded.in_pool(lambda: "still ran twice")
+        self.assertEqual(first, "still ran")
+        self.assertEqual(second, "still ran twice")
+        self.assertEqual(len(reported), 1, reported)
+        self.assertIn("saturation watch raised", reported[0])
+
+
 if __name__ == "__main__":
     unittest.main()
