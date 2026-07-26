@@ -321,7 +321,7 @@ without Twisted:
 | `server.py` | yes | the `IMAP4Server` factory + reactor wiring |
 | `__main__.py` | -- | `python -m posternimap` entrypoint |
 
-## Concurrency (#416)
+## Concurrency (#416, #457)
 
 Worker calls run in the reactor threadpool, not on the reactor thread. Before this, one
 slow worker call stalled EVERY connected client for the duration of the call, and
@@ -340,12 +340,29 @@ door. Numbers, method and the re-runnable scripts: `imap/bench/`.
   call behind the slowest one. Both measured.
 - The pool is bounded by the reactor threadpool default (10 threads), so a hung worker
   consumes at most ten threads.
-- KNOWN RESIDUAL: per-message BODY hydration during FETCH still runs on the reactor
-  thread. Twisted renders a FETCH response by calling `IMessage` accessors straight from
-  the protocol, with no Deferred seam, and bodies are hydrated lazily on purpose so a
-  header scan never pays for them (#102). `test_reactor_nonblocking.py` asserts that
-  residual explicitly, and fails if it grows OR disappears without the exception being
-  removed.
+- FETCH rendering was the last thing left on the reactor thread, and #457 closed it.
+  Twisted renders a FETCH by calling `IMessage` accessors straight from the protocol,
+  with no Deferred seam, so a body hydration inside it froze the door once per rendered
+  message: a `FETCH 1:10` against a 200ms worker froze every other client for 2405ms of
+  a 2399ms command, in ten separate stalls. `do_FETCH` now PRE-RUNS the accessor reads
+  the render is about to make (`fetchwarm.fetch_reads` -> `PosternIMAPMessage.prehydrate`)
+  inside the pool, so the render reads memory. Twisted's rendering path is untouched.
+- Lazy hydration is preserved, not traded away. The warm derives its reads from the
+  query and each message applies its OWN summary-versus-body rules to them, so a scan
+  still fetches no body (#102) and `BODY[i]` still pulls one attachment, not all of them
+  (#342). A query needing nothing from the worker (`FETCH UID FLAGS`) produces no reads
+  and skips the pool hop entirely.
+- The warm is invisible by construction: it can move where a wait happens, never what a
+  FETCH answers. It swallows its own failures, and hydration errors are MEMOIZED on the
+  message, so the render re-raises the identical error without a second worker call.
+- The warm for one FETCH runs SERIALLY in ONE pool thread, for the whole message range,
+  rather than fanning each message out across the pool. Deliberate: fanning out would
+  make a single client fetching a large range consume most of the ten available threads
+  and starve everyone else, which is the fairness problem #416 set out to fix, moved one
+  level down. A client still waits for its own fetch, and only for its own.
+- `test_reactor_nonblocking.py` asserts ZERO reactor-thread worker calls across every
+  FETCH shape a real client sends, and pins #102 and #342 alongside, so a warm that
+  bought its speed by over-fetching fails too.
 
 ## Tests
 

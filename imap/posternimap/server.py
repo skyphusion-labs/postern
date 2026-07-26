@@ -32,8 +32,10 @@ from twisted.python.compat import networkString
 
 from .auth import build_portal
 from .config import Config
+from .fetchwarm import fetch_reads
 from .mailbox import MailboxLoadError
 from .proxywrap import wrap_listener_factory
+from .threaded import in_pool
 
 # The three SEARCH keys whose single-term form we can push to the store's substr
 # endpoint (#148). Maps the RFC 3501 search key to the /api/search field selector
@@ -142,6 +144,70 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         # UNIXAddress has no host attribute; None falls back to the shared bucket.
         setattr(creds, "peer_host", getattr(peer, "host", None))
         return self.portal.login(creds, None, imap4.IAccount)
+
+    def do_FETCH(self, tag, messages, query, uid=0):
+        """FETCH with the response body hydrated in the threadpool, not the reactor (#457).
+
+        #416 part 2 moved every worker call off the reactor thread EXCEPT this one.
+        Twisted renders a FETCH by calling IMessage accessors (getHeaders, getBodyFile,
+        getSize, getSubPart) straight from the protocol as it writes the response, and
+        that path has no maybeDeferred seam, so a body hydration inside it froze the
+        whole door for every connected client, once per rendered message, for up to
+        api_timeout each time.
+
+        The fix is a step, not a rewrite of the Twisted FETCH machinery: after mbox.fetch
+        answers and before the messages reach __cbFetch, PRE-RUN the accessor reads the
+        render is about to make (fetchwarm.fetch_reads) inside the pool. Everything
+        memoizes, so the render then reads memory. The Twisted rendering path itself is
+        untouched.
+
+        Lazy hydration is PRESERVED, not traded away (#102): the reads are derived from
+        the query, and each message applies its own summary-versus-body rules to them, so
+        an ENVELOPE or header scan still fetches no body. A query needing nothing from
+        the worker (FETCH UID FLAGS) produces no reads and skips the pool hop entirely.
+        """
+        if not query:
+            return imap4.IMAP4Server.do_FETCH(self, tag, messages, query, uid)
+        self._oldTimeout = self.setTimeout(None)
+        (
+            maybeDeferred(self.mbox.fetch, messages, uid=uid)
+            .addCallback(self._warm_fetch, query)
+            .addCallback(iter)
+            .addCallback(self._IMAP4Server__cbFetch, tag, query, uid)
+            .addErrback(self._IMAP4Server__ebFetch, tag)
+        )
+
+    # dispatchCommand reads the class tuple by state name, not getattr(self, "do_FETCH"),
+    # so the override only takes effect once it is rebound here.
+    select_FETCH = (
+        do_FETCH,
+        imap4.IMAP4Server.arg_seqset,
+        imap4.IMAP4Server.arg_fetchatt,
+    )
+
+    def _warm_fetch(self, results, query):
+        """Pre-run the accessor reads of the render in the pool; pass the messages through.
+
+        Returns the fetch result UNCHANGED. The warm can only move where a wait happens,
+        never what the FETCH answers: PosternIMAPMessage.prehydrate swallows its own
+        failures and the render re-raises them from the memo.
+        """
+        reads = fetch_reads(query)
+        if not reads:
+            return results
+        fetched = list(results)
+        warmable = [
+            msg for _seq, msg in fetched if callable(getattr(msg, "prehydrate", None))
+        ]
+        if not warmable:
+            return fetched
+
+        def warm():
+            for msg in warmable:
+                msg.prehydrate(reads)
+            return fetched
+
+        return in_pool(warm)
 
     def _IMAP4Server__ebAppend(self, failure, tag):  # overrides IMAP4Server.__ebAppend
         if failure.check(imap4.MailboxException):

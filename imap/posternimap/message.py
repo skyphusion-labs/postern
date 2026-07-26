@@ -13,7 +13,17 @@ cannot supply. RFC822.SIZE prefers summary `projectedSize` (#342) and never
 downloads attachment bytes. Attachment GETs are per-part on BODY[i] / getBodyFile
 of an attachment subpart; whole BODY[] still pulls every attachment (correctness).
 
-Hydration is memoized, so opening a message costs exactly one message GET.
+Hydration is memoized, so opening a message costs exactly one message GET. Failures are
+memoized too (#457): the FETCH warm below runs the accessors ahead of the render and
+swallows what they raise, so without an error memo the render would repeat the failed
+worker call on the reactor thread, which is the stall #457 exists to remove.
+
+WHERE THE HYDRATION RUNS (#457). Twisted renders a FETCH by calling these accessors
+straight from the protocol, on the reactor thread, with no Deferred seam. So the door
+pre-runs the reads a given FETCH needs in the reactor threadpool (`prehydrate` below,
+driven by `fetchwarm.fetch_reads`) before the messages reach Twisted, and the render
+then reads memory. Lazy hydration is unchanged by this: the warm calls the SAME
+accessors, which apply the SAME rules, so a scan still fetches no body.
 """
 
 from __future__ import annotations
@@ -140,6 +150,14 @@ class PosternIMAPMessage:
         self._fetch_attachment_cb = fetch_attachment
         self._meter = meter or Meter(False)
         self._loaded = False
+        # Hydration failures are memoized alongside successes (#457). The render is the
+        # authority on what a FETCH answers, so the prehydrate pass swallows errors and
+        # lets the accessor raise; without this the accessor would REPEAT the failed
+        # worker call on the reactor thread, which is the exact stall #457 removes. The
+        # memo lives on the message, and a message lives for one FETCH, so a later
+        # command still retries the worker.
+        self._hydrate_error: Optional[BaseException] = None
+        self._attachment_errors: dict = {}
         self._full: Optional[Message] = None
         self._rendered: bytes = b""
         self._parsed: Optional[PyMessage] = None
@@ -183,8 +201,14 @@ class PosternIMAPMessage:
         """Fetch message metadata/body and render with attachment placeholders (#342)."""
         if self._loaded:
             return
+        if self._hydrate_error is not None:
+            raise self._hydrate_error
         with self._meter.timed("hydrate", uid=self._uid) as span:
-            full = self._hydrate_cb()
+            try:
+                full = self._hydrate_cb()
+            except BaseException as exc:
+                self._hydrate_error = exc
+                raise
             placeholder = full is None
             if full is None:
                 full = self._placeholder()
@@ -201,10 +225,17 @@ class PosternIMAPMessage:
             raise IndexError(index)
         if self._real_attachments[index] is not None:
             return
+        prior = self._attachment_errors.get(index)
+        if prior is not None:
+            raise prior
         if self._fetch_attachment_cb is None:
             self._real_attachments[index] = b""
         else:
-            self._real_attachments[index] = self._fetch_attachment_cb(index)
+            try:
+                self._real_attachments[index] = self._fetch_attachment_cb(index)
+            except BaseException as exc:
+                self._attachment_errors[index] = exc
+                raise
         self._render_current()
 
     def _ensure_all_attachments(self) -> None:
@@ -238,6 +269,47 @@ class PosternIMAPMessage:
                     if isinstance(child, PyMessage):
                         return child
         return None
+
+    def prehydrate(self, reads) -> None:
+        """Run the FETCH render accessor reads HERE, off the reactor thread (#457).
+
+        `reads` comes from fetchwarm.fetch_reads(query): the same accessors, with the
+        same arguments, on the same subparts, that IMAP4Server is about to call while it
+        writes the response. Every accessor on this class memoizes, so pre-running them
+        turns the render into memory reads.
+
+        This pass is INVISIBLE by construction. It never changes what a FETCH answers,
+        only where the waiting happens, so a failure is swallowed and left to the render:
+        the render calls the same accessor, gets the memoized error (no second worker
+        call, no reactor stall), and behaves exactly as it did before this existed.
+        """
+        for read in reads:
+            try:
+                self._apply_read(read)
+            except Exception:
+                continue
+
+    def _apply_read(self, read) -> None:
+        target = self
+        for index in read.path:
+            if not target.isMultipart():
+                # spew_body: a non-multipart message has an implicit part 1 and no
+                # others. Stop here and let the render raise its own TypeError.
+                break
+            target = target.getSubPart(index)
+        kind = read.kind
+        if kind == "size":
+            target.getSize()
+        elif kind == "structure":
+            imap4.getBodyStructure(target, True)
+        elif kind == "headers":
+            headers = target.getHeaders(read.negate, *read.fields)
+            # The whole-header map is lazy (_EnvelopeHeaders); _formatHeaders is what
+            # forces it, via .items(). Force it here or the hydration stays on the
+            # reactor thread with the read looking done.
+            headers.items()
+        elif kind == "body":
+            target.getBodyFile()
 
     def getUID(self) -> int:
         return self._uid

@@ -65,8 +65,6 @@ def in_pool(fn, *args, **kwargs):
     branch is proven by test_reactor_nonblocking, which asserts against real thread
     identities through a real reactor rather than trusting this comment.
     """
-    import sys, threading as _t
-    print('DEBUG in_pool enter', getattr(fn, "__name__", fn), 'thread=', _t.current_thread().name, file=sys.stderr, flush=True)
     if not reactor.running:
         return defer.execute(fn, *args, **kwargs)
     return threads.deferToThread(_flattened, fn, *args, **kwargs)
