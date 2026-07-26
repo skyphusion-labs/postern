@@ -11,6 +11,55 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.2.0
+
+The 2026-07-26 intake sprint: all 12 issues filed by the v1.1.0 evaluation (#413-#420, #422,
+#425, #427, #429) plus the #436 audit-scripts arc. MINOR because real capability shipped:
+webmail role queues, honored session `to=`, the generated route contract, and a door that no
+longer freezes whole-mailbox under a slow call. No schema change; no migration ships with
+this tag. First tag through the shared preflight (#418), which itself ships here.
+
+- **release safety (#418):** ONE shared preflight (`tag-preflight.yml` ->
+  `tag-preflight.sh`) gates every tag workflow via `needs:`, asserting the tag equals all
+  four version pins, `CHANGELOG.md` has a non-empty section, and the tag is on
+  `origin/main`; `postern-mcp-v*` tags get the same gate against `mcp/package.json`.
+  After `wrangler deploy` the workflow verifies the ARTIFACT: it reads the live deployment
+  back and asserts production serves the uploaded version, then runs the live smoke when
+  the `POSTERN_SMOKE_*` secrets are configured (#434).
+- **route contract (#417):** `inbound/src/routes.ts` is the single source of the API
+  surface; the live scope gate DERIVES from it (the api.ts if-chain is gone), and
+  `npm run routes:emit` projects it to `contracts/api-routes.json` +
+  `contracts/api-params.json`. Four suites keep it honest, including one contract suite
+  per client (mcp, python, imap door) asserting each emits only what the contract
+  declares (#449, #452, #455, #459).
+- **webmail roles (#425):** new worker var `POSTERN_VIEWER_ROLES` (mirrors the door's
+  `POSTERN_IMAP_VIEWER_ROLES` verbatim); role addresses appear as their OWN folders with
+  per-member seen state; `GET /api/roles` (admin scope) is the operator drift-diff
+  surface (#437). Optional var; absent means no role folders.
+- **inbound (#422):** a session's `to=` is HONORED as a recipient filter inside the
+  account boundary instead of being silently swallowed (#444).
+- **inbound (#429):** the pre-gate session dispatch gets the route error envelope;
+  unknown errors answer a fixed 500 and never echo internals onto the sign-in
+  surface (#441).
+- **imap door (#416):** worker calls run in the reactor threadpool with per-thread
+  connections, so one slow call no longer freezes the whole door (measured 15s ->
+  gone); NO responses surface the worker's reason instead of a bare status (#446,
+  #456). Residual: per-message FETCH body hydration, tracked as #457.
+- **imap door (#427):** LIST/LSUB patterns match the WHOLE mailbox name (RFC 3501
+  6.3.8), with non-wildcard metacharacters escaped (#443).
+- **relay (#414):** a worker 403 now answers SMTP 451 (queue-and-retry) instead of a
+  permanent bounce; MIME part cap aligned with the worker's attachment cap (20); loud
+  deprecation warning on the legacy re-send path (#433).
+- **clients:** python client closes the worker parity gap (attachments, filters,
+  folders, drafts) (#413, #440); mcp wire types and search/list params synced to the
+  worker, including the auth block (#415, #445).
+- **ci (#419, #420):** `npm audit --audit-level=high` gates the npm surfaces, coverage
+  floors enforced, corpus-notify repo-guarded (#435); audit actions SHA-pinned and the
+  fleet pin single-sourced (#439).
+- **ci (#436):** the adversarial-audit workflow checks its scripts out of the PUBLIC
+  `skyphusion-labs/security-audit` repo (pinned at v0.2.0); the fleet deploy key and
+  read token are gone from this repo's workflows (#451).
+
 ## v1.1.0
 
 The 2026-07-25/26 evaluation sprint: a full up-to-par audit of the repo (docs, security,
