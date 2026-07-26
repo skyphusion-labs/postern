@@ -13,7 +13,7 @@ import * as store from "./store";
  * postern-relay SMTP later) builds this shape and hands it to ingest().
  */
 export interface ParsedInbound {
-  /** Raw Message-ID without <>; ingest() normalizes (>64 chars -> sha256). */
+  /** Raw Message-ID without <>; ingest() stores it VERBATIM (see normalizeMessageId). */
   messageId?: string;
   from: string;
   /** The delivered-to recipient. */
@@ -86,11 +86,10 @@ export async function ingest(
   // size-capped to bound storage / render cost on very large messages.
   const bodyHtml = parsed.html ? parsed.html.slice(0, 512_000) : null;
 
-  // Dedup key -- use Message-ID or generate a stable fallback. D1 stores the
-  // full raw ID; Vectorize requires max 64 chars so we SHA-256 hash anything
-  // longer (32 bytes = 64 hex chars exactly).
-  const rawMessageId = (parsed.messageId ?? "").replace(/[<>]/g, "") || crypto.randomUUID();
-  const messageId = rawMessageId.length > 64 ? await sha256hex(rawMessageId) : rawMessageId;
+  // Dedup key -- the sender's Message-ID kept VERBATIM (#486), or a stable
+  // fallback when the message carries none. ONE normalizer, shared with the IMAP
+  // APPEND path in api.ts.
+  const messageId = await normalizeMessageId(env, parsed.messageId);
   const date = parsed.date ? new Date(parsed.date).toISOString() : new Date().toISOString();
 
   // Only index mail for addresses that opted in to crew RAG (VECTORIZE_FOR). The
@@ -184,6 +183,59 @@ export function fileAlsoUnder(recipient: string, raw: string | undefined | null)
     if (!out.includes(target)) out.push(target);
   }
   return out;
+}
+
+/**
+ * The longest Message-ID stored verbatim; past it the id collapses to its sha256.
+ *
+ * The cap is NOT a Vectorize constraint. Vector ids are
+ * `sha256hex(messageId).slice(0, 56) + ".<chunk>"` (store.vectorIdsForMessage), a fixed
+ * 58 chars for an id of ANY length, and the raw id rides only in vector METADATA, which
+ * is never an id and is never filtered on. D1's `message_id` is TEXT with no length
+ * bound. Nothing downstream of the store needed the old 64-char cutoff.
+ *
+ * What DOES bound the id is the R2 attachment key, `att/<messageId>/<n>-<name>`, against
+ * R2's 1024-byte key limit. 255 leaves that key comfortably inside the bound (4 + 255 + 1
+ * + up to ~104 for the index and sanitized filename) and sits far above any Message-ID
+ * observed in production -- the longest GitHub thread root measured is under 100 chars,
+ * and RFC 5322 folds the whole header line at 998. Past 255 we still hash, so identity
+ * and dedup survive even an absurd header; that path is a documented, tested refusal
+ * rather than the invisible cliff #486 filed.
+ */
+export const MAX_STORED_MESSAGE_ID = 255;
+
+/** The pre-#486 cutoff. Ids longer than this MAY already be stored under their sha256. */
+const LEGACY_COLLAPSE_ABOVE = 64;
+
+/**
+ * The ONE place a Message-ID header becomes a stored id (#486). Both ingest paths (the
+ * inbound transport seam here, and the IMAP APPEND import in api.ts) call it, so the two
+ * cannot drift.
+ *
+ * WHY VERBATIM: the Message-ID is the only machine-parseable handle a sender gives us.
+ * GitHub encodes `owner/repo/{issues,pull}/N@github.com` in it, and the old 64-char
+ * collapse destroyed that structure for long ids with no error anywhere -- a consumer
+ * keying on the structured id worked until a repo name or issue number crossed a length
+ * it could not see, then silently stopped seeing new items. Keeping the header also fixes
+ * THREADING for those ids: `in_reply_to` is stored raw, so a reply to a collapsed parent
+ * never matched the parent row and started its own thread.
+ *
+ * LEGACY MERGE: a message ingested BEFORE this change already lives under its sha256. A
+ * redelivery of that exact header must merge into that row (delivered_to, #178), not fork
+ * a second copy under the raw id, so ids in the legacy range get one indexed existence
+ * check against the hash first. A miss -- every id first seen from here on -- stores the
+ * raw header. The check is scoped to ids over the old cutoff and disappears from practice
+ * as those rows age out.
+ */
+export async function normalizeMessageId(env: Env, raw: string | undefined | null): Promise<string> {
+  const stripped = (raw ?? "").replace(/[<>]/g, "").trim();
+  if (!stripped) return crypto.randomUUID();
+  if (stripped.length > MAX_STORED_MESSAGE_ID) return await sha256hex(stripped);
+  if (stripped.length > LEGACY_COLLAPSE_ABOVE) {
+    const legacy = await sha256hex(stripped);
+    if (await store.messageExists(env, legacy)) return legacy;
+  }
+  return stripped;
 }
 
 export async function sha256hex(input: string): Promise<string> {

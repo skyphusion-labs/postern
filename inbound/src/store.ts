@@ -196,7 +196,8 @@ const MAX_LIMIT = 200;
 
 /**
  * Normalized input to store.put(). messageId is already normalized (<>-stripped,
- * sha256 if >64 chars) by the caller. references is the parsed References list
+ * trimmed, and kept VERBATIM unless it is absurdly long, #486) by the caller --
+ * ingest.normalizeMessageId. references is the parsed References list
  * (newest last) used for thread resolution; attachments carry raw bytes for R2.
  */
 export interface StoreInput {
@@ -310,6 +311,19 @@ async function seedSameDomainSeen(
       .bind(messageId, r)
       .run();
   }
+}
+
+/**
+ * Does a row already exist under this exact message_id? The store owns every D1 read,
+ * so ingest.normalizeMessageId asks through here rather than reaching for the binding
+ * itself (#486: a redelivery of a message stored under the pre-fix sha256 must merge
+ * into that row instead of forking a second copy under the raw header).
+ */
+export async function messageExists(env: Env, messageId: string): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT message_id FROM messages WHERE message_id = ? LIMIT 1")
+    .bind(messageId)
+    .first<{ message_id: string }>();
+  return !!row;
 }
 
 export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): Promise<PutResult> {

@@ -14,7 +14,7 @@
 
 import PostalMime from "postal-mime";
 import * as store from "./store";
-import { cleanBody, htmlToText, ingest, sha256hex, type ParsedInbound } from "./ingest";
+import { cleanBody, htmlToText, ingest, normalizeMessageId, type ParsedInbound } from "./ingest";
 import { toArrayBuffer } from "./headers";
 import {
   send,
@@ -1049,8 +1049,10 @@ async function handleImapImport(
   if (outbound && deliveredTo.length === 0) {
     throw new MailboxError("E_FIELD_MISSING", "outbound APPEND requires a recipient");
   }
-  const rawId = (parsed.messageId ?? "").replace(/[<>]/g, "") || crypto.randomUUID();
-  const messageId = rawId.length > 64 ? await sha256hex(rawId) : rawId;
+  // The SAME normalizer the inbound seam uses (#486): an APPENDed message keeps its
+  // own Message-ID verbatim, so a Sent copy imported here and the delivered copy that
+  // arrives over SMTP resolve to one identity.
+  const messageId = await normalizeMessageId(env, parsed.messageId);
   const parsedDate = parsed.date ? new Date(parsed.date) : new Date();
   const date = Number.isNaN(parsedDate.getTime()) ? new Date().toISOString() : parsedDate.toISOString();
   const attachments: NonNullable<store.StoreInput["attachments"]> = [];
