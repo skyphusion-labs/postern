@@ -29,9 +29,11 @@
 //   8. Attachments: a send WITH an attachment, then the bytes read back byte-for-byte
 //      from /api/messages/{id}/attachments/0. The read-back is POLLED (bounded): the
 //      store persists attachment rows + bytes out of band, after the send answers.
-//   9. Drafts are identity-owned: a static operator token must be REFUSED
-//      (E_IDENTITY_REQUIRED). With POSTERN_IDENTITY_TOKEN set, the full draft
-//      lifecycle runs and cleans up after itself.
+//   9. Drafts are identity-owned: a read-scoped token is refused by the SCOPE
+//      gate (403); a static send-scoped token clears scope but is refused by
+//      the IDENTITY gate (E_IDENTITY_REQUIRED, needs POSTERN_SEND_TOKEN set to
+//      a bearer distinct from POSTERN_API_TOKEN). With POSTERN_IDENTITY_TOKEN
+//      set, the full draft lifecycle runs and cleans up after itself.
 //  10. With POSTERN_DELETE_TOKEN set, this run hard-deletes the messages it created,
 //      so a repeated smoke does not accumulate mail in the operator's store.
 //
@@ -379,9 +381,22 @@ async function main() {
   // --- 9. drafts are identity-owned ---
   console.log("\n9. drafts (identity-owned)");
   {
-    const refused = await api("GET", "/api/drafts");
-    assert(refused.status === 403 && refused.json?.error === "E_IDENTITY_REQUIRED",
-      "a static operator token is REFUSED on /api/drafts (E_IDENTITY_REQUIRED)", refused);
+    // (a) the SCOPE gate: /api/drafts requires send scope (routes.ts), so a
+    // read-scoped token is refused here and never reaches the identity check.
+    const scopeRefused = await api("GET", "/api/drafts");
+    assert(scopeRefused.status === 403,
+      "a read-scoped token is REFUSED on /api/drafts (403, the scope gate)", scopeRefused);
+
+    // (b) the IDENTITY gate: a static send-scoped token clears the scope gate
+    // but carries no bound identity, so it is refused here instead. Needs a
+    // send-scoped credential distinct from the read token; skip loudly otherwise.
+    if (!process.env.POSTERN_SEND_TOKEN || cfg.sendToken === cfg.readToken) {
+      ok("SKIP the identity-gate check: set POSTERN_SEND_TOKEN (a static, non-identity, send-scoped bearer distinct from POSTERN_API_TOKEN) to run it");
+    } else {
+      const identityRefused = await api("GET", "/api/drafts", { token: cfg.sendToken });
+      assert(identityRefused.status === 403 && identityRefused.json?.error === "E_IDENTITY_REQUIRED",
+        "a static send-scoped operator token is REFUSED on /api/drafts (E_IDENTITY_REQUIRED)", identityRefused);
+    }
 
     if (!cfg.identityToken) {
       ok("SKIP the drafts lifecycle: set POSTERN_IDENTITY_TOKEN (a per-identity send token) to run it");
