@@ -179,7 +179,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
 
     # dispatchCommand reads the class tuple by state name, not getattr(self, "do_FETCH"),
     # so the override only takes effect once it is rebound here.
-    select_FETCH = (
+    select_FETCH = (  # type: ignore[assignment]
         do_FETCH,
         imap4.IMAP4Server.arg_seqset,
         imap4.IMAP4Server.arg_fetchatt,
