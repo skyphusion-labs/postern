@@ -231,6 +231,15 @@ trust verdict, D1 insert, R2 attachments, opt-in Vectorize), but as a pure funct
   CF Email Routing (#29). `content` arrives base64-encoded over JSON; the driver decodes to
   `ArrayBuffer` before the call.
 
+  **Failure answer (#442).** A malformed body is refused with its own status
+  (`400 E_FIELD_MISSING` / `E_VALIDATION_ERROR`, `413 E_PAYLOAD_TOO_LARGE`), and an
+  UNEXPECTED failure (a store outage) answers a fixed
+  `500 { ok:false, error:"E_INTERNAL_SERVER_ERROR", message:"ingest unavailable" }` --
+  no echo of the internal error, which goes to the worker log instead. 5xx is load-bearing:
+  the driver branches on the status alone and maps any non-2xx to **SMTP 451** (transient),
+  so the sending MTA retries rather than bouncing the message. A driver MUST NOT read the
+  error `message` as machine-readable; the `error` code is the contract.
+
 When `ParsedInbound.auth` is **absent or partial**, the missing verdicts default to `none`, which
 is the allowlist-only trust path: a sender is trusted iff it is on `TRUSTED_SENDER_DOMAINS` (since
 `spf=none && dkim=none` is treated as "CF stripped the headers, lean on the MX allowlist"). An
@@ -653,14 +662,8 @@ POST /api/smtp-auth          Authorization: Bearer <POSTERN_TRANSPORT_TOKEN>
   200 { "ok": false }                                   // bad credential -> daemon answers 535
   401                                                    // wrong transport token (relay misconfig)
   400 { "ok": false, "error": "E_FIELD_MISSING" }      // missing username/secret
+  500 { "ok": false, "error": "E_INTERNAL_SERVER_ERROR" }  // the check itself is unavailable (#442)
 ```
-
-The endpoint is gated by the **transport token**, never the mailbox API token (section 5): the relay
-is an infra seam, not an API client. `smtp_credentials` (migration `0004`) stores the secret only as
-a `pbkdf2$<iterations>$<salt>$<hash>` derivation (Web Crypto PBKDF2-HMAC-SHA256); an unknown user is
-verified against a dummy hash so timing does not reveal whether the username exists. Operators mint /
-rotate / revoke credentials via the API-token-gated `POST` / `DELETE /api/admin/smtp-credentials`
-(the generated secret is returned once and never logged).
 
   The endpoint is gated by the **transport token**, never the mailbox API token (section 5): the
   relay is an infra seam, not an API client. `smtp_credentials` (migration `0004`) stores the secret
@@ -668,6 +671,14 @@ rotate / revoke credentials via the API-token-gated `POST` / `DELETE /api/admin/
   unknown user is verified against a dummy hash so timing does not reveal whether the username
   exists. Operators mint / rotate / revoke credentials via the API-token-gated `POST` /
   `DELETE /api/admin/smtp-credentials` (the secret is returned once and never logged).
+
+  The 2xx body is the only one a daemon parses; every other status is an INFRA failure, not a
+  verdict on the credential. That split is load-bearing (#442): the worker answers an unexpected
+  throw (a credential-store outage) with the fixed `500` above and never a `200 { ok:false }`,
+  because a `200 { ok:false }` means "wrong password" -- a permanent `535` AND, in this daemon,
+  a strike against the #105 per-account throttle, so an outage would lock every account out. The
+  daemon in turn logs a non-2xx as an infra error, answers the client the same generic `535`, and
+  deliberately does NOT count it toward the throttle. The detail stays in the worker log.
 - **ldap**: LDAP direct-bind + self-read (`LDAP_BIND_DN_TEMPLATE` required) over TLS (`ldaps://`
   or `LDAP_STARTTLS`). After bind success the backend self-reads the user's entry for the
   `LDAP_MAIL_ATTR` identity (default `mail`) and optional `LDAP_REQUIRE_GROUP` gate (#182).

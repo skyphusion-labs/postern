@@ -115,6 +115,18 @@ function base64ByteLength(b64: string): number {
   return atob(b64).length;
 }
 
+// The decoded bytes of a validated base64 attachment, for the STORE (#470). The
+// transport takes the base64 form and decodes its own copy for the wire; the store
+// needs raw bytes, because store.put persists attachments exactly the way ingest
+// does (metadata rows + R2 objects). Only ever called on content validateAttachments
+// already ran atob over, so it cannot throw here.
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
 /**
  * Validate + normalize the attachments array (#70). Returns undefined when there
  * are none (so the no-attachment send path is byte-for-byte unchanged). Enforces
@@ -534,6 +546,21 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       references: d.references,
       bodyText: deriveBodyText(safeHtml, d.text),
       bodyHtml: safeHtml ?? null,
+      // The sent copy carries its attachments too (#470). We handed the transport the
+      // same parts above, so the RECIPIENT always had them; without this the stored
+      // copy reported attachmentCount 0 and GET /api/messages/{id}/attachments/{i}
+      // had nothing to serve, i.e. our own sent files were unreadable from our own
+      // mailbox (webmail Sent, IMAP Sent, API). store.put writes the metadata rows +
+      // R2 bytes through the SAME storeAttachments path inbound uses, so the read-back
+      // contract is identical in both directions. Decoded HERE, after dispatch, rather
+      // than beside the transport copy: the base64 was validated up front (so this
+      // cannot fail the send), and the two decoded copies never need to be alive at
+      // once, which keeps the peak byte count of a 25 MiB send where it was.
+      attachments: d.attachments?.map((a) => ({
+        filename: a.filename,
+        mimeType: a.mimeType,
+        content: base64ToArrayBuffer(a.content),
+      })),
       auth: { spf: "none", dkim: "none", dmarc: "none" },
       trusted: true, // we sent it
       // Envelope fidelity v2 (#189): the sent copy carries the full recipient set

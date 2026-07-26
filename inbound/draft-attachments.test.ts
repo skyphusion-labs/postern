@@ -89,7 +89,12 @@ describe("identity-owned draft attachment staging (#353)", () => {
     expect(response.status).toBe(200);
     expect(sent[0].attachments?.[0]).toMatchObject({ filename: "notes.txt", type: "text/plain" });
     expect(new TextDecoder().decode(sent[0].attachments?.[0].content as ArrayBuffer)).toBe("hello");
-    expect(r2).toHaveLength(0);
+    // The STAGED draft bytes are released on a successful send. Asserted by KEY PREFIX
+    // rather than an empty bucket: since #470 the same send also stores the sent copy own
+    // attachment under att/<messageId>/, so "the bucket is empty" would now be asserting
+    // the absence of the thing that issue exists to store.
+    expect(r2.filter((o) => o.key.startsWith("drafts/"))).toHaveLength(0);
+    expect(r2.filter((o) => o.key.startsWith("att/"))).toHaveLength(1);
     expect((await handleApi(jsonRequest("GET", "/api/drafts/d2", token), env, ctx)).status).toBe(404);
   });
 
