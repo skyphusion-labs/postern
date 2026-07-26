@@ -48,9 +48,11 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
 - **`message_id` is the header the sender sent, VERBATIM** (`<>`-stripped and trimmed, nothing
   else). It is the only machine-parseable handle a sender gives us -- GitHub encodes
   `owner/repo/{issues,pull}/N@github.com` in it -- so the core does not rewrite it. Ids longer
-  than **255 chars** collapse to their sha256 hex, because the id is a path segment of the R2
-  attachment key (`att/<message_id>/<n>-<name>`) and R2 keys are bounded at 1024 bytes; no
-  Message-ID observed in production comes near that. #486 removed an earlier 64-char collapse
+  than **255 UTF-8 bytes** collapse to their sha256 hex, because the id is a path segment of
+  the R2 attachment key (`att/<message_id>/<n>-<name>`) and R2 bounds keys at 1024 BYTES; the
+  budget is counted the same way the limit is, so the guarantee is exact rather than resting
+  on slack. No Message-ID observed in production comes near it, and RFC 5322 message-ids are
+  ASCII, so bytes and characters agree for every real id. #486 removed an earlier 64-char collapse
   whose stated Vectorize reason was stale: vector ids are derived BY HASH from the message id
   at any length (section 5), so the store never needed a short id.
 - `attachments` and the FTS5 triggers are untouched. The triggers only read

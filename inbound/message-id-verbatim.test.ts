@@ -13,7 +13,7 @@
 // live control, and the pre-fix behavior is asserted as the thing that must NOT happen.
 
 import { describe, it, expect } from "vitest";
-import { ingest, normalizeMessageId, sha256hex, MAX_STORED_MESSAGE_ID, type ParsedInbound } from "./src/ingest";
+import { ingest, normalizeMessageId, sha256hex, MAX_STORED_MESSAGE_ID_BYTES, type ParsedInbound } from "./src/ingest";
 import * as store from "./src/store";
 import { handleApi } from "./src/api";
 import { realEnv } from "./realdb";
@@ -108,16 +108,55 @@ describe("#486 a Message-ID over 64 chars survives ingest intact", () => {
   it("collapses only past the documented cap, and stores that collapse", async () => {
     const { env, ctx } = realEnv();
     const suffix = "@example.com";
-    const atCap = "a".repeat(MAX_STORED_MESSAGE_ID - suffix.length) + suffix;
-    expect(atCap).toHaveLength(MAX_STORED_MESSAGE_ID);
+    const atCap = "a".repeat(MAX_STORED_MESSAGE_ID_BYTES - suffix.length) + suffix;
+    expect(atCap).toHaveLength(MAX_STORED_MESSAGE_ID_BYTES);
     expect(await normalizeMessageId(env, atCap)).toBe(atCap);
 
-    const past = "b".repeat(MAX_STORED_MESSAGE_ID) + suffix;
+    const past = "b".repeat(MAX_STORED_MESSAGE_ID_BYTES) + suffix;
     const res = await ingest(env, inbound({ messageId: past }), ctx);
 
     expect(res.messageId).toBe(await sha256hex(past));
     expect(res.messageId).toHaveLength(64);
     expect((await store.get(env, res.messageId))?.messageId).toBe(res.messageId);
+  });
+
+  it("counts the cap in BYTES, and keeps the R2 attachment key inside its limit", async () => {
+    const { env } = realEnv();
+    const bytes = (v: string) => new TextEncoder().encode(v).length;
+
+    // 200 CJK characters: 200 UTF-16 units (inside a character-counted 255) but 600 UTF-8
+    // bytes (outside a byte-counted one). Proves which count the budget actually applies.
+    // Message-IDs are ASCII by RFC 5322, so this only decides malformed-header handling.
+    const wide = "\u4E2D".repeat(200);
+    expect(wide.length).toBeLessThan(MAX_STORED_MESSAGE_ID_BYTES);
+    expect(bytes(wide)).toBeGreaterThan(MAX_STORED_MESSAGE_ID_BYTES);
+    expect(await normalizeMessageId(env, wide)).toBe(await sha256hex(wide));
+
+    // The property the budget exists to guarantee, on the worst id we accept.
+    const worst = "a".repeat(MAX_STORED_MESSAGE_ID_BYTES);
+    expect(await normalizeMessageId(env, worst)).toBe(worst);
+    expect(bytes(`att/${worst}/0-${"n".repeat(100)}`)).toBeLessThan(1024);
+
+    // Stated for the record, because it is why this is a tightening and NOT a breach
+    // fix: a character-counted 255 would have held too (765 id bytes worst case, about
+    // 873 with the key around it). Counting bytes removes the slack from the argument.
+    expect(4 + 255 * 3 + 1 + 2 + 1 + 100).toBeLessThan(1024);
+  });
+
+  it("hashes the UNTRIMMED header for the legacy lookup, as the pre-fix code keyed it", async () => {
+    const { env, ctx, raw } = realEnv();
+    // A header that arrived with surrounding whitespace: the pre-fix code stripped only
+    // <>, so the row it wrote is keyed on the sha256 of the UNTRIMMED string.
+    const padded = ` ${LONG_ROOT} `;
+    const legacy = await sha256hex(padded);
+    expect(legacy).not.toBe(await sha256hex(LONG_ROOT));
+    await ingest(env, inbound({ messageId: legacy }), ctx);
+
+    const res = await ingest(env, inbound({ messageId: padded, to: "alerts@skyphusion.org" }), ctx);
+
+    expect(res.messageId).toBe(legacy);
+    expect(res.merged).toBe(true);
+    expect(rowCount(raw)).toBe(1);
   });
 
   it("normalizes angle brackets and surrounding whitespace, and falls back when absent", async () => {

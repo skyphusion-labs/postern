@@ -186,7 +186,8 @@ export function fileAlsoUnder(recipient: string, raw: string | undefined | null)
 }
 
 /**
- * The longest Message-ID stored verbatim; past it the id collapses to its sha256.
+ * The longest Message-ID stored verbatim, measured in UTF-8 BYTES; past it the id
+ * collapses to its sha256.
  *
  * The cap is NOT a Vectorize constraint. Vector ids are
  * `sha256hex(messageId).slice(0, 56) + ".<chunk>"` (store.vectorIdsForMessage), a fixed
@@ -195,17 +196,32 @@ export function fileAlsoUnder(recipient: string, raw: string | undefined | null)
  * bound. Nothing downstream of the store needed the old 64-char cutoff.
  *
  * What DOES bound the id is the R2 attachment key, `att/<messageId>/<n>-<name>`, against
- * R2's 1024-byte key limit. 255 leaves that key comfortably inside the bound (4 + 255 + 1
- * + up to ~104 for the index and sanitized filename) and sits far above any Message-ID
- * observed in production -- the longest GitHub thread root measured is under 100 chars,
- * and RFC 5322 folds the whole header line at 998. Past 255 we still hash, so identity
- * and dedup survive even an absurd header; that path is a documented, tested refusal
- * rather than the invisible cliff #486 filed.
+ * R2's 1024-byte key limit, and R2 counts that limit in BYTES.
+ *
+ * NEITHER count can actually cross it, and the honest arithmetic is worth writing down:
+ * 255 UTF-16 units is at most 765 UTF-8 bytes (3-byte BMP characters are one unit each;
+ * astral characters are two units and four bytes, so they top out lower), which with the
+ * prefix, index, and sanitized 100-char filename reaches about 873 bytes. So a
+ * char-counted cap would ALSO have held. The budget is counted in bytes anyway for two
+ * reasons: the guarantee becomes exact instead of resting on a 150-byte slack factor
+ * that a later change to the filename cap could quietly eat, and the stored id gets a
+ * hard byte bound for the D1 index. Message-IDs are ASCII by RFC 5322, so for every real
+ * id the two counts are identical; the distinction only decides what happens to a
+ * malformed header.
+ *
+ * 255 also sits far above any Message-ID observed in production -- the longest GitHub
+ * thread root measured is under 100 chars, and RFC 5322 folds the whole header line at
+ * 998. Past the budget we still hash, so identity and dedup survive even an absurd
+ * header; that path is a documented, tested refusal rather than the invisible cliff #486
+ * filed.
  */
-export const MAX_STORED_MESSAGE_ID = 255;
+export const MAX_STORED_MESSAGE_ID_BYTES = 255;
 
-/** The pre-#486 cutoff. Ids longer than this MAY already be stored under their sha256. */
+/** The pre-#486 cutoff, in JS string length, because that is exactly what the old code
+ *  compared. Ids longer than this MAY already be stored under their sha256. */
 const LEGACY_COLLAPSE_ABOVE = 64;
+
+const TE = new TextEncoder();
 
 /**
  * The ONE place a Message-ID header becomes a stored id (#486). Both ingest paths (the
@@ -228,11 +244,17 @@ const LEGACY_COLLAPSE_ABOVE = 64;
  * as those rows age out.
  */
 export async function normalizeMessageId(env: Env, raw: string | undefined | null): Promise<string> {
-  const stripped = (raw ?? "").replace(/[<>]/g, "").trim();
+  // `bare` is EXACTLY the string the pre-#486 code keyed on: <>-stripped, NOT trimmed.
+  // The legacy lookup below must hash that string, or for a header that arrived with
+  // surrounding whitespace it hashes something the old code never stored and misses the
+  // very row it exists to find. What we STORE is the trimmed form, which is what
+  // in_reply_to / references are compared as at thread resolution.
+  const bare = (raw ?? "").replace(/[<>]/g, "");
+  const stripped = bare.trim();
   if (!stripped) return crypto.randomUUID();
-  if (stripped.length > MAX_STORED_MESSAGE_ID) return await sha256hex(stripped);
-  if (stripped.length > LEGACY_COLLAPSE_ABOVE) {
-    const legacy = await sha256hex(stripped);
+  if (TE.encode(stripped).length > MAX_STORED_MESSAGE_ID_BYTES) return await sha256hex(stripped);
+  if (bare.length > LEGACY_COLLAPSE_ABOVE) {
+    const legacy = await sha256hex(bare);
     if (await store.messageExists(env, legacy)) return legacy;
   }
   return stripped;
