@@ -78,7 +78,8 @@ npx wrangler d1 migrations apply postern   # apply D1 migrations
 
 The workers have vitest suites; the scripted v1.0 acceptance smoke is `inbound/smoke.mjs` (issue #25).
 **The cross-seam route contract is GENERATED from `inbound/src/routes.ts`** (#417). That file is the
-single source: `requiredScope()` is derived from the same rows, so there is no second list to drift.
+single source: the live scope gate in `api.ts` CALLS the `requiredScope()` derived from those rows
+(the if-chain that used to live there is gone), so there is no second list to drift.
 `npm run routes:emit` (in `inbound/`) projects it to `contracts/api-routes.json` (route + method +
 required scope) and `contracts/api-params.json` (the query/body names each route reads, keyed by the
 same route id). **Add or rename a route by editing `inbound/src/routes.ts` and re-emitting in the

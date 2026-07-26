@@ -338,7 +338,8 @@ none touches D1 directly (#25, #26).
 **The table above has a machine-readable twin: `contracts/api-routes.json`** (#417), plus its
 parameter sibling `contracts/api-params.json` (the query names and body keys each route reads, keyed
 by the same route id). Both are GENERATED from `inbound/src/routes.ts` by `npm run routes:emit`, and
-`requiredScope()` is derived from those same rows, so the code and the contract cannot disagree by
+**the worker's own scope gate calls the `requiredScope()` derived from those same rows** (there is no
+second copy of the mapping in `api.ts`), so the code and the contract cannot disagree by
 construction. Edit the source and re-emit; never hand-edit the JSON. Four tests keep it honest, in
 both directions:
 

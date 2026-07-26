@@ -4,12 +4,21 @@
 // The manifest is now GENERATED from the same declaration requiredScope() derives from,
 // so there is no hand-maintained second list to be wrong. What has to be proved:
 //
-//   1. DERIVATION: the derived requiredScope answers identically to the if-chain it
-//      replaced, over every route plus adversarial paths. The reference implementation
-//      is copied here verbatim, so the refactor is PROVED equivalent rather than
-//      asserted to be. This caught two places a naive matcher silently moved the auth
-//      gate (the bare /api/messages/, which the original DOES gate, and the bare
-//      /api/admin/smtp-credentials/, which it does NOT).
+//   1. DERIVATION: api.ts no longer has its own copy of this mapping. The gate calls the
+//      DERIVED requiredScope, and the if-chain that used to live in api.ts is copied
+//      here verbatim as a REFERENCE, so the migration is proved faithful over every
+//      route plus adversarial paths rather than asserted to be. It keeps earning its
+//      place afterwards as a change-detector: an edit to the table that would move the
+//      AUTH GATE fails against the recorded original, and has to be made deliberately.
+//      It caught three such moves while this was being written (the bare
+//      /api/messages/, which the original DOES gate; the bare
+//      /api/admin/smtp-credentials/, which it does NOT; and a plain prefix on
+//      /api/drafts swallowing the sibling /api/drafts2).
+//
+//      The swap is verified by BEHAVIOR too, not only by this file: scopes.test.ts and
+//      route-contract.test.ts drive the real handleApi with a token per scope, and
+//      flipping one row's scope in the table makes them fail, which is what proves the
+//      table is wired to the live gate rather than merely imported next to it.
 //   2. ORDERING: every row is reachable, i.e. matchRoute returns THAT row for its own
 //      path. A broad prefix shadowing a later exact route is the classic way a table
 //      like this rots, and it is invisible without this test.
