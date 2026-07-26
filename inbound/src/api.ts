@@ -112,7 +112,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     try {
       sres = await handleSession(request, env);
     } catch (err) {
-      return sessionErrorResponse(err);
+      return preGateErrorResponse(err, "session", "session unavailable");
     }
     if (sres) return sres;
   }
@@ -1100,6 +1100,22 @@ const EMAIL_RE = /^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$/;
 // by the transport token. Returns { ok:true, from } on success (the bound From
 // identity the daemon then enforces), { ok:false } on a bad credential.
 async function handleSmtpAuth(request: Request, env: Env): Promise<Response> {
+  // #442: this route is dispatched BEFORE the try/catch that wraps every gated route and
+  // had none of its own, so an unexpected throw (a D1 outage inside authenticate(), past
+  // every deliberate refusal below) escaped route-level mapping entirely. Its refusals are
+  // all RESPONSES -- 401 (wrong transport token), 400 (bad body), 200 {ok:false} (bad
+  // credential) -- so they return through this wrapper untouched; only what would have
+  // escaped is caught. Answering 200 {ok:false} here instead would tell the relay the
+  // PASSWORD was wrong (SMTP 535, and counted toward the #105 throttle), which is why the
+  // envelope is a 500 the relay reads as an infra failure.
+  try {
+    return await smtpAuthResponse(request, env);
+  } catch (err) {
+    return preGateErrorResponse(err, "smtp-auth", "auth check unavailable");
+  }
+}
+
+async function smtpAuthResponse(request: Request, env: Env): Promise<Response> {
   if (!transportAuthorized(request, env)) {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
@@ -1208,10 +1224,18 @@ async function handleReconcile(request: Request, env: Env): Promise<Response> {
 // decoded to ArrayBuffer here), and hands to ingest(). The M8 fidelity fields
 // (toHeader/cc/sender/replyTo/rawSize) flow through ingest()'s mapping untouched.
 async function handleIngest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  if (!transportAuthorized(request, env)) {
-    return json({ ok: false, error: "unauthorized" }, 401);
-  }
+  // #442: the transport gate moves INSIDE the try so nothing on this route can throw past
+  // the envelope, and an unexpected throw now answers a fixed 500 instead of going through
+  // errorResponse. That branch echoes err.message and answers 400 for any error whose code
+  // is not in RETRYABLE -- on the MAIL path a 400 reads as a permanent reject, and the
+  // echoed text is internal detail put on the wire (the relay logs the response body
+  // verbatim). Deliberate refusals are unchanged: 401 unauthorized, and the MailboxErrors
+  // parseIngestBody throws (E_FIELD_MISSING, E_VALIDATION_ERROR, E_PAYLOAD_TOO_LARGE) still
+  // map through errorResponse with their own status.
   try {
+    if (!transportAuthorized(request, env)) {
+      return json({ ok: false, error: "unauthorized" }, 401);
+    }
     const body = await readJson<unknown>(request);
     const parsed = parseIngestBody(body);
     const result = await ingest(env, parsed, ctx);
@@ -1223,7 +1247,7 @@ async function handleIngest(request: Request, env: Env, ctx: ExecutionContext): 
       threadId: result.threadId,
     });
   } catch (err) {
-    return errorResponse(err);
+    return preGateErrorResponse(err, "ingest", "ingest unavailable");
   }
 }
 
@@ -1505,25 +1529,33 @@ async function readJson<T>(request: Request): Promise<T> {
   }
 }
 
-/** The envelope for an UNEXPECTED throw on the PRE-GATE session path (#429).
+/** The envelope for an UNEXPECTED throw on a PRE-GATE route: /api/session (#429) and the
+ *  two infra seams that share its construction, /api/smtp-auth and /ingest (#442).
  *
  *  A structured MailboxError maps exactly as it does on a gated route, so the two edges
  *  answer identically for the same error. Anything else is, by construction, an infra
- *  failure the session path did not anticipate, and it deliberately does NOT reuse
+ *  failure the route did not anticipate, and it deliberately does NOT reuse
  *  errorResponse unknown-error branch: that one answers 400 and echoes err.message, which
  *  on a D1 outage would both blame the CALLER for a server failure and put internal error
  *  text on the wire. A fixed 500 with a fixed message says the true thing and discloses
  *  nothing; the detail goes to the log, where an operator can see it and a client cannot.
  *
+ *  5xx is the load-bearing half on the MAIL seams (#442). Both callers branch on the
+ *  STATUS only (relay/client.go tests `StatusCode/100 != 2`; relay/submit_client.go parses
+ *  the body only on a 2xx), and both map a non-2xx to a TRANSIENT answer: an /ingest
+ *  failure is SMTP 451 so the sending MTA retries, and an /api/smtp-auth infra failure is
+ *  logged and deliberately kept OUT of the #105 per-account throttle. A 200 {ok:false}
+ *  envelope would be read as "bad credential" (permanent 535, and it WOULD count toward
+ *  the throttle, locking every user out during an outage), and the 400 that errorResponse
+ *  gives an unknown error reads as a permanent client fault. Neither is true of a D1
+ *  outage, so both seams answer a fixed 500.
+ *
  *  E_INTERNAL_SERVER_ERROR is the existing vocabulary for this (CONTRACT section 4), not a
  *  new code minted for one route. */
-function sessionErrorResponse(err: unknown): Response {
+function preGateErrorResponse(err: unknown, route: string, message: string): Response {
   if (err instanceof MailboxError) return errorResponse(err);
-  console.error("session route failed:", err instanceof Error ? err.message : String(err));
-  return json(
-    { ok: false, error: "E_INTERNAL_SERVER_ERROR", message: "session unavailable" },
-    500,
-  );
+  console.error(`${route} route failed:`, err instanceof Error ? err.message : String(err));
+  return json({ ok: false, error: "E_INTERNAL_SERVER_ERROR", message }, 500);
 }
 
 function errorResponse(err: unknown): Response {
