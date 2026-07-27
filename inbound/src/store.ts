@@ -532,11 +532,20 @@ async function storeAttachments(
   await refreshProjectedSize(env, messageId);
 }
 
-/** Recompute projected_size from D1 body + attachment metadata (no R2 reads). */
-export async function refreshProjectedSize(env: Env, messageId: string): Promise<void> {
+/**
+ * The projected size of ONE stored message, from D1 body + attachment metadata
+ * (no R2 reads). Returns null when the row is gone.
+ *
+ * This is the single projection entry point on the worker side: live ingest
+ * (refreshProjectedSize) and the #507 reproject sweep both go through it, so a
+ * backfilled size is computed by the same code that computes a live one and the two
+ * cannot drift. Duplicating the projection for the sweep would have re-created the
+ * exact class of bug #507 is about, one number produced by two serializers.
+ */
+export async function projectedSizeFor(env: Env, messageId: string): Promise<number | null> {
   const msg = await get(env, messageId);
-  if (!msg) return;
-  const size = await projectRfc822Size({
+  if (!msg) return null;
+  return await projectRfc822Size({
     messageId: msg.messageId,
     from: msg.from,
     to: msg.to,
@@ -551,6 +560,12 @@ export async function refreshProjectedSize(env: Env, messageId: string): Promise
     bodyHtml: msg.bodyHtml,
     attachments: msg.attachments,
   });
+}
+
+/** Recompute projected_size from D1 body + attachment metadata (no R2 reads). */
+export async function refreshProjectedSize(env: Env, messageId: string): Promise<void> {
+  const size = await projectedSizeFor(env, messageId);
+  if (size === null) return;
   await env.DB.prepare(
     "UPDATE messages SET projected_size = ?, projection_version = ? WHERE message_id = ?",
   )
@@ -2663,6 +2678,145 @@ export async function reindexPage(
     indexed,
     vectors,
     skippedByGate,
+    nextCursor,
+    done: nextCursor === null,
+    dryRun,
+  };
+  if (!opts.cursor) result.total = await countMessages(env);
+  return result;
+}
+
+// --- Reproject sweep (#507): refill projected_size after a PROJECTION_VERSION bump ---
+//
+// A PROJECTION_VERSION bump invalidates every cached projected_size at once: the IMAP
+// door only trusts a cached size whose stored projection_version matches the renderer
+// it is running (imap/posternimap/message.py getSize). Nothing refills them on its own,
+// because refreshProjectedSize is only ever called at store time. Without this sweep
+// every pre-existing row is a permanent cache MISS, and each RFC822.SIZE on old mail
+// costs the door a full message hydration, which is exactly the cost #342 exists to
+// remove. Measured scale at the time of #507: 10634 rows.
+//
+// Shape is deliberately the reindexPage shape (#116 ws4): one keyset page per call, a
+// cursor back to the runner, and a dryRun that computes everything and writes nothing.
+// Idempotent: re-running over a row already at the current version rewrites the same
+// number.
+
+export interface ReprojectResult {
+  /** Total messages in the store; first call only (no cursor), for a progress bar. */
+  total?: number;
+  processed: number; // rows examined this page
+  updated: number; // rows whose stored size or version CHANGED (0 on a dry run)
+  unchanged: number; // rows already correct at the current PROJECTION_VERSION
+  missing: number; // rows that vanished between the page read and the projection
+  failed: number; // rows whose post-write read-back did NOT match what we wrote
+  nextCursor: string | null;
+  done: boolean;
+  dryRun: boolean;
+}
+
+interface ReprojectRow {
+  id: number;
+  message_id: string;
+  date: string;
+  projected_size: number | null;
+  projection_version: number | null;
+}
+
+/** Same keyset order and opaque cursor as pageForReindex and the read API. */
+async function pageForReproject(
+  env: Env,
+  cursor: string | undefined,
+  limit: number,
+): Promise<{ rows: ReprojectRow[]; nextCursor: string | null }> {
+  const cur = decodeCursor(cursor);
+  const binds: unknown[] = [];
+  let where = "";
+  if (cur) {
+    where = " WHERE (date < ? OR (date = ? AND id < ?))";
+    binds.push(cur.date, cur.date, cur.id);
+  }
+  const sql =
+    "SELECT id, message_id, date, projected_size, projection_version" +
+    ` FROM messages${where} ORDER BY date DESC, id DESC LIMIT ?`;
+  binds.push(limit + 1);
+  const res = await env.DB.prepare(sql).bind(...binds).all<ReprojectRow>();
+  const all = res.results ?? [];
+  const hasMore = all.length > limit;
+  const rows = hasMore ? all.slice(0, limit) : all;
+  const last = rows[rows.length - 1];
+  const nextCursor = hasMore && last ? encodeCursor(last.date, last.id) : null;
+  return { rows, nextCursor };
+}
+
+/**
+ * reprojectPage recomputes projected_size for ONE page and verifies each write.
+ *
+ * Every row goes through projectedSizeFor, the same entry point live ingest uses, so a
+ * backfilled size is byte-identical to the size the same message would get if it were
+ * stored today. After each write the row is READ BACK and compared; a row whose
+ * read-back does not match what was written counts as `failed` and is reported rather
+ * than being silently folded into `updated`. A write nobody read back is not evidence
+ * the write landed.
+ */
+export async function reprojectPage(
+  env: Env,
+  opts: { cursor?: string; limit?: number; dryRun?: boolean },
+): Promise<ReprojectResult> {
+  const dryRun = opts.dryRun === true;
+  const { rows, nextCursor } = await pageForReproject(
+    env,
+    opts.cursor,
+    clampReindexLimit(opts.limit),
+  );
+
+  let updated = 0;
+  let unchanged = 0;
+  let missing = 0;
+  let failed = 0;
+
+  for (const r of rows) {
+    const size = await projectedSizeFor(env, r.message_id);
+    if (size === null) {
+      missing++;
+      continue;
+    }
+    const current = r.projected_size;
+    const version = r.projection_version;
+    if (current === size && version === PROJECTION_VERSION) {
+      unchanged++;
+      continue;
+    }
+    if (dryRun) {
+      updated++;
+      continue;
+    }
+    await env.DB.prepare(
+      "UPDATE messages SET projected_size = ?, projection_version = ? WHERE message_id = ?",
+    )
+      .bind(size, PROJECTION_VERSION, r.message_id)
+      .run();
+    const back = await env.DB.prepare(
+      "SELECT projected_size, projection_version FROM messages WHERE message_id = ?",
+    )
+      .bind(r.message_id)
+      .first<{ projected_size: number | null; projection_version: number | null }>();
+    if (
+      !back ||
+      back.projected_size !== size ||
+      back.projection_version !== PROJECTION_VERSION
+    ) {
+      failed++;
+      continue;
+    }
+    updated++;
+  }
+
+  const result: ReprojectResult = {
+    processed: rows.length,
+    updated,
+    unchanged,
+    missing,
+    failed,
     nextCursor,
     done: nextCursor === null,
     dryRun,

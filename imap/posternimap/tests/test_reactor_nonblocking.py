@@ -507,3 +507,68 @@ class ConcurrentTransportTest(unittest.TestCase):
         # Concurrency CONTROL: six 150ms calls that truly overlap finish far inside the
         # ~0.9s a serialized run would take, so this also fails if a lock creeps back in.
         self.assertLess(elapsed, 0.9, "calls serialized (%.2fs): connections are shared" % elapsed)
+
+
+class FetchWarmMirrorsSpewBodyTest(unittest.TestCase):
+    """fetchwarm must mirror the accessors twisted ACTUALLY calls, not the ones it
+    used to call (#507).
+
+    The module is only worth anything while it is a faithful mirror of
+    imap4.IMAP4Server.spew_body. Since the door implements IMessageFile, spew_body and
+    spew_rfc822 no longer walk getHeaders + getBodyFile for a whole-message fetch; they
+    call open() and stream it. A mirror still naming the old pair would keep working by
+    accident (both paths hydrate) while quietly ceasing to describe the render, which
+    is the drift this module exists to prevent.
+    """
+
+    def _query(self, spec: bytes):
+        from twisted.mail import imap4
+
+        return imap4._FetchParser().parseString(spec) or imap4._FetchParser().parse(spec)
+
+    def _reads(self, spec: bytes):
+        from twisted.mail import imap4
+
+        from posternimap.fetchwarm import fetch_reads
+
+        parser = imap4._FetchParser()
+        parser.parseString(spec)
+        return fetch_reads(parser.result)
+
+    def test_whole_body_fetch_warms_the_message_file(self):
+        reads = self._reads(b"(BODY[])")
+        self.assertEqual([r.kind for r in reads], ["file"])
+        self.assertEqual(reads[0].path, ())
+
+    def test_rfc822_fetch_warms_the_message_file(self):
+        reads = self._reads(b"(RFC822)")
+        self.assertEqual([r.kind for r in reads], ["file"])
+
+    def test_per_part_and_section_fetches_are_unchanged(self):
+        # CONTROL: only the whole-message path moved. A change that turned every shape
+        # into a whole-message read would satisfy the two gates above and destroy #102
+        # and #342, so pin the neighbours that must NOT have moved.
+        self.assertEqual([r.kind for r in self._reads(b"(BODY[2])")], ["body"])
+        self.assertEqual([r.kind for r in self._reads(b"(BODY[TEXT])")], ["body"])
+        self.assertEqual([r.kind for r in self._reads(b"(BODYSTRUCTURE)")], ["structure"])
+        self.assertEqual([r.kind for r in self._reads(b"(BODY[HEADER])")], ["headers"])
+        self.assertEqual([r.kind for r in self._reads(b"(RFC822.SIZE)")], ["size"])
+        self.assertEqual(self._reads(b"(UID FLAGS)"), ())
+
+    def test_the_file_read_is_applied_by_calling_open(self):
+        # The read is only useful if _apply_read actually drives open(); a kind the
+        # applier does not understand would be a silent no-op and put the hydration
+        # back on the reactor thread.
+        from posternimap.fetchwarm import Read
+        from posternimap.message import PosternIMAPMessage
+
+        calls = []
+
+        class Spy(PosternIMAPMessage):
+            def open(self):
+                calls.append("open")
+                return None
+
+        spy = Spy.__new__(Spy)
+        PosternIMAPMessage._apply_read(spy, Read((), "file"))
+        self.assertEqual(calls, ["open"])

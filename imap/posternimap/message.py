@@ -130,7 +130,7 @@ class _RFC822Part:
         return _RFC822Part(child)
 
 
-@implementer(imap4.IMessage)
+@implementer(imap4.IMessage, imap4.IMessageFile)
 class PosternIMAPMessage:
     """One stored message presented to the IMAP server, hydrated on demand."""
 
@@ -310,6 +310,11 @@ class PosternIMAPMessage:
             headers.items()
         elif kind == "body":
             target.getBodyFile()
+        elif kind == "file":
+            # Whole-message BODY[] / RFC822: twisted streams IMessageFile.open() (#507),
+            # so that is the accessor to warm. It hydrates AND pulls every attachment,
+            # which is what a whole-message fetch legitimately needs.
+            target.open()
 
     def getUID(self) -> int:
         return self._uid
@@ -390,10 +395,34 @@ class PosternIMAPMessage:
             text = ""
         return BytesIO(text.encode("utf-8", "replace"))
 
+    def open(self) -> BytesIO:
+        """IMessageFile: the exact bytes to serve for BODY[] and RFC822 (#507).
+
+        THIS IS WHAT MAKES RFC822.SIZE HONEST. Without an IMessageFile, twisted falls
+        back to imap4.MessageProducer, which RE-SERIALIZES the message from the parsed
+        tree: it re-joins the headers with CRLF, copies the body file through verbatim,
+        and writes its own multipart boundary lines. That is a SECOND serializer, and
+        the projected size has never described its output. Measured on a raw socket
+        before this existed: a plain message announced 226 and served {235}, an html
+        message announced 518 and served {540}.
+
+        Implementing IMessageFile makes twisted serve the rendered projection verbatim
+        (imap4.py spew_body / spew_rfc822 both prefer it), so there is ONE serializer
+        and the size agreeing with the literal is a consequence rather than a
+        coincidence to be maintained.
+
+        Real attachment bytes, like getBodyFile: BODY[] is the whole message.
+        """
+        self._ensure_all_attachments()
+        return BytesIO(self._rendered)
+
     def getSize(self) -> int:
-        # RFC822.SIZE must byte-match BODY[]. Prefer the cached projection (#342);
-        # never use wire_size (#189/#207). Cached hit = zero network (no message GET,
-        # no attachment GETs). Miss = hydrate with placeholders (message GET only).
+        # RFC822.SIZE must byte-match BODY[], which since #507 is exactly what open()
+        # returns. Prefer the cached projection (#342); never use wire_size
+        # (#189/#207). Cached hit = zero network (no message GET, no attachment GETs).
+        # Miss = hydrate with placeholders (message GET only): the placeholder render
+        # is the same LENGTH as the real one, which is the #342 contract and is gated
+        # in test_rfc822.CrlfProjectionTest.
         cached = getattr(self._summary, "projected_size", None)
         version = getattr(self._summary, "projection_version", None)
         if (

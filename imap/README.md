@@ -192,10 +192,21 @@ so clients discard their cached estate view and resync into the per-account view
 
 Projection changes that alter BODY[] bytes (including the #342 deterministic MIME
 boundary renderer, and any `PROJECTION_VERSION` bump such as v2 Unicode header
-encoding) also require a **UIDVALIDITY bump** on the fleet IMAP image roll so
-clients drop SIZE/BODY caches that would disagree with the new projection.
+encoding or v3 CRLF terminators) also require a **UIDVALIDITY bump** on the fleet
+IMAP image roll so clients drop SIZE/BODY caches that would disagree with the new
+projection. This is not a precaution, it is RFC 3501 section 2.3.1.1: the
+combination of mailbox name, UIDVALIDITY and UID "must refer to a single immutable
+message on that server forever", and that sentence names the RFC-2822 size and the
+message texts among the things that "must never change". Changing either under a
+steady UIDVALIDITY is the server violating that MUST, whatever any individual
+client happens to tolerate.
+
 Stale `messages.projected_size` rows (older `projection_version`) are ignored by
-IMAP and fall back to a one-shot metadata hydrate.
+IMAP and fall back to a one-shot metadata hydrate. That fallback is correct but it
+is NOT a substitute for refilling them: after a bump EVERY pre-existing row takes
+it, so ship the `POST /api/admin/reproject` sweep
+(`inbound/scripts/reproject-sweep.mjs`) with the roll, or the door hydrates a whole
+message for every `RFC822.SIZE` on old mail, indefinitely.
 
 ### Role queues (#404)
 

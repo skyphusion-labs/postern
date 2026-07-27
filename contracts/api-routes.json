@@ -202,6 +202,15 @@
       "auth": "bearer"
     },
     {
+      "id": "admin-reproject",
+      "method": "POST",
+      "path": "/api/admin/reproject",
+      "match": "exact",
+      "scope": "admin",
+      "auth": "bearer",
+      "note": "#507: refill projected_size after a PROJECTION_VERSION bump; idempotent, and dryRun writes nothing"
+    },
+    {
       "id": "admin-roles",
       "method": "GET",
       "path": "/api/roles",

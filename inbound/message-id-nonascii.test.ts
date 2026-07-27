@@ -219,9 +219,9 @@ describe("#500 an id the door cannot carry is not representable, so it collapses
 // constants on both sides. The Python half is
 // imap/posternimap/tests/test_rfc822.py::ProjectionLockstepTest -- change one, change both.
 const LOCKSTEP = {
-  nonascii_id: 254,
-  ascii_id: 249,
-  nonascii_in_reply_to: 291,
+  nonascii_id: 264,
+  ascii_id: 259,
+  nonascii_in_reply_to: 302,
 } as const;
 
 describe("#500 projection lockstep with imap/posternimap/rfc822.py", () => {

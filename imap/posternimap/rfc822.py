@@ -19,16 +19,23 @@ from email.utils import format_datetime, parsedate_to_datetime
 
 from .client import Message, MessageSummary
 
-# v2: hand-rolled RFC 2047 B-encoding (no email.header.Header Q/fold) + B-encoded
-# non-ASCII filenames. Must stay byte-length identical to inbound/src/rfc822Project.ts.
-PROJECTION_VERSION = 2
+# v3: CRLF line endings end to end (#507). v2 was the hand-rolled RFC 2047 B-encoding
+# (no email.header.Header Q/fold) + B-encoded non-ASCII filenames.
+# Must stay byte-length identical to inbound/src/rfc822Project.ts.
+PROJECTION_VERSION = 3
 
 # Collapses RFC 5322 header folding (a CRLF/LF followed by leading whitespace) back
 # to a single space, so a value handed to the IMAP ENVELOPE serializer is one line:
 # a raw newline inside an ENVELOPE quoted-string would desync the IMAP response.
 _WIRE_FOLD_RE = re.compile(r"\r?\n[ \t]+")
 
-_NL = "\n"
+# The wire line terminator. RFC 5322 section 2.1: a line is terminated by CRLF, and CR
+# and LF "MUST NOT appear independently". Before #507 this constant existed but was
+# DEAD: every newline below was a hard-coded literal, so the projection emitted bare LF,
+# the door served a body the RFC does not permit, and RFC822.SIZE described bytes that
+# were not the bytes on the wire. It is now the single source for every terminator in
+# this file, and inbound/src/rfc822Project.ts NL is its byte-for-byte counterpart.
+_NL = "\r\n"
 
 
 def _fmt_date(iso: str) -> str:
@@ -186,8 +193,21 @@ def _quote_filename(name: str) -> str:
     return encoded.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _to_crlf(text: str) -> str:
+    """Normalize any mix of CRLF, bare CR and bare LF to the wire terminator.
+
+    Idempotent: CRLF is collapsed to LF first, so a body that already carries CRLF
+    never gains a second CR. Stored bodies land in D1 with LF, so without this a
+    projector that changed only its JOIN separators would still emit bare LF inside
+    the body text, which is the half-fix the #507 gates refuse.
+
+    Must stay byte-for-byte identical to inbound/src/rfc822Project.ts toCrlf.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", _NL)
+
+
 def _ensure_trailing_nl(text: str) -> str:
-    return text if text.endswith("\n") else text + "\n"
+    return text if text.endswith(_NL) else text + _NL
 
 
 def _attachment_note(msg: Message) -> str:
@@ -235,30 +255,33 @@ def _envelope_lines(msg: Message) -> list[str]:
 
 def _part(headers: list[str], body: bytes) -> bytes:
     # Headers are ASCII after RFC 2047 encoding; fail loud if a bug leaks Unicode.
-    return ("\n".join(headers) + "\n\n").encode("ascii") + body
+    return (_NL.join(headers) + _NL + _NL).encode("ascii") + body
 
 
 def _text_body(text: str) -> bytes:
-    return _ensure_trailing_nl(text).encode("utf-8")
+    return _ensure_trailing_nl(_to_crlf(text)).encode("utf-8")
 
 
 def _wrap_multipart(boundary: str, parts: list[bytes]) -> bytes:
     chunks: list[bytes] = []
     for part in parts:
-        chunks.append(f"--{boundary}\n".encode("ascii"))
+        chunks.append(f"--{boundary}{_NL}".encode("ascii"))
         chunks.append(part)
+        # Every part this renderer builds already ends in the terminator; the guard is
+        # for an empty body. Testing the final LF byte is equivalent to testing the full
+        # CRLF here, and matches the 0x0a check in rfc822Project.ts wrapMultipart.
         if not part.endswith(b"\n"):
-            chunks.append(b"\n")
-    chunks.append(f"--{boundary}--\n".encode("ascii"))
+            chunks.append(_NL.encode("ascii"))
+    chunks.append(f"--{boundary}--{_NL}".encode("ascii"))
     return b"".join(chunks)
 
 
 def _base64_wire(data: bytes) -> bytes:
     b64 = base64.b64encode(data).decode("ascii")
     if not b64:
-        return b"\n"
+        return _NL.encode("ascii")
     lines = [b64[i : i + 76] for i in range(0, len(b64), 76)]
-    return ("\n".join(lines) + "\n").encode("ascii")
+    return (_NL.join(lines) + _NL).encode("ascii")
 
 
 def _attachment_part(filename: Optional[str], mime: Optional[str], data: bytes) -> bytes:
@@ -326,7 +349,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
     if not atts and not html_part:
         env.append('Content-Type: text/plain; charset="utf-8"')
         env.append("Content-Transfer-Encoding: 8bit")
-        return ("\n".join(env) + "\n\n").encode("utf-8") + _text_body(plain)
+        return (_NL.join(env) + _NL + _NL).encode("utf-8") + _text_body(plain)
 
     if not atts and html_part:
         boundary = _boundary_token(mid, "0")
@@ -348,7 +371,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
                 _text_body(html_part),
             ),
         ]
-        return ("\n".join(env) + "\n\n").encode("utf-8") + _wrap_multipart(
+        return (_NL.join(env) + _NL + _NL).encode("utf-8") + _wrap_multipart(
             boundary, parts
         )
 
@@ -368,7 +391,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
     parts = [first]
     for att, data in zip(msg.attachments, attachment_bytes):
         parts.append(_attachment_part(att.filename, att.mime, data))
-    return ("\n".join(env) + "\n\n").encode("utf-8") + _wrap_multipart(
+    return (_NL.join(env) + _NL + _NL).encode("utf-8") + _wrap_multipart(
         boundary, parts
     )
 

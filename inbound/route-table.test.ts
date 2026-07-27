@@ -49,6 +49,9 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   if (method === "POST" && path === "/api/admin/smtp-credentials") return "admin";
   if (method === "DELETE" && /^\/api\/admin\/smtp-credentials\/(.+)$/.test(path)) return "admin";
   if (method === "POST" && path === "/api/admin/reindex") return "admin";
+  // #507 adds POST /api/admin/reproject at `admin` scope (the projected_size backfill
+  // after a PROJECTION_VERSION bump). Same deliberate-act rule as the #438 row above.
+  if (method === "POST" && path === "/api/admin/reproject") return "admin";
   if (method === "POST" && path === "/api/admin/reconcile") return "admin";
   if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
   if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
@@ -72,7 +75,7 @@ const CORPUS = [
   "/api/drafts/d1/attachments", "/api/drafts/d1/attachments/a1",
   "/api/imap/drafts", "/api/imap/drafts/d1", "/api/imap/import", "/api/imap/roles",
   "/api/admin/smtp-credentials", "/api/admin/smtp-credentials/", "/api/admin/smtp-credentials/bob",
-  "/api/admin/reindex", "/api/admin/reconcile",
+  "/api/admin/reindex", "/api/admin/reconcile", "/api/admin/reproject",
   // Pre-gate rows: they never reach the gate, and the table says so.
   "/health", "/", "/webmail", "/.well-known/mta-sts.txt", "/api/smtp-auth", "/api/session",
   "/api/session/refresh", "/ingest",

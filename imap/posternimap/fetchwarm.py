@@ -40,7 +40,9 @@ class Read(NamedTuple):
     """One accessor call the render will make, addressed to a subpart.
 
     path   -- Twisted 0-based subpart path; () addresses the message itself.
-    kind   -- "size" | "headers" | "body" | "structure".
+    kind   -- "size" | "headers" | "body" | "structure" | "file".
+              "file" is the whole rendered message (IMessageFile.open), which is what
+              a whole-message BODY[] / RFC822 fetch streams since #507.
     negate -- getHeaders negate flag ("headers" only).
     fields -- getHeaders names ("headers" only); () means the whole header block.
     """
@@ -89,9 +91,10 @@ def _body_reads(part) -> Tuple[Read, ...]:
             # BODY[i]: the subpart octets, which for an attachment subpart is that ONE
             # attachment (#342), never every attachment.
             return (Read(path, "body"),)
-        # BODY[]: no IMessageFile on this door, so Twisted falls to MessageProducer,
-        # which reads the whole header block and then the body.
-        return (Read(_WHOLE, "headers", True, ()), Read(_WHOLE, "body"))
+        # BODY[]: the door implements IMessageFile (#507), so spew_body streams
+        # open() verbatim instead of letting MessageProducer re-serialize a parsed
+        # tree. One read, and it is the read the render actually makes.
+        return (Read(_WHOLE, "file"),)
     # Bare BODY: getBodyStructure.
     return (Read(path, "structure"),)
 
@@ -112,9 +115,8 @@ def fetch_reads(query) -> Tuple[Read, ...]:
         elif ptype == "rfc822text":
             reads.append(Read(_WHOLE, "body"))
         elif ptype == "rfc822":
-            # MessageProducer again: headers, then body.
-            reads.append(Read(_WHOLE, "headers", True, ()))
-            reads.append(Read(_WHOLE, "body"))
+            # spew_rfc822 prefers IMessageFile exactly as spew_body does (#507).
+            reads.append(Read(_WHOLE, "file"))
         elif ptype == "bodystructure":
             reads.append(Read(_WHOLE, "structure"))
         elif ptype == "body":

@@ -327,7 +327,12 @@ class BodyEncodingTest(unittest.TestCase):
             client = base64.b64decode(served)
         else:
             client = served
-        self.assertEqual(client.decode("utf-8").rstrip("\n"), self.NASTY.rstrip("\n"))
+        # The served body is CRLF on the wire (#507), so compare CONTENT with the
+        # terminators normalized, and pin the terminator itself rather than papering
+        # over it: a bare LF here would mean the projection regressed.
+        self.assertNotIn(b"\n", served.replace(b"\r\n", b""))
+        text = client.decode("utf-8").replace("\r\n", "\n")
+        self.assertEqual(text.rstrip("\n"), self.NASTY.rstrip("\n"))
         self.assertIn("token=abc=def", client.decode("utf-8"))
 
 
@@ -436,14 +441,14 @@ class ProjectedSizeTest(unittest.TestCase):
             attachments=[Attachment(filename="inv.pdf", mime="application/pdf", size=len(data))],
         )
         self.assertEqual(project_rfc822_size(m), len(render_rfc822(m, attachment_bytes=[data])))
-        self.assertEqual(PROJECTION_VERSION, 2)
+        self.assertEqual(PROJECTION_VERSION, 3)
 
     def test_unicode_projection_sizes_match_worker_goldens(self):
-        # Lockstep with inbound/projected-size.test.ts (projection v2).
+        # Lockstep with inbound/projected-size.test.ts (projection v3, CRLF #507).
         cases = [
             (
                 _msg(message_id="u1", subject="café", body_text="hi"),
-                230,
+                240,
             ),
             (
                 _msg(
@@ -452,7 +457,7 @@ class ProjectedSizeTest(unittest.TestCase):
                     subject="Hello",
                     body_text="hi",
                 ),
-                237,
+                247,
             ),
             (
                 _msg(
@@ -461,15 +466,15 @@ class ProjectedSizeTest(unittest.TestCase):
                     body_text="hi",
                     attachments=[Attachment(filename="résumé.pdf", mime="application/pdf", size=10)],
                 ),
-                612,
+                633,
             ),
             (
                 _msg(message_id="u4", subject=("Long " * 40) + "café", body_text="hi"),
-                498,
+                508,
             ),
             (
                 _msg(message_id="u5", subject="Hello café world", body_text="hi"),
-                246,
+                256,
             ),
         ]
         for msg, expected in cases:
@@ -546,20 +551,85 @@ class ProjectionLockstepTest(unittest.TestCase):
 
     def test_nonascii_id(self):
         m = _msg(message_id="naïve-root@example.com", subject="non-ascii id root", **self.BASE)
-        self.assertEqual(len(render_rfc822(m)), 254)
-        self.assertEqual(project_rfc822_size(m), 254)
+        self.assertEqual(len(render_rfc822(m)), 264)
+        self.assertEqual(project_rfc822_size(m), 264)
 
     def test_ascii_id(self):
         m = _msg(message_id="ascii-root@example.com", subject="ascii id root", **self.BASE)
-        self.assertEqual(len(render_rfc822(m)), 249)
-        self.assertEqual(project_rfc822_size(m), 249)
+        self.assertEqual(len(render_rfc822(m)), 259)
+        self.assertEqual(project_rfc822_size(m), 259)
 
     def test_nonascii_in_reply_to(self):
         m = _msg(message_id="reply@example.net", subject="Re: non-ascii id root",
                  in_reply_to="naïve-root@example.com", **self.BASE)
-        self.assertEqual(len(render_rfc822(m)), 291)
-        self.assertEqual(project_rfc822_size(m), 291)
+        self.assertEqual(len(render_rfc822(m)), 302)
+        self.assertEqual(project_rfc822_size(m), 302)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CrlfProjectionTest(unittest.TestCase):
+    """#507: RFC 5322 line endings, and the invariant that makes SIZE honest.
+
+    RFC 5322 section 2.1: a line ends with CRLF, and CR and LF "MUST NOT appear
+    independently". The projection used to emit bare LF, so the door served a body
+    the RFC does not allow and announced a size that could not match it. These gates
+    fail against the pre-#507 renderer (they were written and watched fail first).
+    """
+
+    DATA = b"%PDF-1.4\n" + bytes(range(256))
+    HTML = "<p>hi</p>"
+
+    def _shapes(self):
+        att = Attachment(filename="inv.pdf", mime="application/pdf", size=len(self.DATA))
+        return {
+            "plain": (_msg(), None),
+            "html": (_msg(body_html=self.HTML), None),
+            "attachment": (_msg(attachments=[att]), [self.DATA]),
+            "html+attachment": (_msg(body_html=self.HTML, attachments=[att]), [self.DATA]),
+        }
+
+    def test_no_bare_lf_in_any_projection_shape(self):
+        for label, (msg, atts) in self._shapes().items():
+            with self.subTest(shape=label):
+                raw = render_rfc822(msg, attachment_bytes=atts)
+                self.assertEqual(
+                    raw.count(b"\n"),
+                    raw.count(b"\r\n"),
+                    "bare LF in the %s projection: every LF must be preceded by CR" % label,
+                )
+
+    def test_no_bare_cr_in_any_projection_shape(self):
+        for label, (msg, atts) in self._shapes().items():
+            with self.subTest(shape=label):
+                raw = render_rfc822(msg, attachment_bytes=atts)
+                self.assertEqual(raw.count(b"\r"), raw.count(b"\r\n"), "bare CR in %s" % label)
+
+    def test_body_text_line_endings_are_normalized_not_passed_through(self):
+        # The stored body carries LF (that is how it lands in D1). A projector that
+        # only changed its JOIN separators would leave these interior newlines bare,
+        # which is the half-fix this gate exists to refuse.
+        raw = render_rfc822(_msg(body_text="one\ntwo\nthree"))
+        self.assertIn(b"one\r\ntwo\r\nthree", raw)
+        self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"))
+
+    def test_mixed_input_line_endings_normalize_idempotently(self):
+        # CRLF, bare CR and bare LF in one body all land as CRLF, and no CR doubles.
+        raw = render_rfc822(_msg(body_text="a\r\nb\rc\nd"))
+        self.assertIn(b"a\r\nb\r\nc\r\nd", raw)
+        self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"))
+        self.assertEqual(raw.count(b"\r"), raw.count(b"\r\n"))
+
+    def test_placeholder_and_real_attachment_renders_stay_the_same_length(self):
+        # The #342 contract SIZE depends on, restated under CRLF: a same-size
+        # placeholder must project to the same byte count as the real payload.
+        att = Attachment(filename="inv.pdf", mime="application/pdf", size=len(self.DATA))
+        m = _msg(attachments=[att])
+        self.assertEqual(project_rfc822_size(m), len(render_rfc822(m, attachment_bytes=[self.DATA])))
+
+    def test_projection_version_is_bumped_for_the_crlf_change(self):
+        # Every projected byte moved, so the cached projected_size from an earlier
+        # version must not be trusted (message.py getSize gates on this).
+        self.assertEqual(PROJECTION_VERSION, 3)

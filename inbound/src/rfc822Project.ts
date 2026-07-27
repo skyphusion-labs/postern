@@ -3,9 +3,10 @@
 // MIME boundaries (sha256(message_id + NUL + path)) make a length from D1
 // metadata match live BODY[].
 
-// v2: always RFC 2047 B-encoding (no Q/fold) + B-encoded non-ASCII filenames.
+// v3: CRLF line endings end to end (#507). v2 was always-RFC 2047 B-encoding (no
+// Q/fold) + B-encoded non-ASCII filenames.
 // Must stay byte-length identical to imap/posternimap/rfc822.py.
-export const PROJECTION_VERSION = 2;
+export const PROJECTION_VERSION = 3;
 
 export interface ProjectAttachment {
   filename: string | null;
@@ -29,7 +30,11 @@ export interface ProjectInput {
   attachments?: ProjectAttachment[];
 }
 
-const NL = "\n";
+// The wire line terminator. RFC 5322 section 2.1: a line is terminated by CRLF, and CR
+// and LF "MUST NOT appear independently". Before #507 this projection emitted bare LF,
+// so the cached projected_size described bytes the IMAP door could not legally serve.
+// Byte-for-byte counterpart of _NL in imap/posternimap/rfc822.py.
+const NL = "\r\n";
 const te = new TextEncoder();
 
 function hdr(value: string): string {
@@ -152,8 +157,21 @@ function mimeFromFilename(filename: string | null | undefined): string | null {
   return byExt[ext] ?? null;
 }
 
+/**
+ * Normalize any mix of CRLF, bare CR and bare LF to the wire terminator.
+ *
+ * Idempotent: CRLF collapses to LF first, so a body that already carries CRLF never
+ * gains a second CR. Stored bodies land in D1 with LF, so without this a projector that
+ * changed only its JOIN separators would still emit bare LF inside the body text.
+ *
+ * Must stay byte-for-byte identical to imap/posternimap/rfc822.py _to_crlf.
+ */
+function toCrlf(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n/g, NL);
+}
+
 function ensureTrailingNl(text: string): string {
-  return text.endsWith("\n") ? text : `${text}\n`;
+  return text.endsWith(NL) ? text : `${text}${NL}`;
 }
 
 function u(s: string): Uint8Array {
@@ -192,7 +210,7 @@ function base64Wire(size: number): Uint8Array {
   if (!b64) return u(NL);
   const lines: string[] = [];
   for (let i = 0; i < b64.length; i += 76) lines.push(b64.slice(i, i + 76));
-  return u(lines.join("\n") + "\n");
+  return u(lines.join(NL) + NL);
 }
 
 function envelopeHeaderBlock(input: ProjectInput): string[] {
@@ -217,7 +235,7 @@ function partHeaders(headers: string[], body: Uint8Array): Uint8Array {
 }
 
 function textBody(text: string): Uint8Array {
-  return u(ensureTrailingNl(text));
+  return u(ensureTrailingNl(toCrlf(text)));
 }
 
 function wrapMultipart(boundary: string, parts: Uint8Array[]): Uint8Array {

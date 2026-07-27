@@ -155,6 +155,14 @@
         "dryRun"
       ]
     },
+    "admin-reproject": {
+      "body": [
+        "cursor",
+        "limit",
+        "dryRun"
+      ],
+      "note": "#507: refill projected_size after a PROJECTION_VERSION bump; idempotent, and dryRun writes nothing"
+    },
     "admin-reconcile": {
       "body": [
         "limit",

@@ -11,6 +11,50 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+**Supervised deploy.** This release changes `RFC822.SIZE` and the `BODY[]` bytes for
+every existing UID, so it REQUIRES a `POSTERN_IMAP_UIDVALIDITY` bump on the same roll
+and a `projected_size` backfill. RFC 3501 section 2.3.1.1 names the RFC-2822 size and
+the message texts among the data that "must never change" for a given mailbox +
+UIDVALIDITY + UID, so the bump is a MUST, not a precaution. Do not ship this without
+the window. Order and steps are in the PR for #507.
+
+- **imap: RFC822.SIZE now byte-matches the BODY[] literal it labels** (#507). The door
+  implemented twisted `IMessagePart` but not `IMessageFile`, so `spew_body` fell back to
+  `imap4.MessageProducer`, which re-serializes a message from the PARSED tree instead of
+  sending the rendered projection: it re-joined the headers with CRLF, copied the body
+  through verbatim, and wrote its own multipart boundary lines. BODY[] was a second
+  serialization that the projected size had never described, so the announced number was
+  short for every message. Measured on a raw socket: plain announced 226 and served
+  {235}, html 518 against {540}, attachment 550 against {573}. The gap was
+  `header_lines + 1` on single-part mail, constant in body length, NOT one byte per line
+  as first diagnosed. The door now implements `IMessageFile.open()`, which both
+  `spew_body` and `spew_rfc822` prefer, so there is ONE serializer and the two agree by
+  construction. Gated at the wire, on all four projection shapes, in
+  `imap/posternimap/tests/test_size_literal_e2e.py`.
+- **imap: the served body is CRLF, as RFC 5322 requires** (#507). Separate from the size
+  bug and not in the original report: the projection emitted bare LF, so every
+  single-part message went out with bare-LF body lines (the header block only looked
+  right because twisted re-joined it). RFC 5322 section 2.1 is explicit that CR and LF
+  "MUST NOT appear independently". Both projectors now terminate with CRLF from a single
+  constant (`_NL` in `imap/posternimap/rfc822.py`, `NL` in
+  `inbound/src/rfc822Project.ts`) and normalize stored body text idempotently, so a body
+  already carrying CRLF never gains a second CR. `_NL` had been dead code since it was
+  introduced: it was defined and never referenced, and every newline was a hard-coded
+  literal.
+- **PROJECTION_VERSION 2 -> 3**, in lockstep across both projectors, with the shared
+  golden byte constants moved together on both sides.
+- **inbound: `POST /api/admin/reproject` and `scripts/reproject-sweep.mjs`, the
+  projected_size backfill** (#507). A version bump invalidates every cached size at once
+  and nothing refilled them, because `refreshProjectedSize` only ever ran at store time.
+  Without the sweep every pre-existing row (10634 at the last live count) is a permanent
+  cache miss and each `RFC822.SIZE` on old mail costs a full message hydration, which is
+  the cost the #342 cache exists to remove. One keyset page per call, admin-scoped,
+  idempotent, dry-run by default; every row recomputed through `store.projectedSizeFor`,
+  the same entry point live ingest uses, and every write read back and reported as
+  `failed` if it did not land.
+
 ## v1.3.5
 
 Patch release. The code change is CI-only, but the deploy is the point: it is what

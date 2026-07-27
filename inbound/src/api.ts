@@ -296,6 +296,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return await handleReindex(request, env);
     }
 
+    // --- admin: reproject / projected_size backfill (#507) ---
+    // A PROJECTION_VERSION bump invalidates every cached size at once and nothing
+    // refills them, so without this sweep the IMAP door hydrates a whole message for
+    // every RFC822.SIZE on pre-existing mail. Idempotent, one keyset page per call.
+    if (request.method === "POST" && path === "/api/admin/reproject") {
+      return await handleReproject(request, env);
+    }
+
     // --- admin: reconcile / orphan-vector audit (#134, READ-ONLY) ---
     // Operator action (both-scoped). Enumerates the EXPECTED vector id set from D1
     // and diffs it against the live index to report the orphan count + a sampled
@@ -1220,6 +1228,29 @@ async function handleReindex(request: Request, env: Env): Promise<Response> {
   const limit = typeof body.limit === "number" ? body.limit : undefined;
   const dryRun = body.dryRun === true;
   const result = await store.reindexPage(env, { cursor, limit, dryRun });
+  return json({ ok: true, ...result });
+}
+
+// POST /api/admin/reproject: recompute projected_size over the existing mailbox after
+// a PROJECTION_VERSION bump (#507). One keyset page per call, returns a cursor; the
+// runner (scripts/reproject-sweep.mjs) loops until done:true. Body: { cursor?, limit?,
+// dryRun? }. Idempotent (the same message projects to the same number); dryRun reports
+// exactly what WOULD change and writes nothing.
+async function handleReproject(request: Request, env: Env): Promise<Response> {
+  let body: { cursor?: unknown; limit?: unknown; dryRun?: unknown } = {};
+  try {
+    const text = await readBodyCapped(request, MAX_BODY_BYTES);
+    if (text) body = JSON.parse(text) as typeof body;
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      return json({ ok: false, error: "E_PAYLOAD_TOO_LARGE", message: "request body too large" }, 413);
+    }
+    return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
+  }
+  const cursor = typeof body.cursor === "string" ? body.cursor : undefined;
+  const limit = typeof body.limit === "number" ? body.limit : undefined;
+  const dryRun = body.dryRun === true;
+  const result = await store.reprojectPage(env, { cursor, limit, dryRun });
   return json({ ok: true, ...result });
 }
 

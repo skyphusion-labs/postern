@@ -953,7 +953,30 @@ RFC 3501's SIZE is the size of the message AS THE SERVER SERVES IT: a client may
 the BODY[] literal against an earlier SIZE, so the two MUST agree byte-for-byte. This
 proxy serves a rendered projection as BODY[] (raw wire bytes are deliberately not stored,
 section 10.7), therefore RFC822.SIZE stays the PROJECTED size -- self-consistent is what
-spec-true means here. `wireSize` is stored fidelity for API consumers and diagnostics; it
+spec-true means here.
+
+**Self-consistent requires ONE serializer (#507).** Announcing the projected size is only
+honest while the projection is also what goes on the wire, and until #507 it was not. The
+door implemented `IMessagePart` but not `IMessageFile`, so twisted fell back to
+`imap4.MessageProducer`, which RE-SERIALIZES a message from the parsed tree: it re-joined
+the headers with CRLF, copied the body file through verbatim, and wrote its own multipart
+boundary lines. BODY[] was therefore a SECOND serialization that `projected_size` had
+never described. Measured on a raw socket: a plain message announced 226 and served
+{235}, an html message announced 518 and served {540}, and the gap was `header_lines + 1`
+on single-part mail rather than one byte per line. The door now implements
+`imap4.IMessageFile.open()`, which both `spew_body` and `spew_rfc822` prefer, so twisted
+streams the rendered projection verbatim: the size matching the literal is a consequence
+of there being one serializer, not a coincidence to be maintained. Gated at the wire in
+`imap/posternimap/tests/test_size_literal_e2e.py`.
+
+**Line endings are CRLF, end to end (#507).** RFC 5322 section 2.1: a line is terminated
+by CRLF, and CR and LF "MUST NOT appear independently". The projection emitted bare LF
+until projection v3, so the door served a body the RFC does not permit (the header block
+arrived CRLF only because twisted re-joined it). `_NL` in `imap/posternimap/rfc822.py`
+and `NL` in `inbound/src/rfc822Project.ts` are now the single source of the terminator on
+each side, and stored body text (which lands in D1 with LF) is normalized through
+`_to_crlf` / `toCrlf`, idempotently, so a body already carrying CRLF never gains a second
+CR. `wireSize` is stored fidelity for API consumers and diagnostics; it
 becomes the IMAP SIZE only in a future milestone where FETCH itself is byte-exact (raw
 blob storage). Serving `wireSize` against a projected body would make SIZE and the
 literal disagree, which is the one combination that actually breaks clients.
@@ -966,10 +989,22 @@ attachment size/filename/mime; no R2 reads). The IMAP door prefers this for RFC8
 zero attachment GETs. A renderer change bumps the version and requires a
 `POSTERN_IMAP_UIDVALIDITY` bump on the fleet image roll (same discipline as other projection
 changes). Pre-0012 rows keep NULL and fall back to a placeholder hydrate (message GET, still
-zero attachment GETs for SIZE). Projection v2 (current) uses hand-rolled RFC 2047
+zero attachment GETs for SIZE). Projection v2 introduced hand-rolled RFC 2047
 Base64 encoded-words for non-ASCII headers and filenames in both
 `inbound/src/rfc822Project.ts` and `imap/posternimap/rfc822.py` -- never Python
 `email.header.Header` Q-encoding/folding, which diverged from the Worker cache.
+**Projection v3 (current)** is v2 plus CRLF terminators (#507).
+
+**A version bump needs a backfill, not just a bump (#507).** The door ignores a cached
+size whose stored `projection_version` does not match the renderer it is running, so the
+day a bump ships EVERY pre-existing row is a cache MISS and each `RFC822.SIZE` on old
+mail costs a full message hydration, which is the cost this cache exists to remove.
+Nothing refills them on its own: `refreshProjectedSize` only ever runs at store time.
+`POST /api/admin/reproject` (admin scope) sweeps one keyset page per call and returns a
+cursor; `inbound/scripts/reproject-sweep.mjs` is the runner (dry-run by default, `--yes`
+to write). Every row is recomputed through `store.projectedSizeFor`, the same entry point
+live ingest uses, and every write is READ BACK and reported as `failed` if it did not
+land. The sweep is idempotent and safe to re-run after an interruption.
 
 ### 10.4 Write side: who populates what
 

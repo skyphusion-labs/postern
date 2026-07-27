@@ -392,6 +392,16 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           const row = counters.get(String(bound[0]));
           return (row ? { next_uid: row.next_uid, uidvalidity: row.uidvalidity } : null) as T | null;
         }
+        // #507 reproject read-back: the sweep re-reads every row it writes, so the
+        // fake must answer that read for real. A fake that returned null here would
+        // make every swept row look FAILED, and a fake that echoed the write without
+        // storing it would make a broken write look verified.
+        if (/SELECT projected_size, projection_version FROM messages WHERE message_id/i.test(sql)) {
+          const row = rows.find((r) => r.message_id === String(bound[0]));
+          return (row
+            ? { projected_size: row.projected_size, projection_version: row.projection_version }
+            : null) as T | null;
+        }
         if (/SELECT mailbox FROM messages WHERE message_id/i.test(sql)) {
           const row = rows.find((r) => r.message_id === String(bound[0]));
           return (row ? { mailbox: row.mailbox } : null) as T | null;
@@ -600,6 +610,33 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             subject: r.subject,
             date: r.date,
             body_text: r.body_text,
+          }));
+          return { results: results as unknown as T[] };
+        }
+        // #507 reproject page: SELECT id, message_id, date, projected_size,
+        // projection_version FROM messages [WHERE keyset] ORDER BY date DESC, id DESC
+        // LIMIT ?. Same keyset walk as the reindex page above, different columns.
+        if (
+          /projection_version\s+FROM messages/i.test(sql) &&
+          /ORDER BY date DESC, id DESC/i.test(sql)
+        ) {
+          let i = 0;
+          let work = rows.slice();
+          if (/date < \?/i.test(sql)) {
+            const d = String(bound[i++]);
+            const d2 = String(bound[i++]);
+            const cid = Number(bound[i++]);
+            void d2;
+            work = work.filter((r) => r.date < d || (r.date === d && r.id < cid));
+          }
+          const limit = Number(bound[i++]);
+          work.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
+          const results = work.slice(0, limit).map((r) => ({
+            id: r.id,
+            message_id: r.message_id,
+            date: r.date,
+            projected_size: r.projected_size,
+            projection_version: r.projection_version,
           }));
           return { results: results as unknown as T[] };
         }
