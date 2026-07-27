@@ -375,8 +375,15 @@ class PosternMailbox:
         # the same list must not be lost to a copy-then-replace.
         self._newest_uid = new_items[-1].uid
         self._newest_id = new_items[-1].message_id
+        # NO re-sort of the live snapshot here (#492). It would reorder nothing (the
+        # list is uid-ascending by construction and every collected item has uid > the
+        # previous mark, so the extend already lands in order), and it is not free:
+        # CPython DETACHES the backing array for the whole duration of a keyed sort, so
+        # a reactor-thread accessor reading this list mid-refresh (getUID after a STORE,
+        # getMessageCount after an APPEND) sees an EMPTY mailbox and the door pushes
+        # * 0 EXISTS for a folder that has mail. `new_items` is sorted above, on ITS own
+        # local list, which no other thread can see.
         self._summaries.extend(new_items)
-        self._summaries.sort(key=lambda s: s.uid)
         return len(new_items)
 
 

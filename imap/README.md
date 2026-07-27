@@ -343,7 +343,7 @@ without Twisted:
 | `server.py` | yes | the `IMAP4Server` factory + reactor wiring |
 | `__main__.py` | -- | `python -m posternimap` entrypoint |
 
-## Concurrency (#416, #457, #458)
+## Concurrency (#416, #457, #458, #492)
 
 Worker calls run in the reactor threadpool, not on the reactor thread. Before this, one
 slow worker call stalled EVERY connected client for the duration of the call, and
@@ -407,6 +407,18 @@ door. Numbers, method and the re-runnable scripts: `imap/bench/`.
   the same boundary and would append the same arrival twice. A failed refresh is logged and
   the NOOP still answers OK; a store blip never fails a keep-alive or stops the loop.
   `test_reactor_surface.LivePollSplitTest` drives both callers and asserts BOTH halves.
+- The pooled refresh no longer RE-SORTS the live snapshot (#492, step 0). The snapshot is
+  uid-ascending by construction, so that sort reordered nothing, but CPython detaches the
+  backing array of a list for the whole duration of a keyed sort: a synchronous IMailbox
+  accessor, which Twisted calls straight from the reactor thread with no Deferred seam
+  (`getUID` after a STORE, `getMessageCount` after an APPEND), could read the list mid-sort
+  and see it EMPTY. The door then pushed `* 0 EXISTS` for a mailbox that has mail, and a
+  client wipes its view of the folder on that. Arrivals are still sorted before they are
+  appended, on the local list `_refresh` builds, which no other thread can reach.
+  `test_snapshot_stability.py` gates both halves: that nothing sorts the live list during a
+  refresh, and that a reactor-thread accessor running against a pooled refresh never sees a
+  detached snapshot. Serializing the two callers properly (a per-mailbox deferred queue) is
+  the follow-on to this step, not a substitute for it.
 
 ### Timeout, circuit breaker, and the saturation signal (#458)
 
