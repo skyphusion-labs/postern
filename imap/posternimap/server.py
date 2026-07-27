@@ -497,9 +497,27 @@ class PosternIMAP4Server(imap4.IMAP4Server):
                 required_direction = getattr(
                     self.account, "restore_direction", lambda _n: None
                 )(dest)
-            maybeDeferred(src.fetch, messages, uid).addCallback(
-                self._cbSoftMove, tag, is_move, placement, required_direction
-            ).addErrback(self._ebCopyToTrashDelete, tag, verb)
+            # #492: ONE crossing. This used to fetch the source rows, then move them
+            # from the callback on that fetch, which is two trips into the pool with the
+            # reactor free in between -- long enough for a pipelined EXPUNGE or a poll
+            # tick to delete rows from the same snapshot after the sequence numbers were
+            # resolved and before they were used. copy_or_move does both halves in one
+            # serialized turn, so nothing can run between them.
+            mover = getattr(src, "copy_or_move", None)
+            if not callable(mover):
+                self.sendNegativeResponse(
+                    tag, verb + b" failed: this folder does not support move"
+                )
+                return
+            d = maybeDeferred(
+                mover, messages, uid, placement, required_direction=required_direction
+            )
+            d.addCallbacks(
+                self._cbMoved,
+                self._ebMoveFailed,
+                callbackArgs=(tag, is_move),
+                errbackArgs=(tag, verb),
+            )
             return
         if kind == "placeholder":
             self.sendNegativeResponse(
@@ -508,51 +526,47 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             return
         imap4.IMAP4Server.do_COPY(self, tag, messages, mailbox, uid)
 
-    def _cbSoftMove(self, fetched, tag, is_move=False, mailbox=None, required_direction=None):
-        src = getattr(self, "mbox", None)
+    def _cbMoved(self, removed_seqs, tag, is_move=False):
+        """The move is done: tell the client which rows left, then answer OK.
+
+        #352 review: emit untagged EXPUNGE for whichever source rows the move ACTUALLY
+        removed from the live snapshot of this view -- for BOTH COPY and MOVE (there is
+        no true dual-membership copy in this exclusive-placement model; a client not
+        told would hold a stale sequence mapping regardless of verb). This replaces the
+        old is_move-only gate that left COPY silently FETCH-unstable.
+
+        Pure protocol, no worker call: it runs on the reactor thread, after the one
+        serialized turn that did the fetch and the move together (#492).
+        """
         verb = b"MOVE" if is_move else b"COPY"
-        if src is None:
-            self.sendNegativeResponse(tag, verb + b" failed: no mailbox selected")
-            return
-        # #416: the move is a worker call, so it runs in the reactor threadpool and answers
-        # with a Deferred. maybeDeferred keeps a synchronous mailbox working through the
-        # identical path; the success and failure handling is unchanged and simply hangs
-        # off callbacks now, because a try/except cannot catch a failure that has not
-        # happened yet.
-        def _moved(removed_seqs):
-            # #352 review: emit untagged EXPUNGE for whichever source rows the
-            # move ACTUALLY removed from this view's live snapshot -- for BOTH
-            # COPY and MOVE (there is no true dual-membership copy in this
-            # exclusive-placement model; a client not told would hold a stale
-            # sequence mapping regardless of verb). This replaces the old
-            # is_move-only gate that left COPY silently FETCH-unstable.
-            if removed_seqs:
-                for seq in removed_seqs:
-                    self.sendUntaggedResponse(b"%d EXPUNGE" % (seq,))
-            self.sendPositiveResponse(tag, verb + b" completed")
+        if removed_seqs:
+            for seq in removed_seqs:
+                self.sendUntaggedResponse(b"%d EXPUNGE" % (seq,))
+        self.sendPositiveResponse(tag, verb + b" completed")
 
-        def _failed(reason):
-            if reason.check(imap4.MailboxException):
-                self.sendNegativeResponse(
-                    tag, verb + b" failed: " + networkString(str(reason.value))
-                )
-            else:
-                self.sendBadResponse(
-                    tag, verb + b" failed: " + networkString(str(reason.value))
-                )
+    def _ebMoveFailed(self, reason, tag, verb=b"COPY"):
+        """One failure path for the whole operation (#492).
 
-        mover = getattr(src, "soft_move_fetched_messages", None)
-        if callable(mover):
-            d = maybeDeferred(mover, fetched, mailbox, required_direction=required_direction)
+        Resolving the source rows and moving them are now one turn, so they fail into
+        one errback. A MailboxException (the door ReadOnlyError and MailboxLoadError) is
+        the server saying it could not do this: tagged NO. Anything else is unexpected
+        and stays BAD, as before.
+
+        ONE deliberate change: a source-row read failing with MailboxException (an
+        unreachable worker on a cold snapshot, MailboxLoadError) used to answer BAD,
+        because it arrived through the fetch errback rather than the move one. It
+        answers NO now. BAD means the client sent something the server could not parse;
+        a worker the door cannot reach is not a protocol error, and the identical
+        failure one call later in the same command already answered NO.
+        """
+        if reason.check(imap4.MailboxException):
+            self.sendNegativeResponse(
+                tag, verb + b" failed: " + networkString(str(reason.value))
+            )
         else:
-            d = maybeDeferred(src.delete_fetched_messages, fetched)
-        d.addCallbacks(_moved, _failed)
-
-    # Back-compat alias for unit tests that call the pre-#352 callback name.
-    _cbCopyToTrashDelete = _cbSoftMove
-
-    def _ebCopyToTrashDelete(self, failure, tag, verb=b"COPY"):
-        self.sendBadResponse(tag, verb + b" failed: " + networkString(str(failure.value)))
+            self.sendBadResponse(
+                tag, verb + b" failed: " + networkString(str(reason.value))
+            )
 
     auth_COPY = (
         do_COPY,

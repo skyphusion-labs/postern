@@ -1721,11 +1721,18 @@ class MoveUntaggedSequencingTest(unittest.TestCase):
 
     #352 review: COPY mutates the SAME exclusive placement as MOVE (there is no real
     dual-membership copy in this model), so it emits the identical untagged EXPUNGE for
-    whichever source rows the mailbox's soft_move_fetched_messages reports as actually
-    removed from THIS view -- fixing the old, unsafe test_copy_emits_no_untagged_expunge
-    that locked in a silently FETCH-stale COPY. Deterministic StringTransport; the
-    response callback is driven directly with a UID != seq fixture so a sequence/UID
-    mix-up cannot hide behind uid == seq (the #300 class)."""
+    whichever source rows the mailbox reports as actually removed from THIS view --
+    fixing the old, unsafe test_copy_emits_no_untagged_expunge that locked in a silently
+    FETCH-stale COPY.
+
+    #492 rewrite: these used to drive _cbCopyToTrashDelete, the callback on the SOURCE
+    FETCH, which then made a second pool crossing to move. COPY/MOVE is one crossing now
+    (mailbox.copy_or_move), so the response half is its own callback and is driven here
+    directly. Every property above is still asserted, on the same UID != seq fixture. The
+    half that moved out -- that a uid/seq confusion cannot leak a UID into the EXPUNGE --
+    is asserted where it now lives, against a real mailbox, in
+    test_serialization.CopyMoveOneCrossingTest.
+    """
 
     def _server(self):
         from twisted.internet.testing import StringTransport
@@ -1735,84 +1742,64 @@ class MoveUntaggedSequencingTest(unittest.TestCase):
         srv.makeConnection(StringTransport())
         srv.setTimeout(None)
         self.addCleanup(srv.setTimeout, None)
+        srv.transport.clear()
         return srv
-
-    def _fetched_uid_ne_seq(self):
-        # A non-contiguous move set: seq 1 -> uid 101, seq 3 -> uid 103. uid != seq so a
-        # UID leak into the untagged EXPUNGE would read 101/103, not the sequence 1/3.
-        class _S:
-            def __init__(self, uid, mid):
-                self.uid = uid
-                self.message_id = mid
-
-        class _M:
-            def __init__(self, uid, mid):
-                self._summary = _S(uid, mid)
-
-        return [(1, _M(101, "a")), (3, _M(103, "c"))]
-
-    def _mbox(self, moved, *, removed=None):
-        """A minimal soft_move_fetched_messages double: records the moved seqs and
-        returns `removed` (defaulting to "everything moved left this view", the
-        common case for a filtered folder like Trash) -- mirrors the real
-        PosternMailbox contract (#352 review)."""
-
-        class _Mbox:
-            _delete_writable = True
-
-            def soft_move_fetched_messages(self, fetched, mailbox, *, required_direction=None):
-                seqs = [seq for seq, _m in fetched]
-                moved.append(seqs)
-                return sorted(seqs, reverse=True) if removed is None else removed
-
-        return _Mbox()
 
     def test_move_emits_untagged_expunge_sequence_numbers_high_to_low(self):
         srv = self._server()
-        moved = []
-        srv.mbox = self._mbox(moved)
-        srv.transport.clear()
-        srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t1", is_move=True)
+        # What the mailbox reports as removed: seq 3 and seq 1, descending, for a fixture
+        # whose uids are 103 and 101, so a UID leak would read 103/101 here.
+        srv._cbMoved([3, 1], b"t1", is_move=True)
         out = srv.transport.value()
         self.assertIn(b"* 3 EXPUNGE\r\n", out)
         self.assertIn(b"* 1 EXPUNGE\r\n", out)
-        # high-to-low, and both before the tagged OK
         self.assertLess(out.index(b"* 3 EXPUNGE"), out.index(b"* 1 EXPUNGE"))
         self.assertLess(out.index(b"* 1 EXPUNGE"), out.index(b"t1 OK MOVE completed"))
-        # the UIDs (101/103) must never surface as EXPUNGE sequence ids
         self.assertNotIn(b"101 EXPUNGE", out)
         self.assertNotIn(b"103 EXPUNGE", out)
-        self.assertEqual(moved, [[1, 3]])
 
     def test_copy_emits_untagged_expunge_for_removed_source_rows(self):
-        # #352 review fix: COPY (soft-move under the hood) removes the source rows
-        # from THIS view exactly like MOVE does, so it must emit the same untagged
-        # EXPUNGE -- a client that isn't told would hold a stale sequence mapping.
+        # #352 review fix: COPY (soft-move under the hood) removes the source rows from
+        # THIS view exactly like MOVE does, so it must emit the same untagged EXPUNGE --
+        # a client that is not told would hold a stale sequence mapping.
         srv = self._server()
-        moved = []
-        srv.mbox = self._mbox(moved)
-        srv.transport.clear()
-        srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t2", is_move=False)
+        srv._cbMoved([3, 1], b"t2", is_move=False)
         out = srv.transport.value()
         self.assertIn(b"* 3 EXPUNGE\r\n", out)
         self.assertIn(b"* 1 EXPUNGE\r\n", out)
         self.assertLess(out.index(b"* 3 EXPUNGE"), out.index(b"* 1 EXPUNGE"))
         self.assertLess(out.index(b"* 1 EXPUNGE"), out.index(b"t2 OK COPY completed"))
-        self.assertEqual(moved, [[1, 3]])
 
     def test_copy_from_all_view_emits_no_expunge_when_row_still_owned(self):
-        # #352 review: when the source view is "All" (owns every placement), the
-        # mailbox reports nothing removed -- COPY correctly stays FETCH-stable here,
-        # unlike the filtered-view case above.
+        # #352 review: when the source view is All (it owns every placement), the mailbox
+        # reports nothing removed -- COPY correctly stays FETCH-stable here, unlike the
+        # filtered-view case above.
         srv = self._server()
-        moved = []
-        srv.mbox = self._mbox(moved, removed=[])
-        srv.transport.clear()
-        srv._cbCopyToTrashDelete(self._fetched_uid_ne_seq(), b"t3", is_move=False)
+        srv._cbMoved([], b"t3", is_move=False)
         out = srv.transport.value()
         self.assertNotIn(b"EXPUNGE", out)
         self.assertIn(b"t3 OK COPY completed", out)
-        self.assertEqual(moved, [[1, 3]])
+
+    def test_a_move_that_fails_answers_NO_not_BAD(self):
+        # #492: resolving the rows and moving them fail into ONE errback now. A
+        # MailboxException is the server saying it could not do this, which is a tagged
+        # NO; BAD is reserved for what the server could not parse.
+        from twisted.python import failure
+        from posternimap.mailbox import ReadOnlyError
+
+        srv = self._server()
+        srv._ebMoveFailed(failure.Failure(ReadOnlyError("nope")), b"t4", b"MOVE")
+        out = srv.transport.value()
+        self.assertIn(b"t4 NO MOVE failed: nope", out)
+        self.assertNotIn(b"BAD", out)
+
+    def test_an_unexpected_move_failure_still_answers_BAD(self):
+        from twisted.python import failure
+
+        srv = self._server()
+        srv._ebMoveFailed(failure.Failure(RuntimeError("boom")), b"t5", b"COPY")
+        out = srv.transport.value()
+        self.assertIn(b"t5 BAD COPY failed: boom", out)
 
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")

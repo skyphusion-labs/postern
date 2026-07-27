@@ -50,7 +50,10 @@ _DEFERRED_METHODS = (
     "expunge",
     "addMessage",
     "requestStatus",
-    "soft_move_fetched_messages",
+    # #492: the door calls copy_or_move, which resolves the source rows AND moves them in
+    # ONE turn. It replaced a two-call shape (fetch here, soft_move from its callback)
+    # that no queue can make atomic, because two entries are two turns by definition.
+    "copy_or_move",
     "copy",
     # #485, and NOT a Twisted seam: do_NOOP is the door own override, and it chains the
     # tagged OK behind this Deferred itself. It is the READ half of the live poll, so it
@@ -151,8 +154,22 @@ class ThreadedMailbox:
         target = object.__getattribute__(self, "_mailbox")
         value = getattr(target, name)
         if name in _DEFERRED_METHODS and callable(value):
+            # #492: NOT in_pool directly. Every deferred-capable method takes a turn in
+            # this mailbox own SerialQueue, which then dispatches it to the pool. Twisted
+            # does not serialize commands per connection, so dispatching straight to the
+            # pool let two commands resolve sequence numbers against a snapshot the other
+            # was mutating. The queue is the ONLY way in; a caller that reached past it
+            # would be the side door the fix exists to close.
+            serialize = getattr(target, "run_serialized", None)
+            if not callable(serialize):
+                raise TypeError(
+                    "ThreadedMailbox wraps %r, which has no run_serialized: a mailbox "
+                    "whose deferred methods bypass the serializer would reopen #492"
+                    % (type(target).__name__,)
+                )
+
             def deferred_call(*args, **kwargs):
-                return in_pool(value, *args, **kwargs)
+                return serialize(lambda: value(*args, **kwargs))
 
             return deferred_call
         return value

@@ -29,7 +29,6 @@ from __future__ import annotations
 import email
 import email.utils
 import re
-import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from email.message import Message as PyMessage
@@ -42,6 +41,7 @@ from twisted.mail import imap4
 from .client import Draft, Message, MessageSummary, PosternClient, PosternError
 from .measure import Meter
 from .message import PosternIMAPMessage
+from .serialqueue import SerialQueue
 
 if TYPE_CHECKING:
     from twisted.internet.task import LoopingCall
@@ -223,14 +223,15 @@ class PosternMailbox:
         # exactly ONE production dispatch path and test_reactor_surface proves that one
         # live, over a socket, against real thread identities.
         self._pool = pool
-        # Serializes _refresh against ITSELF (#485). Two refreshes can now genuinely
-        # overlap -- a NOOP pipelined behind another, or a NOOP landing while the timed
-        # tick is in flight -- and both would read the same boundary (_newest_id) and
-        # append the SAME arrivals, duplicating sequence numbers in a live snapshot. Held
-        # across the worker read, so the second caller waits the first out (bounded by
-        # api_timeout, exactly like every other pooled call) rather than answering a
-        # client that explicitly asked for status with a stale zero.
-        self._refresh_lock = threading.Lock()
+        # ONE operation at a time on THIS mailbox (#492), FIFO, on the reactor thread.
+        # It replaces the #485 refresh mutex, and covers strictly more: the mutex
+        # serialized _refresh against ITSELF (two overlapping refreshes read the same
+        # boundary and appended the same arrivals twice) while leaving a refresh free to
+        # run against a concurrent store or expunge, which is the #492 stale-index class.
+        # A mutex could not be widened to cover that: it would have made the second caller
+        # wait INSIDE a pool thread, and ten such waiters is the whole pool consumed by
+        # calls doing nothing -- the #416 starvation, one level down. See serialqueue.py.
+        self._serial = SerialQueue(self._dispatch)
 
     def preload(self) -> None:
         """Load this mailbox snapshot NOW (#416).
@@ -975,7 +976,7 @@ class PosternMailbox:
         Returns the 1-based sequence numbers (descending) that were actually
         REMOVED from this view's live snapshot -- i.e. rows that no longer match
         this mailbox's own filter after the move (see _matches_own_filter). The
-        caller (server._cbSoftMove) emits an untagged EXPUNGE for exactly these,
+        caller (server._cbMoved) emits an untagged EXPUNGE for exactly these,
         for BOTH COPY and MOVE: this mailbox mutates the SAME exclusive placement
         either way (there is no real dual-membership COPY here), so a client that
         is not told via EXPUNGE would hold a stale, now-wrong sequence mapping
@@ -1021,6 +1022,31 @@ class PosternMailbox:
         for i in reversed(remove_at):
             del self._summaries[i]
         return removed_seqs
+
+    def copy_or_move(
+        self,
+        messages,
+        uid,
+        mailbox: Optional[str],
+        *,
+        required_direction: Optional[str] = None,
+    ) -> List[int]:
+        """Resolve the source rows AND move them, as ONE serialized operation (#492).
+
+        COPY/MOVE crossed into the pool TWICE: the door fetched the source rows, and the
+        move ran from the callback on that fetch. Between the two, the reactor is free, so
+        a pipelined EXPUNGE or a poll tick could delete rows from the same snapshot after
+        the sequence numbers had been resolved and before they were used -- and the
+        untagged EXPUNGE the caller then emits carries positions that no longer mean what
+        the client thinks. Queueing alone cannot fix that: two entries are two turns by
+        definition. The two halves have to be ONE entry, which is this method.
+
+        Returns exactly what soft_move_fetched_messages returns: the 1-based sequence
+        numbers (descending) that actually LEFT this view.
+        """
+        return self.soft_move_fetched_messages(
+            self.fetch(messages, uid), mailbox, required_direction=required_direction
+        )
 
     def delete_fetched_messages(self, fetched) -> List[int]:
         """Back-compat alias: soft-move to trash (prefer soft_move_fetched_messages)."""
@@ -1068,11 +1094,15 @@ class PosternMailbox:
         Errors are NOT swallowed here. They cross the Deferred to the caller, which
         decides: both callers log and carry on, because a transient store blip must never
         fail a NOOP or tear down the poll loop.
+
+        NOT serialized by this method (#492). It used to take a mutex against itself; the
+        ordering now belongs to the mailbox SerialQueue, which both callers enter through
+        run_serialized, so two refreshes cannot be in flight together and neither can a
+        refresh and a store. Calling this directly, off the queue, is a caller bug.
         """
         if not self._loaded or self._empty:
             return 0
-        with self._refresh_lock:
-            return self._refresh()
+        return self._refresh()
 
     def notify_new_messages(self, added: int) -> int:
         """REACTOR THREAD ONLY: push untagged EXISTS for `added` new arrivals.
@@ -1108,6 +1138,21 @@ class PosternMailbox:
         from .threaded import in_pool
 
         return in_pool(fn)
+
+    def run_serialized(self, fn):
+        """THE seam every worker-touching mailbox operation enters; returns a Deferred.
+
+        One at a time, in submission order, per mailbox instance (#492). Twisted does not
+        serialize commands per connection, so without this two commands against the same
+        snapshot run concurrently in the pool and the second resolves sequence numbers
+        against rows the first is deleting. Both entry points are here and there is no
+        third: ThreadedMailbox routes every deferred-capable method through it, and
+        _poll_tick submits its own refresh through it.
+
+        Submit a COMPOUND operation as ONE callable (see copy_or_move). Two submissions
+        are two turns, and another operation may run between them.
+        """
+        return self._serial.run(fn)
 
     def _maybe_start_poll(self) -> None:
         if (
@@ -1158,7 +1203,10 @@ class PosternMailbox:
                 span.set(added=added, listeners=listeners)
                 return added
 
-        d = self._dispatch(refresh)
+        # #492: the timed poll takes its turn like every other operation. It used to go
+        # straight to the pool through _dispatch, which is precisely the side door that
+        # let a tick land in the middle of a client STORE or EXPUNGE.
+        d = self.run_serialized(refresh)
         d.addCallback(self._cb_poll_notify)
         d.addErrback(self._eb_poll_failed)
         return d

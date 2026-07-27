@@ -987,57 +987,68 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(clock.getDelayedCalls(), [])
 
     def test_a_second_refresh_waits_for_the_one_in_flight(self):
-        # #485: refresh_now serializes against ITSELF. Two overlapping refreshes read the
-        # SAME boundary (_newest_id) and would each append the SAME arrival, duplicating
-        # sequence numbers in a live snapshot. This is reachable now that do_NOOP
-        # dispatches into the pool: a client pipelining NOOPs, or a NOOP landing while
-        # the timed tick is in flight, puts two refreshes on two pool threads at once.
-        import threading
-
+        # #485 proved this against a MUTEX inside refresh_now; #492 retired that mutex
+        # and the property now belongs to the mailbox SerialQueue. The property itself is
+        # UNCHANGED and still real: two overlapping refreshes read the SAME boundary
+        # (_newest_id) and would each append the SAME arrival, duplicating sequence
+        # numbers in a live snapshot. What changed is HOW it is guaranteed, so this
+        # asserts the guarantee rather than the mechanism: the second refresh is not
+        # DISPATCHED AT ALL until the first has finished. A mutex could only have made it
+        # dispatch and then block, holding a pool thread while it waited (#416).
+        #
+        # Deterministic: the pool seam is injected, so nothing here races. The same
+        # property is proved again in test_serialization.py against the REAL reactor,
+        # real threadpool and a real parked worker call, because an injected seam proves
+        # the decision path and only the real one proves the shipped article.
         from posternimap.mailbox import PosternMailbox
 
-        entered = threading.Event()
-        release = threading.Event()
-        armed = {"on": False}
-        inner = self.transport
+        dispatched = []
 
-        def gate(req):
-            # Park the FIRST refresh read inside the worker call: precisely the window a
-            # second refresh would race.
-            if armed["on"]:
-                armed["on"] = False
-                entered.set()
-                release.wait(10)
-            return inner(req)
+        def pool(fn):
+            from twisted.internet import defer
 
-        client = PosternClient("https://x", "t", transport=gate)
-        mb = PosternMailbox(client, page_size=2)
-        mb.getMessageCount()  # snapshot loaded with the gate disarmed
+            d = defer.Deferred()
+            dispatched.append((fn, d))
+            return d
+
+        mb = PosternMailbox(self.client, page_size=2, pool=pool)
+        mb.getMessageCount()  # snapshot loaded (the load is not queued; SELECT preloads)
         self.msgs.insert(0, make_message("m4", subject="newest"))
-        armed["on"] = True
 
         results = []
-        first = threading.Thread(target=lambda: results.append(mb.refresh_now()))
-        first.start()
-        self.assertTrue(entered.wait(10), "the first refresh never reached the worker")
+        mb.run_serialized(mb.refresh_now).addCallback(results.append)
+        mb.run_serialized(mb.refresh_now).addCallback(results.append)
 
-        second = threading.Thread(target=lambda: results.append(mb.refresh_now()))
-        second.start()
-        second.join(0.5)
-        self.assertTrue(
-            second.is_alive(),
-            "the second refresh did not wait for the one in flight; both are reading the "
-            "same boundary and will append the same arrival twice",
+        self.assertEqual(
+            1,
+            len(dispatched),
+            "the second refresh was dispatched while the first was still in flight; both "
+            "read the same boundary and will append the same arrival twice",
         )
 
-        release.set()
-        first.join(10)
-        second.join(10)
-        self.assertFalse(first.is_alive() or second.is_alive())
+        # Run the first for real, then answer its Deferred the way the pool would.
+        fn, waiter = dispatched[0]
+        waiter.callback(fn())
+        self.assertEqual(
+            2, len(dispatched), "the queue did not start the second refresh after the first"
+        )
+        fn2, waiter2 = dispatched[1]
+        waiter2.callback(fn2())
+
         # One arrival, counted once: the loser of the race sees the moved boundary.
         self.assertEqual([0, 1], sorted(results))
         self.assertEqual(4, mb.getMessageCount())
+        self.assertEqual([1, 2, 3, 4], [s.uid for s in mb._summaries])
 
+    def test_the_refresh_mutex_is_gone(self):
+        # #492: the lock is RETIRED, not hidden. A mutex reintroduced next to the queue
+        # would make a pool thread wait again, which is the #416 starvation the queue
+        # exists to avoid, and it would be invisible in behaviour until the pool filled.
+        mb = self._mailbox()
+        self.assertFalse(
+            hasattr(mb, "_refresh_lock"),
+            "a refresh mutex is back; ordering belongs to the SerialQueue now",
+        )
 
     # --- #102 fault F9: durable UID == store insertion key (uid-ordering) ---
 

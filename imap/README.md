@@ -419,6 +419,44 @@ door. Numbers, method and the re-runnable scripts: `imap/bench/`.
   refresh, and that a reactor-thread accessor running against a pooled refresh never sees a
   detached snapshot. Serializing the two callers properly (a per-mailbox deferred queue) is
   the follow-on to this step, not a substitute for it.
+- **One mailbox operation at a time** (#492, the serializer). Twisted does NOT serialize
+  commands per connection: `blocked` is set only inside `__cbFetch`, so every other
+  command dispatched into the pool the moment its line was parsed. Two commands against
+  the same mailbox therefore ran at once, each having resolved sequence numbers against a
+  snapshot the other was mutating: a STORE landing on the row an EXPUNGE had just
+  shifted, silently, with a tagged OK. RFC 3501 / RFC 9051 section 5.5 puts that
+  obligation on the SERVER, so it is settled regardless of client behaviour, and it is
+  reachable in practice anyway (mutt pipelines to depth 15 by default, mbsync without a
+  limit). Measured identically on Twisted 24.3.0 and 26.4.0.
+  Each mailbox instance now owns a **FIFO deferred queue** (`serialqueue.py`), and every
+  worker-touching operation takes a turn in it through `PosternMailbox.run_serialized`:
+  the threaded proxy routes every deferred-capable method through it, and the timed poll
+  submits its own refresh through it rather than going straight to the pool. There is no
+  third way in, and `ThreadedMailbox` refuses to wrap a mailbox that has no queue.
+  **A queue, not a mutex, deliberately.** A mutex makes the second caller wait INSIDE a
+  pool thread; ten of those is the whole ten-thread pool consumed by calls doing nothing,
+  and the eleventh command, from another client on another mailbox, queues behind them --
+  the #416 starvation one level down. It also wakes waiters in whatever order the OS
+  picks, so a caller can be starved by luck. Waiters here are Deferreds on the reactor
+  thread: they cost no thread, and they run strictly in submission order.
+  The #485 refresh mutex is RETIRED, and its property (two overlapping refreshes read the
+  same boundary and would append the same arrival twice) is now guaranteed by the queue
+  and asserted against it, deterministically in `test_mailbox.py` and live against the
+  real reactor and threadpool in `test_serialization.py`.
+- **COPY/MOVE is ONE turn, not two** (#492). It used to fetch the source rows and then
+  move them from the callback on that fetch, which is two trips into the pool with the
+  reactor free in between: long enough for a pipelined EXPUNGE or a poll tick to delete
+  rows from the same snapshot after the sequence numbers were resolved and before they
+  were used, so the untagged EXPUNGE the door emits carried positions that no longer meant
+  what the client thought. Queueing alone cannot fix this (two entries are two turns by
+  definition), so both halves are one operation, `PosternMailbox.copy_or_move`, and
+  `test_serialization.CopyMoveOneCrossingTest` asserts the COUNT over a real socket.
+  ONE behaviour change falls out of the merge: a COPY/MOVE whose SOURCE READ fails with a
+  MailboxException (an unreachable worker on a cold snapshot) now answers a tagged **NO**
+  where it used to answer BAD, because it arrives through the same errback as a move
+  failure. NO is the honest answer: BAD means the server could not parse the command, and
+  a worker the door cannot reach is not a protocol error. The identical failure one call
+  later in the same command already answered NO.
 
 ### Timeout, circuit breaker, and the saturation signal (#458)
 
