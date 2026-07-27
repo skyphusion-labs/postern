@@ -55,6 +55,10 @@ name: deploy
 #   POSTERN_SMOKE_DELETE_TOKEN (delete-scoped bearer, #496) unlocks the smoke's own
 #   leg-10 cleanup, so the run deletes the probe messages it created; without it
 #   every run (green or red) leaves debris in the target mailbox.
+#   POSTERN_SMOKE_IDENTITY_TOKEN (per-identity send bearer) unlocks the leg-9 drafts
+#   LIFECYCLE (create, read back, stale-PUT 409 E_CONFLICT, PUT, delete); without it
+#   that block SKIPs and the drafts routes are never proven against the live
+#   instance. The leg deletes the draft it creates, so it leaves no debris.
 #
 # D1 migrations: the inbound deploy runs `wrangler d1 migrations apply` before
 # `wrangler deploy`, so a schema change ships with its code instead of drifting.
@@ -219,6 +223,7 @@ jobs:
           POSTERN_BASE_URL: ${{ secrets.POSTERN_SMOKE_BASE_URL }}
           POSTERN_API_TOKEN: ${{ secrets.POSTERN_SMOKE_API_TOKEN }}
           POSTERN_SEND_TOKEN: ${{ secrets.POSTERN_SMOKE_SEND_TOKEN }}
+          POSTERN_IDENTITY_TOKEN: ${{ secrets.POSTERN_SMOKE_IDENTITY_TOKEN }}
           POSTERN_DELETE_TOKEN: ${{ secrets.POSTERN_SMOKE_DELETE_TOKEN }}
           POSTERN_FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
           POSTERN_TO: ${{ secrets.POSTERN_SMOKE_TO }}

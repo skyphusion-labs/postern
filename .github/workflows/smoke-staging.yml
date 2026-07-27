@@ -10,6 +10,9 @@ name: smoke-staging
 #   POSTERN_SMOKE_SEND_TOKEN -- send-scoped bearer (optional; defaults to API token)
 #   POSTERN_SMOKE_DELETE_TOKEN -- delete-scoped bearer (optional; unlocks the smoke's
 #                               own leg-10 cleanup so runs leave no debris, #496)
+#   POSTERN_SMOKE_IDENTITY_TOKEN -- per-identity send bearer (optional; unlocks the
+#                               leg-9 drafts lifecycle, which SKIPs without it; the
+#                               leg deletes the draft it creates, so no debris)
 #   POSTERN_SMOKE_FROM       -- allowed From address for POST /api/send
 #   POSTERN_SMOKE_TO         -- recipient the smoke can address (need not be readable)
 #
@@ -67,6 +70,7 @@ jobs:
           POSTERN_BASE_URL: ${{ secrets.POSTERN_SMOKE_BASE_URL }}
           POSTERN_API_TOKEN: ${{ secrets.POSTERN_SMOKE_API_TOKEN }}
           POSTERN_SEND_TOKEN: ${{ secrets.POSTERN_SMOKE_SEND_TOKEN }}
+          POSTERN_IDENTITY_TOKEN: ${{ secrets.POSTERN_SMOKE_IDENTITY_TOKEN }}
           POSTERN_DELETE_TOKEN: ${{ secrets.POSTERN_SMOKE_DELETE_TOKEN }}
           POSTERN_FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
           POSTERN_TO: ${{ secrets.POSTERN_SMOKE_TO }}

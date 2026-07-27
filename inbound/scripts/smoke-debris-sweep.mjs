@@ -5,14 +5,16 @@
 // inbound/smoke.mjs (the v1.0 acceptance smoke, run by smoke-staging.yml
 // nightly and by deploy.yml tag-deploy live probe) creates real messages in
 // the production mailbox every run. Its own leg 10 cleanup only fires when
-// POSTERN_DELETE_TOKEN is set on the run -- and neither
-// .github/workflows/deploy.yml nor .github/workflows/smoke-staging.yml sets
-// that secret today, so cleanup never runs in CI, pass or fail. Every smoke
-// run against production (nightly plus tag-deploy probe, back to whichever
-// run first had POSTERN_SMOKE_* secrets configured) has left probe messages
-// behind. This is broader than "failed runs never reach cleanup" (#483
-// framing): a fully green run leaves debris too, because the cleanup leg is
-// opt-in and nothing opts it in.
+// POSTERN_DELETE_TOKEN is set on the run -- and when this script was written
+// neither .github/workflows/deploy.yml nor .github/workflows/smoke-staging.yml
+// set that secret, so cleanup never ran in CI, pass or fail. Every smoke run
+// against production (nightly plus tag-deploy probe, back to whichever run
+// first had POSTERN_SMOKE_* secrets configured) left probe messages behind.
+// This is broader than "failed runs never reach cleanup" (#483 framing): a
+// fully green run left debris too, because the cleanup leg is opt-in and
+// nothing opted it in. Both workflows now wire POSTERN_DELETE_TOKEN (#496), so
+// runs clean up after themselves; this script remains the sweep for the
+// historical backlog and for any run that dies before leg 10.
 //
 // This script only LISTS or DELETES messages matching the smoke probe exact
 // subject signature (derived from inbound/smoke.mjs, not guessed):
@@ -29,16 +31,17 @@
 //   Re: postern-smoke <ISO-8601 timestamp> <base36 token> send        (leg 3, reply)
 //   postern-smoke <ISO-8601 timestamp> <base36 token> attachment      (leg 8)
 //   postern-smoke <ISO-8601 timestamp> <base36 token> inbound         (leg 4, --expect-inbound only; not used by either workflow today)
-//   postern-smoke <ISO-8601 timestamp> <base36 token> draft           (leg 9; needs POSTERN_IDENTITY_TOKEN, not set by either workflow today, so drafts are never created by CI smoke runs)
+//   postern-smoke <ISO-8601 timestamp> <base36 token> draft           (leg 9; needs POSTERN_IDENTITY_TOKEN, now wired in both workflows)
 //   postern-smoke <ISO-8601 timestamp> <base36 token> draft v2        (leg 9, PUT)
 //
-// In the two workflows that actually run against production today, only the
-// "send", "Re: ... send", and "attachment" subjects are ever produced (the
-// identity and expect-inbound legs are both dark). The other two forms are
-// included in the match regex anyway because they are real signatures the
-// smoke script itself can produce, not guesses; if the drafts leg is ever
-// wired to a per-identity token, or --expect-inbound to a real domain, this
-// script stays correct without a rewrite.
+// In the two workflows that actually run against production today, the "send",
+// "Re: ... send", "attachment", and both "draft" subjects can be produced (only
+// the expect-inbound leg is still dark). The drafts lifecycle deletes the draft
+// it creates, so those two forms should never linger; the regex covers them for
+// a run that dies mid-lifecycle. The inbound form is included anyway because it
+// is a real signature the smoke script itself can produce, not a guess; if
+// --expect-inbound is ever pointed at a real domain, this script stays correct
+// without a rewrite.
 //
 // SMOKE_SUBJECT_RE anchors the whole subject: it cannot match a real message
 // from a human sender (nobody hand-writes an ISO-8601 timestamp plus a random
