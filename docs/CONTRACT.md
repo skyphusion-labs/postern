@@ -69,6 +69,24 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
   input only. As with #486 there is NO backfill: the raw header was never persisted, the
   hash is one-way, and existing rows stay readable.
 
+- **A message identifier is emitted, never RFC 2047 encoded** (#500). `Message-ID` and
+  `In-Reply-To` are `msg-id` (RFC 5322 section 3.6.4), a STRUCTURED field body, and RFC 2047
+  section 5 states an encoded-word "MUST NOT be used ... in any structured field body except
+  within a 'comment' or 'phrase'". The projection used to B-encode any non-ASCII header value
+  including these two, which put an encoded-word in a structured field AND did not round-trip:
+  measured against the real door, Mutt 2.2.12 quoted the encoded-word back verbatim in
+  `In-Reply-To`, matched no stored `message_id`, and forked the thread. Both projectors
+  (`inbound/src/rfc822Project.ts`, `imap/posternimap/rfc822.py`) now emit an identifier exactly
+  as stored; `Subject` and the address headers are unstructured and keep their RFC 2047
+  encoding. At the time of the change the production store held ZERO rows with a non-ASCII
+  `message_id` or `in_reply_to` out of 10634, so no projected byte moved for any existing row
+  and neither `PROJECTION_VERSION` nor `UIDVALIDITY` changed. THREADING for a non-ASCII
+  identifier is NOT fixed by this: the door re-parses its own rendered bytes to answer a FETCH
+  and `_to_wire` keeps the wire ASCII (RFC 6855, see #504), so such an id is still served
+  altered. Making it round-trip needs either the collapse rule above widened to any
+  unrepresentable id, or RFC 6855 `UTF8=ACCEPT` plus a raw-bytes read path (#504). Both stay
+  open in #500.
+
 - `attachments` and the FTS5 triggers are untouched. The triggers only read
   `subject` / `body_text`, which both directions populate.
 

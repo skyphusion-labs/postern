@@ -483,5 +483,83 @@ class ProjectedSizeTest(unittest.TestCase):
                     )
 
 
+class StructuredIdentifierTest(unittest.TestCase):
+    """#500: `Message-ID` / `In-Reply-To` are never RFC 2047 encoded.
+
+    Both are `msg-id` (RFC 5322 section 3.6.4), a STRUCTURED field body, and RFC 2047
+    section 5 forbids an encoded-word in one. Measured before the fix against this
+    renderer and a real client: the id went out as
+    `=?utf-8?b?PG5hw692ZS1yb290QGV4YW1wbGUuY29tPg==?=` (angle brackets inside the
+    base64) and Mutt 2.2.12 quoted it back verbatim, matching no stored message_id.
+    """
+
+    NONASCII = "naïve-root@example.com"
+
+    def test_non_ascii_message_id_is_served_as_stored(self):
+        raw = render_rfc822(_msg(message_id=self.NONASCII))
+        self.assertIn(f"Message-ID: <{self.NONASCII}>".encode("utf-8"), raw)
+        self.assertNotIn(b"=?utf-8?b?", raw)
+
+    def test_non_ascii_in_reply_to_is_served_as_stored(self):
+        raw = render_rfc822(_msg(in_reply_to=self.NONASCII))
+        self.assertIn(f"In-Reply-To: <{self.NONASCII}>".encode("utf-8"), raw)
+        self.assertNotIn(b"=?utf-8?b?", raw)
+
+    def test_envelope_scan_agrees_with_the_render(self):
+        # The body-free ENVELOPE path formats identically by contract, so it must not
+        # encode either. _to_wire still keeps the ENVELOPE ASCII-safe on the wire
+        # (RFC 6855, see #504): what it produces is not the raw id, and that seam is
+        # tracked there, not here.
+        h = envelope_headers(_summary(message_id=self.NONASCII))
+        self.assertNotIn("=?utf-8?b?", h["message-id"])
+
+    def test_CONTROL_subject_is_still_rfc2047_encoded(self):
+        # Subject IS unstructured, so 2047 applies and must keep applying. Without this
+        # control the change could have disabled encoding everywhere and still passed.
+        raw = render_rfc822(_msg(subject="naïve subject"))
+        self.assertIn(b"Subject: =?utf-8?b?", raw)
+
+    def test_CONTROL_ascii_identifiers_are_unchanged(self):
+        raw = render_rfc822(_msg(message_id="ascii-root@example.com",
+                                 in_reply_to="parent@example.com"))
+        self.assertIn(b"Message-ID: <ascii-root@example.com>", raw)
+        self.assertIn(b"In-Reply-To: <parent@example.com>", raw)
+
+
+class ProjectionLockstepTest(unittest.TestCase):
+    """Byte-length parity with inbound/src/rfc822Project.ts.
+
+    The worker caches projected_size from D1 metadata while the door serves BODY[] from
+    this renderer, so a drift makes RFC822.SIZE disagree with the literal it labels: the
+    one combination that breaks size-validating clients. Measured live against the pair
+    before this change (worker projectedSize 279 == door RFC822.SIZE 279; 251 == 251).
+    The TypeScript half asserts the SAME constants in
+    inbound/message-id-nonascii.test.ts -- change one, change both.
+    """
+
+    BASE = dict(
+        from_addr="sender@example.net",
+        to_addr="conrad@example.com",
+        date="2026-07-27T00:00:00Z",
+        body_text="root body\n",
+    )
+
+    def test_nonascii_id(self):
+        m = _msg(message_id="naïve-root@example.com", subject="non-ascii id root", **self.BASE)
+        self.assertEqual(len(render_rfc822(m)), 254)
+        self.assertEqual(project_rfc822_size(m), 254)
+
+    def test_ascii_id(self):
+        m = _msg(message_id="ascii-root@example.com", subject="ascii id root", **self.BASE)
+        self.assertEqual(len(render_rfc822(m)), 249)
+        self.assertEqual(project_rfc822_size(m), 249)
+
+    def test_nonascii_in_reply_to(self):
+        m = _msg(message_id="reply@example.net", subject="Re: non-ascii id root",
+                 in_reply_to="naïve-root@example.com", **self.BASE)
+        self.assertEqual(len(render_rfc822(m)), 291)
+        self.assertEqual(project_rfc822_size(m), 291)
+
+
 if __name__ == "__main__":
     unittest.main()

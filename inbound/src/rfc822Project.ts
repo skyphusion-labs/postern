@@ -63,6 +63,26 @@ function encodeHeaderValue(value: string): string {
   return b64Word(v);
 }
 
+/**
+ * A message identifier header (`Message-ID`, `In-Reply-To`) is a STRUCTURED field body:
+ * RFC 5322 section 3.6.4 defines it as `msg-id`, not as unstructured text. RFC 2047
+ * section 5 is explicit that an encoded-word "MUST NOT be used ... in any structured
+ * field body except within a comment or phrase", so an id is emitted exactly as it is
+ * stored and is never RFC 2047 encoded (#500).
+ *
+ * Measured before this changed: an encoded id was served as `=?utf-8?b?...?=` with the
+ * angle brackets INSIDE the base64, and Mutt 2.2.12 quoted that encoded-word verbatim
+ * into `In-Reply-To`, which matched no stored message_id and forked the thread.
+ *
+ * hdr() still neutralizes CR and LF. #494 stores an id carrying an interior break as its
+ * sha256, so that is defence in depth rather than the round-trip guarantee.
+ *
+ * Must stay byte-for-byte identical to imap/posternimap/rfc822.py _id_header_value.
+ */
+function idHeaderValue(value: string): string {
+  return hdr(angle(value));
+}
+
 function encodeAddressHeader(value: string): string {
   const v = hdr(value);
   if (isAscii(v)) return v;
@@ -186,8 +206,8 @@ function envelopeHeaderBlock(input: ProjectInput): string[] {
   lines.push(`Subject: ${encodeHeaderValue(input.subject || "")}`);
   const date = fmtDate(input.date || "");
   if (date) lines.push(`Date: ${date}`);
-  if (input.messageId) lines.push(`Message-ID: ${encodeHeaderValue(angle(input.messageId))}`);
-  if (input.inReplyTo) lines.push(`In-Reply-To: ${encodeHeaderValue(angle(input.inReplyTo))}`);
+  if (input.messageId) lines.push(`Message-ID: ${idHeaderValue(input.messageId)}`);
+  if (input.inReplyTo) lines.push(`In-Reply-To: ${idHeaderValue(input.inReplyTo)}`);
   lines.push("MIME-Version: 1.0");
   return lines;
 }

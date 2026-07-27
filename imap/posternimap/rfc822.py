@@ -74,6 +74,23 @@ def _encode_header_value(value: str) -> str:
         return _b64_word(v)
 
 
+def _id_header_value(value: str) -> str:
+    """A message identifier header, emitted as stored and NEVER RFC 2047 encoded.
+
+    `Message-ID` and `In-Reply-To` are STRUCTURED field bodies (RFC 5322 section 3.6.4
+    defines them as `msg-id`). RFC 2047 section 5: an encoded-word "MUST NOT be used ...
+    in any structured field body except within a comment or phrase" (#500). Measured
+    before this changed: Mutt 2.2.12 quoted our encoded-word back verbatim, matched no
+    stored message_id, and forked the thread.
+
+    _hdr() still neutralizes CR and LF; #494 collapses such an id to its sha256 at the
+    store, so that is defence in depth, not the round-trip guarantee.
+
+    Must stay byte-for-byte identical to inbound/src/rfc822Project.ts idHeaderValue.
+    """
+    return _hdr(_angle(value))
+
+
 def _encode_address_header(value: str) -> str:
     """Encode a display-name without wrapping the addr-spec (ENVELOPE parity)."""
     v = _hdr(value)
@@ -92,8 +109,21 @@ def _encode_address_header(value: str) -> str:
         return _b64_word(v)
 
 
-def _to_wire(value: str) -> str:
-    """Make a header value safe to hand the IMAP ENVELOPE/FETCH serializer."""
+def _to_wire(value) -> str:
+    """Make a header value safe to hand the IMAP ENVELOPE/FETCH serializer.
+
+    Accepts whatever the stdlib parser hands back, not only `str`. A header line
+    carrying non-ASCII parses to an `email.header.Header` under the compat32 policy,
+    and this function is the last thing between a stored value and the serializer:
+    it must never be the reason a FETCH dies. Measured (#500): with an identifier
+    emitted as stored, a `Header` reached here and BOTH `spew_envelope` and
+    `spew_body` raised TypeError, so the FETCH never completed and the client hung.
+    """
+    if not isinstance(value, str):
+        try:
+            value = str(value)
+        except Exception:
+            return ""
     try:
         v = _WIRE_FOLD_RE.sub(" ", value).replace("\r", " ").replace("\n", " ")
         v.encode("ascii")
@@ -196,9 +226,9 @@ def _envelope_lines(msg: Message) -> list[str]:
     if date:
         lines.append(f"Date: {date}")
     if msg.message_id:
-        lines.append(f"Message-ID: {_encode_header_value(_angle(msg.message_id))}")
+        lines.append(f"Message-ID: {_id_header_value(msg.message_id)}")
     if msg.in_reply_to:
-        lines.append(f"In-Reply-To: {_encode_header_value(_angle(msg.in_reply_to))}")
+        lines.append(f"In-Reply-To: {_id_header_value(msg.in_reply_to)}")
     lines.append("MIME-Version: 1.0")
     return lines
 
@@ -296,7 +326,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
     if not atts and not html_part:
         env.append('Content-Type: text/plain; charset="utf-8"')
         env.append("Content-Transfer-Encoding: 8bit")
-        return ("\n".join(env) + "\n\n").encode("ascii") + _text_body(plain)
+        return ("\n".join(env) + "\n\n").encode("utf-8") + _text_body(plain)
 
     if not atts and html_part:
         boundary = _boundary_token(mid, "0")
@@ -318,7 +348,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
                 _text_body(html_part),
             ),
         ]
-        return ("\n".join(env) + "\n\n").encode("ascii") + _wrap_multipart(
+        return ("\n".join(env) + "\n\n").encode("utf-8") + _wrap_multipart(
             boundary, parts
         )
 
@@ -338,7 +368,7 @@ def render_rfc822(msg: Message, *, attachment_bytes: Optional[Sequence[bytes]] =
     parts = [first]
     for att, data in zip(msg.attachments, attachment_bytes):
         parts.append(_attachment_part(att.filename, att.mime, data))
-    return ("\n".join(env) + "\n\n").encode("ascii") + _wrap_multipart(
+    return ("\n".join(env) + "\n\n").encode("utf-8") + _wrap_multipart(
         boundary, parts
     )
 
@@ -375,9 +405,9 @@ def envelope_headers(summary: MessageSummary) -> dict[str, str]:
         if date:
             lines.append(f"Date: {date}")
         if summary.message_id:
-            lines.append(f"Message-ID: {_encode_header_value(_angle(summary.message_id))}")
+            lines.append(f"Message-ID: {_id_header_value(summary.message_id)}")
         if summary.in_reply_to:
-            lines.append(f"In-Reply-To: {_encode_header_value(_angle(summary.in_reply_to))}")
+            lines.append(f"In-Reply-To: {_id_header_value(summary.in_reply_to)}")
         out: dict[str, str] = {}
         for line in lines:
             k, sep, v = line.partition(": ")
