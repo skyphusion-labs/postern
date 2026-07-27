@@ -3,7 +3,7 @@
 // (#22) and mailbox.send()/reply() for the sent copy (#27) -- so threads are
 // complete and the data model has a single owner.
 
-import { sha256hex, chunkText } from "./ingest";
+import { sha256hex, chunkText, representableId } from "./ingest";
 import { PROJECTION_VERSION, projectRfc822Size } from "./rfc822Project";
 
 /** A message row plus its attachment metadata. Column names are the field names. */
@@ -248,6 +248,14 @@ export interface PutResult {
  *   1. in_reply_to matches an existing row -> inherit its thread_id
  *   2. else any id in references matches an existing row -> inherit that thread_id
  *   3. else new thread: thread_id = this messageId
+ *
+ * Each candidate is tried BOTH as the sender wrote it and as `representableId` would
+ * have stored it (#500). A parent whose header could not be represented lives under its
+ * sha256 (#486, #494, #500), so a reply quoting the sender's own raw id would match no
+ * row and fork, which is the exact bug the collapse exists to prevent, moved one seam
+ * over. The raw form is tried FIRST, so this is purely additive: no lookup that
+ * succeeded before can start failing, and for a representable id the two forms are the
+ * same string and only one query runs.
  */
 async function resolveThreadId(
   db: D1Database,
@@ -255,12 +263,19 @@ async function resolveThreadId(
   inReplyTo: string | null | undefined,
   references: string[] | undefined,
 ): Promise<string> {
-  const candidates: string[] = [];
-  if (inReplyTo) candidates.push(stripAngle(inReplyTo));
+  const quoted: string[] = [];
+  if (inReplyTo) quoted.push(stripAngle(inReplyTo));
   // References: check most-recent first (closest parent wins).
   for (const r of (references ?? []).slice().reverse()) {
     const id = stripAngle(r);
-    if (id && !candidates.includes(id)) candidates.push(id);
+    if (id && !quoted.includes(id)) quoted.push(id);
+  }
+  const candidates: string[] = [];
+  for (const id of quoted) {
+    if (!id || candidates.includes(id)) continue;
+    candidates.push(id);
+    const stored = await representableId(id);
+    if (stored !== id && !candidates.includes(stored)) candidates.push(stored);
   }
   for (const parentId of candidates) {
     const row = await db

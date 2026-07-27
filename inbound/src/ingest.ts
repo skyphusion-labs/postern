@@ -231,6 +231,43 @@ const TE = new TextEncoder();
  *  trailing breaks, so only an INTERIOR break can reach the header. */
 const LINE_BREAK = /[\r\n]/;
 
+/** A non-ASCII id cannot be represented in a header we are allowed to serve either
+ *  (#500). RFC 6532 makes such an id LEGAL for an internationalized message, so this is
+ *  a limitation of what our door can carry, not a judgement that the sender is wrong:
+ *  `Message-ID` and `In-Reply-To` are structured fields, so RFC 2047 encoding them is a
+ *  MUST NOT (RFC 2047 section 5), and RFC 6855 forbids sending UTF-8 to a client that
+ *  has not enabled `UTF8=ACCEPT`, which our door does not offer. Measured on the live
+ *  door: emitted as stored, such an id crashed the FETCH outright; ASCII-replaced to
+ *  keep the wire legal, it came back `na??ve-...` and a real client's reply matched
+ *  nothing. When #504 lands and the door can carry those bytes, "representable" widens
+ *  and this trigger narrows on its own. */
+function isAsciiId(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 127) return false;
+  }
+  return true;
+}
+
+/**
+ * The stored FORM of an id: VERBATIM unless it cannot be represented (#486, #494, #500).
+ *
+ * This is the one rule, in one place, and it is PURE: no store lookup, so thread
+ * resolution can apply exactly the same transform to an `in_reply_to` / `references`
+ * entry before it tries to match a parent row (store.resolveThreadId). Without that,
+ * collapsing an id here would simply trade one fork for another: a reply quoting the
+ * sender's own raw id would no longer match the collapsed parent.
+ *
+ * `normalizeMessageId` layers the legacy existence check on top; that check is about
+ * WHICH row an already-stored header lives in, not about what is representable.
+ */
+export async function representableId(stripped: string): Promise<string> {
+  if (!stripped) return stripped;
+  if (TE.encode(stripped).length > MAX_STORED_MESSAGE_ID_BYTES) return await sha256hex(stripped);
+  if (LINE_BREAK.test(stripped)) return await sha256hex(stripped);
+  if (!isAsciiId(stripped)) return await sha256hex(stripped);
+  return stripped;
+}
+
 /**
  * The ONE place a Message-ID header becomes a stored id (#486). Both ingest paths (the
  * inbound transport seam here, and the IMAP APPEND import in api.ts) call it, so the two
@@ -265,19 +302,19 @@ export async function normalizeMessageId(env: Env, raw: string | undefined | nul
     const legacy = await sha256hex(bare);
     if (await store.messageExists(env, legacy)) return legacy;
   }
-  // Second trigger for the SAME collapse the byte budget uses (#494): an id we cannot
-  // serve back faithfully is stored as its sha256, which is plain ASCII hex and so
-  // round-trips the projection exactly. One rule to state: verbatim unless the id
-  // cannot be represented -- either it does not fit the budget, or it cannot survive a
-  // header.
+  // The SAME collapse the byte budget uses, for the other two ways an id cannot be
+  // represented: it cannot survive a header (#494, an interior CR/LF) or it cannot be
+  // served in one at all (#500, non-ASCII). Either way the stored id is its sha256,
+  // plain ASCII hex, which round-trips the projection exactly. One rule to state:
+  // verbatim unless the id cannot be represented. representableId() IS that rule, and
+  // thread resolution applies the identical function to the ids it matches against.
   //
   // Deliberately AFTER the legacy lookup, not folded into the budget branch above: a
   // pre-#486 row already lives under sha256(bare), and jumping the queue would fork a
   // second row for the same header instead of merging into it (#178). The legacy hash
   // is hex too, so returning it satisfies the round-trip guarantee just as well. Both
   // existing branches are left exactly as they were.
-  if (LINE_BREAK.test(stripped)) return await sha256hex(stripped);
-  return stripped;
+  return await representableId(stripped);
 }
 
 export async function sha256hex(input: string): Promise<string> {

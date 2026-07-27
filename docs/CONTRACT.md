@@ -78,14 +78,32 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
   `In-Reply-To`, matched no stored `message_id`, and forked the thread. Both projectors
   (`inbound/src/rfc822Project.ts`, `imap/posternimap/rfc822.py`) now emit an identifier exactly
   as stored; `Subject` and the address headers are unstructured and keep their RFC 2047
-  encoding. At the time of the change the production store held ZERO rows with a non-ASCII
-  `message_id` or `in_reply_to` out of 10634, so no projected byte moved for any existing row
-  and neither `PROJECTION_VERSION` nor `UIDVALIDITY` changed. THREADING for a non-ASCII
-  identifier is NOT fixed by this: the door re-parses its own rendered bytes to answer a FETCH
-  and `_to_wire` keeps the wire ASCII (RFC 6855, see #504), so such an id is still served
-  altered. Making it round-trip needs either the collapse rule above widened to any
-  unrepresentable id, or RFC 6855 `UTF8=ACCEPT` plus a raw-bytes read path (#504). Both stay
-  open in #500.
+  encoding.
+- **A non-ASCII id is not representable either, so it collapses too** (#500). This is the
+  #494 rule applied to a newly measured fact, not a second rule. Emitting such an id as
+  stored was measured on the live door and it CANNOT be carried: the door re-parses its own
+  rendered bytes to answer a FETCH, the stdlib returns an `email.header.Header` for an 8-bit
+  line, and both `spew_envelope` and `spew_body` raised, so the FETCH never completed;
+  hardened to keep the wire legal, the id came back ASCII-replaced (`na??ve-...`) and a real
+  client's reply still matched nothing. RFC 6532 makes a non-ASCII `msg-id` LEGAL for an
+  internationalized (SMTPUTF8, RFC 6531) message, so this is a limitation of what our door
+  can carry, NOT a judgement that the sender is wrong: RFC 6855 forbids sending UTF-8 to a
+  client that has not enabled `UTF8=ACCEPT`, which the door does not offer. When #504 lands
+  and the door can carry those bytes, "representable" widens and this trigger narrows on its
+  own. The rule stays one sentence: **verbatim unless the id cannot be represented**, whether
+  because it does not fit the budget, cannot survive a header, or cannot be served in one.
+  `ingest.representableId()` IS that rule and it is pure, with `normalizeMessageId` layering
+  the legacy existence check on top.
+- **Thread resolution matches an id in BOTH forms** (#500). `in_reply_to` and `references`
+  are stored raw, so a reply from a client that never saw our projection quotes the sender's
+  own header. Each candidate is tried as written and as `representableId` would have stored
+  it, raw form first, so a collapsed parent is still found and the collapse does not simply
+  move the fork one seam over. Purely additive: no lookup that succeeded before can start
+  failing, and for a representable id both forms are the same string.
+  At the time of this change the production store held ZERO rows with a non-ASCII
+  `message_id` or `in_reply_to` out of 10634 (counted with a live detector control), so no
+  projected byte moved for any existing row and neither `PROJECTION_VERSION` nor
+  `UIDVALIDITY` changed. As with #486 and #494 there is NO backfill.
 
 - `attachments` and the FTS5 triggers are untouched. The triggers only read
   `subject` / `body_text`, which both directions populate.
