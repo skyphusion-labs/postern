@@ -150,6 +150,10 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         # client's delayed-ACK timer holds ~40ms -- a ~40ms stall on EVERY message open
         # (measured: FETCH RFC822 ~50ms vs FETCH ENVELOPE ~0.8ms on loopback). A mail
         # client opening or backfilling many messages pays it per message (#229).
+        # RFC 6855 (#504) starts OFF for every connection, and this default is what
+        # guarantees no byte moves for any client that exists today: the extension can
+        # only change a response on a connection that has explicitly run ENABLE.
+        self._utf8_accept = False
         imap4.IMAP4Server.connectionMade(self)
         try:
             self.transport.setTcpNoDelay(True)
@@ -202,6 +206,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         self._oldTimeout = self.setTimeout(None)
         (
             maybeDeferred(self.mbox.fetch, messages, uid=uid)
+            .addCallback(self._stamp_utf8)
             .addCallback(self._warm_fetch, query)
             .addCallback(iter)
             .addCallback(self._IMAP4Server__cbFetch, tag, query, uid)
@@ -215,6 +220,26 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         imap4.IMAP4Server.arg_seqset,
         imap4.IMAP4Server.arg_fetchatt,
     )
+
+    def _stamp_utf8(self, results):
+        """Stamp this connection's RFC 6855 state onto the messages of ONE fetch (#504).
+
+        THIS is where the connection-dependence lives, and it lives nowhere else. A
+        message object exists for exactly one FETCH (see PosternIMAPMessage), the account
+        and mailbox are per-connection (the portal logs in per connection), so a stamp
+        here cannot leak into another client's response. The alternative, teaching the
+        store or the projection about connections, is the layer violation this design
+        exists to avoid: what form an id is STORED in is a worker question, what bytes
+        THIS socket may receive is a door question.
+
+        Returns the list so it can sit in the callback chain without changing it.
+        """
+        fetched = list(results)
+        for _seq, msg in fetched:
+            setter = getattr(msg, "set_utf8_accept", None)
+            if setter is not None:
+                setter(self._utf8_accept)
+        return fetched
 
     def _warm_fetch(self, results, query):
         """Pre-run the accessor reads of the render in the pool; pass the messages through.
@@ -430,6 +455,121 @@ class PosternIMAP4Server(imap4.IMAP4Server):
     select_NOOP = unauth_NOOP  # type: ignore[assignment]
     logout_NOOP = unauth_NOOP  # type: ignore[assignment]
 
+    # ------------------------------------------------------------------
+    # RFC 6855 wire serialisation (#504).
+    #
+    # Twisted cannot put UTF-8 on the wire and says so: collapseNestedLists does
+    # `i.encode("ascii")` with the comment "anything besides ASCII will have to wait for
+    # an RFC 5738 implementation", and _formatHeaders ends in networkString(), which is
+    # also an ASCII encode. Measured live before these overrides existed: with the gate
+    # on, a FETCH (ENVELOPE) over a non-ASCII identifier died with
+    # UnicodeEncodeError inside collapseNestedLists and the client got a dropped
+    # connection. Every unit suite was green at that moment. That is the #500 lesson
+    # again: the serializer runs INSIDE the protocol, so only a live FETCH can see it.
+    #
+    # These three overrides are the ONLY vendored twisted code here, and each one runs
+    # its vendored branch ONLY when the connection has enabled the extension. A
+    # connection that has not (which is every connection in existence today) falls
+    # straight through to the stock implementation, so its bytes cannot move and cannot
+    # drift if twisted changes.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _utf8_wire(value):
+        """Recursively hand twisted BYTES for anything it would ASCII-encode.
+
+        collapseNestedLists quotes or literalises a `bytes` item correctly; it is only
+        the `str` branch that is ASCII-only. So encoding our strings to UTF-8 before it
+        sees them is enough, and RFC 6855 section 3 is satisfied: the ENVELOPE
+        quoted-string carries UTF-8 to a client that asked for it.
+        """
+        if isinstance(value, str):
+            return value.encode("utf-8")
+        if isinstance(value, (list, tuple)):
+            return type(value)(PosternIMAP4Server._utf8_wire(v) for v in value)
+        return value
+
+    @staticmethod
+    def _format_headers_utf8(headers) -> bytes:
+        """_formatHeaders, but UTF-8 clean. Same shape, same order, same CRLF join."""
+        lines = [
+            ": ".join((k.title(), "\r\n".join(v.splitlines())))
+            for (k, v) in headers.items()
+        ]
+        return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+    def spew_envelope(self, id, msg, _w=None, _f=None):
+        if not self._utf8_accept:
+            return imap4.IMAP4Server.spew_envelope(self, id, msg, _w=_w, _f=_f)
+        if _w is None:
+            _w = self.transport.write
+        envelope = self._utf8_wire(imap4.getEnvelope(msg))
+        _w(b"ENVELOPE " + imap4.collapseNestedLists([envelope]))
+
+    def spew_rfc822header(self, id, msg, _w=None, _f=None):
+        if not self._utf8_accept:
+            return imap4.IMAP4Server.spew_rfc822header(self, id, msg, _w=_w, _f=_f)
+        if _w is None:
+            _w = self.transport.write
+        hdrs = self._format_headers_utf8(msg.getHeaders(True))
+        _w(b"RFC822.HEADER " + imap4._literal(hdrs))
+
+    def spew_body(self, part, id, msg, _w=None, _f=None):
+        """Only the HEADER and MIME branches need us; everything else is stock.
+
+        Both of those branches end in a LITERAL, which is 8-bit clean by RFC 3501, so
+        serving the canonical bytes there is legal. It is also necessary: an enabled
+        connection that got the raw form in the ENVELOPE and a folded form in
+        BODY[HEADER] would be #517 rebuilt inside the extension.
+        """
+        if not self._utf8_accept or not (part.header or part.mime):
+            return imap4.IMAP4Server.spew_body(self, part, id, msg, _w=_w, _f=_f)
+        if _w is None:
+            _w = self.transport.write
+        # Same part walk as the stock method; it rebinds msg to the addressed subpart.
+        for p in part.part:
+            if msg.isMultipart():
+                msg = msg.getSubPart(p)
+            elif p > 0:
+                raise TypeError("Requested subpart of non-multipart message")
+        if part.header:
+            hdrs = msg.getHeaders(part.header.negate, *part.header.fields)
+        else:
+            hdrs = msg.getHeaders(True)
+        _w(part.__bytes__() + b" " + imap4._literal(self._format_headers_utf8(hdrs)))
+
+    def do_ENABLE(self, tag, line):
+        """RFC 5161 ENABLE, implementing RFC 6855 UTF8=ACCEPT (#504).
+
+        Twisted has no ENABLE at all: `twisted.mail.imap4` (26.4.0) contains zero
+        occurrences of ENABLE, 5161, 6855 or UTF8, and `lookupCommand` answers
+        "Unsupported command" for it in every state. So the command, the capability and
+        the per-connection state are all ours.
+
+        STATE. RFC 5161 section 3.1: ENABLE is valid only in the AUTHENTICATED state,
+        before a mailbox is selected, and a server SHOULD reply BAD if a client issues
+        it once selected. Binding ONLY `auth_ENABLE` below gives exactly that for free:
+        `lookupCommand` builds the attribute name from `self.state`, so the unauth and
+        select states find nothing and fall through to BAD. That is deliberate, not an
+        oversight; do not add a `select_ENABLE` alias.
+
+        A capability we do not implement is silently not enabled, which is what RFC 5161
+        requires: the ENABLED response lists only what the server actually turned on, and
+        the command still completes OK.
+        """
+        requested = [atom for atom in (line or b"").upper().split() if atom]
+        enabled = []
+        if b"UTF8=ACCEPT" in requested:
+            self._utf8_accept = True
+            enabled.append(b"UTF8=ACCEPT")
+        # RFC 5161 section 3.1: the untagged ENABLED response is sent even when empty.
+        self.sendUntaggedResponse(b"ENABLED " + b" ".join(enabled) if enabled else b"ENABLED")
+        self.sendPositiveResponse(tag, b"ENABLE completed")
+
+    # Authenticated state ONLY, on purpose. See the docstring: the absence of a
+    # select_ENABLE binding IS the RFC 5161 "BAD once a mailbox is selected" behaviour.
+    auth_ENABLE = (do_ENABLE, imap4.IMAP4Server.arg_line)
+
     def do_APPEND(self, tag, mailbox, flags, date, message):
         """APPEND persist-or-refuse (#352 section 3.2); never silent OK+drop.
 
@@ -466,7 +606,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         # bytes, so nothing re-reads a consumed stream. The stock-path branch above
         # returns before this point and still passes the original object through.
         raw = _read_message_bytes(message)
-        if _has_8bit_headers(raw):
+        if not self._utf8_accept and _has_8bit_headers(raw):
             self.sendNegativeResponse(tag, _UTF8_APPEND_REFUSAL)
             return
         # sent / drafts / placement: select the mailbox object without emitting
@@ -660,6 +800,12 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         # RFC 6851: advertise MOVE (#304). do_MOVE implements it fully for the Trash
         # delete sink (untagged EXPUNGE per moved message, then tagged OK).
         cap[b"MOVE"] = None
+        # RFC 6855: advertise UTF8=ACCEPT (#504). listCapabilities renders a list-valued
+        # entry as NAME=VALUE, so this emits exactly "UTF8=ACCEPT". Advertising it is
+        # honest only because do_ENABLE below actually implements it and the serve gate
+        # actually honours it; a capability we did not implement would be a lie the
+        # client acts on.
+        cap[b"UTF8"] = [b"ACCEPT"]
         return cap
 
     @staticmethod

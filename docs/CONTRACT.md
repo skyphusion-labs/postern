@@ -87,10 +87,10 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
   hardened to keep the wire legal, the id came back ASCII-replaced (`na??ve-...`) and a real
   client's reply still matched nothing. RFC 6532 makes a non-ASCII `msg-id` LEGAL for an
   internationalized (SMTPUTF8, RFC 6531) message, so this is a limitation of what our door
-  can carry, NOT a judgement that the sender is wrong: RFC 6855 forbids sending UTF-8 to a
-  client that has not enabled `UTF8=ACCEPT`, which the door does not offer. When #504 lands
-  and the door can carry those bytes, "representable" widens and this trigger narrows on its
-  own. The rule stays one sentence: **verbatim unless the id cannot be represented**, whether
+  can carry, NOT a judgement that the sender is wrong. Since #504 the door DOES offer
+  `UTF8=ACCEPT`, so it can carry those bytes to a client that asked for them; widening the
+  storage rule to match is a separate, deliberate decision and has NOT been taken. The rule
+  stays one sentence: **verbatim unless the id cannot be represented**, whether
   because it does not fit the budget, cannot survive a header, or cannot be served in one.
   `ingest.representableId()` IS that rule and it is pure, with `normalizeMessageId` layering
   the legacy existence check on top.
@@ -104,6 +104,51 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
   `message_id` or `in_reply_to` out of 10634 (counted with a live detector control), so no
   projected byte moved for any existing row and neither `PROJECTION_VERSION` nor
   `UIDVALIDITY` changed. As with #486 and #494 there is NO backfill.
+
+- **STORAGE and WIRE are different layers, and identifier handling depends on both**
+  (#504). These two questions look alike and are not, and conflating them is what made
+  #504 read as a change to the storage rule when it is not:
+
+  | | question | who answers | connection-dependent? |
+  |---|---|---|---|
+  | **Storage** | what form does this id LIVE under in D1? | the Worker, `ingest.representableId()` | **no**, and it has nowhere to put a connection |
+  | **Wire** | what bytes may THIS socket receive? | the IMAP door, per-connection RFC 6855 state | **yes**, that is the whole point |
+
+  They are not merely different layers, they are different PROCESSES: the door never calls
+  `representableId` and the Worker never learns that a connection exists. So RFC 6855 did
+  not make representability connection-dependent, and `representableId` stayed one pure
+  function that both the serve seam and the thread-match seam share.
+
+  **Why a client-dependent serve form cannot fork a thread.** If the storage rule ever
+  widens so a non-ASCII id is stored raw, a client that enabled the extension is served
+  the raw form and one that did not is served the ASCII fold. Neither forks, for different
+  reasons: the raw form resolves through the dual-candidate lookup above, the stored form
+  resolves directly, and the ASCII FOLD IS NEVER A THREAD KEY. The fold is lossy and many
+  distinct ids collapse onto it, so it must never match a stored row, or two unrelated
+  conversations sharing a fold would merge. That is also the argument for the extension
+  existing: a client that can only ever see the fold cannot reply into the right thread.
+  Pinned by `inbound/utf8-accept-layering.test.ts`.
+
+  **What the door does NOT do, even with the extension enabled.** It does not decode RFC
+  2047: an encoded-word is passed through as it stands, because RFC 6855 permits a server
+  to SEND UTF-8 and does not require it to undo a sender's encoding. It does not implement
+  the RFC 6855 `APPEND ... UTF8 (<literal8>)` syntax, nor `UTF8=ONLY`; an APPEND whose
+  HEADERS carry 8-bit characters is refused with a tagged `NO` unless the connection has
+  enabled `UTF8=ACCEPT` (an 8-bit BODY is ordinary 8BITMIME traffic and is always
+  accepted). And `ENABLE` is bound in the authenticated state ONLY, so issuing it once a
+  mailbox is selected answers `BAD`, per RFC 5161 section 3.1.
+
+- **One stored header value is served as ONE string on every seam** (#517). The stdlib
+  hands back a `str` for an ASCII header and an `email.header.Header` over `unknown-8bit`
+  for one carrying raw 8-bit bytes, and `str()` of that Header is lossy (one U+FFFD per
+  BYTE). Reading both with `str()` meant the summary path folded per CHARACTER and the
+  re-parsed path folded per BYTE, so the same `In-Reply-To` was served as two different
+  strings and WHICH one a client got depended on whether something else in the same FETCH
+  had forced hydration. `imap/posternimap/rfc822.py` `header_text()` is the single
+  canonicaliser and every consumer goes through it. Header ORDER is canonical too: the
+  summary path follows the projection's order rather than iterating a set, whose order was
+  randomised per process. `BODY[]` is unaffected and still carries the raw projection
+  bytes that `RFC822.SIZE` describes (#507).
 
 - `attachments` and the FTS5 triggers are untouched. The triggers only read
   `subject` / `body_text`, which both directions populate.

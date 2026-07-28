@@ -168,7 +168,7 @@ def header_text(value) -> str:
         return ""
 
 
-def _to_wire(value) -> str:
+def _to_wire(value, allow_utf8: bool = False) -> str:
     """Make a header value safe to hand the IMAP ENVELOPE/FETCH serializer.
 
     Accepts whatever the stdlib parser hands back, not only `str`. A header line
@@ -182,10 +182,22 @@ def _to_wire(value) -> str:
     to one canonical string and the fold below runs over that ONE string. The non-ASCII
     branch also folds `v`, not the raw input, so a folded header collapses its
     continuation identically on both branches instead of only on the ASCII one.
+
+    `allow_utf8` is the RFC 6855 lever (#504) and it is the ONLY connection-dependent
+    thing in this file. FALSE (the default, and what every caller gets unless a
+    connection has run ENABLE UTF8=ACCEPT) keeps the ASCII fold exactly as it was, so a
+    client that exists today cannot be served a different byte. TRUE returns the
+    canonical text unfolded, which is legal only once the client has asked for it.
+
+    NOTE what this does NOT do even when TRUE: it does not decode RFC 2047. An
+    encoded-word arrives as a plain `str` and is returned as it stands. RFC 6855 permits
+    a server to SEND UTF-8; it does not require it to undo a sender encoding.
     """
     text = header_text(value)
+    v = _WIRE_FOLD_RE.sub(" ", text).replace("\r", " ").replace("\n", " ")
+    if allow_utf8:
+        return v
     try:
-        v = _WIRE_FOLD_RE.sub(" ", text).replace("\r", " ").replace("\n", " ")
         v.encode("ascii")
         return v
     except (UnicodeEncodeError, AttributeError):
@@ -452,10 +464,14 @@ def project_rfc822_size(msg: Message) -> int:
     return len(render_rfc822(msg))
 
 
-def envelope_headers(summary: MessageSummary) -> dict[str, str]:
+def envelope_headers(summary: MessageSummary, allow_utf8: bool = False) -> dict[str, str]:
     """The IMAP ENVELOPE / scan-relevant headers for a summary, body-free.
 
     Returns a lowercase-keyed map formatted IDENTICALLY to render_rfc822 above.
+
+    `allow_utf8` is passed straight through to `_to_wire` (#504). It changes nothing
+    about WHICH headers are produced or how they are formatted, only whether a value
+    that cannot be represented in ASCII is folded on the way out.
     """
     try:
         lines: list[str] = []
@@ -483,28 +499,28 @@ def envelope_headers(summary: MessageSummary) -> dict[str, str]:
         for line in lines:
             k, sep, v = line.partition(": ")
             if k and sep:
-                out[k.lower()] = _to_wire(v)
+                out[k.lower()] = _to_wire(v, allow_utf8)
         return out
     except Exception:
         h: dict[str, str] = {}
         if summary.from_addr:
-            h["from"] = _to_wire(_hdr(summary.from_addr))
+            h["from"] = _to_wire(_hdr(summary.from_addr), allow_utf8)
         if summary.to_addr:
-            h["to"] = _to_wire(_hdr(summary.to_addr))
+            h["to"] = _to_wire(_hdr(summary.to_addr), allow_utf8)
         if summary.cc:
-            h["cc"] = _to_wire(_hdr(summary.cc))
+            h["cc"] = _to_wire(_hdr(summary.cc), allow_utf8)
         if summary.bcc:
-            h["bcc"] = _to_wire(_hdr(summary.bcc))
+            h["bcc"] = _to_wire(_hdr(summary.bcc), allow_utf8)
         if summary.sender:
-            h["sender"] = _to_wire(_hdr(summary.sender))
+            h["sender"] = _to_wire(_hdr(summary.sender), allow_utf8)
         if summary.reply_to:
-            h["reply-to"] = _to_wire(_hdr(summary.reply_to))
-        h["subject"] = _to_wire(_hdr(summary.subject or ""))
+            h["reply-to"] = _to_wire(_hdr(summary.reply_to), allow_utf8)
+        h["subject"] = _to_wire(_hdr(summary.subject or ""), allow_utf8)
         date = _fmt_date(summary.date)
         if date:
-            h["date"] = _to_wire(date)
+            h["date"] = _to_wire(date, allow_utf8)
         if summary.message_id:
-            h["message-id"] = _to_wire(_hdr(_angle(summary.message_id)))
+            h["message-id"] = _to_wire(_hdr(_angle(summary.message_id)), allow_utf8)
         if summary.in_reply_to:
-            h["in-reply-to"] = _to_wire(_hdr(_angle(summary.in_reply_to)))
+            h["in-reply-to"] = _to_wire(_hdr(_angle(summary.in_reply_to)), allow_utf8)
         return h

@@ -382,6 +382,20 @@ class DoorCommandSurfaceTest(_SurfaceTest):
         rec = yield self._drive(body)
         self.assertEqual([], rec.routes(), "ID reached the worker")
 
+    @defer.inlineCallbacks
+    def test_enable_touches_no_worker_at_all(self):
+        # ENABLE (RFC 5161 / RFC 6855, #504) is a pure protocol answer that flips one
+        # per-connection flag, so the claim is the same strong one as ID: it must cost NO
+        # worker call. An implementation that decided to look up, say, a per-identity
+        # capability policy fails here rather than quietly adding a round trip to every
+        # connection that negotiates the extension.
+        @defer.inlineCallbacks
+        def body(proto):
+            yield proto.sendCommand(imap4.Command(b"ENABLE", b"UTF8=ACCEPT"))
+
+        rec = yield self._drive(body)
+        self.assertEqual([], rec.routes(), "ENABLE reached the worker")
+
 
 class PerAccountSurfaceTest(_SurfaceTest):
     """per_account sessions and role folders: the modes the original suite never ran."""
@@ -605,6 +619,7 @@ class DrivenSurfaceDeclarationTest(unittest.TestCase):
         "do_COPY": "DoorCommandSurfaceTest (durable folders + restore)",
         "do_MOVE": "DoorCommandSurfaceTest",
         "do_ID": "DoorCommandSurfaceTest (must cost no worker call)",
+        "do_ENABLE": "DoorCommandSurfaceTest (must cost no worker call)",
         "do_NOOP": "LivePollSplitTest (refresh in the pool, EXISTS push on the reactor)",
     }
     # command -> why it is not driven here. Empty on purpose: everything the door

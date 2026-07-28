@@ -77,8 +77,13 @@ class _RFC822Part:
         attachment_index: Optional[int] = None,
         ensure_attachment: Optional[Callable[[int], None]] = None,
         root: Optional["PosternIMAPMessage"] = None,
+        utf8_accept: bool = False,
     ) -> None:
         self._parsed = parsed
+        # Inherited from the parent so a nested part is not folded differently from the
+        # message containing it (#504). A subpart serving one form while its parent
+        # serves another is the #517 divergence rebuilt one level down.
+        self._utf8_accept = utf8_accept
         self._attachment_index = attachment_index
         self._ensure_attachment = ensure_attachment
         self._root = root
@@ -93,7 +98,7 @@ class _RFC822Part:
         for key, value in self._parsed.items():
             in_set = key.lower() in names_lower
             if (not negate and in_set) or (negate and not in_set):
-                result[key.lower()] = _to_wire(value)
+                result[key.lower()] = _to_wire(value, self._utf8_accept)
         return result
 
     def getBodyFile(self) -> BytesIO:
@@ -127,7 +132,7 @@ class _RFC822Part:
         child = subparts[part]
         if not isinstance(child, PyMessage):
             raise IndexError(part)
-        return _RFC822Part(child)
+        return _RFC822Part(child, utf8_accept=self._utf8_accept)
 
 
 @implementer(imap4.IMessage, imap4.IMessageFile)
@@ -156,6 +161,13 @@ class PosternIMAPMessage:
         # worker call on the reactor thread, which is the exact stall #457 removes. The
         # memo lives on the message, and a message lives for one FETCH, so a later
         # command still retries the worker.
+        # RFC 6855 (#504). A message lives for ONE FETCH (see the memo note below), and
+        # the protocol stamps this from the connection's ENABLE state before the render.
+        # It is therefore per-connection state that never outlives the response it
+        # shapes, which is the whole point: representability is a STORAGE question and
+        # stays in the worker, while what THIS connection may receive is a WIRE question
+        # and stays here. False means the ASCII fold that predates the extension.
+        self._utf8_accept = False
         self._hydrate_error: Optional[BaseException] = None
         self._attachment_errors: dict = {}
         self._full: Optional[Message] = None
@@ -316,6 +328,10 @@ class PosternIMAPMessage:
             # which is what a whole-message fetch legitimately needs.
             target.open()
 
+    def set_utf8_accept(self, enabled: bool) -> None:
+        """Stamp the connection's RFC 6855 state onto this one-FETCH message (#504)."""
+        self._utf8_accept = bool(enabled)
+
     def getUID(self) -> int:
         return self._uid
 
@@ -350,14 +366,26 @@ class PosternIMAPMessage:
             return self._headers_from_parsed(negate, names_lower)
 
         if not negate and names_lower:
-            env = envelope_headers(self._summary)
+            env = envelope_headers(self._summary, self._utf8_accept)
             if names_lower <= set(env.keys()):
-                return {n: env[n] for n in names_lower if n in env}
+                # Iterate `env`, NOT `names_lower`. names_lower is a SET, so iterating it
+                # ordered the served headers by Python string hash, which is randomised
+                # PER PROCESS: the same door served BODY[HEADER.FIELDS] in a different
+                # order on every restart, and that order also disagreed with the hydrated
+                # path, which yields message order. Found while building the byte-equality
+                # harness for #504, where it made a pre/post comparison impossible because
+                # there was no stable "before" to compare against. `env` is built in the
+                # projection's own header order, which is exactly the order
+                # _headers_from_parsed yields (both come from render_rfc822), so this
+                # makes the two seams agree on ORDER as well as on VALUE (#517).
+                return {n: env[n] for n in env if n in names_lower}
 
         if negate and not names_lower:
             if self._loaded:
                 return self._headers_from_parsed(True, set())
-            return _EnvelopeHeaders(envelope_headers(self._summary), self._full_headers)
+            return _EnvelopeHeaders(
+                envelope_headers(self._summary, self._utf8_accept), self._full_headers
+            )
 
         self._hydrate()
         return self._headers_from_parsed(negate, names_lower)
@@ -368,7 +396,7 @@ class PosternIMAPMessage:
         for key, value in self._parsed.items():
             in_set = key.lower() in names_lower
             if (not negate and in_set) or (negate and not in_set):
-                result[key.lower()] = _to_wire(value)
+                result[key.lower()] = _to_wire(value, self._utf8_accept)
         return result
 
     def _full_headers(self) -> dict:
@@ -459,6 +487,7 @@ class PosternIMAPMessage:
             attachment_index=att_index,
             ensure_attachment=self._ensure_attachment if att_index is not None else None,
             root=self if att_index is not None else None,
+            utf8_accept=self._utf8_accept,
         )
 
 
