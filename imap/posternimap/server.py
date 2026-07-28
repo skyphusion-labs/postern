@@ -33,7 +33,7 @@ from twisted.python.compat import networkString
 from .auth import build_portal
 from .config import Config
 from .fetchwarm import fetch_reads
-from .mailbox import MailboxLoadError
+from .mailbox import MailboxLoadError, _read_message_bytes
 from .proxywrap import wrap_listener_factory
 from .threaded import configure_pool_watch, in_pool
 
@@ -97,6 +97,37 @@ def _redact_wire_trace(line: bytes) -> bytes:
     delivered via rawDataReceived, NOT lineReceived, so it never reaches this trace at
     all (the trace only hooks lineReceived + sendLine). Redaction happens AT CAPTURE."""
     return _WIRE_TRACE_REDACT.sub(rb"\1 <REDACTED>", line)
+
+
+# RFC 6855: a server that has not had UTF8=ACCEPT enabled MUST refuse an APPEND whose
+# HEADERS carry 8-bit characters. Ours refused already, but only by accident and with a
+# useless diagnostic: the 8-bit header parsed to an email.header.Header, a .strip() on it
+# raised AttributeError, and mailbox.addMessage caught it in its generic handler, so the
+# client was told "APPEND failed: Header object has no attribute strip" (#517). The
+# outcome was right and the reason was noise. This makes the refusal explicit and
+# attributable BEFORE any parse, which also means the fix to header_text (which stops the
+# AttributeError) cannot silently start ACCEPTING 8-bit APPENDs in the gap before the
+# UTF8=ACCEPT gate lands in #504.
+_UTF8_APPEND_REFUSAL = (
+    b"[CANNOT] APPEND failed: this message carries 8-bit characters in its headers; "
+    b"RFC 6855 requires the connection to negotiate ENABLE UTF8=ACCEPT first"
+)
+
+
+def _has_8bit_headers(raw: bytes) -> bool:
+    """True when the APPEND header block holds a byte outside US-ASCII.
+
+    Scoped to the HEADER block on purpose. RFC 6855 gates header characters; an 8-bit
+    BODY is ordinary 8BITMIME traffic and refusing it would break normal mail. The header
+    block is everything before the first empty line, and a message with no empty line is
+    all headers.
+    """
+    head = raw
+    for sep in (b"\r\n\r\n", b"\n\n"):
+        if sep in raw:
+            head = raw.split(sep, 1)[0]
+            break
+    return any(b > 127 for b in head)
 
 
 class PosternIMAP4Server(imap4.IMAP4Server):
@@ -430,6 +461,14 @@ class PosternIMAP4Server(imap4.IMAP4Server):
                 b"APPEND is not supported",
             )
             return
+        # RFC 6855 header gate (#517), BEFORE any parse so the refusal names its own
+        # reason. Read the literal once here and hand the BYTES down; addMessage accepts
+        # bytes, so nothing re-reads a consumed stream. The stock-path branch above
+        # returns before this point and still passes the original object through.
+        raw = _read_message_bytes(message)
+        if _has_8bit_headers(raw):
+            self.sendNegativeResponse(tag, _UTF8_APPEND_REFUSAL)
+            return
         # sent / drafts / placement: select the mailbox object without emitting
         # EXISTS from a cold load in the stock path -- call addMessage directly.
         # #416: select now answers with a Deferred (it builds AND preloads in the reactor
@@ -440,7 +479,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             if mbox is None:
                 self.sendNegativeResponse(tag, b"[TRYCREATE] No such mailbox")
                 return None
-            appended = maybeDeferred(mbox.addMessage, message, flags or (), date)
+            appended = maybeDeferred(mbox.addMessage, raw, flags or (), date)
             return appended.addCallback(
                 lambda _r: self.sendPositiveResponse(tag, b"APPEND complete")
             )

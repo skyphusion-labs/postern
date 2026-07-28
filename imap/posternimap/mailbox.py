@@ -39,6 +39,7 @@ from zope.interface import implementer
 from twisted.mail import imap4
 
 from .client import Draft, Message, MessageSummary, PosternClient, PosternError
+from .rfc822 import header_text
 from .measure import Meter
 from .message import PosternIMAPMessage
 from .serialqueue import SerialQueue
@@ -85,7 +86,12 @@ def _parse_rfc822(raw: bytes) -> PyMessage:
 
 
 def _header_addrs(msg: PyMessage, name: str) -> str:
-    return (msg.get(name, "") or "").strip()
+    # header_text, not str(): an APPEND carrying raw 8-bit header bytes parses to an
+    # email.header.Header, which has no .strip(), and the AttributeError surfaced to the
+    # client as the literal refusal text "APPEND failed: Header object has no attribute
+    # strip" (#517). Same root cause as the serve-side divergence: a Header where a str
+    # was assumed.
+    return header_text(msg.get(name, "") or "").strip()
 
 
 def _bare_addr(value: str) -> str:
@@ -100,7 +106,7 @@ def _norm_subject(value: str) -> str:
 
 
 def _message_id_header(msg: PyMessage) -> Optional[str]:
-    mid = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
+    mid = header_text(msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
     if not mid:
         return None
     if mid.startswith("<") and mid.endswith(">"):
