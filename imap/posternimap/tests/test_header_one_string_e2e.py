@@ -114,6 +114,31 @@ class HeaderTextUnitTest(unittest.TestCase):
         self.assertIsInstance(value, str)  # ASCII, so never a Header
         self.assertEqual(header_text(value), "=?utf-8?b?Y2Fmw6k=?=")
 
+    def test_encoded_word_survives_even_when_the_header_ALSO_carries_raw_8bit(self):
+        """The corner case the pure-ASCII test cannot reach.
+
+        A mixed header DOES become a Header, so decode_header actually runs on it. The
+        encoded-word still must not be decoded, or this path would disagree with the
+        pure-ASCII path and a Subject would render differently depending on whether some
+        OTHER part of the same line happened to be 8-bit.
+        """
+        raw = b"Subject: =?utf-8?b?Y2Fmw6k=?= plus raw caf\xc3\xa9\r\n\r\nx"
+        value = self._parsed(raw, "Subject")
+        # POSITIVE CONTROL: this really is the Header path, not the str early return.
+        self.assertNotIsInstance(value, str)
+        self.assertEqual(
+            header_text(value), "=?utf-8?b?Y2Fmw6k=?= plus raw café"
+        )
+
+    def test_decode_header_can_decode_encoded_words_so_the_above_is_not_vacuous(self):
+        """CONTROL for the two tests above. If decode_header could not parse an
+        encoded-word at all, "it does not decode it" would be true for a worthless
+        reason and both assertions would pass against a broken implementation."""
+        from email.header import decode_header
+
+        parts = decode_header("=?utf-8?b?Y2Fmw6k=?= plus raw")
+        self.assertEqual(parts[0], (b"caf\xc3\xa9", "utf-8"))
+
 
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class OneStringPerHeaderE2ETest(twisted_unittest.TestCase):

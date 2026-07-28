@@ -137,10 +137,30 @@ def header_text(value) -> str:
     hydration. `decode_header` on the Header OBJECT (not on its lossy `str()`) hands back
     the original bytes, so the two representations reconcile to one canonical string.
 
-    This deliberately does NOT decode RFC 2047 encoded-words, and cannot: compat32
-    returns a Header ONLY when the raw value holds surrogates, i.e. only for genuine
-    8-bit bytes. An encoded-word is ASCII, so it arrives here as a plain `str` and is
-    passed through untouched; a Subject the projection encoded stays encoded on the wire.
+    This deliberately does NOT decode RFC 2047 encoded-words, on ANY path, and the
+    guarantee holds for two independent reasons rather than one:
+
+      * A header that is PURE ASCII never becomes a Header at all. compat32 wraps a value
+        only when it holds surrogates, i.e. only for genuine 8-bit bytes, so an
+        encoded-word arrives as a plain `str` and hits the early return above untouched.
+      * A MIXED header (an encoded-word AND raw 8-bit bytes on the same line) DOES arrive
+        as a Header, so `decode_header` runs on it, and it STILL does not decode the
+        encoded-word. compat32 wraps the whole raw value as ONE `unknown-8bit` chunk, so
+        `decode_header` on the Header object returns that single chunk verbatim and never
+        RFC 2047-parses it. Measured:
+
+            Subject: =?utf-8?b?Y2Fmw6k=?= plus raw caf<0xc3><0xa9>
+            chunks  [('=?utf-8?b?Y2Fmw6k=?= plus raw caf\udcc3\udca9', unknown-8bit)]
+            result  '=?utf-8?b?Y2Fmw6k=?= plus raw caf<e-acute>'
+
+        Only the raw bytes are turned back into text; the encoded-word survives as
+        written. (`decode_header` is perfectly capable of parsing encoded-words when
+        handed a `str`, which is the control on that claim, so this is a property of the
+        Header path and not a dead call.)
+
+    So there is no asymmetry between the two paths: a Subject the projection encoded stays
+    encoded on the wire in every case. Anyone widening `representableId` later can rely on
+    that. Pinned by test_header_one_string_e2e.HeaderTextUnitTest.
     """
     if isinstance(value, str):
         return value
