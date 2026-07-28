@@ -422,7 +422,10 @@ async function main() {
       assert(updated.json?.draft?.subject === `${tag} draft v2`, "PUT with the CURRENT updatedAt is applied", updated.json);
 
       const removed = await api("DELETE", `/api/drafts/${encodeURIComponent(id)}`, opts);
-      assert(removed.status === 200, "DELETE /api/drafts/{id} removes it (no debris left behind)", removed);
+      assert(removed.status === 200, "DELETE /api/drafts/{id} answers 200", removed);
+
+      const goneDraft = await api("GET", `/api/drafts/${encodeURIComponent(id)}`, opts);
+      assert(goneDraft.status === 404, "the deleted draft is GONE (404 on read-back, no debris left behind)", goneDraft);
     }
   }
 
