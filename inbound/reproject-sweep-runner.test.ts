@@ -121,7 +121,29 @@ describe("reproject sweep runner (#507)", () => {
     expect(err).toContain("Refusing");
   });
 
-  it("fails when the rows examined do not add up to the store total", async () => {
+  // #515: storeTotal is sampled ONCE, at the start of the sweep (store.ts reads it
+  // before the first page's rows). A live mailbox keeps accepting mail while the
+  // sweep runs, so processed ending up ABOVE that start-of-run total is normal, not
+  // a failure -- the real incident this guards against ran 216 pages, converted
+  // every row, and still exited FATAL because the store had grown during the ~2h
+  // run. These two tests prove BOTH directions: growth alone must never fail it,
+  // and a genuine shortfall (rows that existed at the start and were never walked)
+  // still must.
+  it("does NOT fail when the mailbox grew during the run (processed ends up above the start total)", async () => {
+    const recorded: Recorded = { bodies: [] };
+    open = await serve(
+      [{ ok: true, total: 50, processed: 64, updated: 64, unchanged: 0, missing: 0, failed: 0, nextCursor: null, done: true }],
+      recorded,
+    );
+    const { code, out, err } = await run(open, ["--yes"]);
+    expect(code).toBe(0);
+    expect(err).toBe("");
+    expect(out).toContain("NOTE");
+    expect(out).toContain("14 more");
+    expect(out).not.toContain("FATAL");
+  });
+
+  it("still fails when coverage is genuinely incomplete (processed ends up below the start total)", async () => {
     const recorded: Recorded = { bodies: [] };
     open = await serve(
       [{ ok: true, total: 64, processed: 50, updated: 50, unchanged: 0, missing: 0, failed: 0, nextCursor: null, done: true }],

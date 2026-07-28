@@ -2763,6 +2763,18 @@ export async function reprojectPage(
   opts: { cursor?: string; limit?: number; dryRun?: boolean },
 ): Promise<ReprojectResult> {
   const dryRun = opts.dryRun === true;
+  // Sample the store total BEFORE reading this page's rows, on the first call only
+  // (no cursor). Ordering matters (#515): the previous code read it AFTER the first
+  // page's rows were already fetched and processed, which left a window where a
+  // message inserted between the two reads counted in `total` but had already been
+  // passed by the very first page's SELECT, so it could never be walked by a later
+  // page either. The runner's completion guard then compared `processed` to that
+  // `total` and FATAL'd on a sweep that genuinely covered everything it needed to.
+  // Reading total FIRST makes it a true lower bound instead: any row that exists at
+  // the moment `total` is sampled is guaranteed to still be reachable by this page
+  // or a later one, so a live mailbox can only ever grow `processed` past `total`,
+  // never fall short of it through no fault of the sweep.
+  const total = opts.cursor ? undefined : await countMessages(env);
   const { rows, nextCursor } = await pageForReproject(
     env,
     opts.cursor,
@@ -2821,7 +2833,7 @@ export async function reprojectPage(
     done: nextCursor === null,
     dryRun,
   };
-  if (!opts.cursor) result.total = await countMessages(env);
+  if (total !== undefined) result.total = total;
   return result;
 }
 

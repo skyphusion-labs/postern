@@ -151,12 +151,35 @@ async function main() {
       `${totals.unchanged} already current, ${totals.missing} missing, ${totals.failed} failed.`,
   );
 
-  if (storeTotal !== null && totals.processed !== storeTotal) {
+  // storeTotal is a COUNT(*) sampled once, at the START of the sweep, before this
+  // page's rows were even read (store.ts reprojectPage, #515). That ordering makes
+  // it a lower bound, never a snapshot to match exactly: a live mailbox keeps
+  // accepting mail while this runs, and every row born during the run is ingested
+  // at the CURRENT projection version already, so it never needed this sweep's
+  // work and the walk structurally cannot (and does not need to) revisit it. So
+  // processed ending up ABOVE storeTotal is expected and is reported here only as
+  // information, never as a failure. processed ending up BELOW storeTotal has no
+  // such explanation -- every row that existed when storeTotal was sampled is
+  // guaranteed reachable by this walk, so falling short means real rows were
+  // skipped, which IS the same bug class named above (a renamed or dropped cursor
+  // field once stopped a different sweep script quietly at 50 of 64 rows) and
+  // stays a hard failure.
+  if (storeTotal !== null && totals.processed < storeTotal) {
     console.error(
-      `FATAL: examined ${totals.processed} rows but the store reported ${storeTotal}. ` +
-        `The sweep did NOT cover the whole mailbox.`,
+      `FATAL: examined ${totals.processed} rows but the store reported ${storeTotal} ` +
+        `when this sweep started. The sweep did NOT cover the whole mailbox.`,
     );
     process.exit(1);
+  }
+  if (storeTotal !== null && totals.processed > storeTotal) {
+    console.log(
+      `NOTE: examined ${totals.processed} rows, ${totals.processed - storeTotal} more than ` +
+        `the ${storeTotal} the store reported when this sweep started. That is expected on ` +
+        `a live mailbox (mail arrived during the run); it does not indicate missed rows. ` +
+        `This number proves nothing about completeness by itself -- completeness is the ` +
+        `processed >= storeTotal check above, plus the sweep reaching its natural end ` +
+        `(no --max-pages cutoff, no page reporting done=false with an unusable cursor).`,
+    );
   }
   if (totals.failed > 0) {
     console.error(
