@@ -15,6 +15,7 @@ import re
 from datetime import datetime, timezone
 from html import escape as _html_escape
 from typing import Optional, Sequence
+from email.header import decode_header
 from email.utils import format_datetime, parsedate_to_datetime
 
 from .client import Message, MessageSummary
@@ -116,6 +117,57 @@ def _encode_address_header(value: str) -> str:
         return _b64_word(v)
 
 
+def header_text(value) -> str:
+    """The CANONICAL text of a parsed header value, whatever the stdlib handed back.
+
+    This is the one place that turns what `email` gives us into a `str`, and every
+    consumer must come through it, because the stdlib gives us TWO representations of
+    the same header depending on its bytes (#517):
+
+      * A header whose value is pure ASCII comes back as a plain `str`.
+      * A header carrying raw 8-bit bytes comes back as an `email.header.Header` over
+        the `unknown-8bit` charset, because compat32 `_sanitize_header` wraps any value
+        holding surrogates. `str()` of that Header is LOSSY: it renders every escaped
+        byte as U+FFFD, so a UTF-8 sequence becomes one replacement character PER BYTE.
+
+    Calling `str()` on both is what produced #517. The summary path held real text and
+    folded to ASCII per CHARACTER; the hydrated path held a Header and folded per BYTE;
+    the same stored In-Reply-To was therefore served as two different strings, and WHICH
+    one a client got depended on whether something else in the same FETCH had forced
+    hydration. `decode_header` on the Header OBJECT (not on its lossy `str()`) hands back
+    the original bytes, so the two representations reconcile to one canonical string.
+
+    This deliberately does NOT decode RFC 2047 encoded-words, and cannot: compat32
+    returns a Header ONLY when the raw value holds surrogates, i.e. only for genuine
+    8-bit bytes. An encoded-word is ASCII, so it arrives here as a plain `str` and is
+    passed through untouched; a Subject the projection encoded stays encoded on the wire.
+    """
+    if isinstance(value, str):
+        return value
+    try:
+        parts = decode_header(value)
+    except Exception:
+        parts = None
+    if parts:
+        out: list[str] = []
+        for data, charset in parts:
+            if isinstance(data, (bytes, bytearray)):
+                # unknown-8bit is the compat32 marker for "these are the raw bytes",
+                # and our own projection writes UTF-8, which is what those bytes are.
+                codec = "utf-8" if not charset or charset == "unknown-8bit" else charset
+                try:
+                    out.append(bytes(data).decode(codec, "replace"))
+                except (LookupError, UnicodeDecodeError):
+                    out.append(bytes(data).decode("utf-8", "replace"))
+            else:
+                out.append(data)
+        return "".join(out)
+    try:
+        return str(value)
+    except Exception:
+        return ""
+
+
 def _to_wire(value) -> str:
     """Make a header value safe to hand the IMAP ENVELOPE/FETCH serializer.
 
@@ -125,24 +177,20 @@ def _to_wire(value) -> str:
     it must never be the reason a FETCH dies. Measured (#500): with an identifier
     emitted as stored, a `Header` reached here and BOTH `spew_envelope` and
     `spew_body` raised TypeError, so the FETCH never completed and the client hung.
+
+    #517: `header_text` runs FIRST, so both representations of one stored value reduce
+    to one canonical string and the fold below runs over that ONE string. The non-ASCII
+    branch also folds `v`, not the raw input, so a folded header collapses its
+    continuation identically on both branches instead of only on the ASCII one.
     """
-    if not isinstance(value, str):
-        try:
-            value = str(value)
-        except Exception:
-            return ""
+    text = header_text(value)
     try:
-        v = _WIRE_FOLD_RE.sub(" ", value).replace("\r", " ").replace("\n", " ")
+        v = _WIRE_FOLD_RE.sub(" ", text).replace("\r", " ").replace("\n", " ")
         v.encode("ascii")
         return v
     except (UnicodeEncodeError, AttributeError):
         try:
-            return (
-                value.encode("ascii", "replace")
-                .decode("ascii")
-                .replace("\r", " ")
-                .replace("\n", " ")
-            )
+            return v.encode("ascii", "replace").decode("ascii")
         except Exception:
             return ""
 
