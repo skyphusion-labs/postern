@@ -21,7 +21,7 @@ getting service. One worker call is then issued against an HTTP server that slee
 inline on the reactor thread (how the door worked before #416) and then through the
 reactor threadpool (how it works now). The largest heartbeat gap is the stall.
 
-Measured on dischord, 2026-07-26:
+Measured on a crew dev box, 2026-07-26:
 
 ```
 heartbeat interval: 20ms (a gap larger than this is a stall)
@@ -88,7 +88,7 @@ and then on in the same process against the same worker. `stalls` counts heartbe
 over 2x the interval and `frozen` sums them, because the worst single gap badly
 understates a freeze that repeats once per message.
 
-Measured on dischord, 2026-07-26:
+Measured on a crew dev box, 2026-07-26:
 
 ```
 heartbeat interval: 20ms (a gap larger than this is a stall)
