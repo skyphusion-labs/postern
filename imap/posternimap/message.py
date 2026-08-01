@@ -290,14 +290,30 @@ class PosternIMAPMessage:
         writes the response. Every accessor on this class memoizes, so pre-running them
         turns the render into memory reads.
 
-        This pass is INVISIBLE by construction. It never changes what a FETCH answers,
-        only where the waiting happens, so a failure is swallowed and left to the render:
-        the render calls the same accessor, gets the memoized error (no second worker
-        call, no reactor stall), and behaves exactly as it did before this existed.
+        This pass is INVISIBLE by construction for a genuine backend failure. It never
+        changes what a FETCH answers, only where the waiting happens, so a hydration
+        failure is swallowed and left to the render: the render calls the same accessor,
+        gets the memoized error (no second worker call, no reactor stall), and behaves
+        exactly as it did before this existed.
+
+        EXCEPT an out-of-range BODY[n] section (#530): both getSubPart implementations
+        (this class and _RFC822Part, reached one level down for a nested part) raise a
+        bare IndexError for a part index the message does not have. That is not a
+        backend failure, it is an ordinary bad client request, but Twisted's spew_body
+        has no error path for it -- once IMAP4Server has written the untagged
+        "* n FETCH (" prefix, ANY exception from a render accessor is unrecoverable and
+        __ebSpewMessage just logs it and tears down the connection (there is no way to
+        tell the client anything once bytes may already be on the wire). This warm pass
+        runs entirely BEFORE that prefix is ever written (do_FETCH warms every message
+        first), so re-raising IndexError here instead of swallowing it turns the same
+        failure into a normal tagged FETCH failure via the already-wired __ebFetch
+        errback, and the connection is never touched.
         """
         for read in reads:
             try:
                 self._apply_read(read)
+            except IndexError:
+                raise
             except Exception:
                 continue
 

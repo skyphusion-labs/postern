@@ -1514,6 +1514,127 @@ class ServerHtmlBodyE2ETest(twisted_unittest.TestCase):
             yield proto.logout()
 
 
+class OutOfRangeBodyFetchE2ETest(twisted_unittest.TestCase):
+    """#530 over the wire: an out-of-range BODY[n] must not kill the connection.
+
+    Twisted's spew_body has no error path for getSubPart raising IndexError: once
+    IMAP4Server has written the untagged "* n FETCH (" prefix, any exception from a
+    render accessor reaches __ebSpewMessage, which just logs the failure and tears
+    down the TCP connection -- there is no way to tell the client anything once bytes
+    may already be on the wire (see message.py PosternIMAPMessage.prehydrate for the
+    full mechanism and why the fix lives in the do_FETCH warm pass, which runs BEFORE
+    that prefix is ever written).
+
+    Two shapes, because a nested part (BODY[1.9]) is addressed through the OTHER
+    getSubPart implementation (_RFC822Part, one level below the root
+    PosternIMAPMessage) -- both raise sites had to be reachable through the same fix.
+    Each test proves survival the way the issue asks: a second, valid FETCH on the
+    SAME connection, asserted against its actual content, not merely "did not hang up".
+    """
+
+    ATTACHMENT_DATA = b"x" * 4096
+    TEXT = "hello body"
+    HTML = "<p>hi there</p>"
+
+    def _attachment(self):
+        return {
+            "id": "a1",
+            "filename": "repro-4096.bin",
+            "mime": "application/octet-stream",
+            "size": len(self.ATTACHMENT_DATA),
+        }
+
+    def _spin(self, message):
+        transport = FakeTransport([message], expected_token="tok", page_size=10)
+        cfg = Config(
+            api_url="https://x", auth_mode="token", api_timeout=5.0, imap_poll_seconds=0
+        )
+        factory, restore = _patched_factory(cfg, transport)
+        port = reactor.listenTCP(0, factory, interface="127.0.0.1")
+        self._restore = restore
+        self._port = port
+        return port.getHost()
+
+    def tearDown(self):
+        _restore_account(self._restore)
+        return self._port.stopListening()
+
+    @defer.inlineCallbacks
+    def _client(self, addr):
+        cc = ClientCreator(reactor, imap4.IMAP4Client)
+        proto = yield cc.connectTCP("127.0.0.1", addr.port)
+        defer.returnValue(proto)
+
+    @staticmethod
+    def _section_text(result, seq=1):
+        # fetchSpecific answers {seq: [[b"BODY", [section], data], ...]}; unwrap the
+        # one requested section's literal data.
+        entry = result[seq][0]
+        data = entry[2]
+        return data.decode() if isinstance(data, bytes) else data
+
+    @defer.inlineCallbacks
+    def test_top_level_out_of_range_answers_bad_and_connection_survives(self):
+        # Root PosternIMAPMessage.getSubPart: 2 top-level parts (plain body,
+        # attachment) -- wire section 9 does not exist.
+        message = make_message(
+            "m1",
+            body=self.TEXT,
+            attachments=[self._attachment()],
+            attachmentBytes=[self.ATTACHMENT_DATA],
+        )
+        addr = self._spin(message)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            yield proto.select(b"INBOX")
+
+            bad = proto.fetchSpecific("1", headerNumber=9)
+            yield self.assertFailure(bad, imap4.IMAP4Exception)
+
+            # Survival proof: a second, valid FETCH on the SAME connection answers
+            # with the real content, not just "the socket is still open".
+            result = yield proto.fetchSpecific("1", headerNumber=1)
+            self.assertEqual(self._section_text(result), self.TEXT)
+        finally:
+            yield proto.logout()
+        self.assertEqual(
+            1,
+            len(self.flushLoggedErrors(IndexError)),
+            "the out-of-range top-level section was not logged as expected",
+        )
+
+    @defer.inlineCallbacks
+    def test_nested_out_of_range_answers_bad_and_connection_survives(self):
+        # _RFC822Part.getSubPart, one level down: wire section 1 is itself
+        # multipart/alternative (plain + html), so 1.9 does not exist.
+        message = make_message(
+            "m1",
+            body=self.TEXT,
+            bodyHtml=self.HTML,
+            attachments=[self._attachment()],
+            attachmentBytes=[self.ATTACHMENT_DATA],
+        )
+        addr = self._spin(message)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            yield proto.select(b"INBOX")
+
+            bad = proto.fetchSpecific("1", headerNumber=(1, 9))
+            yield self.assertFailure(bad, imap4.IMAP4Exception)
+
+            result = yield proto.fetchSpecific("1", headerNumber=(1, 1))
+            self.assertEqual(self._section_text(result), self.TEXT)
+        finally:
+            yield proto.logout()
+        self.assertEqual(
+            1,
+            len(self.flushLoggedErrors(IndexError)),
+            "the out-of-range nested section was not logged as expected",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 
