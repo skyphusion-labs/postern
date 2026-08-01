@@ -296,23 +296,26 @@ class PosternIMAPMessage:
         gets the memoized error (no second worker call, no reactor stall), and behaves
         exactly as it did before this existed.
 
-        EXCEPT an out-of-range BODY[n] section (#530): both getSubPart implementations
-        (this class and _RFC822Part, reached one level down for a nested part) raise a
-        bare IndexError for a part index the message does not have. That is not a
-        backend failure, it is an ordinary bad client request, but Twisted's spew_body
-        has no error path for it -- once IMAP4Server has written the untagged
-        "* n FETCH (" prefix, ANY exception from a render accessor is unrecoverable and
-        __ebSpewMessage just logs it and tears down the connection (there is no way to
-        tell the client anything once bytes may already be on the wire). This warm pass
-        runs entirely BEFORE that prefix is ever written (do_FETCH warms every message
-        first), so re-raising IndexError here instead of swallowing it turns the same
-        failure into a normal tagged FETCH failure via the already-wired __ebFetch
-        errback, and the connection is never touched.
+        EXCEPT a bad BODY[n] section (#530), in TWO shapes, both ordinary bad client
+        requests rather than backend failures: an out-of-range index -- both getSubPart
+        implementations (this class and _RFC822Part, reached one level down for a
+        nested part) raise a bare IndexError for a part index the message does not
+        have -- and a too-deep index into a part that is not itself multipart, which
+        _apply_read's own walk above raises a TypeError for, mirroring spew_body's
+        identical check. Twisted's spew_body has no error path for either: once
+        IMAP4Server has written the untagged "* n FETCH (" prefix, ANY exception from a
+        render accessor is unrecoverable and __ebSpewMessage just logs it and tears
+        down the connection (there is no way to tell the client anything once bytes may
+        already be on the wire). This warm pass runs entirely BEFORE that prefix is
+        ever written (do_FETCH warms every message first), so re-raising IndexError or
+        TypeError here instead of swallowing it turns the same failure into a normal
+        tagged FETCH failure via the already-wired __ebFetch errback, and the
+        connection is never touched.
         """
         for read in reads:
             try:
                 self._apply_read(read)
-            except IndexError:
+            except (IndexError, TypeError):
                 raise
             except Exception:
                 continue
@@ -321,8 +324,17 @@ class PosternIMAPMessage:
         target = self
         for index in read.path:
             if not target.isMultipart():
-                # spew_body: a non-multipart message has an implicit part 1 and no
-                # others. Stop here and let the render raise its own TypeError.
+                # spew_body: a non-multipart entity has an implicit part 1 (index 0)
+                # and no others -- index 0 means "this part itself" (fall through,
+                # target unchanged) and any deeper index is invalid. #530 gap found
+                # in review: this used to just `break` unconditionally and "let the
+                # render raise its own TypeError", which is exactly the bad-index
+                # crash the IndexError fix above addresses, one branch over -- the
+                # warm pass never modeled it, so it still reached Twisted's
+                # spew_body uncaught and dropped the connection. Mirror spew_body's
+                # own check exactly instead of leaving this branch unmodeled.
+                if index > 0:
+                    raise TypeError("Requested subpart of non-multipart message")
                 break
             target = target.getSubPart(index)
         kind = read.kind
