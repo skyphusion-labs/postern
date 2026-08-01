@@ -11,6 +11,93 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.3.7
+
+**Supervised deploy.** #529 changes the announced `RFC822.SIZE` for every existing UID
+dated on days 1-9 of any month once the reproject sweep runs. The served `BODY[]`
+bytes do NOT change -- the door's render was always correct and this release moves the
+worker's projection onto it -- but RFC 3501 section 2.3.1.1 names the RFC-2822 size
+among the data that must never change for a given mailbox + UIDVALIDITY + UID, so a
+`POSTERN_IMAP_UIDVALIDITY` bump is a MUST, not a precaution. The practical reason is
+the stronger one: clients cached the WRONG size for those UIDs, and the bump forces a
+clean resync, which is the only reliable way to clear that cached bad state. Order and
+steps are the same as #507: worker deploy, then the reproject sweep, then the door
+image roll. Every intermediate point is safe on its own (a version-mismatched row
+falls back to a live hydrate-and-measure, per `PosternIMAPMessage.getSize`), so the
+ordering is about correctness of the final state, not about avoiding a crash
+mid-rollout. Do not ship this without the window.
+
+- **imap: an out-of-range `BODY[n]` no longer drops the connection** (#530). Twisted's
+  `spew_body` has no error path for a bad section number: once `IMAP4Server` has
+  written the untagged `* n FETCH (` prefix, any exception from a render accessor is
+  unrecoverable, and `__ebSpewMessage` logs it and tears down the TCP connection. The
+  door's own FETCH warm pass (#457) already ran every accessor read in a threadpool
+  step wired to a clean tagged-BAD errback; it was swallowing the bad-index case along
+  with genuine backend failures. Two raise sites needed covering, and the first pass
+  only caught one: an out-of-range index (`getSubPart` on the root message and on a
+  nested part), and a too-deep index into a part that is not itself multipart (raises
+  `TypeError`, not `IndexError`, in Twisted's own walk -- found and closed in review
+  before the gap could reach a live client). Gated end to end against a real Twisted
+  `IMAP4Server` + `IMAP4Client`: a bad FETCH answers a tagged BAD, then a second, valid
+  FETCH on the SAME connection answers with real content.
+- **imap: `BODYSTRUCTURE` filename parameters no longer carry an extra layer of
+  quoting** (#531). Twisted's own Content-Disposition parser
+  (`_MessageStructure._disposition`) is a documented "poorly tested parser" that never
+  strips the RFC 2822 quoted-string wrapper it is handed, unlike its Content-Type
+  parameter handling, which does. `("filename" "repro-4096.bin")` was going out as
+  `("filename" "\"repro-4096.bin\"")`. Fixed at the one place `BODYSTRUCTURE` is
+  written to the wire, reversing the quoting with the exact inverse of the renderer's
+  own escaping (so a filename containing a real quote character round-trips exactly,
+  not merely "every quote character deleted"). The Content-Type `name=` parameter has
+  an adjacent, smaller version of this gap (tracked separately as #534, not in this
+  release): `unquote()` strips the wrapper but never undoes backslash-escaping.
+- **inbound + imap: the Date header day-of-month is zero-padded on both sides**
+  (#529). The worker emitted it unpadded ("1 Aug"); the door has always emitted it
+  zero-padded ("01 Aug") via Python's `email.utils.format_datetime`. `projectRfc822Size`
+  is just the worker render's byte length, so the cached `projected_size` was one byte
+  short of the door's actual `BODY[]` for every message dated on days 1-9 of the month,
+  roughly 30% of the mailbox at any given time. **PROJECTION_VERSION 3 -> 4**, in
+  lockstep across both projectors. Gated by a real cross-engine harness
+  (`imap/posternimap/tests/test_projection_cross_engine.py` + new
+  `inbound/scripts/render-golden.mjs`) that runs BOTH renderers on the SAME input in
+  ONE test and asserts byte equality directly, rather than two suites separately
+  matching a hand-copied number -- which is how this shipped with both green in the
+  first place. That pattern (each engine's suite comparing its own output to a
+  hand-copied number in the other file, which looks like a cross-engine contract but
+  is not one) is tracked separately for the other shared-golden tests.
+- **imap: RFC 6855 `UTF8=ACCEPT`** (#504), behind a per-connection `ENABLE` gate.
+  Twisted's `imap4` has no ENABLE support at all; the command, the capability, and the
+  per-connection state are the door's own.
+- **imap: one canonical string per stored header, and 8-bit APPEND refused on
+  purpose** (#517). A stored `In-Reply-To` carrying raw 8-bit bytes had been served as
+  THREE different strings by the same door, decided by whether anything else in the
+  same FETCH had already forced hydration -- a summary-path fold per character
+  disagreeing with a hydrated-path fold per byte, because Python's stdlib hands back a
+  lossy `str()` of the underlying `email.header.Header` on one path and the Header
+  object itself on the other. `rfc822.header_text()` is now the one canonicaliser both
+  seams route through. Landed together with an explicit, named 8-bit-in-header APPEND
+  refusal (tagged NO, never BAD; scoped to headers only, an 8-bit BODY is ordinary
+  8BITMIME mail and still accepted): fixing the string bug would otherwise have turned
+  an ACCIDENTAL refusal (an `AttributeError` swallowed into a useless "APPEND failed"
+  message) into an accidental ACCEPT, opening a window before #504's ENABLE-gated
+  refusal existed. Follow-up review (docs + tests only, no behavior change): a header
+  carrying both an RFC 2047 encoded-word and raw 8-bit bytes never has that
+  encoded-word decoded either, the same guarantee a pure-ASCII header already had, and
+  that claim is now a pinned test with a control, not a docstring assertion.
+- **inbound: `reproject-sweep.mjs` no longer FATALs on its own success path.** Its
+  completion guard demanded exact equality between rows-examined and a live store
+  total; on a mailbox that keeps receiving mail while the sweep runs, the total moves
+  and a run that converted every row it needed to could still exit 1. Hit for real
+  during the #507 rollout window: 216 pages, every row converted, exit 1 for nothing.
+- **inbound: smoke leg 9 (drafts DELETE) now proves the row is actually gone**, not
+  just that the server answered 200 -- brought to the same standard leg 10 already
+  held (delete, then GET and require 404).
+- Routine dependency bumps (GitHub Actions, `@modelcontextprotocol/sdk`, `@types/node`,
+  the Cloudflare toolchain group) and a repo-hygiene fix (genericizing a leaked
+  internal hostname in `imap/bench/README.md`).
+
+No route change, no D1 migration.
+
 ## v1.3.6
 
 **Supervised deploy.** This release changes `RFC822.SIZE` and the `BODY[]` bytes for
