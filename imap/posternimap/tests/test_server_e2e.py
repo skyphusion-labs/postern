@@ -13,6 +13,7 @@ TestCase subclasses unittest.TestCase).
 
 from __future__ import annotations
 
+import base64
 import unittest
 
 try:
@@ -1632,6 +1633,47 @@ class OutOfRangeBodyFetchE2ETest(twisted_unittest.TestCase):
             1,
             len(self.flushLoggedErrors(IndexError)),
             "the out-of-range nested section was not logged as expected",
+        )
+
+    @defer.inlineCallbacks
+    def test_subpart_of_non_multipart_part_answers_bad_and_connection_survives(self):
+        # A too-deep index into a part that is not itself multipart: wire section 2
+        # is the attachment (not multipart), so 2.2 is invalid -- spew_body's OWN
+        # walk raises TypeError for this (not IndexError), a second raise site
+        # _apply_read did not originally mirror (found reviewing this fix's own
+        # sufficiency, not named in the original issue): the warm pass silently
+        # treated the too-deep index as "the part itself" and let the real render
+        # hit Twisted's uncaught TypeError instead.
+        message = make_message(
+            "m1",
+            body=self.TEXT,
+            attachments=[self._attachment()],
+            attachmentBytes=[self.ATTACHMENT_DATA],
+        )
+        addr = self._spin(message)
+        proto = yield self._client(addr)
+        try:
+            yield proto.login(b"agent@skyphusion.org", b"tok")
+            yield proto.select(b"INBOX")
+
+            bad = proto.fetchSpecific("1", headerNumber=(2, 2))
+            yield self.assertFailure(bad, imap4.IMAP4Exception)
+
+            # Survival proof, same as the other two: a second, valid FETCH on the
+            # SAME connection answers with real content. BODY[2.1] IS valid here
+            # (RFC 3501: a non-multipart part's only sub-reference is "1", meaning
+            # itself), so this also confirms that legitimate case still works.
+            result = yield proto.fetchSpecific("1", headerNumber=(2, 1))
+            # The attachment is served base64-encoded on the wire (its own
+            # Content-Transfer-Encoding); decode before comparing to the raw bytes.
+            decoded = base64.b64decode(self._section_text(result))
+            self.assertEqual(decoded, self.ATTACHMENT_DATA)
+        finally:
+            yield proto.logout()
+        self.assertEqual(
+            1,
+            len(self.flushLoggedErrors(TypeError)),
+            "the subpart-of-non-multipart section was not logged as expected",
         )
 
 
