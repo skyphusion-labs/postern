@@ -20,10 +20,16 @@ from email.utils import format_datetime, parsedate_to_datetime
 
 from .client import Message, MessageSummary
 
-# v3: CRLF line endings end to end (#507). v2 was the hand-rolled RFC 2047 B-encoding
-# (no email.header.Header Q/fold) + B-encoded non-ASCII filenames.
+# v4 (#529): inbound/src/rfc822Project.ts's Date day-of-month is now zero-padded to
+# match this side (email.utils.format_datetime, used below via _fmt_date, has always
+# zero-padded it), closing a one-byte skew that hit every message dated on days 1-9
+# of the month. This file's own render did not change; the bump exists so a
+# projected_size cached under v3 is never trusted as authoritative against a v4
+# render (message.py PosternIMAPMessage.getSize gates on the version matching). v3:
+# CRLF line endings end to end (#507). v2 was the hand-rolled RFC 2047 B-encoding (no
+# email.header.Header Q/fold) + B-encoded non-ASCII filenames.
 # Must stay byte-length identical to inbound/src/rfc822Project.ts.
-PROJECTION_VERSION = 3
+PROJECTION_VERSION = 4
 
 # Collapses RFC 5322 header folding (a CRLF/LF followed by leading whitespace) back
 # to a single space, so a value handed to the IMAP ENVELOPE serializer is one line:

@@ -108,7 +108,7 @@ describe("projected size (#342)", () => {
         bodyText: "hi",
       }),
     ).toBe(256);
-    expect(PROJECTION_VERSION).toBe(3);
+    expect(PROJECTION_VERSION).toBe(4);
   });
 
   it("emits CRLF terminators with no bare LF or bare CR (#507)", async () => {

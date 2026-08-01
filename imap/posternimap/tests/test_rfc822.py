@@ -441,7 +441,7 @@ class ProjectedSizeTest(unittest.TestCase):
             attachments=[Attachment(filename="inv.pdf", mime="application/pdf", size=len(data))],
         )
         self.assertEqual(project_rfc822_size(m), len(render_rfc822(m, attachment_bytes=[data])))
-        self.assertEqual(PROJECTION_VERSION, 3)
+        self.assertEqual(PROJECTION_VERSION, 4)
 
     def test_unicode_projection_sizes_match_worker_goldens(self):
         # Lockstep with inbound/projected-size.test.ts (projection v3, CRLF #507).
@@ -629,7 +629,10 @@ class CrlfProjectionTest(unittest.TestCase):
         m = _msg(attachments=[att])
         self.assertEqual(project_rfc822_size(m), len(render_rfc822(m, attachment_bytes=[self.DATA])))
 
-    def test_projection_version_is_bumped_for_the_crlf_change(self):
-        # Every projected byte moved, so the cached projected_size from an earlier
-        # version must not be trusted (message.py getSize gates on this).
-        self.assertEqual(PROJECTION_VERSION, 3)
+    def test_projection_version_is_current(self):
+        # Bumped for #507 (CRLF, v2->v3) and again for #529 (Date day-of-month
+        # padding skew, v3->v4): each time this file's own byte output moved or
+        # drifted from inbound/src/rfc822Project.ts, so a cached projected_size
+        # from an earlier version must not be trusted (message.py getSize gates
+        # on the version matching).
+        self.assertEqual(PROJECTION_VERSION, 4)

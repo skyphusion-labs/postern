@@ -81,6 +81,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # #529: test_projection_cross_engine.py shells out to `node` to render
+      # inbound/src/rfc822Project.ts directly (it has zero imports of its own, so
+      # no npm ci / wrangler / vitest-pool-workers is needed) and asserts byte
+      # equality against this door's own render_rfc822 for the SAME input. Pinned
+      # to the same version as the inbound job so both engines are exercised under
+      # a known Node, not whatever happens to be preinstalled on the runner image.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: node available for the cross-engine projection test (#529)
+        run: node --version
       # Twisted is the only runtime dep; mypy is the type gate (mirrors the
       # Node typecheck convention). The pure layers test without Twisted, but
       # the e2e server test needs it, so install the package + dev extras. We also

@@ -3,10 +3,15 @@
 // MIME boundaries (sha256(message_id + NUL + path)) make a length from D1
 // metadata match live BODY[].
 
-// v3: CRLF line endings end to end (#507). v2 was always-RFC 2047 B-encoding (no
-// Q/fold) + B-encoded non-ASCII filenames.
+// v4 (#529): the day-of-month in the Date header is zero-padded, matching the
+// door (imap/posternimap/rfc822.py _fmt_date via Python's email.utils.format_datetime)
+// -- this file previously emitted it unpadded on days 1-9 of the month, one byte
+// short of what the door actually serves, so a cached projected_size silently
+// disagreed with BODY[] for roughly 30% of the mailbox at any given time. v3: CRLF
+// line endings end to end (#507). v2 was always-RFC 2047 B-encoding (no Q/fold) +
+// B-encoded non-ASCII filenames.
 // Must stay byte-length identical to imap/posternimap/rfc822.py.
-export const PROJECTION_VERSION = 3;
+export const PROJECTION_VERSION = 4;
 
 export interface ProjectAttachment {
   filename: string | null;
@@ -113,11 +118,16 @@ export function fmtDate(iso: string): string {
   // Python %a / format_datetime weekday: Mon=0 in calendar.weekday; JS getUTCDay Sun=0.
   const pyWeekday = (d.getUTCDay() + 6) % 7; // Mon=0
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const dd = d.getUTCDate();
+  // #529: zero-padded, matching Python's email.utils.format_datetime (which this
+  // function otherwise mirrors) and imap/posternimap/rfc822.py's _fmt_date, which
+  // is what actually calls format_datetime and always emits e.g. "01" not "1". A
+  // prior version of this comment claimed format_datetime omits the leading zero;
+  // it does not, and that wrong assumption is exactly how the two engines drifted
+  // by one byte on every day 1-9 of the month (see PROJECTION_VERSION below).
+  const dd = String(d.getUTCDate()).padStart(2, "0");
   const hh = String(d.getUTCHours()).padStart(2, "0");
   const mm = String(d.getUTCMinutes()).padStart(2, "0");
   const ss = String(d.getUTCSeconds()).padStart(2, "0");
-  // format_datetime omits leading zero on day-of-month.
   return `${days[pyWeekday]}, ${dd} ${months[d.getUTCMonth()]} ${d.getUTCFullYear()} ${hh}:${mm}:${ss} +0000`;
 }
 
