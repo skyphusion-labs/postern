@@ -11,6 +11,37 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.3.8
+
+**Incident patch. v1.3.7's door image could not start.** `imap/posternimap/rfc822.py`
+carried a docstring example using the escape sequence `\udcc3\udca9`, meant to show
+two backslash escapes as visible text. The docstring is a normal (non-raw) string, so
+that sequence compiled to two REAL, unpaired UTF-16 surrogate code points in the
+constant. CPython 3.13+ refuses to compile a module containing one; the door image is
+`FROM python:3.14-slim`. The `imap` CI job, and separately `imap-image.yml`'s own
+pre-build gate job, both pinned Python 3.12, which still tolerated it, so 686 passing
+trial tests and a clean mypy run said nothing about the interpreter the image actually
+ships. Two of three production doors went to 0/1 and the third flapped; service was
+restored by rolling back to the v1.3.6 image (`9f7a768`) while this was fixed.
+
+- **imap: the docstring escape no longer materializes as a live constant.** One line:
+  the backslashes are doubled, so the example still shows the escape sequence as text
+  without compiling it into one. The documented compat32 behavior is unchanged and the
+  example itself was kept -- it is real, load-bearing documentation of what
+  `header_text` relies on.
+- **Both gates that missed it are now pinned to Python 3.14**, matching
+  `imap/Dockerfile`'s `FROM` line: `ci.yml`'s `imap` job, and `imap-image.yml`'s own
+  pre-build `gate` job, which is the literal step that stood between source and the
+  `build` step that produced the broken image. A green suite on a different
+  interpreter than production is not evidence about production.
+- **New guard** (`imap/posternimap/tests/test_no_lone_surrogates.py`): walks every
+  `.py` file's AST and asserts no string constant contains a lone surrogate code point
+  (U+D800-U+DFFF), so this class cannot return silently.
+
+**No UIDVALIDITY bump, no reproject sweep for this release.** Nothing about the
+projection or the store changes -- v1.3.8 only fixes whether the door process can
+start. Do not repeat v1.3.7's supervised-deploy steps here.
+
 ## v1.3.7
 
 **Supervised deploy.** #529 changes the announced `RFC822.SIZE` for every existing UID
