@@ -273,6 +273,65 @@ def _quote_filename(name: str) -> str:
     return encoded.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _unescape_quoted_string(value: str) -> str:
+    """Undo RFC 2822 quoted-string wrapping (#531).
+
+    The exact reverse of _quote_filename above: strip one matching pair of
+    wrapping double quotes, then undo backslash-escaping (\\" -> ", \\\\ -> \\).
+    A value that was never quoted (a bare token, no tspecials to escape) passes
+    through unchanged.
+    """
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        value = re.sub(r'\\(.)', r'\1', value[1:-1])
+    return value
+
+
+def fix_bodystructure_disposition(node):
+    """Recursively unquote Content-Disposition parameter values in a BODYSTRUCTURE
+    tree that twisted.mail.imap4.getBodyStructure(msg, True) produced (#531).
+
+    Twisted's _MessageStructure._disposition() (twisted/mail/imap4.py) is a
+    documented "XXX Poorly tested parser": it splits the raw Content-Disposition
+    header text on "; " and "=" but never strips the RFC 2822 quoted-string
+    wrapper or undoes backslash-escaping, unlike _unquotedAttrs() (used for the
+    Content-Type parameter list right next to it), which DOES call unquote(). So
+    an attachment's filename parameter round-trips with one extra layer of
+    literal quote characters on the wire -- ("filename" "\\"repro-4096.bin\\"")
+    instead of ("filename" "repro-4096.bin") -- even though the Content-Type
+    name= parameter and the rendered Content-Disposition header itself (the
+    thing _quote_filename above builds) are both already correct. This is a
+    Twisted parser limitation, not something in this file to render differently;
+    the fix is a targeted correction of the structure Twisted hands back, at the
+    one caller that writes BODYSTRUCTURE to the wire (server.py spew_bodystructure).
+
+    getBodyStructure(msg, True) threads `extended` down to every subpart
+    uniformly (_MultipartMessageStructure.encode passes the same flag to each
+    child's own encode()), so every node in the tree -- the top-level message
+    and every nested subpart -- ends with the same 4 RFC 3501 extension fields,
+    in this fixed order: [body parameters, body disposition, body language,
+    body location]. node[-3] is therefore always "the disposition entry" for
+    that node, at any depth: either None, a bare (type, None) tuple with no
+    parameters, or [disposition-type, [name, value, name, value, ...]] when
+    parameters (here, always just "filename") are present.
+
+    The shape check below (a 2-list whose second element is itself a list) is
+    what keeps this from misfiring elsewhere in a generic recursive walk: no
+    other field in this fixed 4-tuple, and no flat parameter-name/value list
+    (whose own entries are plain strings, never lists), can match it.
+    """
+    if isinstance(node, (list, tuple)):
+        fixed = [fix_bodystructure_disposition(child) for child in node]
+        if len(fixed) >= 4:
+            disp = fixed[-3]
+            if isinstance(disp, list) and len(disp) == 2 and isinstance(disp[1], list):
+                disp[1] = [
+                    _unescape_quoted_string(v) if (i % 2 == 1 and isinstance(v, str)) else v
+                    for i, v in enumerate(disp[1])
+                ]
+        return fixed
+    return node
+
+
 def _to_crlf(text: str) -> str:
     """Normalize any mix of CRLF, bare CR and bare LF to the wire terminator.
 

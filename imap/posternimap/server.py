@@ -35,6 +35,7 @@ from .config import Config
 from .fetchwarm import fetch_reads
 from .mailbox import MailboxLoadError, _read_message_bytes
 from .proxywrap import wrap_listener_factory
+from .rfc822 import fix_bodystructure_disposition
 from .threaded import configure_pool_watch, in_pool
 
 # The three SEARCH keys whose single-term form we can push to the store's substr
@@ -537,6 +538,22 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         else:
             hdrs = msg.getHeaders(True)
         _w(part.__bytes__() + b" " + imap4._literal(self._format_headers_utf8(hdrs)))
+
+    def spew_bodystructure(self, id, msg, _w=None, _f=None):
+        """BODYSTRUCTURE with Content-Disposition params actually unquoted (#531).
+
+        Stock: `_w(b"BODYSTRUCTURE " + collapseNestedLists([getBodyStructure(msg, True)]))`.
+        getBodyStructure's own disposition parser is a documented "XXX Poorly tested
+        parser" that never strips the RFC 2822 quoted-string wrapper it is handed (see
+        rfc822.fix_bodystructure_disposition for the full mechanism), so an attachment's
+        filename parameter reaches the wire with an extra layer of literal quote
+        characters. Twisted's own structure is otherwise correct and untouched; this
+        only corrects the disposition parameter values before they are serialized.
+        """
+        if _w is None:
+            _w = self.transport.write
+        structure = fix_bodystructure_disposition(imap4.getBodyStructure(msg, True))
+        _w(b"BODYSTRUCTURE " + imap4.collapseNestedLists([structure]))
 
     def do_ENABLE(self, tag, line):
         """RFC 5161 ENABLE, implementing RFC 6855 UTF8=ACCEPT (#504).
