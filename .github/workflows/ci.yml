@@ -78,9 +78,17 @@ jobs:
         working-directory: imap
     steps:
       - uses: actions/checkout@v7
+      # INCIDENT postern#539: this was pinned to 3.12 while imap/Dockerfile builds
+      # FROM python:3.14-slim. A lone-surrogate string constant compiled fine on
+      # 3.12 (686 trial tests + mypy green) and could not be IMPORTED AT ALL on
+      # 3.13+ (CPython rejects it at compile time), so the gate never ran on the
+      # interpreter production actually ships, and the v1.3.7 image crashlooped on
+      # every door. Pin to the SAME version family the image is built FROM, not a
+      # separately-chosen one -- a green suite on a different interpreter than
+      # production is not evidence of anything about production.
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       # #529: test_projection_cross_engine.py shells out to `node` to render
       # inbound/src/rfc822Project.ts directly (it has zero imports of its own, so
       # no npm ci / wrangler / vitest-pool-workers is needed) and asserts byte

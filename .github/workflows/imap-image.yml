@@ -63,6 +63,12 @@ jobs:
   # Gate: the same checks ci.yml runs for imap (mypy type gate + Twisted trial
   # suite), so the image is only built from code that passes the project gate.
   # CI parity is the house convention (the tsc-equivalent must be green first).
+  #
+  # INCIDENT postern#539: this was pinned to 3.12 while `build` below produces an
+  # image FROM python:3.14-slim -- so THIS is the exact gate that waved the broken
+  # v1.3.7 image through: it passed on 3.12 (686 trial tests + mypy green) for code
+  # that could not even be IMPORTED on the interpreter the image it gated actually
+  # ships. Pin to the same version family `build`'s Dockerfile is FROM.
   gate:
     needs: preflight
     runs-on: ubuntu-latest
@@ -75,7 +81,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       # Install the package with the SAME extras the runtime image ships
       # (.[tls,ldap]) plus dev (mypy), so the gate resolves exactly what we deploy.
       - run: pip install -e '.[dev,tls,ldap]'

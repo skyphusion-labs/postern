@@ -156,7 +156,7 @@ def header_text(value) -> str:
         RFC 2047-parses it. Measured:
 
             Subject: =?utf-8?b?Y2Fmw6k=?= plus raw caf<0xc3><0xa9>
-            chunks  [('=?utf-8?b?Y2Fmw6k=?= plus raw caf\udcc3\udca9', unknown-8bit)]
+            chunks  [('=?utf-8?b?Y2Fmw6k=?= plus raw caf\\udcc3\\udca9', unknown-8bit)]
             result  '=?utf-8?b?Y2Fmw6k=?= plus raw caf<e-acute>'
 
         Only the raw bytes are turned back into text; the encoded-word survives as
