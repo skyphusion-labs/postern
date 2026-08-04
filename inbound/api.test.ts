@@ -21,6 +21,16 @@ describe("handleApi", () => {
     expect(await res.json()).toMatchObject({ ok: true, service: "postern" });
   });
 
+  it("serves an HTML landing at / (not the health JSON)", async () => {
+    const { env, ctx } = makeFakeEnv();
+    const res = await handleApi(req("GET", "/"), env, ctx);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    const body = await res.text();
+    expect(body).toContain("Postern");
+    expect(body).toContain("/webmail");
+  });
+
   it("401s an API call with no/with a wrong token", async () => {
     const { env, ctx } = makeFakeEnv();
     expect((await handleApi(req("POST", "/api/send", { body: {} }), env, ctx)).status).toBe(401);

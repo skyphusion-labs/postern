@@ -141,8 +141,9 @@ from outside (an uptime checker) and from inside (logs + capacity).
 
 ### 4.1 Uptime probe (outside-in)
 
-`GET /` and `GET /health` are **not** token-gated and return `{"ok":true,
-"service":"postern"}`. Point any uptime checker at it:
+`GET /health` is **not** token-gated and returns `{"ok":true,"service":"postern"}`.
+Point any uptime checker at it. `GET /` is a public HTML landing (links to
+`/webmail`); do not use the root path as a JSON probe.
 
 ```bash
 curl -fsS https://mail.example.com/health
