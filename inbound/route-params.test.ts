@@ -218,7 +218,7 @@ describe("#417 the two contract files join", () => {
     // Routes with no row here take nothing: assert that explicitly rather than letting
     // an absent row mean "nobody looked".
     const takesNothing = [
-      "health", "root", "webmail", "mta-sts", "ingest", "session-refresh",
+      "health", "root", "robots", "sitemap", "webmail", "mta-sts", "ingest", "session-refresh",
       "message-get", "thread-get", "message-delete", "mobileconfig",
       "admin-smtp-credential-delete", "admin-roles", "imap-roles",
     ];
