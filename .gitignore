@@ -45,3 +45,4 @@ relay/dist/
 # Debug / eval debris (untracked in working clones, never for the public repo)
 imap/smoke/
 .playwright-mcp/
+inbound/wrangler.demo.jsonc
