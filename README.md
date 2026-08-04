@@ -228,8 +228,10 @@ Self-hosters, agent builders, and mail admins who want a mailbox they own on Clo
 
 - **Quickstart:** [DEPLOY.md](DEPLOY.md)
 - **Operations (backup, restore, monitoring):** [docs/OPERATIONS.md](docs/OPERATIONS.md)
-- **Skyphusion Labs:** https://skyphusion.org · **Org:** https://github.com/skyphusion-labs
-- **Related:** [prism](https://github.com/skyphusion-labs/prism) (AI playground), [search-mcp](https://github.com/skyphusion-labs/search-mcp)
+- **Demo:** https://demo.posternonline.com · **Webmail:** https://demo.posternonline.com/webmail
+- **Write-ups:** [v1.4.1 identity-bound credentials](https://skyphusion.net/blog/postern-identity-bound/) · [v1.0.0 milestone](https://skyphusion.net/blog/postern-v1/) · [intro](https://skyphusion.net/blog/postern/)
+- **Skyphusion Labs:** https://skyphusion.org · **Blog:** https://skyphusion.net · **Org:** https://github.com/skyphusion-labs
+- **Related:** [prism](https://github.com/skyphusion-labs/prism) (AI playground), [search-mcp](https://github.com/skyphusion-labs/search-mcp), [security-audit](https://github.com/skyphusion-labs/security-audit)
 
 ## License
 
