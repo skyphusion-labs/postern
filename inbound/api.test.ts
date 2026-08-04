@@ -44,6 +44,41 @@ describe("handleApi", () => {
     expect(await health.text()).toBe("");
   });
 
+  it("serves robots.txt and sitemap.xml for the public demo", async () => {
+    const { env, ctx } = makeFakeEnv();
+    const robots = await handleApi(req("GET", "/robots.txt"), env, ctx);
+    expect(robots.status).toBe(200);
+    expect(robots.headers.get("content-type")).toMatch(/text\/plain/);
+    const robotsBody = await robots.text();
+    expect(robotsBody).toContain("Sitemap: https://demo.posternonline.com/sitemap.xml");
+
+    const sitemap = await handleApi(req("GET", "/sitemap.xml"), env, ctx);
+    expect(sitemap.status).toBe(200);
+    expect(sitemap.headers.get("content-type")).toMatch(/xml/);
+    const mapBody = await sitemap.text();
+    expect(mapBody).toContain("https://demo.posternonline.com/");
+    expect(mapBody).toContain("https://demo.posternonline.com/webmail");
+  });
+
+  it("301s posternonline.com apex to demo.posternonline.com", async () => {
+    const { env, ctx } = makeFakeEnv();
+    const res = await handleApi(
+      new Request("https://posternonline.com/webmail?x=1", { method: "GET" }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(301);
+    expect(res.headers.get("location")).toBe("https://demo.posternonline.com/webmail?x=1");
+
+    const www = await handleApi(
+      new Request("https://www.posternonline.com/", { method: "GET" }),
+      env,
+      ctx,
+    );
+    expect(www.status).toBe(301);
+    expect(www.headers.get("location")).toBe("https://demo.posternonline.com/");
+  });
+
   it("401s an API call with no/with a wrong token", async () => {
     const { env, ctx } = makeFakeEnv();
     expect((await handleApi(req("POST", "/api/send", { body: {} }), env, ctx)).status).toBe(401);

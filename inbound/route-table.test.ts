@@ -77,7 +77,7 @@ const CORPUS = [
   "/api/admin/smtp-credentials", "/api/admin/smtp-credentials/", "/api/admin/smtp-credentials/bob",
   "/api/admin/reindex", "/api/admin/reconcile", "/api/admin/reproject",
   // Pre-gate rows: they never reach the gate, and the table says so.
-  "/health", "/", "/webmail", "/.well-known/mta-sts.txt", "/api/smtp-auth", "/api/session",
+  "/health", "/", "/robots.txt", "/sitemap.xml", "/webmail", "/.well-known/mta-sts.txt", "/api/smtp-auth", "/api/session",
   "/api/session/refresh", "/ingest",
   // Adversarial: near-misses, and paths with no handler at all.
   "/api/message", "/api/messages2", "/api/messagesx/m1", "/api/drafts2", "/api/draftsx/d1",

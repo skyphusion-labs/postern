@@ -28,7 +28,8 @@ scripted v1.0 acceptance smoke (issue #25).
 
 Live read-only demo: [https://demo.posternonline.com](https://demo.posternonline.com)
 (landing) or [webmail](https://demo.posternonline.com/webmail). Log in with the demo
-token below.
+token below. Apex [posternonline.com](https://posternonline.com) **301s** to the demo
+host. Sitemap: [demo.posternonline.com/sitemap.xml](https://demo.posternonline.com/sitemap.xml).
 
 Mail **any** address `@posternonline.com` and watch it appear in the mailbox.
 That is the product working: Email Routing -> worker -> D1 store.

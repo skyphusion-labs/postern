@@ -78,6 +78,13 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   const url = new URL(request.url);
   const path = url.pathname;
 
+  // Demo SEO host: apex/www.posternonline.com always 301 to demo. (Separate CF
+  // account from production skyphusion Postern; see wrangler.demo.jsonc.)
+  if (request.method === "GET" || request.method === "HEAD") {
+    const apexRedirect = redirectApexToDemo(url);
+    if (apexRedirect) return apexRedirect;
+  }
+
   // Uptime probe. Only /health is the probe surface; keep / as a human landing
   // (SEO + demo root) that points at webmail without dumping JSON at browsers.
   // HEAD matches GET status/headers (no body) so uptime bots that HEAD do not 404.
@@ -102,6 +109,13 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       });
     }
     return serveDemoLanding(url);
+  }
+
+  if ((request.method === "GET" || request.method === "HEAD") && path === "/robots.txt") {
+    return serveRobotsTxt(request.method === "HEAD");
+  }
+  if ((request.method === "GET" || request.method === "HEAD") && path === "/sitemap.xml") {
+    return serveSitemap(request.method === "HEAD");
   }
 
   // The webmail door (compose/reply/read, the human browser door, complementing the IMAP proxy).
@@ -1679,9 +1693,25 @@ function errorCode(err: unknown): string {
   return "E_INTERNAL_SERVER_ERROR";
 }
 
+/** Public demo host (SEO canonical). Apex/www posternonline.com 301 here. */
+const DEMO_CANONICAL_ORIGIN = "https://demo.posternonline.com";
+
+/** Apex/www of the public demo zone must not compete with the demo host. */
+function redirectApexToDemo(url: URL): Response | null {
+  const host = url.hostname.toLowerCase();
+  if (host !== "posternonline.com" && host !== "www.posternonline.com") return null;
+  const target = new URL(url.pathname + url.search, DEMO_CANONICAL_ORIGIN);
+  return Response.redirect(target.toString(), 301);
+}
+
 /** Public root landing for demo/product hosts (SEO + human door). Health stays on /health. */
 function serveDemoLanding(url: URL): Response {
-  const origin = url.origin;
+  // Prefer the public demo origin when on that product zone so OG/canonical stay stable.
+  const origin =
+    url.hostname.toLowerCase() === "demo.posternonline.com" ||
+    url.hostname.toLowerCase().endsWith(".posternonline.com")
+      ? DEMO_CANONICAL_ORIGIN
+      : url.origin;
   const webmail = `${origin}/webmail`;
   const html = `<!doctype html>
 <html lang="en">
@@ -1697,6 +1727,7 @@ function serveDemoLanding(url: URL): Response {
   <meta property="og:url" content="${origin}/">
   <meta name="twitter:card" content="summary">
   <meta name="robots" content="index, follow">
+  <link rel="sitemap" type="application/xml" href="${origin}/sitemap.xml">
   <style>
     :root { color-scheme: dark light; font-family: system-ui, sans-serif; }
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1.5rem;
@@ -1729,6 +1760,49 @@ function serveDemoLanding(url: URL): Response {
       "x-content-type-options": "nosniff",
     },
   });
+}
+
+function serveRobotsTxt(headOnly: boolean): Response {
+  const body = `User-agent: *
+Allow: /
+
+# Public demo product host. Apex posternonline.com 301s here.
+Sitemap: ${DEMO_CANONICAL_ORIGIN}/sitemap.xml
+`;
+  const headers = {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "public, max-age=3600",
+    "x-content-type-options": "nosniff",
+  };
+  if (headOnly) return new Response(null, { status: 200, headers });
+  return new Response(body, { status: 200, headers });
+}
+
+function serveSitemap(headOnly: boolean): Response {
+  const today = new Date().toISOString().slice(0, 10);
+  const urls = ["/", "/webmail"];
+  const entries = urls
+    .map(
+      (p) => `  <url>
+    <loc>${DEMO_CANONICAL_ORIGIN}${p === "/" ? "/" : p}</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>${p === "/" ? "1.0" : "0.8"}</priority>
+  </url>`,
+    )
+    .join("\n");
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${entries}
+</urlset>
+`;
+  const headers = {
+    "content-type": "application/xml; charset=utf-8",
+    "cache-control": "public, max-age=3600",
+    "x-content-type-options": "nosniff",
+  };
+  if (headOnly) return new Response(null, { status: 200, headers });
+  return new Response(body, { status: 200, headers });
 }
 
 function json(payload: unknown, status = 200): Response {
