@@ -21,7 +21,8 @@
       "path": "/health",
       "match": "exact",
       "scope": null,
-      "auth": "public"
+      "auth": "public",
+      "note": "JSON uptime probe only; do not probe GET / for health"
     },
     {
       "id": "root",
@@ -29,7 +30,8 @@
       "path": "/",
       "match": "exact",
       "scope": null,
-      "auth": "public"
+      "auth": "public",
+      "note": "HTML product landing (links to /webmail); not the health JSON"
     },
     {
       "id": "webmail",

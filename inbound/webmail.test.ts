@@ -182,12 +182,15 @@ describe("the inbound worker serves the webmail route", () => {
     expect(res.status).toBe(200);
   });
 
-  it("does not change the health route", async () => {
+  it("keeps JSON health on /health (root is the HTML landing)", async () => {
     const { env } = makeFakeEnv();
-    const res = await handleApi(new Request("https://postern.example/"), env, ctx);
-    expect(res.headers.get("content-type")).toContain("application/json");
-    const body = (await res.json()) as { ok: boolean; service: string };
+    const health = await handleApi(new Request("https://postern.example/health"), env, ctx);
+    expect(health.headers.get("content-type")).toContain("application/json");
+    const body = (await health.json()) as { ok: boolean; service: string };
     expect(body).toEqual({ ok: true, service: "postern" });
+
+    const root = await handleApi(new Request("https://postern.example/"), env, ctx);
+    expect(root.headers.get("content-type")).toMatch(/text\/html/);
   });
 
   it("still gates /api behind the token", async () => {

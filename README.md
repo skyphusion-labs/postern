@@ -26,8 +26,9 @@ scripted v1.0 acceptance smoke (issue #25).
 
 ## Try it live
 
-Live read-only demo: [https://demo.posternonline.com](https://demo.posternonline.com).
-Open `/webmail` and log in with the demo token below.
+Live read-only demo: [https://demo.posternonline.com](https://demo.posternonline.com)
+(landing) or [webmail](https://demo.posternonline.com/webmail). Log in with the demo
+token below.
 
 Mail **any** address `@posternonline.com` and watch it appear in the mailbox.
 That is the product working: Email Routing -> worker -> D1 store.
