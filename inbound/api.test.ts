@@ -31,6 +31,19 @@ describe("handleApi", () => {
     expect(body).toContain("/webmail");
   });
 
+  it("answers HEAD on / and /health with 200 (no body)", async () => {
+    const { env, ctx } = makeFakeEnv();
+    const root = await handleApi(req("HEAD", "/"), env, ctx);
+    expect(root.status).toBe(200);
+    expect(root.headers.get("content-type")).toMatch(/text\/html/);
+    expect(await root.text()).toBe("");
+
+    const health = await handleApi(req("HEAD", "/health"), env, ctx);
+    expect(health.status).toBe(200);
+    expect(health.headers.get("content-type")).toContain("application/json");
+    expect(await health.text()).toBe("");
+  });
+
   it("401s an API call with no/with a wrong token", async () => {
     const { env, ctx } = makeFakeEnv();
     expect((await handleApi(req("POST", "/api/send", { body: {} }), env, ctx)).status).toBe(401);

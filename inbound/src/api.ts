@@ -80,10 +80,27 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
 
   // Uptime probe. Only /health is the probe surface; keep / as a human landing
   // (SEO + demo root) that points at webmail without dumping JSON at browsers.
-  if (request.method === "GET" && path === "/health") {
+  // HEAD matches GET status/headers (no body) so uptime bots that HEAD do not 404.
+  if ((request.method === "GET" || request.method === "HEAD") && path === "/health") {
+    if (request.method === "HEAD") {
+      return new Response(null, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     return json({ ok: true, service: "postern" });
   }
-  if (request.method === "GET" && path === "/") {
+  if ((request.method === "GET" || request.method === "HEAD") && path === "/") {
+    if (request.method === "HEAD") {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "public, max-age=300",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    }
     return serveDemoLanding(url);
   }
 
