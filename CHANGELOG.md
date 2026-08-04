@@ -11,6 +11,19 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.4.2
+
+PATCH: public HTML landing at `GET /`. No `PROJECTION_VERSION` or
+`POSTERN_IMAP_UIDVALIDITY` bump -- wire format and door projection are unchanged;
+door image rolls from this tag are image refresh only.
+
+- **inbound: product landing at `GET /` (#564).** Root no longer returns the JSON
+  health body (browsers and crawlers hit a dead door). Serves a small HTML page
+  with title, description, and link to `/webmail`. Uptime probes stay on
+  `GET /health` only (`{"ok":true,"service":"postern"}`).
+- **docs:** OPERATIONS + README point probes at `/health` and the demo root at the
+  landing / webmail.
+
 ## v1.4.1
 
 PATCH: webmail compose attachment race. No `PROJECTION_VERSION` or

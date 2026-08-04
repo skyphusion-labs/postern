@@ -85,8 +85,10 @@ const SEND_FIELDS = [
 
 export const ROUTE_TABLE: readonly RouteSpec[] = [
   // --- served BEFORE the bearer/session gate: each carries its own auth ---
-  { id: "health", method: "GET", path: "/health", match: "exact", scope: null, auth: "public" },
-  { id: "root", method: "GET", path: "/", match: "exact", scope: null, auth: "public" },
+  { id: "health", method: "GET", path: "/health", match: "exact", scope: null, auth: "public",
+    note: "JSON uptime probe only; do not probe GET / for health" },
+  { id: "root", method: "GET", path: "/", match: "exact", scope: null, auth: "public",
+    note: "HTML product landing (links to /webmail); not the health JSON" },
   { id: "webmail", method: "GET", path: "/webmail", match: "exact", scope: null, auth: "public",
     note: "the single-page human door; the page then calls the API with its own session" },
   { id: "mta-sts", method: "GET", path: "/.well-known/mta-sts.txt", match: "exact", scope: null, auth: "public" },

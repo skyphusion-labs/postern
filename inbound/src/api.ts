@@ -78,8 +78,13 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   const url = new URL(request.url);
   const path = url.pathname;
 
-  if (request.method === "GET" && (path === "/" || path === "/health")) {
+  // Uptime probe. Only /health is the probe surface; keep / as a human landing
+  // (SEO + demo root) that points at webmail without dumping JSON at browsers.
+  if (request.method === "GET" && path === "/health") {
     return json({ ok: true, service: "postern" });
+  }
+  if (request.method === "GET" && path === "/") {
+    return serveDemoLanding(url);
   }
 
   // The webmail door (compose/reply/read, the human browser door, complementing the IMAP proxy).
@@ -1655,6 +1660,58 @@ function errorCode(err: unknown): string {
     return (err as { code: string }).code;
   }
   return "E_INTERNAL_SERVER_ERROR";
+}
+
+/** Public root landing for demo/product hosts (SEO + human door). Health stays on /health. */
+function serveDemoLanding(url: URL): Response {
+  const origin = url.origin;
+  const webmail = `${origin}/webmail`;
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Postern: self-hostable mailbox for humans and agents</title>
+  <meta name="description" content="Postern is a self-hostable mailbox on Cloudflare for humans and agents: send, receive, search, webmail, IMAP, and MCP. Open source AGPL-3.0 by Skyphusion Labs.">
+  <link rel="canonical" href="${origin}/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Postern: mailbox for humans and agents">
+  <meta property="og:description" content="Self-hostable Cloudflare mailbox with webmail, IMAP, and agent MCP. Identity-bound credentials so each person sends and reads as themselves.">
+  <meta property="og:url" content="${origin}/">
+  <meta name="twitter:card" content="summary">
+  <meta name="robots" content="index, follow">
+  <style>
+    :root { color-scheme: dark light; font-family: system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1.5rem;
+      background: #0b0f14; color: #e8eef5; }
+    main { max-width: 36rem; line-height: 1.5; }
+    h1 { font-size: 1.6rem; margin: 0 0 0.75rem; }
+    p { margin: 0 0 1rem; color: #b7c2cf; }
+    a.btn { display: inline-block; padding: 0.65rem 1rem; background: #3d8bfd; color: #041018;
+      text-decoration: none; font-weight: 600; border-radius: 6px; margin-right: 0.75rem; }
+    a.sec { color: #9ec1ff; }
+    code { font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Postern</h1>
+    <p>Self-hostable mailbox on Cloudflare for humans and agents. One store, one API, webmail and IMAP doors, MCP for agents.</p>
+    <p><a class="btn" href="${webmail}">Open webmail</a>
+       <a class="sec" href="https://github.com/skyphusion-labs/postern">Source on GitHub</a></p>
+    <p>Write-up: <a class="sec" href="https://skyphusion.net/blog/postern-identity-bound/">Postern v1.4.1 identity-bound credentials</a>.
+       Health probe: <code>GET /health</code>.</p>
+  </main>
+</body>
+</html>`;
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=300",
+      "x-content-type-options": "nosniff",
+    },
+  });
 }
 
 function json(payload: unknown, status = 200): Response {
