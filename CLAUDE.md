@@ -117,7 +117,7 @@ first (it is not part of any test run).
 
 - **Never bind the relay to `0.0.0.0`.** It sends as `@skyphusion.org`; an internet-reachable SMTP port
   is an open spam relay. Loopback / private bridge IP only.
-- **Max 50 recipients** (to + cc + bcc), enforced in both `email.ts` (`MAX_RECIPIENTS`) and `smtp.go`
+- **Max 50 recipients** (to + cc + bcc), enforced in both `mailbox.ts` (`MAX_RECIPIENTS`) and `smtp.go`
   (`MaxRecipients`). Keep them in sync.
 - **No queue.** Synchronous sends; on worker failure the relay returns SMTP 451 (transient) so the MTA
   can retry, but nothing is durably buffered.
