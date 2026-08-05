@@ -11,6 +11,12 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+- **mcp:** advertised McpServer version was stuck at `1.3.0` while `mcp/package.json`
+  was `1.4.0`. Single source is now `mcp/src/version.ts` with a CI guard that
+  matches package.json (same pattern as crew-bus MCP).
+
 ## v1.4.3
 
 PATCH: HEAD parity on `/` and `/health`. No `PROJECTION_VERSION` or

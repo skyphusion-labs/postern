@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { PosternClient } from "./client.js";
 import { READ_TOOLS, SEND_TOOLS, registerTools, type Scope } from "./tools.js";
+import { VERSION } from "./version.js";
 
 function requireEnv(name: string): string {
   const v = (process.env[name] ?? "").trim();
@@ -30,7 +31,7 @@ async function main(): Promise<void> {
 
   const readClient = new PosternClient(apiUrl, token, { timeoutMs });
 
-  const server = new McpServer({ name: "postern-mcp", version: "1.3.0" });
+  const server = new McpServer({ name: "postern-mcp", version: VERSION });
 
   // Read tools always register. Prefer a per-identity registry token with scopes
   // including "read" (#544): the worker forces the viewer to that identity. An
