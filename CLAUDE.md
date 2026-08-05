@@ -4,38 +4,46 @@ Guidance for Claude Code (and the crew) working in this repo.
 
 ## What this is
 
-**Postern: email for humans AND agents.** A self-hostable mailbox on Cloudflare: it sends and
-receives mail, stores every message in a searchable store (D1 full-text + R2 + optional Vectorize),
-and exposes ONE structured mailbox API that agents and human clients (IMAP / webmail) both speak.
-Cloudflare Email is the default transport on each seam, never a hard dependency. From a fresh clone,
-with only your own domain, you can deploy it, send a message, and receive + read it back. Public, on
-CF Email (formerly `skyphusion-email`). See **DEPLOY.md** for the clean-install quickstart.
+**Postern: email for humans AND agents (egalitarian).** A self-hostable mailbox on Cloudflare: it
+sends and receives mail, stores every message in a searchable store (D1 full-text + R2 + optional
+Vectorize), and exposes ONE structured mailbox API that agents and human clients (IMAP / webmail)
+both speak. Humans and agents are first-class peers: each sends as itself under per-identity
+credentials, not a shared mailbox. Cloudflare Email is the default transport on each seam, never a
+hard dependency. From a fresh clone, with only your own domain, you can deploy it, send a message,
+and receive + read it back. Public, on CF Email (formerly `skyphusion-email`). See **DEPLOY.md** for
+the clean-install quickstart.
 
 Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/AUTH-CONTRACT.md**, and
 **docs/SEND-IDENTITIES.md** before changing behavior.
 
 ## Components (one repo)
 
-- **`inbound/`** -- THE core Cloudflare Worker. Ingests inbound mail via Email Routing, stores it in
-  D1 (FTS5 search), R2 (attachment bytes), and optionally Vectorize (chunked embeddings for crew RAG),
-  and serves the one mailbox API (`/api/messages`, `/api/search`, `/api/send`, `/api/reply`,
-  `/api/threads`) plus a same-account `MailboxService` RPC entrypoint (legacy `EmailService` alias
-  for send-only bindings). It also SENDS, so the sent copy is written in the same isolate as the store.
-  This is the heart of postern.
-- **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) on the **directory host** for local services that
-  can only speak SMTP (cron, backups, CI failure mail). Accepts MIME on `127.0.0.1:2525`, parses it,
-  POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP).
+- **`inbound/`** -- THE core Cloudflare Worker (the heart of postern). Ingests inbound mail via Email
+  Routing, stores it in D1 (FTS5 search), R2 (attachment bytes), and optionally Vectorize (chunked
+  embeddings for crew RAG), and serves the one mailbox API (`/api/messages`, `/api/search`,
+  `/api/send`, `/api/reply`, `/api/threads`) plus a same-account `MailboxService` RPC entrypoint
+  (legacy `EmailService` alias for send-only bindings). It also SENDS, so the sent copy is written in
+  the same isolate as the store. **Production receiving is CF Email Routing -> this Worker**, not a
+  host MTA on a fleet box.
+- **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) for local services that can only speak
+  SMTP (cron, backups, CI failure mail). Accepts MIME on **`127.0.0.1` only** (never `0.0.0.0`),
+  parses it, POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP). Box-side relay is an
+  **operator/dev seam**, not the production inbound path.
 - **`mcp/`** -- the MCP server (TypeScript) so agents speak the mailbox over MCP. Published on npm
-  as **`@skyphusion/postern-mcp`** (`npx -y @skyphusion/postern-mcp`). **Per-identity send** is first-class here: each
-  human/agent sends under its OWN identity via per-identity creds (`docs/SEND-IDENTITIES.md`).
+  as **`@skyphusion/postern-mcp`** (`npx -y @skyphusion/postern-mcp`). **Per-identity send** is
+  first-class here: each human/agent sends under its OWN identity via per-identity creds
+  (`docs/SEND-IDENTITIES.md`). **Advertised MCP `serverInfo.version` must match `mcp/package.json`**
+  (`mcp/src/version.ts` + tests; never hardcode a drifted literal).
 - **`webmail/`** -- a single self-contained page (vanilla HTML/CSS/JS, no build step) served by the
   worker at **`/webmail`**. Compose, reply, and read: list, read, threads, search, session
   login, drafts, delete. BYO-token in `sessionStorage` only, HTML rendered in a sandboxed
   iframe (no scripts/trackers), locked-down CSP.
-- **`imap/`** -- a small Twisted server fronting the API as IMAP: read, the
-  `\Seen` flag, delete (EXPUNGE, via a `both`-scoped `POSTERN_API_TOKEN_DELETE`), drafts, and
-  soft-move to Trash/Junk/Archive; sending still only through the structured API.
-  Thunderbird / mutt / iOS Mail can open the mailbox.
+- **`imap/`** -- Twisted IMAP proxy fronting the API: read, the `\Seen` flag, delete (EXPUNGE, via a
+  `both`-scoped `POSTERN_API_TOKEN_DELETE`), drafts, and soft-move to Trash/Junk/Archive; sending
+  still only through the structured API. Thunderbird / mutt / iOS Mail can open the mailbox.
+  **Production door is the container image** (`imap/Dockerfile` -> `ghcr.io/skyphusion-labs/postern-imap`),
+  not a host-level Python install. Host/systemd IMAP on a box is for local/dev, not the canonical
+  prod receiving path (that remains CF Email -> inbound Worker).
 - **`clients/python/`** -- a Python client + CLI for the API. Published on PyPI as
   **`postern-client`** (`pip install postern-client`).
 
@@ -158,13 +166,13 @@ v1.0.5 deployed production and rolled both door images off a tag whose release +
 On a non-tag ref (dispatch, push to main) it asserts the pins agree with each other. It guards
 HAND-CUT tags, which a ci.yml-only assert cannot.
 
-**Verify the ARTIFACT, not the pipeline**: the worker's `modified_on` (or a behavior probe against
-the live worker), never a green run. This paragraph previously claimed merges to `main` deploy, which
-was wrong and cost a sprint an assumption -- code merged is NOT code live here. The tag deploy now
+**Verify the ARTIFACT, not the pipeline**: the worker's live version / `modified_on` (or a behavior
+probe against the live worker), never a green run. Code merged is NOT code live here. The tag deploy
 enforces this itself: after `wrangler deploy` it reads the live deployment back through the API and
 asserts production serves the version just uploaded (`.github/scripts/verify-worker-deployment.mjs`),
 then runs `inbound/smoke.mjs` against the live instance when the `POSTERN_SMOKE_*` secrets are
-configured (and says so loudly when they are not).
+configured (and says so loudly when they are not). After any release, confirm the **live Worker
+version** matches the tag you intended.
 
 The relay is rebuilt and reinstalled on the directory host by hand (`go build` + `systemctl`); the
 pipeline does not ship the binary.
