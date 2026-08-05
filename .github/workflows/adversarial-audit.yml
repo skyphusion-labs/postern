@@ -61,14 +61,14 @@ concurrency:
 
 jobs:
   audit:
-    # Skip Dependabot by PR AUTHOR, not by github.actor (#420): actor is whoever
-    # triggered the latest run, so a human pushing one commit to a dependabot
-    # branch used to switch the full audit on for that branch. The author is a
-    # property of the PR and does not flip.
+    # Same-repo only (fork PRs never get org CF tokens). Dependabot is NOT
+    # skipped: policy is every PR to main runs the K2.7 audit. Dependabot-
+    # triggered runs read org *Dependabot* secrets (not Actions secrets) with
+    # the same names -- ADVERSARIAL_AUDIT_CF_API_TOKEN, CF_AIG_TOKEN -- seeded
+    # at org scope visibility=all. See fleet-chezmoi adversarial-audit-rollout.md.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]')
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -133,6 +133,7 @@ jobs:
 
       - name: Post PR comment (advisory)
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
