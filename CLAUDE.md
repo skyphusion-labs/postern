@@ -13,6 +13,21 @@ hard dependency. From a fresh clone, with only your own domain, you can deploy i
 and receive + read it back. Public, on CF Email (formerly `skyphusion-email`). See **DEPLOY.md** for
 the clean-install quickstart.
 
+**Inbound Worker version:** trust `inbound/package.json` (currently **1.4.3** train; do not hardcode
+a frozen version in this file). Tag-gated release on `main` (`v*`).
+
+**Public demo (Skyphusion Labs account, 2026-08):** zone **posternonline.com** lives on the regular
+Skyphusion Labs Cloudflare account (not a separate demo account). Live Worker name **`postern`**,
+custom domains **`demo.posternonline.com`**, **`posternonline.com`**, **`www.posternonline.com`**
+(apex/www **301** to demo). Operator config: gitignored `inbound/wrangler.demo.jsonc` (account +
+D1/R2/Vectorize ids). Redeploy: `cd inbound && npx wrangler deploy --config wrangler.demo.jsonc`.
+Email Routing catch-all routes to Worker `postern`. Public read token is documented in **README.md**
+(`POSTERN_API_TOKEN_READ`; send/reply/delete refused). Mail any `@posternonline.com` address into
+the shared demo mailbox.
+
+**Production estate mail** remains the operator private deploy (skyphusion.org inbound Worker /
+escrow wrangler in crew-secrets) -- distinct from the public posternonline demo.
+
 Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/AUTH-CONTRACT.md**, and
 **docs/SEND-IDENTITIES.md** before changing behavior.
 
