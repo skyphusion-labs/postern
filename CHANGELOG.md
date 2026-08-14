@@ -11,13 +11,19 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
-## Unreleased
+## v1.4.5
 
-- **relay: bump Go toolchain to 1.25.13.** govulncheck (audit #107) flagged
-  stdlib CVEs in `crypto/tls`, `net/http`, and `encoding/asn1` against
-  `go1.25.12` (fixed in 1.25.13, released 2026-08-13). Door image pin restored
-  to lockstep with `go.mod` (`golang:1.25.13-bookworm`; #541 / #562 had drifted
-  the image to 1.26.5 while CI still built 1.25.12).
+PATCH: relay stdlib CVE pin + inbound/mcp dep bumps. No
+`PROJECTION_VERSION` or `POSTERN_IMAP_UIDVALIDITY` bump -- wire format and
+door projection are unchanged; door image rolls from this tag are a Go
+1.25.13 rebuild.
+
+- **relay: bump Go toolchain to 1.25.13 (#585).** govulncheck (audit #107)
+  flagged stdlib CVEs in `crypto/tls`, `net/http`, and `encoding/asn1`
+  against `go1.25.12` (fixed in 1.25.13). Door image pin restored to
+  lockstep with `go.mod` (`golang:1.25.13-bookworm`).
+- **deps:** inbound Cloudflare toolchain (#582), postal-mime 2.7.6 (#584),
+  mcp `@types/node` 26.2.0 (#583).
 
 ## v1.4.4
 

@@ -8,4 +8,4 @@
 // `src/**/*.ts`, so importing a file above src breaks the build the same way
 // it does for mcp/tsconfig (rootDir: "src"). The literal is a copy, but it is
 // a copy the test makes impossible to ship wrong -- see inbound/version.test.ts.
-export const VERSION = "1.4.4";
+export const VERSION = "1.4.5";

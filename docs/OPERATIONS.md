@@ -142,7 +142,7 @@ from outside (an uptime checker) and from inside (logs + capacity).
 ### 4.1 Uptime probe (outside-in)
 
 `GET /health` is **not** token-gated and returns
-`{"ok":true,"service":"postern","version":"1.4.4"}`. `version` mirrors
+`{"ok":true,"service":"postern","version":"1.4.5"}`. `version` mirrors
 `inbound/package.json` (single-sourced in `inbound/src/version.ts`, guarded by a
 test against drift), so "confirm the live Worker version" after a release is a
 `curl` away instead of trusting a green pipeline. Point any uptime checker at
