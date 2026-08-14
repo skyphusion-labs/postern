@@ -4,9 +4,10 @@ go 1.25.0
 
 // Build toolchain pinned to a PATCHED release (audit #107): govulncheck flags
 // standard-library CVEs against the toolchain version, so CI (setup-go reads this
-// directive) must build with a patched Go. 1.25.12 carries every current 1.25-line
-// stdlib security backport; bump when the dep-scan gate flags a newer stdlib CVE.
-toolchain go1.25.12
+// directive) must build with a patched Go. 1.25.13 carries every current 1.25-line
+// stdlib security backport (GO-2026-6090 / 6089 / 5972 / 5026); bump when the
+// dep-scan gate flags a newer stdlib CVE.
+toolchain go1.25.13
 
 require (
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
