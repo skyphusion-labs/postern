@@ -22,7 +22,7 @@
 # 1.25 -- that is the declared-vs-artifact skew #539/#541 closed.
 # When bumping the toolchain for a stdlib CVE (audit #107), bump this tag
 # in the same commit.
-FROM golang:1.25.13-bookworm AS builder
+FROM golang:1.26.6-bookworm AS builder
 
 ENV CGO_ENABLED=0 \
     GOFLAGS=-trimpath
