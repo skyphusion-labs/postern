@@ -108,7 +108,8 @@ func (t *SMTPTransport) send(from string, rcpts []string, raw []byte) error {
 	}
 
 	if t.cfg.Username != "" {
-		auth := smtp.PlainAuth("", t.cfg.Username, t.cfg.Password, t.cfg.Host)
+		// iCloud rejects AUTH PLAIN with an empty identity ("501 Bad token parameter").
+		auth := smtp.PlainAuth(t.cfg.Username, t.cfg.Username, t.cfg.Password, t.cfg.Host)
 		if err := c.Auth(auth); err != nil {
 			return fmt.Errorf("smtp auth: %w", err)
 		}

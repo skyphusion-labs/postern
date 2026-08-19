@@ -68,12 +68,10 @@ async function main() {
   }
 
   const payload = {
-    actions: [{ type: "worker" }],
+    actions: [{ type: "worker", value: [workerName] }],
     matchers: [{ type: "all" }],
     enabled: true,
     name: "postern catch-all (via setup-email-routing.mjs)",
-    owner_worker_tag: script.tag,
-    source: "api",
   };
 
   if (dryRun) {
