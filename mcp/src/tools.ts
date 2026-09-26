@@ -226,6 +226,13 @@ export const READ_TOOLS: ToolDef[] = [
       lens: LENS.optional().describe("viewer view (needs to=): inbox = delivered to them and not written by them; sent = written by them. Not combinable with direction"),
       mailbox: MAILBOX.optional().describe("filter by durable folder placement: archive, trash, junk, or all (every placement); omitted = the default unfoldered placement"),
       thread: z.string().optional().describe("filter to a thread id"),
+      q: z
+        .string()
+        .optional()
+        .describe(
+          "keyword filter over subject + body (exact FTS: every word must appear). Narrows the " +
+            "listing in place; use mailbox_search for ranked topic search",
+        ),
       limit: z.number().int().positive().max(200).optional().describe("max results (default ~50)"),
       cursor: z.string().optional().describe("opaque pagination cursor"),
       seenFor: z.string().optional().describe(
@@ -236,7 +243,7 @@ export const READ_TOOLS: ToolDef[] = [
       ),
     },
     handler: async (client, a) => {
-      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor });
+      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, q: a.q, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor });
       return {
         count: page.items.length,
         ...completeness(page),
@@ -423,7 +430,21 @@ export function registerTools(
     if (!scopes.has(t.scope)) continue;
     server.registerTool(
       t.name,
-      { description: t.description, inputSchema: t.inputSchema },
+      // STRICT, so an unknown parameter is a REFUSAL and not a strip. Refs #632 F1.
+      //
+      // This has to live in the SCHEMA, and that is not a style preference. The SDK calls
+      // our handler with `parseResult.data` (server/mcp.js validateToolInput), so a plain
+      // object schema has already dropped unknown keys by the time we could inspect them: a
+      // check in this wrapper would be a gate that cannot fire. Passing a ZodObject keeps
+      // strictness intact (normalizeObjectSchema returns an object schema as-is) and it also
+      // improves the ADVERTISED schema, which now carries additionalProperties:false, so a
+      // well-behaved client will not send the key in the first place.
+      //
+      // Why it matters more than it looks: a supplied filter that is silently dropped is
+      // worse than one that is rejected, because the caller reasonably believes it applied.
+      // That is how `mailbox_list after=... before=...` returned newest-N while reading like
+      // a date-windowed answer (#631).
+      { description: t.description, inputSchema: z.object(t.inputSchema).strict() },
       async (args: unknown) => {
         try {
           return ok(await t.handler(client, args)) as any;
