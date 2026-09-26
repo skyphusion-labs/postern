@@ -146,7 +146,7 @@ npx wrangler r2 bucket create postern-attachments
 
 npm run typecheck     # CI gate
 npx vitest run        # unit suite (pure helpers)
-npm run deploy        # wrangler deploy  (auto-deploys on green main via Jenkins)
+npm run deploy        # wrangler deploy (manual; CI deploys only on a pushed v* tag, never on a merge to main)
 ```
 
 For an existing DB that predates the attachments/FTS/dmarc columns, apply

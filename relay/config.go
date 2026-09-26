@@ -345,6 +345,19 @@ func loadConfig() (Config, error) {
 			if !secure {
 				return c, fmt.Errorf("ldap auth requires TLS: use an ldaps:// LDAP_URL or set LDAP_STARTTLS=true")
 			}
+			// Direct-bind is the only bind mode (#182). The retired search+bind vars
+			// fail LOUD so an operator carrying an old EnvironmentFile learns at
+			// startup, not from silently-changed auth (parity with the Python door,
+			// imap/posternimap/config.py; #612).
+			var retired []string
+			for _, k := range []string{"LDAP_BIND_DN", "LDAP_BIND_PASSWORD", "LDAP_SEARCH_BASE", "LDAP_SEARCH_FILTER"} {
+				if strings.TrimSpace(os.Getenv(k)) != "" {
+					retired = append(retired, k)
+				}
+			}
+			if len(retired) > 0 {
+				return c, fmt.Errorf("the LDAP search+bind path is retired (#182, docs/AUTH-CONTRACT.md 5b): unset %s and use LDAP_BIND_DN_TEMPLATE (direct-bind + self-read)", strings.Join(retired, ", "))
+			}
 			if c.Submission.LDAP.BindDNTemplate == "" {
 				return c, fmt.Errorf("ldap auth needs LDAP_BIND_DN_TEMPLATE for direct-bind (e.g. cn=%%s,ou=users,dc=ldap,dc=goauthentik,dc=io)")
 			}

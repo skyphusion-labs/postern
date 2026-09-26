@@ -153,7 +153,9 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
 - **ldap**: direct-bind + self-read (`LDAP_BIND_DN_TEMPLATE`) over TLS (`ldaps://` or
   `LDAP_STARTTLS=true`). After bind the backend self-reads the user's entry for
   `LDAP_MAIL_ATTR` (default `mail`) and optional `LDAP_REQUIRE_GROUP` (#182). The
-  search+bind vars (`LDAP_BIND_DN`, `LDAP_SEARCH_*`) are retired and refuse startup.
+  search+bind vars (`LDAP_BIND_DN`, `LDAP_BIND_PASSWORD`, `LDAP_SEARCH_BASE`,
+  `LDAP_SEARCH_FILTER`) are retired: with `AUTH_BACKEND=ldap`, any of them set
+  (non-blank) refuses startup, same as the IMAP door (#612).
   Two mutually-exclusive trust models for a private/awkward directory cert
   (both strict verification, never an insecure-skip): `LDAP_TLS_PIN_SHA256` pins the
   EXACT leaf by SHA-256 (SAN-independent, for a cert with an unusable SAN such as an
@@ -273,7 +275,8 @@ The relay also ships as a versioned image, built + pushed by
 (`CGO_ENABLED=0`), runs non-root (uid 10001), and `setcap`s the binary so it binds
 the privileged submission port without root. `docker-entrypoint.sh` expands `*_FILE`
 secrets (`POSTERN_SEND_TOKEN`, `POSTERN_TRANSPORT_TOKEN`, `EMAIL_RELAY_TOKEN`,
-`SMTP_OUT_PASSWORD`, `LDAP_BIND_PASSWORD`) from their mount paths; the TLS cert/key
+`SMTP_OUT_PASSWORD`) from their mount paths (a stale `LDAP_BIND_PASSWORD_FILE` is still
+expanded only so the retired-var guard refuses startup, #612); the TLS cert/key
 are read as PATHs directly (`SUBMISSION_TLS_CERT` / `_KEY`).
 
 Container deploys use **`AUTH_BACKEND=ldap` (direct-bind + self-read, #182)** -- the cgo-free image
@@ -313,7 +316,7 @@ relay/
   submission.go       #68  AUTH-over-TLS submission session -> /api/send bridge
   submit_client.go    #68  HTTPS client for /api/smtp-auth + /api/send (native)
   auth.go             #68  AuthProvider interface + backend selector
-  auth_ldap.go        #68  ldap backend (go-ldap simple/search bind over TLS)
+  auth_ldap.go        #68  ldap backend (go-ldap direct-bind + self-read over TLS)
   auth_system.go      #68  system backend stub (default build; rejects without -tags pam)
   auth_system_pam.go  #68  system backend (PAM; build-tagged `pam`, cgo)
   sasl_login.go       vendored LOGIN SASL server (go-sasl removed NewLoginServer)
