@@ -31,12 +31,21 @@
 # and the digest lookup, so it can never be misread as a registry hiccup or a network flake.
 #
 # NOT AFFECTED: the image build, the artifact smoke (#543) and the GHCR push. Those jobs are
-# untouched and still publish a real, started-and-greeted image. `dispatch-roll` is a leaf job
-# in imap-image.yml and relay-image.yml (no other job declares `needs: dispatch-roll`), so
-# this guard cannot turn a build red. Postern's inbound Worker on CF Email is a separate
-# deploy path (deploy.yml) and is unaffected; only the container door tier lost its host.
+# untouched and still publish a real, started-and-greeted image. Postern's inbound Worker on
+# CF Email is a separate deploy path (deploy.yml) and is unaffected; only the container door
+# tier lost its host.
 #
-# RE-ENABLING is deleting the one guard block below, nothing else. Everything after it is the
+# NO CALLER, BY DESIGN (2026-09-26). This script is a RECIPE on the shelf, not a step in any
+# workflow: the `dispatch-roll` jobs that used to invoke it were removed from imap-image.yml
+# and relay-image.yml, because the guard's own conclusion (a dispatch that cannot deploy)
+# argues for unwiring the call, not for failing a release. Leaving them wired made the next
+# `v*` tag a guaranteed red run, which is the same false signal in the other direction: the
+# original defect reported a green roll that deployed nothing, and a permanent red reports a
+# broken release that is in fact fine. `grep -rn dispatch-fleet-postern-door-roll .github/`
+# is the check that this is still true.
+#
+# RE-ENABLING is deleting the one guard block below AND restoring a job that calls this
+# script (git history has both, removed together). Everything after it is the
 # original recipe, unmodified and deliberately kept: postern is a live product whose container
 # door tier lost its host, so the recipe is NOT removed. Re-enabling needs a container host
 # for the doors plus the fleet-chezmoi handler restored, which is a spend and topology

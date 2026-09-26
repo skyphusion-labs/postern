@@ -2,19 +2,27 @@ name: relay-image
 
 # Build the postern-relay door image and push it to GHCR.
 #
-# WHY: the Go relay (587 submission door + loopback intake) is moving off the host
-# systemd install onto a versioned container image (CI -> GHCR -> Swarm), the same
-# move the 993 IMAP door made (#150/#152). The image is the unit of deploy; the
-# Swarm stack pins it by the immutable git short-SHA tag this workflow produces, so
-# `docker service update --image ...:<sha>` is exact.
+# WHY: the Go relay (587 submission door + loopback intake) ships as a versioned
+# container image rather than a host systemd install, the same move the 993 IMAP door made
+# (#150/#152). The image is the unit of deploy, tagged by immutable git short-SHA so any
+# orchestrator can pin an exact build.
 #
-# After a green publish (version tag or manual dispatch), dispatches fleet-chezmoi `postern-door-roll` to pin the image on
-# the door host and redeploy `postern-submission` (requires org secret FLEET_DISPATCH_TOKEN).
+# NO DEPLOY LANE (2026-09-24). This workflow builds and PUBLISHES; nothing rolls the
+# image onto a host, because the host is gone. The Swarm host that ran the door services,
+# and the fleet-chezmoi `postern-door-roll` handler this workflow used to dispatch, were
+# both released with the Hetzner cut (#2066 over there). The recipe is kept in
+# `.github/scripts/dispatch-fleet-postern-door-roll.sh`, which fails closed and documents
+# what re-enabling needs; it just has no caller any more. Where the door tier runs next is
+# a spend and topology decision, so nothing here guesses at one.
 #
-# ARTIFACT SMOKE (#543): same gap as imap-image -- build then dispatch-roll with no
-# start of the artifact. `build` loads the image and asserts the binary binds and
-# answers an SMTP greeting with stub inbound env, so a non-starting image cannot
-# reach a door.
+# Production receiving is unaffected: that is CF Email Routing -> the inbound Worker, and it
+# never involved these images.
+#
+# ARTIFACT SMOKE (#543): `build` loads the image and asserts the binary binds and answers
+# an SMTP greeting with stub inbound env, so a non-starting image cannot be published. This
+# gate is now the LAST one in the workflow, which makes it the only thing standing between a
+# broken build and a tag-named image on GHCR; it earns its place more than it did when a
+# roll job sat behind it.
 #
 # Triggers:
 #   - push to main that touches relay/** (or this workflow): rebuild on real
@@ -187,18 +195,3 @@ jobs:
           docker logs "$name" >&2 || true
           exit 1
 
-  # Gated on build (which includes artifact smoke). A failed start/greeting fails
-  # build, so this job never dispatches a non-starting image (#543).
-  dispatch-roll:
-    needs: build
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Dispatch postern-submission roll to fleet-chezmoi
-        env:
-          FLEET_DISPATCH_TOKEN: ${{ secrets.FLEET_DISPATCH_TOKEN }}
-        run: bash .github/scripts/dispatch-fleet-postern-door-roll.sh submission skyphusion-labs/postern-relay
