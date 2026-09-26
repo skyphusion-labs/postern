@@ -30,7 +30,7 @@ describe("mailbox.send attachments (#70)", () => {
         text: "see attached",
         attachments: [{ filename: "report.csv", mimeType: "text/csv", content: b64("a,b,c\n1,2,3") }],
       },
-      ctx,
+      ctx, undefined, "estate",
     );
     await settle();
 
@@ -57,7 +57,7 @@ describe("mailbox.send attachments (#70)", () => {
           { filename: "two.bin", mimeType: "application/octet-stream", content: b64("TWO") },
         ],
       },
-      ctx,
+      ctx, undefined, "estate",
     );
     await settle();
     const atts = sent[0].attachments!;
@@ -67,7 +67,7 @@ describe("mailbox.send attachments (#70)", () => {
 
   it("fills sane defaults when filename/mimeType are omitted", async () => {
     const { env, ctx, settle, sent } = makeFakeEnv();
-    await send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [{ content: b64("ZZ") }] }, ctx);
+    await send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [{ content: b64("ZZ") }] }, ctx, undefined, "estate");
     await settle();
     const a = sent[0].attachments![0];
     expect(a.filename).toBe("attachment-1");
@@ -77,14 +77,14 @@ describe("mailbox.send attachments (#70)", () => {
 
   it("leaves the field-based path unchanged with no attachments", async () => {
     const { env, ctx, settle, sent } = makeFakeEnv();
-    await send(env, { to: "d@example.com", subject: "s", text: "x" }, ctx);
+    await send(env, { to: "d@example.com", subject: "s", text: "x" }, ctx, undefined, "estate");
     await settle();
     expect(sent[0].attachments).toBeUndefined();
   });
 
   it("treats an empty attachments array as none (field-based path)", async () => {
     const { env, ctx, settle, sent } = makeFakeEnv();
-    await send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [] }, ctx);
+    await send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [] }, ctx, undefined, "estate");
     await settle();
     expect(sent[0].attachments).toBeUndefined();
   });
@@ -92,14 +92,14 @@ describe("mailbox.send attachments (#70)", () => {
   it("rejects invalid base64 content", async () => {
     const { env, ctx } = makeFakeEnv();
     await expect(
-      send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [{ content: "@@@not-base64@@@" }] }, ctx),
+      send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [{ content: "@@@not-base64@@@" }] }, ctx, undefined, "estate"),
     ).rejects.toMatchObject({ code: "E_VALIDATION_ERROR" });
   });
 
   it("rejects an attachment with no content", async () => {
     const { env, ctx } = makeFakeEnv();
     await expect(
-      send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [{ filename: "x.bin" } as never] }, ctx),
+      send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [{ filename: "x.bin" } as never] }, ctx, undefined, "estate"),
     ).rejects.toMatchObject({ code: "E_FIELD_MISSING" });
   });
 
@@ -109,7 +109,7 @@ describe("mailbox.send attachments (#70)", () => {
       send(
         env,
         { to: "d@example.com", subject: "s", text: "x", attachments: [{ filename: "ok\r\nBcc: v@x.com", content: b64("z") }] },
-        ctx,
+        ctx, undefined, "estate",
       ),
     ).rejects.toMatchObject({ code: "E_VALIDATION_ERROR" });
   });
@@ -117,7 +117,7 @@ describe("mailbox.send attachments (#70)", () => {
   it("rejects more than the per-message attachment cap", async () => {
     const { env, ctx } = makeFakeEnv();
     const many = Array.from({ length: 21 }, (_, i) => ({ filename: `f${i}.txt`, content: b64("x") }));
-    await expect(send(env, { to: "d@example.com", subject: "s", text: "x", attachments: many }, ctx)).rejects.toMatchObject({
+    await expect(send(env, { to: "d@example.com", subject: "s", text: "x", attachments: many }, ctx, undefined, "estate")).rejects.toMatchObject({
       code: "E_VALIDATION_ERROR",
     });
   });
@@ -126,7 +126,7 @@ describe("mailbox.send attachments (#70)", () => {
     const { env, ctx } = makeFakeEnv();
     const big = Buffer.alloc(25 * 1024 * 1024 + 16, 0x41).toString("base64");
     await expect(
-      send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [{ content: big }] }, ctx),
+      send(env, { to: "d@example.com", subject: "s", text: "x", attachments: [{ content: big }] }, ctx, undefined, "estate"),
     ).rejects.toMatchObject({ code: "E_PAYLOAD_TOO_LARGE", status: 413 });
   });
 });

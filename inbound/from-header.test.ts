@@ -46,7 +46,7 @@ describe("ingest stores the header From end-to-end", () => {
     );
     await settle();
 
-    const msg = await store.get(env, "cf-access-1@notify.cloudflare.com");
+    const msg = await store.getUnscoped(env, "cf-access-1@notify.cloudflare.com");
     expect(msg!.from).toBe(headerFrom);
     expect(msg!.from).not.toContain("bounces");
 
@@ -75,6 +75,6 @@ describe("ingest stores the header From end-to-end", () => {
       ctx,
     );
     await settle();
-    expect((await store.get(env, "trust-1@skyphusion.org"))!.trusted).toBe(true);
+    expect((await store.getUnscoped(env, "trust-1@skyphusion.org"))!.trusted).toBe(true);
   });
 });

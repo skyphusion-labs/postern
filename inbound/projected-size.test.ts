@@ -36,7 +36,7 @@ describe("projected size (#342)", () => {
       attachments: [{ filename: "a.txt", mime: "text/plain", size: att.byteLength }],
     });
 
-    const msg = await store.get(env, "proj-1");
+    const msg = await store.getUnscoped(env, "proj-1");
     expect(msg?.projectedSize).toBe(expected);
     expect(msg?.projectionVersion).toBe(PROJECTION_VERSION);
 

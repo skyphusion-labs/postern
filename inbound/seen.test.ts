@@ -21,8 +21,8 @@ describe("store seen state", () => {
     );
     await settle();
 
-    expect((await store.get(env, "in@example.com"))!.seen).toBe(false);
-    expect((await store.get(env, "out@example.com"))!.seen).toBe(true);
+    expect((await store.getUnscoped(env, "in@example.com"))!.seen).toBe(false);
+    expect((await store.getUnscoped(env, "out@example.com"))!.seen).toBe(true);
     // Summaries carry the same flag (drives the unread view body-free).
     const list = await store.list(env, {});
     const byId = Object.fromEntries(list.items.map((m) => [m.messageId, m.seen]));
@@ -38,13 +38,13 @@ describe("store seen state", () => {
 
     const n = await store.setSeen(env, ["m1@example.com", "m2@example.com"], true);
     expect(n).toBe(2);
-    expect((await store.get(env, "m1@example.com"))!.seen).toBe(true);
-    expect((await store.get(env, "m2@example.com"))!.seen).toBe(true);
+    expect((await store.getUnscoped(env, "m1@example.com"))!.seen).toBe(true);
+    expect((await store.getUnscoped(env, "m2@example.com"))!.seen).toBe(true);
 
     // Mark one back to unread.
     expect(await store.setSeen(env, ["m1@example.com"], false)).toBe(1);
-    expect((await store.get(env, "m1@example.com"))!.seen).toBe(false);
-    expect((await store.get(env, "m2@example.com"))!.seen).toBe(true);
+    expect((await store.getUnscoped(env, "m1@example.com"))!.seen).toBe(false);
+    expect((await store.getUnscoped(env, "m2@example.com"))!.seen).toBe(true);
   });
 
   it("setSeen is a no-op for an empty id list and skips unknown ids", async () => {
@@ -53,7 +53,7 @@ describe("store seen state", () => {
     await settle();
     expect(await store.setSeen(env, [], true)).toBe(0);
     expect(await store.setSeen(env, ["nope@example.com"], true)).toBe(0);
-    expect((await store.get(env, "only@example.com"))!.seen).toBe(false);
+    expect((await store.getUnscoped(env, "only@example.com"))!.seen).toBe(false);
   });
 });
 
@@ -70,13 +70,13 @@ describe("POST /api/messages/seen", () => {
     const { env, ctx, settle } = makeFakeEnv();
     await ingest(env, { messageId: "a@example.com", from: "x@example.com", to: "c@skyphusion.org", subject: "s", text: "t", date: "2026-01-01T00:00:00.000Z" }, ctx);
     await settle();
-    expect((await store.get(env, "a@example.com"))!.seen).toBe(false);
+    expect((await store.getUnscoped(env, "a@example.com"))!.seen).toBe(false);
 
     const res = await handleApi(post({ ids: ["a@example.com"], seen: true }), env, ctx);
     const body = (await res.json()) as { ok: boolean; updated: number };
     expect(res.status).toBe(200);
     expect(body).toEqual({ ok: true, updated: 1 });
-    expect((await store.get(env, "a@example.com"))!.seen).toBe(true);
+    expect((await store.getUnscoped(env, "a@example.com"))!.seen).toBe(true);
   });
 
   it("validates the body shape", async () => {

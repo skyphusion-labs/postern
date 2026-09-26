@@ -46,7 +46,7 @@ async function projectedHeaders(
   env: Env,
   storedId: string,
 ): Promise<{ raw: string; messageId: string; inReplyTo: string | null }> {
-  const m = await store.get(env, storedId);
+  const m = await store.getUnscoped(env, storedId);
   if (!m) throw new Error(`no stored message ${storedId}`);
   const bytes = await renderRfc822Projection({
     messageId: m.messageId,
@@ -112,8 +112,8 @@ describe("#500 an id the door cannot carry is not representable, so it collapses
     expect(res.messageId).toBe(hashed);
     expect(res.messageId).toHaveLength(64);
     expect(res.messageId).not.toBe(NONASCII_ID);
-    expect(await store.get(env, NONASCII_ID)).toBeNull();
-    expect((await store.get(env, hashed))?.messageId).toBe(hashed);
+    expect(await store.getUnscoped(env, NONASCII_ID)).toBeNull();
+    expect((await store.getUnscoped(env, hashed))?.messageId).toBe(hashed);
   });
 
   it("round-trips the projection, where the raw header demonstrably does not", async () => {

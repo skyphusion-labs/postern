@@ -337,6 +337,37 @@ function deriveBodyText(html?: string, text?: string): string {
   return cleanBody(raw).slice(0, 32_000);
 }
 
+
+/**
+ * WHOSE stored mail a write path may read when it quotes one (a reply target, a forward
+ * source). Refs GHSA-49mc-vh6w-95h4.
+ *
+ * The estate case is the LITERAL `"estate"`, not an absent argument and not an empty
+ * array, so it cannot be reached by omission: a bare address is not assignable to this
+ * type, and a member scope must be written as a one-element array. Every caller therefore
+ * states which of the two it is.
+ */
+export type MessageReadScope = readonly string[] | "estate";
+
+/**
+ * Read the message a write path is about to quote, under that path's scope.
+ *
+ * `"estate"` means there is no bound member to scope to: a static operator/IMAP token, or
+ * the same-account `MailboxService` RPC entrypoint, both of which are estate-wide by
+ * construction. Anything else is a member scope and goes through the scoped reader, which
+ * answers null for a message the member is not a party to. Null is then the SAME
+ * E_NOT_FOUND the caller gets for an id that does not exist, so the refusal leaks nothing.
+ */
+async function readQuotable(
+  env: Env,
+  messageId: string,
+  readScope: MessageReadScope,
+): Promise<store.StoredMessage | null> {
+  return readScope === "estate"
+    ? await store.getUnscoped(env, messageId)
+    : await store.get(env, messageId, readScope);
+}
+
 /**
  * Send a new message. validate -> resolveFrom -> Message-ID -> dispatch ->
  * store the sent copy (direction: outbound). Returns the stored messageId +
@@ -346,7 +377,8 @@ export async function send(
   env: Env,
   req: SendRequest,
   ctx: ExecutionContext,
-  identity?: BoundIdentity,
+  identity: BoundIdentity | undefined,
+  readScope: MessageReadScope,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object") {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be an object");
@@ -356,7 +388,7 @@ export async function send(
     if (typeof req.forwardMessageId !== "string" || !req.forwardMessageId.trim()) {
       throw new MailboxError("E_VALIDATION_ERROR", "forwardMessageId must be a message id");
     }
-    original = await store.get(env, req.forwardMessageId.replace(/[<>]/g, "").trim());
+    original = await readQuotable(env, req.forwardMessageId.replace(/[<>]/g, "").trim(), readScope);
     if (!original) throw new MailboxError("E_NOT_FOUND", "forward source message not found", 404);
   }
   if (!original && (typeof req.subject !== "string" || req.subject.trim() === "")) {
@@ -426,7 +458,8 @@ export async function reply(
   env: Env,
   req: ReplyRequest,
   ctx: ExecutionContext,
-  identity?: BoundIdentity,
+  identity: BoundIdentity | undefined,
+  readScope: MessageReadScope,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object" || typeof req.messageId !== "string" || !req.messageId.trim()) {
     throw new MailboxError("E_FIELD_MISSING", "messageId is required");
@@ -435,7 +468,7 @@ export async function reply(
     throw new MailboxError("E_FIELD_MISSING", "at least one of html or text is required");
   }
 
-  const original = await store.get(env, req.messageId.replace(/[<>]/g, "").trim());
+  const original = await readQuotable(env, req.messageId.replace(/[<>]/g, "").trim(), readScope);
   if (!original) {
     throw new MailboxError("E_NOT_FOUND", `no stored message with id ${req.messageId}`, 404);
   }

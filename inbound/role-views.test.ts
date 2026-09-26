@@ -143,7 +143,7 @@ describe("#425 a MEMBER reads the role queue, and INBOX stays personal", () => {
     const one = await handleApi(get(`/api/messages/${encodeURIComponent(ROLE_MSG)}`, ada), e, ctx);
     expect(one.status).toBe(200);
 
-    const stored = await store.get(e, ROLE_MSG);
+    const stored = await store.getUnscoped(e, ROLE_MSG);
     const thread = await handleApi(
       get(`/api/threads/${encodeURIComponent(stored!.threadId!)}`, ada),
       e,
@@ -199,7 +199,7 @@ describe("#425 a NON-member sees nothing of the queue, on every read route", () 
     );
     expect(att.status).toBe(404);
 
-    const stored = await store.get(e, ROLE_MSG);
+    const stored = await store.getUnscoped(e, ROLE_MSG);
     const thread = await handleApi(
       get(`/api/threads/${encodeURIComponent(stored!.threadId!)}`, carol),
       e,

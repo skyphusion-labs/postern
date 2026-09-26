@@ -25,6 +25,7 @@ import {
   type SendAttachment,
   type SendRequest,
   type ReplyRequest,
+  type MessageReadScope,
 } from "./mailbox";
 import { serveWebmail } from "./webmail";
 import {
@@ -217,14 +218,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // --- write: send ---
     if (request.method === "POST" && (path === "/api/send" || path === "/send")) {
       const body = await readJson<SendRequest>(request);
-      const result = await send(env, body, ctx, resolution.identity);
+      const result = await send(env, body, ctx, resolution.identity, writeReadScope(env, resolution));
       return json({ ok: true, ...result });
     }
 
     // --- write: reply ---
     if (request.method === "POST" && path === "/api/reply") {
       const body = await readJson<ReplyRequest>(request);
-      const result = await reply(env, body, ctx, resolution.identity);
+      const result = await reply(env, body, ctx, resolution.identity, writeReadScope(env, resolution));
       return json({ ok: true, ...result });
     }
 
@@ -477,7 +478,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             html: draft.bodyHtml ?? undefined,
             bcc: draft.bcc ? splitRecipientInput(draft.bcc) : undefined,
             attachments,
-          }, ctx, resolution.identity);
+          }, ctx, resolution.identity, writeReadScope(env, resolution));
         } else {
           if (!draft.to) throw new MailboxError("E_FIELD_MISSING", "draft recipient required");
           result = await send(env, {
@@ -491,7 +492,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             ...(draft.composeMode === "forward" && draft.sourceMessageId
               ? { forwardMessageId: draft.sourceMessageId }
               : {}),
-          }, ctx, resolution.identity);
+          }, ctx, resolution.identity, writeReadScope(env, resolution));
         }
         // Delete only after dispatch + sent-copy storage succeeds. Every validation,
         // transport, or storage failure leaves the draft and staged bytes retryable.
@@ -759,11 +760,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "message id required" }, 400);
       // Read scope is the SET (#425): a message opened from a role view is reachable
       // because the viewer is a MEMBER of that queue, not because the estate is open.
+      // The scope now rides INTO the read (store.get requires it) rather than being a
+      // separate pre-check, so the gate cannot be present here and missing elsewhere; a
+      // static estate token has no member and names the unscoped reader. Same responses,
+      // and one D1 round trip fewer. Refs GHSA-49mc-vh6w-95h4.
       const readScope = sessionReadScope(env, resolution);
-      if (readScope && !(await store.messageAccessible(env, id, readScope))) {
-        return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
-      }
-      const msg = await store.get(env, id);
+      const msg = readScope
+        ? await store.get(env, id, readScope)
+        : await store.getUnscoped(env, id);
       if (!msg) return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
       return json({ ok: true, message: msg });
     }
@@ -798,6 +802,27 @@ function sessionReadScope(env: Env, resolution: AuthResolution): string[] | unde
   const identity = boundReadMember(resolution);
   if (!identity) return undefined;
   return [identity, ...rolesForViewer(env, identity)];
+}
+
+/**
+ * WHOSE stored mail a WRITE path may read when it quotes one (the reply target, the
+ * forward source). Refs GHSA-49mc-vh6w-95h4.
+ *
+ * Keyed on ANY bound identity, deliberately NOT on `boundReadMember`. A send-only registry
+ * token carries no `read` cap, and scoping by that rule would leave every send-only
+ * identity reading the estate through the quote -- which is the registry DEFAULT for every
+ * pre-#544 entry (`parseIdentityCaps`), so it would be the common case rather than an edge
+ * one. Holding no permission to read is not a reason to read wider.
+ *
+ * Role queues are included so a member replying to mail delivered to a queue it belongs to
+ * still resolves, matching what the read route grants that same member (#425). A
+ * resolution with no bound identity is a static operator/IMAP token, estate-wide by
+ * construction, and says so with the literal rather than by omission.
+ */
+function writeReadScope(env: Env, resolution: AuthResolution): MessageReadScope {
+  const bound = resolution.identity?.from;
+  if (!bound) return "estate";
+  return [bound, ...rolesForViewer(env, bound)];
 }
 
 /** The single mail address a resolution is bound to for READ, or undefined.

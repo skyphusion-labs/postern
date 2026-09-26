@@ -39,7 +39,7 @@ function inbound(over: Partial<ParsedInbound> = {}): ParsedInbound {
  *  replying client would quote. This is the whole point of the issue, so it runs through
  *  renderRfc822Projection itself rather than re-implementing what it does. */
 async function projectedMessageId(env: Env, storedId: string): Promise<string> {
-  const m = await store.get(env, storedId);
+  const m = await store.getUnscoped(env, storedId);
   if (!m) throw new Error(`no stored message ${storedId}`);
   const bytes = await renderRfc822Projection({
     messageId: m.messageId,
@@ -67,8 +67,8 @@ describe("#494 a Message-ID carrying CR/LF collapses so it can round-trip", () =
     expect(res.messageId).toHaveLength(64);
     // The pre-fix answer, named so a regression cannot pass quietly.
     expect(res.messageId).not.toBe(CRLF_ID);
-    expect((await store.get(env, CRLF_ID))).toBeNull();
-    expect((await store.get(env, hashed))?.messageId).toBe(hashed);
+    expect((await store.getUnscoped(env, CRLF_ID))).toBeNull();
+    expect((await store.getUnscoped(env, hashed))?.messageId).toBe(hashed);
   });
 
   it("round-trips the projection, where the raw header demonstrably does not", async () => {
