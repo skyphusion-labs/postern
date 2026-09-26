@@ -174,8 +174,10 @@ interface Env {
    * plain-text VAR in wrangler config ("vars"), not a secret (#335): readable,
    * mergeable, diffable, and recoverable from the deployed worker. Vars ship on every
    * wrangler deploy (only secrets persist), so it lives in the config you deploy with.
+   * Normally a JSON string; wrangler also accepts the registry as a JSON object var,
+   * which arrives already parsed, and parseRegistry accepts both.
    */
-  POSTERN_SEND_IDENTITIES?: string;
+  POSTERN_SEND_IDENTITIES?: string | Record<string, unknown>;
   /** Default From when a send omits it. Must be on ALLOWED_FROM_DOMAIN. */
   DEFAULT_FROM?: string;
   /** Optional display name paired with DEFAULT_FROM. */
