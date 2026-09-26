@@ -67,7 +67,7 @@ describe("v1-row COALESCE fallback (pre-0006 rows)", () => {
     expect(page.items.map((m) => m.messageId)).toEqual(["old@example.com"]);
     expect(page.items[0].deliveredTo).toEqual(["conrad@skyphusion.org"]);
 
-    const msg = await store.get(env, "old@example.com");
+    const msg = await store.getUnscoped(env, "old@example.com");
     expect(msg?.deliveredTo).toEqual(["conrad@skyphusion.org"]);
     expect(msg?.cc).toBeNull();
     expect(msg?.wireSize).toBeNull();
@@ -93,7 +93,7 @@ describe("header fidelity fields ride the message shape", () => {
       ctx,
     );
     await settle();
-    const msg = await store.get(env, "fid@example.com");
+    const msg = await store.getUnscoped(env, "fid@example.com");
     expect(msg?.cc).toBe("team@skyphusion.org, ops@skyphusion.org");
     expect(msg?.sender).toBe("assistant@example.com");
     expect(msg?.replyTo).toBe("Boss <boss-replies@example.com>");
@@ -127,7 +127,7 @@ describe("outbound envelope population", () => {
     // A bcc recipient's view is complete for our own sent mail.
     const forBcc = await store.list(env, { to: "c@example.com" });
     expect(forBcc.items.map((m) => m.messageId)).toEqual(["out@skyphusion.org"]);
-    const msg = await store.get(env, "out@skyphusion.org");
+    const msg = await store.getUnscoped(env, "out@skyphusion.org");
     expect(msg?.cc).toBe("b@example.com");
     expect(msg?.bcc).toBe("c@example.com");
     expect(msg?.sender).toBeNull();
@@ -144,7 +144,7 @@ describe("reply routing to stored Reply-To (#189)", () => {
       ctx,
     );
     await settle();
-    await reply(env, { messageId: "list@lists.example.com", text: "thanks" }, ctx);
+    await reply(env, { messageId: "list@lists.example.com", text: "thanks" }, ctx, undefined, "estate");
     expect(sent).toHaveLength(1);
     expect(sent[0].to).toEqual(["list@lists.example.com"]);
   });
@@ -153,7 +153,7 @@ describe("reply routing to stored Reply-To (#189)", () => {
     const { env, ctx, sent, settle } = makeFakeEnv();
     await ingest(env, { messageId: "plain@example.com", from: "alice@example.com", to: "conrad@skyphusion.org", text: "hi" }, ctx);
     await settle();
-    await reply(env, { messageId: "plain@example.com", text: "hi back" }, ctx);
+    await reply(env, { messageId: "plain@example.com", text: "hi back" }, ctx, undefined, "estate");
     expect(sent[0].to).toEqual(["alice@example.com"]);
   });
 
@@ -165,7 +165,7 @@ describe("reply routing to stored Reply-To (#189)", () => {
       ctx,
     );
     await settle();
-    await reply(env, { messageId: "comma@example.com", text: "re" }, ctx);
+    await reply(env, { messageId: "comma@example.com", text: "re" }, ctx, undefined, "estate");
     expect(sent[0].to).toEqual(["jane@example.com"]);
   });
 
@@ -177,7 +177,7 @@ describe("reply routing to stored Reply-To (#189)", () => {
       ctx,
     );
     await settle();
-    await reply(env, { messageId: "multi-rt@example.com", text: "re" }, ctx);
+    await reply(env, { messageId: "multi-rt@example.com", text: "re" }, ctx, undefined, "estate");
     expect(sent[0].to).toEqual(["a@example.com"]);
   });
 });

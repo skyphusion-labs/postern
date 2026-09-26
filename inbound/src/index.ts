@@ -117,14 +117,20 @@ export default {
  *   ]
  */
 export class MailboxService extends WorkerEntrypoint<Env> {
+  // A service binding carries no bearer and therefore no bound member, so every method
+  // here is estate-scoped by construction: the trust boundary is the same-account binding
+  // itself, declared in the consumer's wrangler config. The scope is stated as the literal
+  // "estate" (and as the named unscoped reader) rather than left implicit, so this stays a
+  // visible decision if a future entrypoint DOES carry an identity. Refs
+  // GHSA-49mc-vh6w-95h4.
   send(req: SendRequest): Promise<SendResult> {
-    return send(this.env, req, this.ctx);
+    return send(this.env, req, this.ctx, undefined, "estate");
   }
   reply(req: ReplyRequest): Promise<SendResult> {
-    return reply(this.env, req, this.ctx);
+    return reply(this.env, req, this.ctx, undefined, "estate");
   }
   get(messageId: string): Promise<StoredMessage | null> {
-    return store.get(this.env, messageId);
+    return store.getUnscoped(this.env, messageId);
   }
   thread(threadId: string): Promise<StoredMessage[]> {
     return store.thread(this.env, threadId);

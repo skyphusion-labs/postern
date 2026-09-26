@@ -25,7 +25,7 @@ describe("body_html persistence (#57)", () => {
     );
     await settle();
 
-    const msg = await store.get(env, "html1@example.com");
+    const msg = await store.getUnscoped(env, "html1@example.com");
     expect(msg).not.toBeNull();
     expect(msg!.bodyHtml).toContain("<h1>Hello</h1>");
     // bodyText is still populated (FTS + fallback).
@@ -47,7 +47,7 @@ describe("body_html persistence (#57)", () => {
     );
     await settle();
 
-    const msg = await store.get(env, "text1@example.com");
+    const msg = await store.getUnscoped(env, "text1@example.com");
     expect(msg!.bodyHtml).toBeNull();
   });
 
@@ -95,7 +95,7 @@ describe("body_html persistence (#57)", () => {
       ctx,
     );
     await settle();
-    const msg = await store.get(env, "big@example.com");
+    const msg = await store.getUnscoped(env, "big@example.com");
     expect(msg!.bodyHtml!.length).toBeLessThanOrEqual(512_000);
   });
 

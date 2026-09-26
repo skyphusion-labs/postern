@@ -136,13 +136,13 @@ describe("mailbox.send over the relay transport (end to end)", () => {
       POSTERN_TRANSPORT_TOKEN: "transport-secret",
     });
 
-    const res = await send(env, { to: "dev@example.com", subject: "hi", text: "hello" }, ctx);
+    const res = await send(env, { to: "dev@example.com", subject: "hi", text: "hello" }, ctx, undefined, "estate");
     await settle();
 
     // Sent through the relay, not env.EMAIL.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     // The sent copy is still in the store, threaded.
-    const stored = await store.get(env, res.messageId);
+    const stored = await store.getUnscoped(env, res.messageId);
     expect(stored?.direction).toBe("outbound");
     expect(res.providerMessageId).toBe("smtp-1");
   });

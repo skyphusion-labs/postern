@@ -55,7 +55,7 @@ describe("#486 a Message-ID over 64 chars survives ingest intact", () => {
     expect(res.messageId).toBe(LONG_ROOT);
     // The pre-fix answer, named explicitly so a regression cannot pass quietly.
     expect(res.messageId).not.toBe(await sha256hex(LONG_ROOT));
-    expect((await store.get(env, LONG_ROOT))?.messageId).toBe(LONG_ROOT);
+    expect((await store.getUnscoped(env, LONG_ROOT))?.messageId).toBe(LONG_ROOT);
     // And the structure a consumer keys on is still parseable off the stored id.
     expect(/^([^/]+)\/([^/]+)\/(issues|pull)\/(\d+)@github\.com$/.exec(res.messageId)?.[4]).toBe("12345");
   });
@@ -117,7 +117,7 @@ describe("#486 a Message-ID over 64 chars survives ingest intact", () => {
 
     expect(res.messageId).toBe(await sha256hex(past));
     expect(res.messageId).toHaveLength(64);
-    expect((await store.get(env, res.messageId))?.messageId).toBe(res.messageId);
+    expect((await store.getUnscoped(env, res.messageId))?.messageId).toBe(res.messageId);
   });
 
   it("counts the cap in BYTES, and keeps the R2 attachment key inside its limit", async () => {
@@ -193,6 +193,6 @@ describe("#486 a Message-ID over 64 chars survives ingest intact", () => {
     );
 
     expect(res.status).toBe(201);
-    expect((await store.get(env, id))?.messageId).toBe(id);
+    expect((await store.getUnscoped(env, id))?.messageId).toBe(id);
   });
 });

@@ -41,7 +41,7 @@ describe("store.deleteMessage (#278)", () => {
     expect(await store.deleteMessage(env, "gone@x", ctx)).toBe(true);
     await settle();
 
-    expect(await store.get(env, "gone@x")).toBeNull();
+    expect(await store.getUnscoped(env, "gone@x")).toBeNull();
     expect(vectors.length).toBe(0);
     expect(vectorLedger.some((r) => r.message_id === "gone@x")).toBe(false);
 
@@ -82,7 +82,7 @@ describe("DELETE /api/messages/{id}", () => {
     await settle();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, deleted: "api@x" });
-    expect(await store.get(env, "api@x")).toBeNull();
+    expect(await store.getUnscoped(env, "api@x")).toBeNull();
   });
 
   it("returns 404 when the message is absent", async () => {

@@ -20,7 +20,7 @@ describe("#350 store lenses (real SQLite)", () => {
     const overrides = raw.prepare("SELECT message_id, recipient, seen FROM message_seen_by ORDER BY recipient").all() as { message_id: string; recipient: string; seen: number }[];
     expect(overrides).toEqual([{ message_id: "ab@skyphusion.org", recipient: "bob@skyphusion.org", seen: 0 }]);
     // messages.seen stays 1 (the sender's Sent view is unchanged).
-    expect((await store.get(env, "ab@skyphusion.org"))!.seen).toBe(true);
+    expect((await store.getUnscoped(env, "ab@skyphusion.org"))!.seen).toBe(true);
   });
 
   it("does NOT seed overrides for external recipients or the sender", async () => {
@@ -71,7 +71,7 @@ describe("#350 store lenses (real SQLite)", () => {
     const { env, ctx } = realEnv();
     await putInbound(env, ctx, { id: "in@skyphusion.org", from: "ext@gmail.com", to: "bob@skyphusion.org" });
     // Inbound lands unread everywhere (messages.seen = 0).
-    expect((await store.get(env, "in@skyphusion.org"))!.seen).toBe(false);
+    expect((await store.getUnscoped(env, "in@skyphusion.org"))!.seen).toBe(false);
 
     const n = await store.setSeen(env, ["in@skyphusion.org"], true, "bob@skyphusion.org");
     expect(n).toBe(1);
@@ -79,7 +79,7 @@ describe("#350 store lenses (real SQLite)", () => {
     const bob = await store.list(env, { to: "bob@skyphusion.org", direction: "inbound" });
     expect(bob.items[0].seen).toBe(true);
     // The row-level (estate) flag is untouched.
-    expect((await store.get(env, "in@skyphusion.org"))!.seen).toBe(false);
+    expect((await store.getUnscoped(env, "in@skyphusion.org"))!.seen).toBe(false);
   });
 
   it("scoped setSeen skips ids that do not exist (no junk overrides)", async () => {
@@ -96,7 +96,7 @@ describe("#350 store lenses (real SQLite)", () => {
     await putOutbound(env, ctx, { id: "ab@skyphusion.org", from: "alice@skyphusion.org", to: ["bob@skyphusion.org"] });
     // Override seeded seen=0; messages.seen=1.
     await store.setSeen(env, ["ab@skyphusion.org"], false); // legacy, no `for`
-    expect((await store.get(env, "ab@skyphusion.org"))!.seen).toBe(false); // messages.seen flipped
+    expect((await store.getUnscoped(env, "ab@skyphusion.org"))!.seen).toBe(false); // messages.seen flipped
     const ov = raw.prepare("SELECT seen FROM message_seen_by WHERE message_id = ? AND recipient = ?").get("ab@skyphusion.org", "bob@skyphusion.org") as { seen: number };
     expect(ov.seen).toBe(0); // existing override realigned to the same value
   });
@@ -134,11 +134,11 @@ describe("#350 store lenses (real SQLite)", () => {
     // B marks read (for=B): A's row-level state untouched.
     await store.setSeen(env, ["fc792@skyphusion.org"], true, "bob@skyphusion.org");
     expect((await store.list(env, { to: "bob@skyphusion.org", lens: "inbox" })).items[0].seen).toBe(true);
-    expect((await store.get(env, "fc792@skyphusion.org"))!.seen).toBe(true); // messages.seen was 1 all along
+    expect((await store.getUnscoped(env, "fc792@skyphusion.org"))!.seen).toBe(true); // messages.seen was 1 all along
     // Legacy unscoped mark-read still works.
     await putInbound(env, ctx, { id: "legacy@skyphusion.org", from: "ext@gmail.com", to: "bob@skyphusion.org" });
     expect(await store.setSeen(env, ["legacy@skyphusion.org"], true)).toBe(1);
-    expect((await store.get(env, "legacy@skyphusion.org"))!.seen).toBe(true);
+    expect((await store.getUnscoped(env, "legacy@skyphusion.org"))!.seen).toBe(true);
   });
 });
 
@@ -165,7 +165,7 @@ describe("#350 POST /api/messages/seen `for` (API surface)", () => {
     expect(await res.json()).toEqual({ ok: true, updated: 1 });
     // B's effective seen flips; the row-level flag does not.
     expect((await store.list(env, { to: "bob@skyphusion.org", direction: "inbound" })).items[0].seen).toBe(true);
-    expect((await store.get(env, "a@skyphusion.org"))!.seen).toBe(false);
+    expect((await store.getUnscoped(env, "a@skyphusion.org"))!.seen).toBe(false);
   });
 
   it("rejects a malformed `for` with a 400", async () => {
@@ -180,7 +180,7 @@ describe("#350 POST /api/messages/seen `for` (API surface)", () => {
     await settle();
     const res = await handleApi(post({ ids: ["a@skyphusion.org"], seen: true }), env, ctx);
     expect(res.status).toBe(200);
-    expect((await store.get(env, "a@skyphusion.org"))!.seen).toBe(true); // messages.seen flipped
+    expect((await store.getUnscoped(env, "a@skyphusion.org"))!.seen).toBe(true); // messages.seen flipped
   });
 });
 

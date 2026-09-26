@@ -62,7 +62,7 @@ describe("sent copy stores its attachments (#470)", () => {
         text: "see attached",
         attachments: [{ filename: "report.csv", mimeType: "text/csv", content: b64("a,b,c\n1,2,3") }],
       },
-      fctx,
+      fctx, undefined, "estate",
     );
     await settle();
 
@@ -84,7 +84,7 @@ describe("sent copy stores its attachments (#470)", () => {
         text: "see attached",
         attachments: [{ filename: "note.txt", mimeType: "text/plain", content: b64(payload) }],
       },
-      fctx,
+      fctx, undefined, "estate",
     );
     await settle();
 
@@ -109,7 +109,7 @@ describe("sent copy stores its attachments (#470)", () => {
         text: "x",
         attachments: [{ filename: "one.txt", mimeType: "text/plain", content: b64("ONE") }],
       },
-      fctx,
+      fctx, undefined, "estate",
     );
     await settle();
 
@@ -137,7 +137,7 @@ describe("sent copy stores its attachments (#470)", () => {
           { filename: "two.bin", mimeType: "application/octet-stream", content: b64("TWO") },
         ],
       },
-      fctx,
+      fctx, undefined, "estate",
     );
     await settle();
 
@@ -177,7 +177,7 @@ describe("sent copy stores its attachments (#470)", () => {
         text: "attached",
         attachments: [{ filename: "numbers.csv", mimeType: "text/csv", content: b64("1,2") }],
       },
-      fctx,
+      fctx, undefined, "estate",
     );
     await settle();
 
@@ -192,7 +192,7 @@ describe("sent copy stores its attachments (#470)", () => {
 
   it("CONTROL: an attachment-free send stores none, and the bytes route 404s", async () => {
     const { env, ctx: fctx, settle } = makeFakeEnv();
-    const { messageId } = await send(env, { to: "dev@example.com", subject: "plain", text: "x" }, fctx);
+    const { messageId } = await send(env, { to: "dev@example.com", subject: "plain", text: "x" }, fctx, undefined, "estate");
     await settle();
 
     const msg = await stored(env, messageId);
@@ -207,7 +207,7 @@ describe("sent copy stores its attachments (#470)", () => {
     const { messageId } = await send(
       env,
       { to: "dev@example.com", subject: "plain", text: "x", attachments: [] },
-      fctx,
+      fctx, undefined, "estate",
     );
     await settle();
 
@@ -221,7 +221,7 @@ describe("sent copy stores its attachments (#470)", () => {
     const { messageId } = await send(
       env,
       { to: "dev@example.com", subject: "one file", text: "x", attachments: [{ content: b64("ZZ") }] },
-      fctx,
+      fctx, undefined, "estate",
     );
     await settle();
 

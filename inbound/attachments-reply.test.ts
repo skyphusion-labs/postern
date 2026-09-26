@@ -41,7 +41,7 @@ describe("mailbox.reply attachments (#363)", () => {
         text: "see attached",
         attachments: [{ filename: "report.csv", mimeType: "text/csv", content: b64("a,b,c\n1,2,3") }],
       },
-      ctx,
+      ctx, undefined, "estate",
     );
     await settle();
 
@@ -68,7 +68,7 @@ describe("mailbox.reply attachments (#363)", () => {
           { filename: "two.bin", mimeType: "application/octet-stream", content: b64("TWO") },
         ],
       },
-      ctx,
+      ctx, undefined, "estate",
     );
     await settle();
     const atts = sent[0].attachments!;
@@ -79,7 +79,7 @@ describe("mailbox.reply attachments (#363)", () => {
   it("fills sane defaults when filename/mimeType are omitted", async () => {
     const { env, ctx, settle, sent } = makeFakeEnv();
     await seedOriginal(env, ctx, settle);
-    await reply(env, { messageId: "orig@example.com", text: "x", attachments: [{ content: b64("ZZ") }] }, ctx);
+    await reply(env, { messageId: "orig@example.com", text: "x", attachments: [{ content: b64("ZZ") }] }, ctx, undefined, "estate");
     await settle();
     const a = sent[0].attachments![0];
     expect(a.filename).toBe("attachment-1");
@@ -90,7 +90,7 @@ describe("mailbox.reply attachments (#363)", () => {
   it("leaves the sent copy attachment-free when the reply carries none", async () => {
     const { env, ctx, settle, sent } = makeFakeEnv();
     await seedOriginal(env, ctx, settle);
-    await reply(env, { messageId: "orig@example.com", text: "no files" }, ctx);
+    await reply(env, { messageId: "orig@example.com", text: "no files" }, ctx, undefined, "estate");
     await settle();
     expect(sent[0].attachments).toBeUndefined();
   });
@@ -98,7 +98,7 @@ describe("mailbox.reply attachments (#363)", () => {
   it("treats an empty attachments array as none", async () => {
     const { env, ctx, settle, sent } = makeFakeEnv();
     await seedOriginal(env, ctx, settle);
-    await reply(env, { messageId: "orig@example.com", text: "x", attachments: [] }, ctx);
+    await reply(env, { messageId: "orig@example.com", text: "x", attachments: [] }, ctx, undefined, "estate");
     await settle();
     expect(sent[0].attachments).toBeUndefined();
   });
@@ -108,7 +108,7 @@ describe("mailbox.reply attachments (#363)", () => {
     const { env, ctx, settle } = makeFakeEnv();
     await seedOriginal(env, ctx, settle);
     await expect(
-      reply(env, { messageId: "orig@example.com", text: "x", attachments: [{ content: "@@@not-base64@@@" }] }, ctx),
+      reply(env, { messageId: "orig@example.com", text: "x", attachments: [{ content: "@@@not-base64@@@" }] }, ctx, undefined, "estate"),
     ).rejects.toMatchObject({ code: "E_VALIDATION_ERROR" });
   });
 
@@ -116,7 +116,7 @@ describe("mailbox.reply attachments (#363)", () => {
     const { env, ctx, settle } = makeFakeEnv();
     await seedOriginal(env, ctx, settle);
     await expect(
-      reply(env, { messageId: "orig@example.com", text: "x", attachments: [{ filename: "x.bin" } as never] }, ctx),
+      reply(env, { messageId: "orig@example.com", text: "x", attachments: [{ filename: "x.bin" } as never] }, ctx, undefined, "estate"),
     ).rejects.toMatchObject({ code: "E_FIELD_MISSING" });
   });
 
@@ -127,7 +127,7 @@ describe("mailbox.reply attachments (#363)", () => {
       reply(
         env,
         { messageId: "orig@example.com", text: "x", attachments: [{ filename: "ok\r\nBcc: v@x.com", content: b64("z") }] },
-        ctx,
+        ctx, undefined, "estate",
       ),
     ).rejects.toMatchObject({ code: "E_VALIDATION_ERROR" });
   });
@@ -137,7 +137,7 @@ describe("mailbox.reply attachments (#363)", () => {
     await seedOriginal(env, ctx, settle);
     const many = Array.from({ length: 21 }, (_, i) => ({ filename: `f${i}.txt`, content: b64("x") }));
     await expect(
-      reply(env, { messageId: "orig@example.com", text: "x", attachments: many }, ctx),
+      reply(env, { messageId: "orig@example.com", text: "x", attachments: many }, ctx, undefined, "estate"),
     ).rejects.toMatchObject({ code: "E_VALIDATION_ERROR" });
   });
 
@@ -146,7 +146,7 @@ describe("mailbox.reply attachments (#363)", () => {
     await seedOriginal(env, ctx, settle);
     const big = Buffer.alloc(25 * 1024 * 1024 + 16, 0x41).toString("base64");
     await expect(
-      reply(env, { messageId: "orig@example.com", text: "x", attachments: [{ content: big }] }, ctx),
+      reply(env, { messageId: "orig@example.com", text: "x", attachments: [{ content: big }] }, ctx, undefined, "estate"),
     ).rejects.toMatchObject({ code: "E_PAYLOAD_TOO_LARGE", status: 413 });
   });
 });

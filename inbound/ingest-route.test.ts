@@ -70,7 +70,7 @@ describe("POST /ingest happy path", () => {
     expect(body).toMatchObject({ ok: true, messageId: "ing1@example.com", stored: true, merged: false });
     await settle();
 
-    const msg = await store.get(env, "ing1@example.com");
+    const msg = await store.getUnscoped(env, "ing1@example.com");
     expect(msg?.to).toBe("Support <support@skyphusion.org>, Ops <ops@skyphusion.org>"); // raw To header fidelity
     expect(msg?.deliveredTo).toEqual(["support@skyphusion.org"]); // the envelope recipient
     expect(msg?.cc).toBe("ops@skyphusion.org");
@@ -165,7 +165,7 @@ describe("POST /ingest with TRUSTED_SENDER_DOMAINS absent (#473)", () => {
     expect(res.status).toBe(200);
     await settle();
 
-    const msg = await store.get(env, "no-allowlist@example.com");
+    const msg = await store.getUnscoped(env, "no-allowlist@example.com");
     expect(msg?.messageId).toBe("no-allowlist@example.com");
     expect(msg?.trusted).toBe(false);
   });
@@ -178,7 +178,7 @@ describe("POST /ingest with TRUSTED_SENDER_DOMAINS absent (#473)", () => {
     expect(res.status).toBe(200);
     await settle();
 
-    const msg = await store.get(env, "allowlisted@example.com");
+    const msg = await store.getUnscoped(env, "allowlisted@example.com");
     expect(msg?.trusted).toBe(true);
   });
 });

@@ -548,7 +548,8 @@ async function storeAttachments(
  * exact class of bug #507 is about, one number produced by two serializers.
  */
 export async function projectedSizeFor(env: Env, messageId: string): Promise<number | null> {
-  const msg = await get(env, messageId);
+  // No caller and no member: an internal projection of a row we already hold.
+  const msg = await getUnscoped(env, messageId);
   if (!msg) return null;
   return await projectRfc822Size({
     messageId: msg.messageId,
@@ -1468,8 +1469,43 @@ export async function deleteMessage(
   return true;
 }
 
-/** Full message + attachment metadata, or null if not found. */
-export async function get(env: Env, messageId: string): Promise<StoredMessage | null> {
+/**
+ * Full message + attachment metadata for a caller SCOPED to `readScope`. Null when the
+ * row does not exist, AND null when it exists but is not this caller's to read: the two
+ * are deliberately indistinguishable, so this is never an existence oracle.
+ *
+ * `readScope` is REQUIRED and there is no estate default. Reading the whole estate is a
+ * real need (the static operator/IMAP token, the same-account RPC entrypoint, the internal
+ * size projection) and it has its OWN function, `getUnscoped`, which a call site must name
+ * out loud. That asymmetry is the whole point of the shape: a reader added later cannot
+ * obtain an unscoped read by forgetting an argument, only by asking for one. The read
+ * ROUTE is not the only path that reads a stored message, and a per-call-site check is
+ * exactly the kind of thing the next call site does not repeat. Refs GHSA-49mc-vh6w-95h4.
+ *
+ * The predicate is `messageAccessible`, so "may this caller see this message" keeps ONE
+ * definition (`accessClause`) rather than gaining a second copy here that could drift from
+ * the one the read route already enforces. An EMPTY viewer set is refused rather than read
+ * as estate, for the reason stated on messageAccessible: this runs only to SCOPE a caller,
+ * so no addresses can only mean the scope is unanswerable.
+ */
+export async function get(
+  env: Env,
+  messageId: string,
+  readScope: string | readonly string[],
+): Promise<StoredMessage | null> {
+  if (!(await messageAccessible(env, messageId, readScope))) return null;
+  return await getUnscoped(env, messageId);
+}
+
+/**
+ * Full message + attachment metadata with NO access scoping: any stored message, whoever
+ * is asking. Named so that an unscoped read is a deliberate, greppable act at the call
+ * site instead of the default (see `get`). Legitimate callers today: the read route when
+ * the bearer is a static estate token, `MailboxService` (a same-account service binding
+ * with no bearer and therefore no member to scope to), and `projectedSizeFor` (an internal
+ * projection with no caller at all).
+ */
+export async function getUnscoped(env: Env, messageId: string): Promise<StoredMessage | null> {
   const row = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
