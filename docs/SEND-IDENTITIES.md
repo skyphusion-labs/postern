@@ -183,11 +183,16 @@ HASH=$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
 #                  "displayName": "<Name>" } }
 #
 #    Put the merged object in the "vars" block of your wrangler config as
-#    POSTERN_SEND_IDENTITIES (JSON as a string), then:
+#    POSTERN_SEND_IDENTITIES. The documented form is the JSON ESCAPED INTO A STRING:
+#
+#      "POSTERN_SEND_IDENTITIES": "{\"<HASH>\": {\"from\": \"<member>@example.com\", \"scopes\": [\"read\", \"send\"]}}"
+#
+#    A plain (unquoted) JSON object is also accepted, since wrangler passes it
+#    through already parsed. Then:
 wrangler deploy
 
-# 4. Hand each member their RAW $TOKEN out of band (e.g. crew-secrets, per-member
-#    age recipient). The raw token NEVER lands in the registry or any tracked file.
+# 4. Hand each member their RAW $TOKEN out of band (a password manager, an
+#    encrypted message). The raw token NEVER lands in the registry or any tracked file.
 #
 #    MCP wiring (multi-person): each person's client env gets ONLY their token as
 #    POSTERN_API_TOKEN. For read+send, also set POSTERN_MCP_SEND=1 (or set
