@@ -41,7 +41,10 @@ load_secret POSTERN_TRANSPORT_TOKEN
 load_secret EMAIL_RELAY_TOKEN
 # Bring-your-own upstream SMTP password (outbound /dispatch).
 load_secret SMTP_OUT_PASSWORD
-# LDAP search+bind service-account password (AUTH_BACKEND=ldap).
+# RETIRED: LDAP search+bind service-account password (#182). Still expanded so a
+# stack that mounts LDAP_BIND_PASSWORD_FILE reaches the relay's retired-var guard
+# (config.go) and refuses startup loudly, instead of the mount being silently
+# dropped here. Direct-bind needs no service-account secret.
 load_secret LDAP_BIND_PASSWORD
 
 exec "$@"

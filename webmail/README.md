@@ -55,7 +55,8 @@ apply `schema.sql` then `seed.dev.sql` to a local D1, `wrangler dev`, open
 - **Thread view**: sibling messages in the same thread, click to jump.
 - **Search** over the mailbox (the `/api/search` endpoint).
 - **Compose and reply** when a send-scoped token is configured at connect;
-  plain-text bodies. Read-only without one: the compose controls are gated on a
+  plain or rich HTML bodies from one editor (rich HTML is sanitized server-side at
+  send). Read-only without one: the compose controls are gated on a
   probed send capability, never on the presence of a token, so a read-only token is
   never offered a UI that can only fail. Full contract: [`COMPOSE.md`](COMPOSE.md).
 
@@ -198,7 +199,7 @@ cd inbound && npm test     # includes webmail.test.ts
 
 `webmail.test.ts` asserts: the `/webmail` route serves the HTML (no token
 required for the page itself), the health and `/api` token gating are unchanged,
-the locked-down CSP/headers are present, the page never uses `innerHTML`, and the
+the locked-down CSP/headers are present, the page never assigns `innerHTML`, and the
 **embedded copy stays byte-identical to `webmail/index.html`** (the worker embeds
 the page because it cannot read a file at request time; the source of truth is
 `webmail/index.html`).
@@ -269,8 +270,9 @@ What you get, signed in:
   per-reader override, so "you read it" never renders to the other members as "the queue
   is handled". Their unread counts are unaffected.
 - **A role view is read plus mark-read only.** Star, Archive, Trash, Junk and delete are
-  not offered and the API refuses them: each would write shared state on behalf of every
-  other member. That workflow is not modeled yet.
+  not offered, and the API skips a role-queue id on those routes (not applied, the
+  same answer as an unknown id; the IMAP door answers a tagged NO): each would write
+  shared state on behalf of every other member. That workflow is not modeled yet.
 - **You answer the queue as yourself.** Reply and forward send under your own identity,
   not the role address, and the view says so. Sending AS a role address is a separate
   send-identity question.
