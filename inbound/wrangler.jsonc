@@ -8,7 +8,7 @@
 
   // Reached via Email Routing + the token-gated custom route; no workers.dev
   // door needed. Secure-by-default for a fresh operator install (defense-in-
-  // depth; fleet-chezmoi#46).
+  // depth). Set true to smoke over https://postern.<subdomain>.workers.dev.
   "workers_dev": false,
 
   // Production door: serve the mailbox API on your own hostname (walkthrough in
@@ -141,8 +141,8 @@
   //   wrangler secret put POSTERN_API_TOKEN
 
   // OPTIONAL (#197): MTA-STS policy host. Add a route + set MTA_STS_* vars when enabling
-  // (see docs/MTA-STS.md). Example:
-  //   { pattern = "mta-sts.example.com/.well-known/mta-sts.txt", zone_name = "example.com" },
+  // (see docs/MTA-STS.md). Example entry for the "routes" array:
+  //   { "pattern": "mta-sts.example.com/.well-known/mta-sts.txt", "zone_name": "example.com" },
 
   // Email Routing rules (CF Dashboard -> Email -> Email Routing -> Routing Rules):
   //   Route ALL addresses (including catch-all) to this Worker. The worker
