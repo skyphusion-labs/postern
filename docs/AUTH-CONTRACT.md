@@ -170,9 +170,9 @@ LDAP_GROUP_ATTR=memberOf                # default
 ```
 
 No `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` / `LDAP_SEARCH_*`: those configured the
-retired search+bind path and are GONE from BOTH doors (removed from the Go
-relay; the Python proxy refuses to start if any of them is set, so an old
-EnvironmentFile fails loud rather than silently changing auth -- #182).
+retired search+bind path and are GONE from BOTH doors: each door refuses to
+start in ldap mode if any of them is set, so an old EnvironmentFile fails loud
+rather than silently changing auth (#182; the Go relay's guard is #612).
 
 **Per-door difference.** The `mail`-attribute resolution is the **SMTP relay's**
 need: it uses `mail` as the authenticated From and enforces `From == mail`, so
