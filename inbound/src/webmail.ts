@@ -464,9 +464,10 @@ export const WEBMAIL_HTML = `<!doctype html>
         .then(function (j) {
           if (r.status === 401) { var e = new Error("unauthorized"); e.code = 401; throw e; }
           if (r.status === 403) {
-            // The token cannot send: degrade honestly (never keep offering compose as
-            // if a retry might work), then surface it to the caller (#277).
-            state.sendCapable = false; state.sendReason = "readonly"; updateComposeUI();
+            // E_IDENTITY_REQUIRED (drafts need a bound identity) is not "cannot send".
+            if ((j && j.error) !== "E_IDENTITY_REQUIRED") {
+              state.sendCapable = false; state.sendReason = "readonly"; updateComposeUI();
+            }
             var e403 = new Error((j && (j.message || j.error)) || "requires send scope");
             e403.code = 403; throw e403;
           }
