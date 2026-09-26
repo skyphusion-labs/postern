@@ -96,19 +96,30 @@ export async function sha256Hex(input: string): Promise<string> {
  * entry can never widen the sender domain. An entry whose From is outside the allowed
  * domain is DENIED at resolve time (skipped here) and logged, so a fat-fingered or
  * tampered entry cannot make the worker send as an arbitrary external domain.
+ *
+ * `raw` is normally the JSON string from the "vars" block, but wrangler also accepts
+ * a JSON OBJECT as a var value and hands it to the Worker already parsed. An operator
+ * who pastes the registry as an object meant exactly that registry, so it is accepted
+ * as-is (every entry still passes the same per-entry validation). Any other type
+ * yields an empty map: it must never throw, because this runs for every bearer that
+ * is not a static token, and a throw there is a 500 instead of a 401.
  */
 export function parseRegistry(
-  raw: string | undefined,
+  raw: unknown,
   allowedDomain?: string,
 ): Map<string, RegistryHit> {
   const map = new Map<string, RegistryHit>();
-  if (!raw || raw.trim() === "") return map;
 
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return map; // malformed JSON: deny-by-default, never throw on the request path
+  if (typeof raw === "string") {
+    if (raw.trim() === "") return map;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return map; // malformed JSON: deny-by-default, never throw on the request path
+    }
+  } else {
+    parsed = raw; // already-parsed object var (or junk, rejected just below)
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return map;
 
@@ -160,7 +171,7 @@ function parseIdentityCaps(raw: unknown): IdentityCap[] {
  */
 export async function resolveRegistryIdentity(
   token: string,
-  raw: string | undefined,
+  raw: unknown,
   allowedDomain?: string,
 ): Promise<RegistryHit | null> {
   if (!token) return null;

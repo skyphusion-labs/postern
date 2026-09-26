@@ -185,19 +185,23 @@ Release tags: `postern-mcp-v*` (npm CI) and GitHub Release `v*` matching
 
 ## Relay (optional, bring-your-own-SMTP)
 
-Go >= 1.22:
+Go 1.25+ (what `relay/go.mod` requires; an older Go with the default
+`GOTOOLCHAIN=auto` downloads the pinned toolchain, one set to `GOTOOLCHAIN=local`
+refuses to build):
 
 ```bash
 cd relay
-go mod tidy
-go build -o postern-relay .
+go build -o skyphusion-email-relay .   # the name the unit in relay/systemd/ runs
 ```
 
-Configure via env (no values are baked in): `POSTERN_INGEST_URL` (or the legacy
-`EMAIL_WORKER_URL`), `POSTERN_TRANSPORT_TOKEN`, and `DEFAULT_FROM` / `FROM_DOMAIN`
-for off-domain sender rewriting. The relay uses the envelope `RCPT TO` for
-recipients; if a message's `From` is off the allowed domain it is rewritten to
-`DEFAULT_FROM` with the original preserved as `Reply-To`.
+Configure via env (no values are baked in; every variable is in
+`relay/skyphusion-email-relay.env.example`, systemd bring-up in
+[relay/README.md](relay/README.md)). For local SMTP-only producers (cron, backups),
+set `POSTERN_INGEST_URL` (your worker's `/ingest`) and `POSTERN_TRANSPORT_TOKEN`:
+each message is stored in the mailbox as received, addressed by the envelope
+`RCPT TO`. `DEFAULT_FROM` / `FROM_DOMAIN` apply only to the legacy
+`EMAIL_WORKER_URL` path, which sends the message instead of storing it and
+rewrites an off-domain `From` to `DEFAULT_FROM`, keeping the original as `Reply-To`.
 
 ## Conventions
 
