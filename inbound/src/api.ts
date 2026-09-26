@@ -388,7 +388,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (role) applyRoleScope(query, role, sessionIdentity as string);
       else if (sessionIdentity) query.viewer = sessionIdentity;
       const page = await store.list(env, query);
-      return json({ ok: true, ...page });
+      return json({
+        ok: true,
+        identityScope: readScopeReport(sessionIdentity, role),
+        ...page,
+      });
     }
 
     // --- operator: the parsed role-membership map (#425) ---
@@ -677,7 +681,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });
-      return json({ ok: true, ...page });
+      // `...page` carries `complete` / `retrievalCap` / `degraded` when the mode could not
+      // answer exhaustively, so both halves of #631 (whose mail, and how much of it) are
+      // answered in the envelope instead of left for the caller to assume.
+      return json({
+        ok: true,
+        identityScope: readScopeReport(sessionIdentity, role),
+        ...page,
+      });
     }
 
     // --- read: recent recipients (D-CONTACTS-1 / #354) ---
@@ -1533,6 +1544,36 @@ async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolu
  */
 function sessionViewer(resolution: AuthResolution): string | undefined {
   return boundReadMember(resolution);
+}
+
+/**
+ * The scope a read was ANSWERED UNDER, stated in the response. Refs #631, and the unbuilt
+ * half of closed #544 ("reads attributable to the identity that made them").
+ *
+ * #544 gave registry tokens a server-forced view of their own mail, which is right. What it
+ * did not do is SAY SO: the response carried items and a cursor and nothing naming the
+ * boundary, so a zero result read as "not in the estate" when it meant "not in your slice". A
+ * scoped view that does not announce its scope is indistinguishable from a complete one, and
+ * the caller cannot tell which one it got.
+ *
+ * This reports what the SERVER imposed, never what the caller asked for. A caller-supplied
+ * `to=` or `from=` is deliberately absent: the caller already knows its own filters, and the
+ * question this answers is the one it cannot answer for itself. A `role` read is reported
+ * distinctly from a `member` read because a queue is a DIFFERENT set, not a wider version of
+ * a personal one (#425).
+ */
+type ReadScopeReport =
+  | { kind: "estate" }
+  | { kind: "member"; addresses: readonly string[] }
+  | { kind: "role"; address: string };
+
+function readScopeReport(member: string | undefined, role: string | null): ReadScopeReport {
+  if (role) return { kind: "role", address: role };
+  // Exactly the addresses the row predicate was given, so the report cannot overstate reach:
+  // list and search bind the single member, not the member plus its role queues (that wider
+  // set belongs to the read ROUTE, via sessionReadScope).
+  if (member) return { kind: "member", addresses: [member] };
+  return { kind: "estate" };
 }
 
 /** WHOSE mail folders/unread bind to (#417 / #544).

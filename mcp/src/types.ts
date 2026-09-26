@@ -94,8 +94,33 @@ export interface SearchHit {
 
 export interface Page<T> {
   items: T[];
-  cursor: string | null;
+  /**
+   * Opaque continuation, or null for "there are no more". UNDEFINED is a third state and not a
+   * synonym for null: it means the answer is incomplete and the worker has no continuation to
+   * offer (the score-ranked search modes, which have no offset to resume from). Coercing it to
+   * null with `?? null` was how this client turned an honest worker answer back into a false
+   * claim of exhaustion, so it is deliberately preserved. Read `complete`.
+   */
+  cursor?: string | null;
+  /** Whether items plus the cursor chain is the WHOLE answer set. Absent means true. */
+  complete?: boolean;
+  /** The retrieval ceiling that applied, present only alongside complete === false. */
+  retrievalCap?: number;
+  /** Why the answer is incomplete, when the reason is not simply the ceiling. */
+  degraded?: string;
+  /** WHOSE mail this answer covers, as the worker imposed it (never what the caller asked). */
+  identityScope?: ReadScopeReport;
 }
+
+/**
+ * The scope a read was answered under, as reported by the worker. An agent holding a bound
+ * credential sees only its own slice, and before this existed nothing in the response said so,
+ * so a zero result was indistinguishable between "not in the estate" and "not in your slice".
+ */
+export type ReadScopeReport =
+  | { kind: "estate" }
+  | { kind: "member"; addresses: string[] }
+  | { kind: "role"; address: string };
 
 export type SearchMode = "fts" | "substr" | "semantic" | "hybrid";
 // Which column(s) the substring mode matches (worker /api/search field param,

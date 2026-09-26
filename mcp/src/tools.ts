@@ -84,6 +84,36 @@ function mapAttachments(
   return input.map((x) => ({ content: x.content, filename: x.filename, mimeType: x.mime_type }));
 }
 
+/**
+ * The completeness and scope fields every read tool result carries.
+ *
+ * `count` is kept (it is this page's length, and callers depend on it) but it is no longer the
+ * only thing an agent can read: `count: 2` sitting next to an implied exhaustion is exactly how
+ * "two results" gets read as "two exist". `complete` answers the question `count` never could,
+ * and `identityScope` answers the other half, whose mail the answer even covers.
+ *
+ * Absent fields mean the old, unambiguous case: a keyset-paginated answer whose cursor chain is
+ * the whole set. Nothing is invented here; every field is passed through from the worker or
+ * omitted.
+ */
+function completeness(page: {
+  cursor?: string | null;
+  complete?: boolean;
+  retrievalCap?: number;
+  degraded?: string;
+  identityScope?: unknown;
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  // `cursor` is reported only when the worker actually sent one. An absent cursor means "no
+  // continuation exists AND this is not exhaustive", which is not null and must not become it.
+  if (page.cursor !== undefined) out.cursor = page.cursor;
+  if (page.complete !== undefined) out.complete = page.complete;
+  if (page.retrievalCap !== undefined) out.retrievalCap = page.retrievalCap;
+  if (page.degraded !== undefined) out.degraded = page.degraded;
+  if (page.identityScope !== undefined) out.identityScope = page.identityScope;
+  return out;
+}
+
 export const READ_TOOLS: ToolDef[] = [
   {
     name: "mailbox_search",
@@ -100,7 +130,15 @@ export const READ_TOOLS: ToolDef[] = [
       "and read state (seen) -- e.g. seen=false plus mailbox=archive answers 'unread " +
       "mail in Archive'. seenFor names whose read state seen/results render, for a " +
       "shared address (e.g. a role queue) with no single reader of its own. This is " +
-      "the primary tool for finding mail by topic.",
+      "the primary tool for finding mail by topic. READING THE RESULT: `count` is the " +
+      "size of THIS page, never a total. `complete: false` means messages matched that " +
+      "are NOT in this response, so the result CANNOT prove absence -- `retrievalCap` " +
+      "and `degraded` say why, and the score-ranked modes (semantic, hybrid) have no " +
+      "cursor to resume from, so raise limit or narrow the query instead. To prove a " +
+      "message is NOT there, use mode 'fts', which is exhaustively paginated. " +
+      "`identityScope` states whose mail was searched: kind 'member' or 'role' means " +
+      "you were shown a SLICE, so a zero result means 'not in your slice', not 'not in " +
+      "the estate'.",
     inputSchema: {
       query: z.string().min(1).describe("the search text"),
       mode: MODE.optional().describe("search mode; defaults to hybrid. substr is a literal substring match (use with field)"),
@@ -158,7 +196,7 @@ export const READ_TOOLS: ToolDef[] = [
         seen: a.seen ?? null,
         seenFor: a.seenFor ?? null,
         count: page.items.length,
-        cursor: page.cursor,
+        ...completeness(page),
         results: page.items,
       };
     },
@@ -175,7 +213,12 @@ export const READ_TOOLS: ToolDef[] = [
       "same-domain mail others sent it). `mailbox` filters by durable folder (archive, " +
       "trash, junk, or all). Use mailbox_search for topic search; use this to browse or " +
       "filter by participant/folder. seenFor names whose read state the seen field " +
-      "renders, for a shared address (e.g. a role queue) with no single reader of its own.",
+      "renders, for a shared address (e.g. a role queue) with no single reader of its own. " +
+      "READING THE RESULT: `count` is the size of THIS page, never a total; follow `cursor` " +
+      "to page, where `cursor: null` means there are genuinely no more. `identityScope` " +
+      "states whose mail was listed: kind 'member' or 'role' means you were shown a SLICE, " +
+      "so an empty result means 'not in your slice', not 'not in the estate'. This tool " +
+      "does NOT filter by date; use mailbox_search for that.",
     inputSchema: {
       to: z.string().optional().describe("filter by recipient address"),
       from: z.string().optional().describe("filter by sender address"),
@@ -194,7 +237,12 @@ export const READ_TOOLS: ToolDef[] = [
     },
     handler: async (client, a) => {
       const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor });
-      return { count: page.items.length, cursor: page.cursor, seenFor: a.seenFor ?? null, messages: page.items };
+      return {
+        count: page.items.length,
+        ...completeness(page),
+        seenFor: a.seenFor ?? null,
+        messages: page.items,
+      };
     },
   },
   {

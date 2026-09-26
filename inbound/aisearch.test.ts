@@ -48,13 +48,21 @@ describe("store.search semantic (#31)", () => {
     expect(ids.filter((id) => id === "big@example.com")).toHaveLength(1);
   });
 
-  it("returns empty when the AI binding is unavailable (graceful)", async () => {
+  // WAS: "returns empty when the AI binding is unavailable (graceful)", asserting
+  // cursor === null. That assertion locked in the defect rather than a behaviour: an empty
+  // page with a null cursor is the wire form of "I searched and found nothing", and what
+  // actually happened is that no query ran at all. Graceful is not the same as silent, and a
+  // test can only be as honest as the contract it asserts. See #632 F4 and
+  // search-completeness.test.ts for the full pairing.
+  it("says WHY it is empty when the AI binding is unavailable, instead of implying a result", async () => {
     const { env, ctx, settle } = makeFakeEnv({ VECTORIZE_FOR: "", AI: undefined });
     await seed(env, ctx, CORPUS);
     await settle();
     const res = await store.search(env, { q: "anything", mode: "semantic" });
     expect(res.items).toEqual([]);
-    expect(res.cursor).toBeNull();
+    expect(res.complete).toBe(false);
+    expect(res.degraded).toMatch(/no AI binding/i);
+    expect(res.cursor).toBeUndefined();
   });
 
   it("returns empty for a blank query", async () => {

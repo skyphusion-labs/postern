@@ -180,10 +180,38 @@ export interface SearchQuery {
   cursor?: string;
 }
 
-/** One page of results. cursor=null means there are no more. */
+/**
+ * One page of results.
+ *
+ * `cursor === null` means THERE ARE NO MORE: it is a positive claim of exhaustion, and the
+ * keyset surfaces (list, fts, substr) can make it honestly because they page a SQL ordering.
+ *
+ * `cursor` ABSENT means something different and is never the same thing: this page is
+ * incomplete AND no continuation exists. The score-ranked modes are in that position, because
+ * a vector index has no offset to resume from and its topK has a platform ceiling. They used
+ * to answer null there, which asserted exhaustion they could not deliver; that is the defect
+ * #631 was filed for, in the field a careful caller trusts most.
+ *
+ * So: read `complete`. Never read an absent cursor as exhaustion.
+ */
 export interface Page<T> {
   items: T[];
-  cursor: string | null;
+  cursor?: string | null;
+  /**
+   * Whether `items` plus the cursor chain is the WHOLE answer set. Absent means true, which
+   * keeps every existing keyset response byte-identical. `false` appears only when a
+   * score-ranked retrieval hit its ceiling, or when a mode could not run at all.
+   */
+  complete?: boolean;
+  /** The retrieval ceiling that applied, present only alongside `complete: false`. */
+  retrievalCap?: number;
+  /**
+   * Why this answer is not complete, in words, when the reason is not simply the ceiling:
+   * a mode that could not run (no AI or no Vectorize binding) answers zero rows, and zero
+   * rows with no explanation is indistinguishable from "no matching mail". A degrade may
+   * happen; it may not be silent.
+   */
+  degraded?: string;
 }
 
 export interface SearchHit {
@@ -2323,6 +2351,25 @@ async function embedQuery(env: Env, text: string): Promise<number[] | null> {
   return Array.isArray(vec) && vec.length > 0 ? vec : null;
 }
 
+/**
+ * Vectorize's OWN ceiling on topK for the way we query it.
+ *
+ * 50 with `returnValues: true` or `returnMetadata: "all"`; 100 only with neither; 20 on a
+ * LEGACY V1 index, where returnMetadata is a boolean. We pass `returnMetadata: "all"` to read
+ * `message_id` back, so 50 is our ceiling and there is no knob that raises it.
+ *
+ * This is a HARD wall, not a tuning parameter, and it is the honest reason a score-ranked
+ * answer can be incomplete: there is no "fetch more" to loop on. Widening it for real means
+ * pushing the date/recipient predicate INTO the query with Vectorize metadata filtering, so
+ * the top N is the top N INSIDE the window rather than whatever survives the global top N.
+ * That needs metadata indexes on the index plus a corpus re-upsert, so it is a deliberate
+ * migration, not a code change here. Until then this module DECLARES the truncation.
+ *
+ * Cross-check when touching this: RECONCILE_SAMPLE_TOPK below cites 20, which was the V1
+ * number and is now only the legacy ceiling.
+ */
+const VECTOR_TOPK_MAX = 50;
+
 interface VectorizeMatch {
   id: string;
   score: number;
@@ -2336,25 +2383,66 @@ async function nearestMessageIds(
   env: Env,
   queryVec: number[],
   limit: number,
-): Promise<{ messageId: string; score: number }[]> {
-  if (!env.VECTORIZE) return [];
-  // Over-fetch chunks so collapsing to messages still yields ~limit of them.
-  const topK = Math.min(50, Math.max(limit * 3, limit));
+  wide: boolean,
+): Promise<{ ranked: { messageId: string; score: number }[]; exhausted: boolean; topK: number }> {
+  // `wide` = a filter will be applied AFTER hydration, so every row the filter drops is a
+  // row the retrieval should have replaced and did not. limit*3 was always a guess at how
+  // many chunks collapse into `limit` messages; under a filter it is the WRONG guess, and
+  // quietly so: a limit-5 query asked for 15 chunks store-wide and then threw most of them
+  // away against a date window, which is how a month of mail answered with two hits. When a
+  // filter is active we ask for the ceiling outright. That does not make the answer complete
+  // (see VECTOR_TOPK_MAX), it just stops us discarding headroom we already had.
+  const topK = wide ? VECTOR_TOPK_MAX : Math.min(VECTOR_TOPK_MAX, Math.max(limit * 3, limit));
+  if (!env.VECTORIZE) return { ranked: [], exhausted: false, topK };
   const res = (await env.VECTORIZE.query(queryVec, {
     topK,
     returnMetadata: "all",
   })) as { matches?: VectorizeMatch[] };
+  const matches = res.matches ?? [];
   const best = new Map<string, number>();
-  for (const m of res.matches ?? []) {
+  for (const m of matches) {
     const id = m.metadata?.message_id;
     if (!id) continue;
     const prev = best.get(id);
     if (prev === undefined || m.score > prev) best.set(id, m.score);
   }
-  return [...best.entries()]
+  const collapsed = [...best.entries()]
     .map(([messageId, score]) => ({ messageId, score }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .sort((a, b) => b.score - a.score);
+  // THE ORDERING IS THE WHOLE FIX. Slicing to `limit` here, before hydration, is what made a
+  // filtered query answer with almost nothing: a message that matched the window but ranked
+  // below `limit` GLOBALLY was discarded before the window was ever consulted, so raising the
+  // retrieval ceiling on its own changed nothing. When a post-retrieval filter is active we
+  // hand back every candidate and let the caller slice AFTER filtering. Unfiltered queries
+  // keep the cheap path: there is nothing to thin, so the old slice is still exactly right and
+  // still bounds the hydration query.
+  const ranked = wide ? collapsed : collapsed.slice(0, limit);
+  // Fewer matches than we asked for means the index had nothing else to give, so the
+  // CANDIDATE set really was exhausted and an exhaustion claim is honest. Hitting the
+  // ceiling proves only that we stopped asking.
+  return { ranked, exhausted: matches.length < topK, topK };
+}
+
+/**
+ * Does this query carry a predicate the score-ranked modes can only apply AFTER retrieval?
+ *
+ * Every one of these is pushed into SQL by the keyset modes and cannot be pushed into a
+ * vector query at all, so for semantic/hybrid they are all post-hydration thinning. If any is
+ * present, retrieval must not also be narrowed by a limit-derived guess.
+ */
+function hasPostRetrievalFilter(q: SearchQuery): boolean {
+  return Boolean(
+    q.after ||
+      q.before ||
+      q.mailbox !== undefined ||
+      q.hasAttachment !== undefined ||
+      q.seen !== undefined ||
+      q.to ||
+      q.from ||
+      q.viewer ||
+      q.lens ||
+      q.direction,
+  );
 }
 
 // Hydrate summaries for a set of message ids in one query, returned as a map so
@@ -2443,9 +2531,26 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   const fromFilter = q.from?.trim() || undefined;
   const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const queryVec = await embedQuery(env, text);
-  if (!queryVec) return { items: [], cursor: null }; // AI binding unavailable
+  // An absent AI binding is not "no matching mail": the query never ran. Answering an
+  // unexplained empty page here is the purest form of the completeness lie, because zero rows
+  // plus a null cursor reads as a searched-and-found-nothing result.
+  if (!queryVec) {
+    return {
+      items: [],
+      complete: false,
+      degraded: "semantic search unavailable: no AI binding is configured, so no query was run",
+    };
+  }
+  if (!env.VECTORIZE) {
+    return {
+      items: [],
+      complete: false,
+      degraded: "semantic search unavailable: no Vectorize binding is configured, so no query was run",
+    };
+  }
 
-  const ranked = await nearestMessageIds(env, queryVec, limit);
+  const wide = hasPostRetrievalFilter(q);
+  const { ranked, exhausted, topK } = await nearestMessageIds(env, queryVec, limit, wide);
   const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), seenKey(q));
   const items: SearchHit[] = [];
   for (const r of ranked) {
@@ -2459,8 +2564,22 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
     if (!passesCommonSearchFilters(message, q)) continue;
     items.push({ message, score: r.score });
   }
-  // Score-ranked: single page, no date cursor.
-  return { items, cursor: null };
+  // Slice AFTER filtering, so `limit` bounds the ANSWER rather than the candidate pool.
+  const page = items.slice(0, limit);
+  // A vector index has no offset, so there is no continuation to hand back either way. What
+  // differs is the CLAIM: null asserts exhaustion, and we may only assert it on two conditions
+  // together -- the index ran out of candidates before our ceiling did, AND filtering did not
+  // leave more matches than this page carries. Either one alone would be a claim we cannot
+  // support, so the cursor is OMITTED and the truncation is stated, and a caller cannot read
+  // exhaustion out of this response at all.
+  const more = items.length > page.length;
+  if (exhausted && !more) return { items: page, cursor: null, complete: true };
+  const out: Page<SearchHit> = { items: page, complete: false, retrievalCap: topK };
+  if (more) {
+    out.degraded =
+      "more matching messages were retrieved than `limit` allows, and a score-ranked mode has no cursor to resume from: raise limit or narrow the query";
+  }
+  return out;
 }
 
 async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
@@ -2506,7 +2625,20 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((h) => ({ message: h.message, score: h.score }));
-  return { items, cursor: null };
+  // A blend is complete only if BOTH halves were. The FTS half is keyset-paginated, so it is
+  // complete exactly when it handed back no continuation; the semantic half reports for
+  // itself. This is the DEFAULT mode for the MCP door, which is why it mattered most that it
+  // stopped claiming exhaustion it had not earned.
+  const ftsComplete = ftsPage.complete ?? ftsPage.cursor === null;
+  const semComplete = semPage.complete ?? semPage.cursor === null;
+  if (ftsComplete && semComplete) return { items, cursor: null, complete: true };
+  const out: Page<SearchHit> = { items, complete: false };
+  if (semPage.retrievalCap !== undefined) out.retrievalCap = semPage.retrievalCap;
+  const reasons = [semPage.degraded, ftsComplete ? undefined : "more keyword matches remain beyond this page"]
+    .filter(Boolean)
+    .join("; ");
+  if (reasons) out.degraded = reasons;
+  return out;
 }
 
 /** Thrown when a search mode is requested before it ships (semantic/hybrid = M4). */
@@ -2916,7 +3048,14 @@ export async function reprojectPage(
 const RECONCILE_GETBYIDS_BATCH = 20;
 /** Default number of live vectors used as similarity probes when sampling for cause. */
 const RECONCILE_DEFAULT_SAMPLE = 32;
-/** topK per sampling probe. Vectorize caps topK at 20 when returnMetadata="all". */
+/** topK per sampling probe.
+ *
+ *  20 was the ceiling on a LEGACY V1 index. The current limit with `returnMetadata: "all"` is
+ *  50 (100 applies only with no values and no metadata), so this constant is now a
+ *  deliberately conservative sample size rather than a platform maximum, and the comment that
+ *  called it one was wrong. Raising it would widen orphan-cause coverage per probe at
+ *  proportional cost on a Conrad-supervised audit path, so the VALUE is left alone here and
+ *  only the false claim is corrected. See VECTOR_TOPK_MAX. */
 const RECONCILE_SAMPLE_TOPK = 20;
 /** Cap on concrete orphan ids returned, so the report stays bounded. */
 const RECONCILE_MAX_ORPHAN_IDS = 200;

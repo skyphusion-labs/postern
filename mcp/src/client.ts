@@ -35,6 +35,26 @@ export interface ClientOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Project a worker read response into a Page WITHOUT flattening its completeness signals.
+ *
+ * The old form was `cursor: body.cursor ?? null`, and that one `??` was the whole problem: the
+ * worker omits `cursor` precisely when it CANNOT claim exhaustion, and `?? null` translated
+ * that into "there are no more" before an agent ever saw it. So an absent cursor stays absent
+ * here, and `complete` / `retrievalCap` / `degraded` / `identityScope` are passed through
+ * untouched, because a door that normalises away the caveat is worse than no caveat: it makes
+ * the lie look like the worker told it.
+ */
+function page<T>(body: Record<string, unknown>, items: T[]): Page<T> {
+  const out: Page<T> = { items };
+  if ("cursor" in body) out.cursor = (body.cursor as string | null) ?? null;
+  if (typeof body.complete === "boolean") out.complete = body.complete;
+  if (typeof body.retrievalCap === "number") out.retrievalCap = body.retrievalCap;
+  if (typeof body.degraded === "string") out.degraded = body.degraded;
+  if (body.identityScope) out.identityScope = body.identityScope as Page<T>["identityScope"];
+  return out;
+}
+
 export class PosternClient {
   private readonly base: string;
   private readonly token: string;
@@ -101,7 +121,7 @@ export class PosternClient {
     // and the imap door.
     if (args.seenFor) params.seenFor = args.seenFor;
     const body = await this.requestGet("/api/search", params);
-    return { items: (body.items as SearchHit[]) ?? [], cursor: body.cursor ?? null };
+    return page<SearchHit>(body, (body.items as SearchHit[]) ?? []);
   }
 
   async list(args: {
@@ -133,7 +153,7 @@ export class PosternClient {
     // search() above.
     if (args.seenFor) params.seenFor = args.seenFor;
     const body = await this.requestGet("/api/messages", params);
-    return { items: (body.items as MessageSummary[]) ?? [], cursor: body.cursor ?? null };
+    return page<MessageSummary>(body, (body.items as MessageSummary[]) ?? []);
   }
 
   async get(messageId: string): Promise<Message | null> {
