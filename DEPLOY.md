@@ -55,6 +55,19 @@ applies `wrangler d1 migrations apply DB --remote` before the inbound deploy, so
 a schema change ships with its code. Wrangler tracks which migration files have
 already run in a `d1_migrations` table and applies only the pending ones.
 
+**Repository secrets it reads** (GitHub: Settings -> Secrets and variables ->
+Actions):
+
+- `CLOUDFLARE_API_TOKEN`: a Cloudflare API token that can deploy Workers and edit
+  D1 on your account (the "Edit Cloudflare Workers" template plus D1 Edit).
+- `CLOUDFLARE_ACCOUNT_ID`: your account id (Dashboard, your domain's Overview page).
+- `POSTERN_INBOUND_WRANGLER`: your complete real `wrangler.jsonc` (comments are
+  fine). CI deploys THIS, not the committed template, and `wrangler deploy`
+  replaces vars wholesale, so it must carry your real ids and every var you rely
+  on. Without it CI deploys the committed template, whose placeholder
+  `database_id` cannot deploy.
+- `POSTERN_SMOKE_*` (optional): see below.
+
 **What the tag gate checks first.** Every tag-triggered workflow (deploy, the
 GitHub Release, the PyPI publish, both door images) starts with one shared
 preflight, `.github/scripts/tag-preflight.sh`, and refuses the whole set if the
@@ -64,8 +77,17 @@ default branch and carries the same version in all three pins
 `inbound/package.json`) plus a non-empty `## vX.Y.Z` section in `CHANGELOG.md`.
 This is deliberate: it exists because a tag once deployed production while the
 release and publish jobs failed on missing pins. If you run your own fork on your
-own version numbers, bump those four and add your CHANGELOG section in the same
-commit you tag.
+own version numbers, bump those three pins and add your CHANGELOG section in the
+same commit you tag.
+
+**In a fork, a `v*` tag fires more than the deploy.** The same tag also triggers
+the GitHub Release (`release.yml`), the PyPI publish of `postern-client`
+(`publish-pypi.yml`), and the two door-image workflows (`imap-image.yml`,
+`relay-image.yml`, which also run on pushes to `main` that touch `imap/` or
+`relay/`). Those publish to the upstream project's PyPI name and
+`ghcr.io/skyphusion-labs/*` and will fail in a fork. If you only want your Worker
+deployed, disable those four workflows in your fork (Actions -> the workflow ->
+"Disable workflow"), or skip CI entirely and deploy by hand as in section 2.
 
 After the deploy, the workflow verifies the ARTIFACT rather than trusting a green
 run: it reads the live deployment back out of the API and asserts the Worker is
@@ -114,8 +136,10 @@ both. (`0000` is `CREATE TABLE IF NOT EXISTS`, so it is also a harmless no-op on
 a store already built by `schema.sql`.)
 
 **Existing store / offline migration (0005 pattern):** when a migration must be
-applied manually (core-table rebuild, backup-first operation), run it offline
-per the operator runbook, verify, then baseline-seed **only that migration name**
+applied manually (core-table rebuild, backup-first operation), back up first
+(see [docs/OPERATIONS.md](docs/OPERATIONS.md)), apply it by hand with
+`npx wrangler d1 execute postern --remote --file=migrations/<file>.sql`, verify,
+then baseline-seed **only that migration name**
 (or the full set through your current schema revision) before merging code that
 expects it. Do not rely on CI to auto-apply destructive migrations; the gate
 blocks them unless the file carries an explicit `-- postern:allow-destructive`
