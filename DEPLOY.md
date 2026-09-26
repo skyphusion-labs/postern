@@ -8,10 +8,12 @@ here is specific to any one account or domain.
 ## Prerequisites
 
 - A Cloudflare account and a domain on it (using Cloudflare DNS).
-- Node 22+ and `npx wrangler` (logged in: `npx wrangler login`).
+- Node 22+. Wrangler itself is pinned in `inbound/package.json` and installed in
+  step 1; you log in there.
 - The sending domain onboarded to **Email Sending** (SPF/DKIM/bounce records):
   Dashboard -> Compute & AI -> Email Service -> Email Sending -> Onboard Domain,
-  then `npx wrangler email sending list` should show `enabled=yes`.
+  then (from `inbound/`, after step 1) `npx wrangler email sending list` should
+  show `enabled` = `yes`.
   Outbound send uses Cloudflare Email Sending, which requires the **Workers Paid**
   plan (USD 5/month). Inbound receive via Email Routing works on the free plan.
 - For the inbound leg: **Email Routing** enabled on the same domain (Dashboard
@@ -22,15 +24,30 @@ here is specific to any one account or domain.
 The store (D1 + R2, optionally Vectorize) is per-account; there is no shared
 default. Create your own:
 
+Every command in this guide runs from `inbound/` unless it says otherwise.
+
 ```bash
 cd inbound
-npx wrangler d1 create postern              # copy the database_id it prints
-npx wrangler r2 bucket create postern-attachments
-# optional (semantic search): npx wrangler vectorize create postern-vec --dimensions=768 --metric=cosine
+npm ci                                       # installs the pinned wrangler; do this before any npx wrangler
+npx wrangler login
+npx wrangler d1 create postern --binding DB  # writes database_id into the existing DB block
+npx wrangler r2 bucket create postern-attachments --binding ATTACHMENTS
+# optional (semantic search):
+#   npx wrangler vectorize create postern-vec --dimensions=768 --metric=cosine --binding VECTORIZE
 ```
 
+Pass `--binding` exactly as shown. Without it, wrangler asks "Would you like
+Wrangler to add it on your behalf?" and, if you accept its defaults, APPENDS a
+second `d1_databases` entry named `postern` while the `DB` entry the Worker
+actually uses keeps its `<your-d1-database-id>` placeholder (the R2 command
+likewise appends a stray `postern_attachments` binding). With `--binding` it
+fills in the existing entry instead. Either way wrangler rewrites the file with
+tab indentation; that is cosmetic.
+
 Edit `inbound/wrangler.jsonc`:
-- paste your `database_id` into the `d1_databases` block,
+- check the `DB` entry in `d1_databases` now carries your real `database_id`
+  (if you created the database without `--binding DB`, paste the id in by hand and
+  delete any extra entry wrangler appended),
 - set `DEFAULT_FROM`, `DEFAULT_FROM_NAME`, `ALLOWED_FROM_DOMAIN` to your domain
   (`ALLOWED_FROM_DOMAIN` is required; there is no built-in default, and sends refuse
   without it),
@@ -39,13 +56,21 @@ Edit `inbound/wrangler.jsonc`:
   default is `false` (secure-by-default: no public door; a production install
   instead adds a token-gated custom route on your own domain), so with the
   default left in place `npm run deploy` gives you no reachable URL to smoke.
-- (optional) uncomment the `vectorize` + `ai` blocks if you created the index.
+- (optional) if you created the index, uncomment the `ai` block (the
+  `vectorize create ... --binding VECTORIZE` above already added the `vectorize`
+  entry).
 
-Apply the schema:
+Build the store:
 
 ```bash
-npx wrangler d1 execute postern --remote --file=schema.sql
+npx wrangler d1 migrations apply postern --remote
 ```
+
+This runs the migration chain under `inbound/migrations/` against the empty
+database and records each file in wrangler's `d1_migrations` table, so a later CI
+deploy applies only migrations that are new. `schema.sql` produces the same
+tables, indexes, and columns in one file, but using it means baseline-seeding
+`d1_migrations` by hand before any CI deploy (next section).
 
 ### CI deploy and D1 migrations (read this before wiring GitHub Actions)
 
@@ -73,8 +98,9 @@ serving the version that run just uploaded. Set the optional `POSTERN_SMOKE_*`
 secrets (same ones `smoke-staging.yml` uses) and it also runs
 `inbound/smoke.mjs` against your live instance on each release.
 
-**Fresh install via `schema.sql` (above):** the schema is already current, but
-`d1_migrations` is still empty. The first CI deploy will try to re-apply
+**If you built the store from `schema.sql` instead** (`npx wrangler d1 execute
+postern --remote --file=schema.sql` in place of `migrations apply`): the schema is
+already current, but `d1_migrations` is still empty. The first CI deploy will try to re-apply
 `0001_attachments_fts_dmarc.sql` and later files against an already-built store
 and fail (for example `duplicate column name`). The migration gate (#112) may
 catch this with a clearer message, but the fix is the same: **baseline-seed**
@@ -90,7 +116,6 @@ filename list (it drifts as migrations are added); generate the INSERTs from the
 actually on disk:
 
 ```bash
-cd inbound
 npx wrangler d1 migrations list postern --remote   # creates d1_migrations, lists all as pending
 for f in migrations/*.sql; do
   name=$(basename "$f")
@@ -104,10 +129,9 @@ Verify nothing is pending:
 npx wrangler d1 migrations list postern --remote
 ```
 
-**Greenfield alternative:** skip `schema.sql` and apply migrations directly
-(`npx wrangler d1 migrations apply postern --remote`). Migration
-`0000_base_schema.sql` creates the base `messages` table, so the full chain
-(`0000` through `0013`) bootstraps an empty store on its own; wrangler creates
+**Migrations path (the default in section 1):** migration `0000_base_schema.sql`
+creates the base `messages` table, so the full chain (every file under
+`inbound/migrations/`) bootstraps an empty store on its own; wrangler creates
 `d1_migrations` and records each file as it runs, and CI then no-ops until a new
 migration lands. Use this OR the `schema.sql` + baseline-seed path above, never
 both. (`0000` is `CREATE TABLE IF NOT EXISTS`, so it is also a harmless no-op on
@@ -127,7 +151,6 @@ When new migrations ship in the repo, CI applies only the ones not yet in
 ## 2. Set the API token and deploy
 
 ```bash
-npm install
 npm run deploy   # first deploy creates the Worker; secret put below needs it to exist
 npx wrangler secret put POSTERN_API_TOKEN   # generate one: openssl rand -hex 32
 ```
@@ -221,11 +244,14 @@ cannot do end to end; `inbound/scripts/setup-email-routing.mjs` closes that gap
 by pointing the zone's catch-all rule at the deployed Worker over the API:
 
 ```bash
-cd inbound
 CF_API_TOKEN=<token> CF_ACCOUNT_ID=<account-id> CF_ZONE_ID=<zone-id> \
   node scripts/setup-email-routing.mjs --dry-run   # print the plan first
 # drop --dry-run to apply
 ```
+
+The account and zone ids are on your domain's Overview page in the Dashboard.
+`--dry-run` applies nothing, but it still calls the API to resolve the Worker, so
+it needs the same token.
 
 The token needs **Email Routing Rules: Edit** (zone) to write the rule, plus
 **Workers Scripts: Read** (account) so the script can resolve the deployed
@@ -243,14 +269,14 @@ POSTERN_BASE_URL=https://postern.<your-subdomain>.workers.dev \
 POSTERN_API_TOKEN=<your-token> \
 POSTERN_FROM=noreply@<your-domain> \
 POSTERN_TO=you@<your-domain> \
-node inbound/smoke.mjs
+node smoke.mjs
 
 # Full v1.0 acceptance, including a real inbound delivery (step 3 wired):
 POSTERN_BASE_URL=https://postern.<your-subdomain>.workers.dev \
 POSTERN_API_TOKEN=<your-token> \
 POSTERN_FROM=noreply@<your-domain> \
 POSTERN_TO=you@<your-domain> \
-node inbound/smoke.mjs --expect-inbound --inbound-subject "postern hello"
+node smoke.mjs --expect-inbound --inbound-subject "postern hello"
 # then send a real email to an address on your domain with that subject.
 ```
 

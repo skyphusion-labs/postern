@@ -131,14 +131,16 @@ The inbox list, a message read view, and search:
 Full steps in [DEPLOY.md](DEPLOY.md). In short:
 
 ```bash
-cd inbound
-npx wrangler d1 create postern              # paste database_id into wrangler.jsonc
-npx wrangler r2 bucket create postern-attachments
-# edit wrangler.jsonc: database_id + DEFAULT_FROM / ALLOWED_FROM_DOMAIN, and set
+cd inbound                                   # everything below runs from inbound/
+npm ci                                       # installs the pinned wrangler; before any npx wrangler
+npx wrangler login
+npx wrangler d1 create postern --binding DB  # writes database_id into the existing DB block
+npx wrangler r2 bucket create postern-attachments --binding ATTACHMENTS
+# edit wrangler.jsonc: DEFAULT_FROM / ALLOWED_FROM_DOMAIN, and set
 # "workers_dev": true (default is false: no reachable URL to smoke without it)
-npx wrangler d1 execute postern --remote --file=schema.sql
-npx wrangler secret put POSTERN_API_TOKEN   # openssl rand -hex 32
-npm install && npm run deploy
+npx wrangler d1 migrations apply postern --remote
+npm run deploy                               # first deploy creates the Worker
+npx wrangler secret put POSTERN_API_TOKEN    # openssl rand -hex 32
 ```
 
 Then route inbound mail to the Worker (Email Routing -> Routing Rules ->
