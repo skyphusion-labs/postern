@@ -209,6 +209,8 @@ jobs:
         run: bash .github/scripts/tests/verify-worker-deployment.test.sh
       - name: topology scrub (fleet hostnames + RFC1918)
         run: bash .github/scripts/tests/check-topology-scrub.test.sh
+      - name: forwarding preflight verdict logic (#611)
+        run: bash .github/scripts/tests/forwarding-preflight.test.sh
 
   ci:
     name: ci

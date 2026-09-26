@@ -69,6 +69,34 @@ empty `TRUSTED_SENDER_DOMAINS` means "none". That is deliberate (fail-closed on
 trust, permissive on the routing lists you control), but keep both lists
 populated in production so the behavior is explicit.
 
+### `wrangler deploy` REPLACES these vars; it does not merge them (#611)
+
+**Anything you set out of band -- dashboard, `wrangler versions`, a one-off API call -- is
+destroyed by the next deploy from this repo.** `vars` in the wrangler config are the complete
+desired state, so a config carrying `"FORWARD_TO": ""` does not leave a live value alone, it
+clears it. There is no error and no log line: the deploy is green and mail simply stops being
+forwarded until somebody notices it missing.
+
+The committed `wrangler.jsonc` ships both forwarding vars EMPTY on purpose, because it is the
+public self-host starting point. That is correct for a new operator and dangerous for an
+established instance, which is the whole of this trap.
+
+Two things protect you, and it is worth knowing which covers what:
+
+1. **Put your real values in your own config, not on the dashboard.** For CI that is the
+   `POSTERN_INBOUND_WRANGLER` secret (the full real config), which `deploy.yml` materializes in
+   preference to the committed template. Values that live only in the live Worker are values the
+   next deploy has never heard of.
+2. **The tag deploy runs a forwarding preflight** (`.github/scripts/forwarding-preflight.mjs`).
+   It reads the live Worker's current vars and REFUSES the deploy if it would clear a set
+   `FORWARD_TO`, or drop a set `FORWARD_FOR` (dropping the allowlist does not stop forwarding, it
+   widens it to every recipient). It refuses on a read it could not perform rather than passing,
+   and it prints only SET/EMPTY, never a value, because this repo is public and so are its logs.
+
+**What the preflight does NOT cover, stated plainly rather than implied:** a `wrangler deploy`
+run BY HAND from a local checkout. No CI step can gate a command that never reaches CI. If you
+operate an established instance, deploy it by pushing a tag, not from your laptop.
+
 ## Trust model
 
 `trusted` (stored per message) is a coarse "is this from us / a known service"
