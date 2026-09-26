@@ -1,5 +1,5 @@
 <!--
-Thanks for contributing. See CONTRIBUTING.md for the workflow and conventions.
+Thanks for contributing. Conventions are in CLAUDE.md ("Conventions") and the README.
 This is an AGPL-3.0-only project.
 -->
 
@@ -11,11 +11,12 @@ This is an AGPL-3.0-only project.
 
 - [ ] `npm run typecheck` passes (`tsc --noEmit`)
 - [ ] `npm test` passes (vitest)
-- [ ] If schema/migrations changed: a migration was added and `MIGRATIONS.md` updated
-- [ ] If a new binding/secret is needed: `wrangler.example.toml` and the README setup were updated
+- [ ] If the schema changed: a new file under `inbound/migrations/` (never edit an applied one), with `inbound/schema.sql` kept in step
+- [ ] If a route was added or renamed: `inbound/src/routes.ts` edited and `npm run routes:emit` re-run in the same commit
+- [ ] If a new binding/secret/var is needed: the public template `inbound/wrangler.jsonc` and `DEPLOY.md` were updated
 
 ## Checklist
 
 - [ ] No em-dashes or en-dashes (use commas, semicolons, or parentheses)
-- [ ] No secrets in the diff (tokens, `.dev.vars`, real `wrangler.toml`, Access JWTs)
+- [ ] No secrets in the diff (tokens, `.dev.vars`, a real wrangler config, Access JWTs)
 - [ ] Did not bump the version or add a CHANGELOG release heading (maintainers cut releases)
