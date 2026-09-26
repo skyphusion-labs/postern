@@ -841,7 +841,10 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("logout").style.display = "none";
     $("identity").textContent = "";
     $("who").textContent = "";
-    $("origin").value = state.origin;
+    // Served by the worker, the CSP is connect-src 'self', so the page's own origin is
+    // the only API origin that can work: prefill it rather than make the user retype
+    // the URL they are already on. Opened from file:// there is nothing to prefill.
+    $("origin").value = state.origin || (/^https?:\\/\\//.test(location.origin) ? location.origin : "");
     // Offer a way back to native sign-in only when the server supports it.
     $("toSigninWrap").style.display = state.authBackend === "native" ? "" : "none";
     $("gateErr").textContent = msg || "";
