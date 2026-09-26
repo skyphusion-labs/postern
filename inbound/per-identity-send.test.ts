@@ -227,4 +227,39 @@ describe("registry parsing + hashing (units)", () => {
     expect(parseRegistry("[]").size).toBe(0);
     expect(parseRegistry("{ broken").size).toBe(0);
   });
+
+  it("parseRegistry accepts an already-parsed object var and never throws on other types", async () => {
+    // wrangler accepts a JSON OBJECT as a var value and hands it over parsed. That used
+    // to reach raw.trim() and throw, turning every non-static bearer into a 500.
+    const hash = await sha256Hex("object-var-token");
+    const obj = { [hash]: { from: "ada@skyphusion.org", scopes: ["read", "send"] } };
+    expect(parseRegistry(obj, "skyphusion.org").get(hash)?.caps).toEqual(["read", "send"]);
+    // Per-entry validation still applies to the object form.
+    expect(parseRegistry({ [hash]: { from: "evil@example.com" } }, "skyphusion.org").size).toBe(0);
+    for (const junk of [null, 42, true, [], [obj]]) {
+      expect(() => parseRegistry(junk)).not.toThrow();
+      expect(parseRegistry(junk).size).toBe(0);
+    }
+  });
+});
+
+describe("registry configured as a JSON object var (not a string)", () => {
+  async function objectRegistryEnv(token: string, from: string) {
+    const registry = { [await sha256Hex(token)]: { from, scopes: ["read", "send"] } };
+    return makeFakeEnv({ POSTERN_SEND_IDENTITIES: registry });
+  }
+
+  it("an unknown bearer is 401, not a 500", async () => {
+    const { env, ctx } = await objectRegistryEnv("ada-token", "ada@skyphusion.org");
+    const res = await handleApi(req("GET", "/api/messages", { token: "not-a-real-token" }), env, ctx);
+    expect(res.status).toBe(401);
+  });
+
+  it("a registered bearer resolves and sends as its bound identity", async () => {
+    const { env, ctx, settle, sent } = await objectRegistryEnv("ada-token", "ada@skyphusion.org");
+    const res = await handleApi(req("POST", "/api/send", { token: "ada-token", body: SEND_BODY }), env, ctx);
+    await settle();
+    expect(res.status).toBe(200);
+    expect(sent[0].from).toBe("ada@skyphusion.org");
+  });
 });
