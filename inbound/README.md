@@ -26,7 +26,7 @@ flowchart LR
 1. **Forward first, before parsing.** CF Email Workers require `message.raw` to be
    unconsumed when `forward()` is called. `PostalMime().parse()` consumes the
    stream, so parsing before forwarding silently breaks delivery. Forward only
-   happens for recipients on `FORWARD_FOR` (crew keep their own mail).
+   happens for recipients on `FORWARD_FOR` (other recipients keep their own mail).
 2. **Parse the MIME** (`message.raw` is a tee CF keeps available after forward).
 3. **Derive auth verdicts** (SPF / DKIM / DMARC) and an allowlist `trusted` flag.
 4. **Clean the body** (strip signature + quoted-reply lines), cap at 32 KB.
@@ -50,12 +50,16 @@ delivery; their errors are logged, not thrown.
 | `ATTACHMENTS` | R2 (`postern-attachments`) | attachment bytes; keys referenced in `DB.attachments` |
 | `AI` | Workers AI (optional AI Gateway) | `@cf/baai/bge-base-en-v1.5` embeddings |
 
-Fleet live deploy uses operator-chosen resource names (for example `skyphusion-mail`,
-`skyphusion-mail-vec-v2`); the template in `wrangler.jsonc` stays generic.
+Resource names are yours to choose; only the binding names (`DB`, `ATTACHMENTS`,
+`VECTORIZE`, `AI`) are fixed, because the code reads them. `VECTORIZE` and `AI` are
+optional: without them search is full-text only.
 
 ## Vars (`wrangler.jsonc` `vars`)
 
-All are plain (non-secret) comma-separated lists; this Worker holds **no secrets**.
+All are plain (non-secret) comma-separated lists. The Worker's credentials
+(`POSTERN_API_TOKEN`, the scoped `POSTERN_API_TOKEN_*`, `POSTERN_TRANSPORT_TOKEN`) are
+secrets set with `wrangler secret put`, never vars; see
+[docs/AUTH-CONTRACT.md](../docs/AUTH-CONTRACT.md).
 
 | Var | Effect | Empty (`""`) means |
 |-----|--------|--------------------|
@@ -134,23 +138,28 @@ Storage is best-effort per attachment; one failure is logged and the rest procee
 
 ## Setup
 
+The full walkthrough is [DEPLOY.md](../DEPLOY.md); in short:
+
 ```bash
 cd inbound
-npm install
+npm ci
 
-# One-time resource creation (paste IDs into wrangler.jsonc):
-npx wrangler d1 create postern
-npx wrangler d1 execute postern --remote --file=schema.sql
-npx wrangler vectorize create postern-vec --dimensions=768 --metric=cosine
-npx wrangler r2 bucket create postern-attachments
+# One-time resource creation. --binding makes wrangler fill in the existing
+# entries in wrangler.jsonc instead of appending new ones.
+npx wrangler d1 create postern --binding DB
+npx wrangler r2 bucket create postern-attachments --binding ATTACHMENTS
+npx wrangler d1 migrations apply postern --remote
+# optional, semantic search (then uncomment the "ai" block):
+#   npx wrangler vectorize create postern-vec --dimensions=768 --metric=cosine --binding VECTORIZE
 
 npm run typecheck     # CI gate
-npx vitest run        # unit suite (pure helpers)
-npm run deploy        # wrangler deploy  (auto-deploys on green main via Jenkins)
+npx vitest run        # unit suite
+npm run deploy        # manual deploy; CI deploys only on a pushed v* tag, never on a merge
 ```
 
-For an existing DB that predates the attachments/FTS/dmarc columns, apply
-`migrations/0001_attachments_fts_dmarc.sql` instead of the full `schema.sql`.
+Schema changes ship as files under `migrations/`; an existing store picks up new
+ones with `npx wrangler d1 migrations apply postern --remote` (DEPLOY.md covers a
+store built from `schema.sql`).
 
 ### Email Routing wiring (CF Dashboard)
 
