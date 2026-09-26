@@ -216,8 +216,8 @@ describe("registry parsing + hashing (units)", () => {
     const raw = JSON.stringify({ [off]: { from: "evil@example.com", displayName: "Spoof" } });
     // Domain policy authoritative over the registry: off-domain entry is dropped.
     expect(parseRegistry(raw, "skyphusion.org").size).toBe(0);
-    // Without a domain argument the shape check still passes it (the resolver always
-    // supplies ALLOWED_FROM_DOMAIN, so the worker path is always domain-gated).
+    // Without a domain argument the shape check still passes it. The resolver never
+    // calls it that way: an unset ALLOWED_FROM_DOMAIN denies before lookup (#615).
     expect(parseRegistry(raw).size).toBe(1);
   });
 

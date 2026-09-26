@@ -180,7 +180,11 @@ interface Env {
   DEFAULT_FROM?: string;
   /** Optional display name paired with DEFAULT_FROM. */
   DEFAULT_FROM_NAME?: string;
-  /** Only From addresses on this domain are permitted for outbound. */
+  /**
+   * Only From addresses on this domain are permitted for outbound. REQUIRED, no
+   * default (#615): unset refuses send / credential upsert / mobileconfig (500),
+   * denies registry tokens (401), and skips the same-domain unread seed.
+   */
   ALLOWED_FROM_DOMAIN?: string;
   /** Outbound transport selector: unset/"cf" = Cloudflare Email (default), "relay" = postern-relay. */
   OUTBOUND_TRANSPORT?: string;
