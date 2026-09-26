@@ -160,9 +160,14 @@ second copy of it.
 Configure with your deployed origin and token:
 
 ```bash
-export POSTERN_API_URL=https://postern.<your-account>.workers.dev
-export POSTERN_API_TOKEN=<read-scoped token>
+export POSTERN_API_URL=https://postern.<your-subdomain>.workers.dev
+export POSTERN_API_TOKEN=<your token>
 ```
+
+`<your token>` is the `POSTERN_API_TOKEN` you set at deploy (full access). For a
+read-only client, give it a `POSTERN_API_TOKEN_READ` value instead (see "Scoped
+tokens" in [DEPLOY.md](DEPLOY.md)); for several people or agents, one per-identity
+token each ([docs/SEND-IDENTITIES.md](docs/SEND-IDENTITIES.md)).
 
 **MCP (Cursor / Claude Code):** add an MCP server entry with `command: npx`,
 `args: ["-y", "@skyphusion/postern-mcp"]`, and the env vars above in `env`. Send tools
