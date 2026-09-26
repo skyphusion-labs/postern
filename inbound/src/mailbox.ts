@@ -11,6 +11,7 @@ import { htmlToText, cleanBody } from "./ingest";
 import { selectTransport, type OutboundMessage, type OutboundAttachment } from "./transport/index";
 import type { BoundIdentity } from "./sendidentity";
 import { sanitizeHtml } from "./sanitize-html";
+import { allowedFromDomain } from "./fromdomain";
 
 export interface EmailAddress {
   email: string;
@@ -193,7 +194,12 @@ function resolveFrom(env: Env, from: SendRequest["from"], bound?: BoundIdentity)
   if (bound) {
     from = bound.displayName ? { email: bound.from, name: bound.displayName } : bound.from;
   }
-  const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  // No configured domain means no send is authorizable: refuse (500, operator config
+  // error) before a transport is touched, never default to someone else's domain (#615).
+  const allowedDomain = allowedFromDomain(env);
+  if (!allowedDomain) {
+    throw new MailboxError("E_INTERNAL_SERVER_ERROR", "ALLOWED_FROM_DOMAIN is not configured", 500);
+  }
   const fallback = env.DEFAULT_FROM || `noreply@${allowedDomain}`;
 
   let email: string;

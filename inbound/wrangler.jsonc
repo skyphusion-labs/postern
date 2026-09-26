@@ -105,6 +105,7 @@
     "POSTERN_VIEWER_ROLES": "",
 
     // Outbound send/reply defaults. DEFAULT_FROM must be on ALLOWED_FROM_DOMAIN.
+    // ALLOWED_FROM_DOMAIN is REQUIRED (no built-in default): unset, sends refuse.
     // OUTBOUND_TRANSPORT unset/"cf" = Cloudflare Email Sending (default).
     "DEFAULT_FROM": "noreply@example.com",
     "DEFAULT_FROM_NAME": "Postern",

@@ -21,6 +21,8 @@
 // the user's existing Postern profile instead of stacking a duplicate mailbox on
 // the device -- the correct on-device behavior for Conrad's #180 verification.
 
+import { allowedFromDomain } from "./fromdomain";
+
 // Standard mailbox ports. 993 = IMAPS (implicit TLS); 587 = submission (STARTTLS).
 // Fixed per the #187 spec (not operator-tunable); revisit if a deployment needs
 // 465 implicit-TLS submission (tracked separately under #197).
@@ -180,7 +182,15 @@ export function handleMobileconfig(request: Request, env: Env): Response {
     return json({ ok: false, error: "E_FIELD_MISSING", message: "user (email address) is required" }, 400);
   }
   const email = emailRaw.toLowerCase();
-  const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  // Unset domain: refuse rather than emit a profile pointing at someone else's
+  // imap./smtp. hosts (#615).
+  const allowedDomain = allowedFromDomain(env);
+  if (!allowedDomain) {
+    return json(
+      { ok: false, error: "E_INTERNAL_SERVER_ERROR", message: "ALLOWED_FROM_DOMAIN is not configured" },
+      500,
+    );
+  }
   if (!EMAIL_RE.test(email) || email.split("@")[1] !== allowedDomain) {
     return json(
       { ok: false, error: "E_VALIDATION_ERROR", message: `user must be a valid address on @${allowedDomain}` },

@@ -143,6 +143,42 @@ jobs:
           npm run typecheck
           npm test
 
+      # FORWARDING PREFLIGHT (#611). wrangler `vars` REPLACE the live Worker's vars, they do
+      # NOT merge, so a config carrying "FORWARD_TO": "" clears a working delivery path with a
+      # green run and no log line; nobody finds out until somebody notices missing mail. The
+      # committed template correctly ships both forwarding vars EMPTY because it is the public
+      # self-host starting point, which is exactly what makes the fallback path dangerous for an
+      # estate instance. This step reads the LIVE Worker's current vars and REFUSES the deploy
+      # when it would clear a set FORWARD_TO, or drop a set FORWARD_FOR (that second direction
+      # does not stop forwarding, it WIDENS it to every recipient, which is worse).
+      #
+      # It REFUSES on a read it could not perform, rather than passing: an absent check reads
+      # exactly like a passed one. The only tolerated not-red state is a genuine 404, meaning the
+      # Worker does not exist yet, and it says so out loud.
+      #
+      # It prints only SET/EMPTY, never a var VALUE. This is a PUBLIC repo, so these logs are
+      # public and FORWARD_TO is a personal address. The suite asserts that property directly
+      # (.github/scripts/tests/forwarding-preflight.test.sh, case P1).
+      - name: Forwarding preflight (refuse a silent delivery change)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: inbound
+        env:
+          POSTERN_INBOUND_WRANGLER: ${{ secrets.POSTERN_INBOUND_WRANGLER }}
+        run: |
+          set -eo pipefail
+          if [ -n "$POSTERN_INBOUND_WRANGLER" ]; then
+            printf "%s" "$POSTERN_INBOUND_WRANGLER" > wrangler.ci.json
+            CFG=wrangler.ci.json
+          else
+            CFG=wrangler.jsonc
+          fi
+          NAME="$(node ../.github/scripts/forwarding-preflight.mjs --script-name "$CFG")"
+          echo "Reading live vars for Worker: ${NAME}"
+          STATUS="$(curl -sS -o settings.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${NAME}/settings")"
+          node ../.github/scripts/forwarding-preflight.mjs settings.json "$CFG" "$STATUS"
+
       # The committed inbound/wrangler.jsonc is the PUBLIC template (placeholder
       # ids, postern-named, vectorize/send commented out). An operator points CI
       # at their own instance via the POSTERN_INBOUND_WRANGLER secret (the full
@@ -244,4 +280,4 @@ jobs:
       - name: Clean up materialized config
         if: always()
         working-directory: inbound
-        run: rm -f wrangler.ci.json migrations.pending.txt deploy.out deployment.json
+        run: rm -f wrangler.ci.json migrations.pending.txt deploy.out deployment.json settings.json
