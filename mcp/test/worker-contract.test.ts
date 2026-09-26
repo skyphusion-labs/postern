@@ -22,6 +22,8 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { PosternClient } from "../src/client";
+import { z } from "zod";
+import { READ_TOOLS, SEND_TOOLS, type ToolDef } from "../src/tools";
 
 interface RouteRow {
   id: string;
@@ -316,6 +318,186 @@ describe("#417 PARITY: what the worker honors, the client can reach", () => {
       expect(can.size, "no parameters recorded at all: the ledger is measuring nothing").toBeGreaterThan(3);
       expect([...can].filter((n) => can.has(n)).length).toBeGreaterThan(0); // stale arm fires
       expect(["nOtApArAm"].filter((n) => !can.has(n))).toEqual(["nOtApArAm"]); // gap arm fires
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// #632 F1/F17: the two arms this suite was missing, and why its two existing arms could not
+// see the defect that shipped.
+//
+// SOUNDNESS asks: is every EMITTED parameter declared by the worker?
+// PARITY asks: is every DECLARED parameter reachable by the CLIENT?
+//
+// A parameter that a TOOL SCHEMA accepts and then drops is emitted by nobody and declared by
+// nobody, so it satisfies both arms and neither can observe it. That is exactly what happened:
+// `mailbox_list` accepted `after`/`before` in practice (zod stripped them), the call succeeded,
+// and the suite stayed green while the answer was newest-N. The mirror image also hid: `q` is
+// declared by the worker on messages-list and PosternClient could always send it, so PARITY
+// read clean, while no agent could reach it because the TOOL did not expose it.
+//
+// So the missing axis is the TOOL schema, on both sides of it:
+//   FORWARDING  -- every inputSchema key must demonstrably change the request.
+//   REACHABILITY -- every parameter the worker honors on a tool's route must be in that
+//                   tool's inputSchema.
+// ---------------------------------------------------------------------------------------
+
+/** A valid sample per parameter NAME, shared across tools so a new key cannot be tested with a
+ *  value that happens to be ignored. A key with no sample is a FAILURE, not a skip: that keeps
+ *  this table honest as the schemas grow, instead of letting new parameters quietly opt out. */
+const SAMPLE: Record<string, unknown> = {
+  query: "kw", q: "kw", mode: "substr", field: "subject", limit: 7, cursor: "cur-1",
+  direction: "inbound", to: "a@example.com", from: "b@example.com", lens: "inbox",
+  mailbox: "archive", seenFor: "a@example.com", after: "2026-01-01", before: "2026-02-01",
+  hasAttachment: true, seen: false, thread: "t-1", message_id: "m-1", thread_id: "t-1",
+  index: 0, subject: "s", text: "t", html: "<p>h</p>", cc: "c@example.com",
+  bcc: "d@example.com", reply_to: "r@example.com", quote_original: true,
+  attachments: [{ content: "QQ==", filename: "a.txt", mime_type: "text/plain" }],
+};
+
+/** Keys a tool needs for its handler to reach the wire at all. */
+const REQUIRED: Record<string, string[]> = {
+  mailbox_search: ["query"],
+  mailbox_list: [],
+  mailbox_get: ["message_id"],
+  mailbox_thread: ["thread_id"],
+  mailbox_get_attachment: ["message_id", "index"],
+  mailbox_send: ["to", "subject", "text"],
+  mailbox_reply: ["message_id", "text"],
+};
+
+/** Everything a request carries, VALUES included: a key whose presence changes only a value
+ *  (mode, which the handler always sends with a default) would be invisible to a key-set diff. */
+function fingerprint(calls: Emitted[], raw: Array<{ url: string; init: any }>): string {
+  return JSON.stringify(
+    raw.map((c) => {
+      const u = new URL(c.url);
+      const q = [...u.searchParams.entries()].sort().map(([k, v]) => `${k}=${v}`);
+      return { m: c.init?.method ?? "GET", p: u.pathname, q, b: c.init?.body ?? null };
+    }),
+  );
+}
+
+async function emitFor(tool: ToolDef, args: Record<string, unknown>): Promise<string> {
+  const seen = recorder();
+  const client = new PosternClient("https://api.example", "tok");
+  try {
+    await tool.handler(client, args);
+  } catch {
+    // A client-side or stub-response throw still leaves the request recorded, and the request
+    // is the subject here.
+  }
+  const fp = fingerprint([], seen);
+  vi.unstubAllGlobals();
+  return fp;
+}
+
+function baselineArgs(tool: ToolDef): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of REQUIRED[tool.name] ?? []) out[k] = SAMPLE[k];
+  return out;
+}
+
+const ALL_TOOLS: ToolDef[] = [...READ_TOOLS, ...SEND_TOOLS];
+
+describe("#632 F1 FORWARDING: every inputSchema key demonstrably changes the request", () => {
+  for (const tool of ALL_TOOLS) {
+    it(`${tool.name}: no declared parameter is accepted and dropped`, async () => {
+      const base = baselineArgs(tool);
+      const baseFp = await emitFor(tool, base);
+      const required = new Set(REQUIRED[tool.name] ?? []);
+      const dropped: string[] = [];
+      const unsampled: string[] = [];
+
+      for (const key of Object.keys(tool.inputSchema)) {
+        if (required.has(key)) continue; // already in the baseline
+        if (!(key in SAMPLE)) {
+          unsampled.push(key);
+          continue;
+        }
+        const withKey = await emitFor(tool, { ...base, [key]: SAMPLE[key] });
+        if (withKey === baseFp) dropped.push(key);
+      }
+
+      expect(
+        unsampled,
+        `add a SAMPLE value for these so they are actually exercised: ${unsampled.join(", ")}`,
+      ).toEqual([]);
+      expect(
+        dropped,
+        `these parameters are declared to the agent and never reach the worker: ${dropped.join(", ")}`,
+      ).toEqual([]);
+    });
+  }
+
+  it("CONTROL: the checker CATCHES an accepted-and-dropped parameter", async () => {
+    // The arm above passes on today's code, so on its own it proves nothing about whether it
+    // could fail. This is the defect it exists for, built deliberately: a tool that advertises
+    // `after` and never forwards it, which is the exact shape of #631's mailbox_list call.
+    const decoy: ToolDef = {
+      name: "decoy_list",
+      scope: "read",
+      description: "stub",
+      inputSchema: {
+        to: z.string().optional(),
+        after: z.string().optional(), // declared, never forwarded
+      },
+      handler: async (client, a) => client.list({ to: (a as { to?: string }).to }),
+    };
+
+    const base = await emitFor(decoy, {});
+    const withTo = await emitFor(decoy, { to: SAMPLE.to });
+    const withAfter = await emitFor(decoy, { after: SAMPLE.after });
+
+    expect(withTo, "a forwarded parameter must change the request").not.toBe(base);
+    expect(withAfter, "a dropped parameter leaves the request identical: this is the catch").toBe(base);
+  });
+});
+
+/** Worker parameters a tool reaches under a DIFFERENT name. Renames are legitimate (an agent
+ *  reads `query` more easily than `q`) but each one is written down here, because an unrecorded
+ *  rename and a missing parameter look identical from the outside. */
+const TOOL_PARAM_ALIASES: Record<string, Record<string, string>> = {
+  mailbox_search: { q: "query" },
+  mailbox_list: {},
+};
+
+/** Worker parameters a tool deliberately does not expose. MUST only ever shrink, and the test
+ *  below fails on a STALE entry, so closing a gap forces the entry out in the same change. */
+const TOOL_REACH_GAPS: Record<string, string[]> = {
+  mailbox_search: [],
+  mailbox_list: [],
+};
+
+describe("#632 F17 REACHABILITY: what the worker honors on a tool's route, the TOOL exposes", () => {
+  const routeFor: Record<string, string> = {
+    mailbox_search: "search",
+    mailbox_list: "messages-list",
+  };
+
+  for (const [toolName, routeId] of Object.entries(routeFor)) {
+    const tool = READ_TOOLS.find((t) => t.name === toolName)!;
+
+    it(`${toolName}: every honored parameter is in the inputSchema, except the listed gaps`, () => {
+      const declared = PARAMS[routeId]?.query ?? [];
+      const alias = TOOL_PARAM_ALIASES[toolName];
+      const keys = new Set(Object.keys(tool.inputSchema));
+      const missing = declared.filter((n) => !keys.has(alias[n] ?? n)).sort();
+      expect(missing).toEqual([...TOOL_REACH_GAPS[toolName]].sort());
+    });
+
+    it(`${toolName}: no STALE gap entry`, () => {
+      const alias = TOOL_PARAM_ALIASES[toolName];
+      const keys = new Set(Object.keys(tool.inputSchema));
+      const stale = TOOL_REACH_GAPS[toolName].filter((n) => keys.has(alias[n] ?? n));
+      expect(stale, `now reachable, delete from TOOL_REACH_GAPS: ${stale.join(", ")}`).toEqual([]);
+    });
+
+    it(`${toolName}: CONTROL: the check can report a genuine gap`, () => {
+      const declared = PARAMS[routeId]?.query ?? [];
+      expect(declared.length, "no declared parameters read at all: measuring nothing").toBeGreaterThan(3);
+      const keys = new Set(Object.keys(tool.inputSchema));
+      expect(["nOtApArAm"].filter((n) => !keys.has(n))).toEqual(["nOtApArAm"]);
     });
   }
 });
