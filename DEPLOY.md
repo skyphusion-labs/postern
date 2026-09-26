@@ -180,13 +180,18 @@ npx wrangler secret put POSTERN_API_TOKEN   # generate one: openssl rand -hex 32
 ```
 
 **Scoped tokens (optional).** `POSTERN_API_TOKEN` alone is a `both`-scoped key and works
-for everything below; split it only if you want narrower blast radius per consumer
-(the IMAP door in section 5 uses these two):
+for everything below; split it only if you want narrower blast radius per consumer.
+Each is its own Worker secret holding a value you generate (`openssl rand -hex 32`);
+full table in [docs/AUTH-CONTRACT.md](docs/AUTH-CONTRACT.md):
 
 ```bash
-# EXPUNGE-only (hard delete), separate from the read token (#278)
+# read-only: list/search/get. What a read-only agent, script, or webmail tab should hold
+npx wrangler secret put POSTERN_API_TOKEN_READ
+# send-only: /api/send + /api/reply (compose in webmail, MCP send opt-in)
+npx wrangler secret put POSTERN_API_TOKEN_SEND
+# EXPUNGE-only (hard delete), separate from the read token (#278); used by the IMAP door
 npx wrangler secret put POSTERN_API_TOKEN_DELETE
-# imap-scoped: durable Drafts + Trash/Junk/Archive APPEND import (#352);
+# imap-scoped (IMAP door): durable Drafts + Trash/Junk/Archive APPEND import (#352);
 # unset means those writes refuse rather than silently no-op
 npx wrangler secret put POSTERN_API_TOKEN_IMAP
 ```
