@@ -112,6 +112,36 @@ func TestLoadConfig_SubmissionValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("ldap with a retired search+bind var is refused (#612)", func(t *testing.T) {
+		// Parity with the Python door (imap/posternimap/config.py): an old
+		// EnvironmentFile carrying the retired search+bind vars must fail loud at
+		// startup, not be silently ignored while auth behaves differently.
+		for _, k := range []string{"LDAP_BIND_DN", "LDAP_BIND_PASSWORD", "LDAP_SEARCH_BASE", "LDAP_SEARCH_FILTER"} {
+			t.Run(k, func(t *testing.T) {
+				setSubmissionBaseEnv(t)
+				t.Setenv("AUTH_BACKEND", "ldap")
+				t.Setenv("LDAP_URL", "ldaps://dir.example:636")
+				t.Setenv("LDAP_BIND_DN_TEMPLATE", "uid=%s,ou=people,dc=example,dc=com")
+				t.Setenv(k, "x")
+				_, err := loadConfig()
+				if err == nil || !strings.Contains(err.Error(), "retired") || !strings.Contains(err.Error(), k) {
+					t.Fatalf("err = %v, want a retired-var refusal naming %s", err, k)
+				}
+			})
+		}
+	})
+
+	t.Run("ldap with a blank retired var is accepted", func(t *testing.T) {
+		setSubmissionBaseEnv(t)
+		t.Setenv("AUTH_BACKEND", "ldap")
+		t.Setenv("LDAP_URL", "ldaps://dir.example:636")
+		t.Setenv("LDAP_BIND_DN_TEMPLATE", "uid=%s,ou=people,dc=example,dc=com")
+		t.Setenv("LDAP_BIND_DN", "  ")
+		if _, err := loadConfig(); err != nil {
+			t.Fatalf("err = %v, want a whitespace-only retired var to be ignored (Python door parity)", err)
+		}
+	})
+
 	t.Run("ldaps is accepted", func(t *testing.T) {
 		setSubmissionBaseEnv(t)
 		t.Setenv("AUTH_BACKEND", "ldap")
