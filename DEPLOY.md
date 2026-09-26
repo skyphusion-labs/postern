@@ -19,6 +19,42 @@ here is specific to any one account or domain.
 - For the inbound leg: **Email Routing** enabled on the same domain (Dashboard
   -> Email -> Email Routing), with MX pointed at Cloudflare.
 
+## 0. Try it locally first (optional, no Cloudflare account needed)
+
+Everything except real mail delivery runs on your machine under `wrangler dev`,
+with local D1 and R2: the API, the smoke, simulated inbound mail, webmail, the
+IMAP proxy, and the MCP / Python clients. It is a quick way to see the product
+work before you onboard a domain or pay for Workers Paid. The shipped
+`wrangler.jsonc` works as-is for this; no edits needed.
+
+```bash
+cd inbound
+npm ci
+printf 'POSTERN_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > .dev.vars   # gitignored; local secrets
+npx wrangler d1 migrations apply postern --local
+npx wrangler dev                                                        # serves http://localhost:8787
+```
+
+In a second terminal, also in `inbound/`:
+
+```bash
+TOKEN=$(sed -n 's/^POSTERN_API_TOKEN=//p' .dev.vars)
+
+# the acceptance smoke (outbound + store + threading + filters + attachments)
+POSTERN_BASE_URL=http://localhost:8787 POSTERN_API_TOKEN=$TOKEN \
+POSTERN_FROM=noreply@example.com POSTERN_TO=you@example.com node smoke.mjs
+
+# simulate an inbound delivery, then find it
+printf 'From: a@sender.example\r\nTo: you@example.com\r\nSubject: postern hello\r\nMessage-ID: <1@sender.example>\r\n\r\nhi\r\n' \
+  | curl --data-binary @- 'http://localhost:8787/cdn-cgi/handler/email?from=a@sender.example&to=you@example.com'
+curl -H "Authorization: Bearer $TOKEN" 'http://localhost:8787/api/search?q=hello'
+```
+
+Webmail is at `http://localhost:8787/webmail` (origin `http://localhost:8787`, the
+token above). Outbound sends are not delivered locally: wrangler writes each one
+to a file under `.wrangler/tmp/email/` and logs the path. Vectorize / Workers AI
+(semantic search) have no local equivalent, so search is full-text only here.
+
 ## 1. Create the storage resources
 
 The store (D1 + R2, optionally Vectorize) is per-account; there is no shared
