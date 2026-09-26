@@ -263,13 +263,29 @@ interface ListQuery {
   cursor?: string;                    // opaque; encodes (date, id) of the last row
 }
 interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; seenFor?: string; limit?: number; cursor?: string }
-interface Page<T> { items: T[]; cursor: string | null }   // cursor=null means no more
+interface Page<T> {
+  items: T[];
+  cursor?: string | null;   // string = more, here is how. null = THERE ARE NO MORE. ABSENT = incomplete, and no continuation exists.
+  complete?: boolean;       // items + the cursor chain is the WHOLE answer set. Absent = true.
+  retrievalCap?: number;    // the retrieval ceiling that applied; only with complete:false
+  degraded?: string;        // why it is incomplete, when the reason is not just the ceiling
+}
 interface SearchHit { message: StoredMessageSummary; score?: number; snippet?: string }
 ```
 
 The `cursor` is opaque: keyset pagination on `(date DESC, id DESC)` (the encoded last tuple),
 stable under concurrent inserts; `cursor: null` means no more rows. Read endpoints fetch
 `limit + 1` rows to decide whether a next cursor exists.
+
+**`cursor` has THREE states and the third is not a synonym for the second** (#631). A string means
+there is more and this is how to reach it. `null` is a positive CLAIM of exhaustion, and only a
+surface that pages a real ordering may make it. An ABSENT `cursor` key means the answer is
+incomplete AND no continuation exists, which is the honest position of the score-ranked search
+modes: a vector index has no offset to resume from. They used to answer `null` there, asserting an
+exhaustion they could not deliver, in the one field a careful caller trusts most; that was the
+defect #631 was filed for. **Read `complete`; never read an absent cursor as exhaustion, and never
+normalise an absent cursor to `null` in a client** (that is how a door turns an honest worker answer
+back into a false one).
 
 **`direction` vs `lens` (#403).** `direction` filters the STORED wire fact and nothing else:
 a row returned under `direction=inbound` always reports `direction: "inbound"`, viewer-scoped
@@ -293,10 +309,52 @@ Vectorize index the store populates for BOTH inbound and outbound mail, #116 ws2
 (`@cf/baai/bge-base-en-v1.5`) and queries Vectorize, collapsing chunk-hits to unique messages
 (best chunk score wins) and hydrating from D1; `hybrid` blends the fts and semantic result sets
 by `message_id` on a normalized score. semantic/hybrid are SCORE-ranked, so they return a single
-ranked page (`cursor` always null) of up to `limit` hits -- a date keyset cursor does not apply;
-paging a re-ranked semantic set is a post-v1 nicety. If the AI/Vectorize bindings are not
-configured, semantic/hybrid degrade to empty rather than erroring (ingest skips indexing too). An
-unknown mode returns `E_VALIDATION_ERROR`.
+ranked page of up to `limit` hits -- a date keyset cursor does not apply, and paging a re-ranked
+semantic set is a post-v1 nicety. They therefore report completeness explicitly rather than implying
+it: `cursor: null` with `complete: true` ONLY when the vector index ran out of candidates before the
+retrieval ceiling did, and otherwise NO `cursor` key plus `complete: false` and `retrievalCap`.
+
+**The ceiling is Vectorize's, not ours, and it is why an exhaustive score-ranked answer is not
+always possible.** `topK` maxes at 50 with `returnMetadata: "all"` (100 only with no values and no
+metadata; 20 on a legacy V1 index), and we need metadata to read `message_id` back. There is no
+"fetch more" to loop on. Two consequences are load-bearing:
+
+- **Filters are applied AFTER retrieval** for these modes (the vector index is neither
+  recipient-, date-, nor direction-keyed), so a filtered query is "whatever survives your filter out
+  of the global top N", not "the top N inside your filter". When any post-retrieval filter is
+  present the retrieval asks for the ceiling outright and does NOT truncate the candidate set to
+  `limit` before filtering; `limit` bounds the ANSWER, not the pool. Truncating first is what made a
+  month-wide query answer with two hits.
+- **Widening this for real means pushing the predicate INTO the query** with Vectorize metadata
+  filtering, so the top N is the top N inside the window. That needs metadata indexes on the index
+  plus a corpus re-upsert, so it is a deliberate migration and not a code change; until then the
+  truncation is DECLARED.
+
+To prove a message is NOT present, use `fts`, which is exhaustively keyset-paged.
+
+If the AI or Vectorize binding is not configured, semantic/hybrid return zero rows with
+`complete: false` and a `degraded` reason naming the missing binding. They do NOT return a bare
+empty page: zero rows with a null cursor is the wire form of "searched and found nothing", and what
+actually happened is that no query ran. A degrade may happen; it may not be silent. An unknown mode
+returns `E_VALIDATION_ERROR`.
+
+### 10.9.1 `identityScope`: every read declares the scope it was answered under
+
+`GET /api/messages` and `GET /api/search` both return an `identityScope` field, which is the unbuilt
+half of #544 ("reads attributable to the identity that made them") and ask 1 of #631:
+
+```ts
+type ReadScopeReport =
+  | { kind: "estate" }                                   // a static operator/IMAP token: no bound member
+  | { kind: "member"; addresses: string[] }              // forced to the bound identity (#544)
+  | { kind: "role"; address: string };                   // a queue view (#425), a DIFFERENT set, not a wider one
+```
+
+It reports what the SERVER imposed, never what the caller asked for: a caller-supplied `to=` or
+`from=` is deliberately absent, because the caller already knows its own filters and this answers the
+question it cannot answer for itself. **A scoped view that does not announce its scope is
+indistinguishable from a complete one**, which is how a zero result gets read as "not in the estate"
+when it means "not in your slice".
 
 ---
 
