@@ -69,7 +69,7 @@ identity (and which functions that token may use):
 | Field | Type | Rule |
 |---|---|---|
 | key | string | lowercase sha256 hex of the raw Bearer token (exactly 64 hex chars) |
-| `from` | string | the AUTHORITATIVE address. MUST be a valid address on `ALLOWED_FROM_DOMAIN` (default `skyphusion.org`), enforced at resolve time (section 4). |
+| `from` | string | the AUTHORITATIVE address. MUST be a valid address on `ALLOWED_FROM_DOMAIN` (required, no default: unset denies every registry token, #615), enforced at resolve time (section 4). |
 | `displayName` | string? | optional. Becomes the From display name (`Name <addr>`) on send. |
 | `scopes` | string[]? | optional (#544). Each entry is `"read"` and/or `"send"`. **Omitted or empty defaults to `["send"]`** so every pre-#544 entry stays send-only. Never grants delete/admin (those stay on static `POSTERN_API_TOKEN` / `both`). |
 

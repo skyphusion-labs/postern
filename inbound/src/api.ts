@@ -51,6 +51,7 @@ import {
 import { roleMap, rolesForViewer } from "./roles";
 import { readBodyCapped, readBytesCapped, PayloadTooLargeError } from "./body";
 import { handleMobileconfig } from "./mobileconfig";
+import { allowedFromDomain } from "./fromdomain";
 import { handleMtaSts } from "./mtasts";
 import { VERSION } from "./version";
 
@@ -1249,7 +1250,14 @@ async function handleCredentialUpsert(request: Request, env: Env): Promise<Respo
   if (!username) return json({ ok: false, error: "E_FIELD_MISSING", message: "username is required" }, 400);
 
   const fromAddr = (typeof body.from === "string" && body.from.trim() ? body.from.trim() : username).toLowerCase();
-  const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  // Unset domain: refuse to mint a credential rather than bind it to a borrowed domain (#615).
+  const allowedDomain = allowedFromDomain(env);
+  if (!allowedDomain) {
+    return json(
+      { ok: false, error: "E_INTERNAL_SERVER_ERROR", message: "ALLOWED_FROM_DOMAIN is not configured" },
+      500,
+    );
+  }
   if (!EMAIL_RE.test(fromAddr) || fromAddr.split("@")[1] !== allowedDomain) {
     return json(
       { ok: false, error: "E_SENDER_NOT_ALLOWED", message: `from must be a valid address on @${allowedDomain}` },
@@ -1621,7 +1629,10 @@ async function resolveToken(request: Request, env: Env): Promise<AuthResolution 
   // No static match: consult the per-identity registry. A hit is a known per-member
   // token with caps + authoritative identity; a miss (incl. an entry whose From is off
   // ALLOWED_FROM_DOMAIN, denied at resolve time) falls through to null (401).
-  const allowedDomain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  // Unset domain: deny every registry token (401), never skip the check. parseRegistry
+  // treats a falsy domain as "no domain policy", so passing "" through would fail OPEN (#615).
+  const allowedDomain = allowedFromDomain(env);
+  if (!allowedDomain) return null;
   const hit = await resolveRegistryIdentity(got, env.POSTERN_SEND_IDENTITIES, allowedDomain);
   if (hit) {
     // Primary scope is only a fallback when caps is absent; authorize() uses caps.

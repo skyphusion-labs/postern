@@ -31,7 +31,9 @@ npx wrangler r2 bucket create postern-attachments
 
 Edit `inbound/wrangler.jsonc`:
 - paste your `database_id` into the `d1_databases` block,
-- set `DEFAULT_FROM`, `DEFAULT_FROM_NAME`, `ALLOWED_FROM_DOMAIN` to your domain,
+- set `DEFAULT_FROM`, `DEFAULT_FROM_NAME`, `ALLOWED_FROM_DOMAIN` to your domain
+  (`ALLOWED_FROM_DOMAIN` is required; there is no built-in default, and sends refuse
+  without it),
 - to reach the worker over `https://postern.<subdomain>.workers.dev` (the URL the
   webmail and smoke steps below use), set `"workers_dev": true`. The shipped
   default is `false` (secure-by-default: no public door; a production install

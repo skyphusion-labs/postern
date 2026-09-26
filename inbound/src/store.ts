@@ -5,6 +5,7 @@
 
 import { sha256hex, chunkText, representableId } from "./ingest";
 import { PROJECTION_VERSION, projectRfc822Size } from "./rfc822Project";
+import { allowedFromDomain } from "./fromdomain";
 
 /** A message row plus its attachment metadata. Column names are the field names. */
 export interface StoredMessage {
@@ -313,7 +314,11 @@ async function seedSameDomainSeen(
   from: string,
   deliveredList: string[],
 ): Promise<void> {
-  const domain = (env.ALLOWED_FROM_DOMAIN || "skyphusion.org").toLowerCase();
+  // Unset domain: no recipient is "same-domain", so seed nothing. Skip, never throw:
+  // this runs after the message is already sent and stored, and the override is a
+  // best-effort unread hint, not a gate (#615).
+  const domain = allowedFromDomain(env);
+  if (!domain) return;
   const sender = (parseRecipients(from)[0] || "").toLowerCase();
   const targets = deliveredList.filter(
     (r) => r.includes("@") && r !== sender && r.slice(r.lastIndexOf("@") + 1) === domain,
