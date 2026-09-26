@@ -2,19 +2,27 @@ name: imap-image
 
 # Build the postern-imap door image and push it to GHCR.
 #
-# WHY: the 993 IMAP door is moving off the host systemd+venv install onto a
-# versioned container image (CI -> GHCR -> Swarm). The image is the unit of
-# deploy; the Swarm stack pins it by the immutable git short-SHA tag this
-# workflow produces, so `docker service update --image ...:<sha>` is exact.
+# WHY: the 993 IMAP door ships as a versioned container image rather than a host
+# systemd+venv install. The image is the unit of deploy, tagged by immutable git short-SHA
+# so any orchestrator can pin an exact build.
 #
-# After a green publish (version tag or manual dispatch), dispatches fleet-chezmoi `postern-door-roll` to pin the image on
-# the door host and redeploy `postern-imap` (requires org secret FLEET_DISPATCH_TOKEN).
+# NO DEPLOY LANE (2026-09-24). This workflow builds and PUBLISHES; nothing rolls the
+# image onto a host, because the host is gone. The Swarm host that ran the door services,
+# and the fleet-chezmoi `postern-door-roll` handler this workflow used to dispatch, were
+# both released with the Hetzner cut (#2066 over there). The recipe is kept in
+# `.github/scripts/dispatch-fleet-postern-door-roll.sh`, which fails closed and documents
+# what re-enabling needs; it just has no caller any more. Where the door tier runs next is
+# a spend and topology decision, so nothing here guesses at one.
 #
-# ARTIFACT SMOKE (#543): `build` always loads the image into the runner docker and
-# runs it before the job can succeed. `dispatch-roll` needs `build`, so a non-importing
-# (or non-greeting) image cannot reach a door. Source-level `gate` is necessary but not
-# sufficient -- #539 shipped an image whose main module could not be imported because
-# nothing between build and roll ever started the artifact.
+# Production receiving is unaffected: that is CF Email Routing -> the inbound Worker, and it
+# never involved these images.
+#
+# ARTIFACT SMOKE (#543): `build` always loads the image into the runner docker and runs it
+# before the job can succeed, so a non-importing (or non-greeting) image cannot be
+# published. Source-level `gate` is necessary but not sufficient -- #539 shipped an image
+# whose main module could not be imported because nothing ever started the artifact. That
+# smoke is now the LAST gate in the workflow, so it matters more than it did when a roll job
+# sat behind it, not less.
 #
 # Triggers:
 #   - push to main that touches imap/** (or this workflow): rebuild on real changes,
@@ -192,18 +200,3 @@ jobs:
           docker logs "$name" >&2 || true
           exit 1
 
-  # Gated on build (which includes artifact smoke). A failed import/greeting
-  # fails build, so this job never dispatches a non-starting image (#543).
-  dispatch-roll:
-    needs: build
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Dispatch postern-imap roll to fleet-chezmoi
-        env:
-          FLEET_DISPATCH_TOKEN: ${{ secrets.FLEET_DISPATCH_TOKEN }}
-        run: bash .github/scripts/dispatch-fleet-postern-door-roll.sh imap skyphusion-labs/postern-imap
