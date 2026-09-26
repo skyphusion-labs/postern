@@ -238,7 +238,7 @@ under the hardened `DynamicUser` unit (already set in `systemd/`).
 
 ## Build, test
 
-Go >= 1.22 (built/tested on the `toolchain` line in `go.mod`, currently
+Go 1.25+ (`go.mod` requires 1.25.0; built/tested on its `toolchain` line, currently
 1.25.13; the door image is `FROM golang:1.25.13-bookworm` in lockstep -- #541).
 Dependency-free: `go mod tidy` adds nothing.
 
@@ -263,7 +263,7 @@ sudo systemctl enable --now skyphusion-email-relay
 See `skyphusion-email-relay.env.example` for every variable. Quick inbound test:
 
 ```bash
-swaks --server 127.0.0.1:2525 --from cron@skyphusion.org \
+swaks --server 127.0.0.1:2525 --from cron@example.com \
       --to you@example.com --header "Subject: relay test" --body "hello"
 ```
 
