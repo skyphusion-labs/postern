@@ -171,6 +171,21 @@ async function installMocks(page: Page, mode: "token" | "session") {
 }
 
 test.describe("webmail critical journeys (#355)", () => {
+  test("BYO token: the API origin is prefilled with the page's own origin", async ({ page }) => {
+    // Served by the worker, CSP connect-src 'self' makes this the only origin that can
+    // work, so a new user should not have to retype the URL they are already on.
+    await installMocks(page, "token");
+    await page.goto("https://postern.test/webmail");
+
+    await expect(page.locator("#gate")).toBeVisible();
+    await expect(page.locator("#origin")).toHaveValue("https://postern.test");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+
+    await expect(page.locator("#app")).toBeVisible();
+    await expect(page.getByText("Hello from Alice")).toBeVisible();
+  });
+
   test("BYO token: connect, list, open sandboxed HTML body", async ({ page }) => {
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
