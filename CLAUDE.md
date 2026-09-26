@@ -93,7 +93,7 @@ npm run cf-typegen                 # regenerate Env types from wrangler.jsonc
 npx wrangler d1 migrations apply postern   # apply D1 migrations
 
 # mcp/     (TypeScript)  -- npm run typecheck; npx vitest run
-# relay/   (Go 1.22+)    -- go vet ./... ; go build -o skyphusion-email-relay .
+# relay/   (Go 1.25+)    -- go vet ./... ; go build -o skyphusion-email-relay .
 # imap/    (Python/Twisted) -- see imap/README.md; trial-based tests
 ```
 
