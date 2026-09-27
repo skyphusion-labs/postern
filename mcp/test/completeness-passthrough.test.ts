@@ -10,8 +10,8 @@
 // like the worker told it. So this suite pins the passthrough in both directions.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PosternClient } from "../src/client";
-import { READ_TOOLS } from "../src/tools";
+import { PosternClient } from "../src/client.js";
+import { READ_TOOLS } from "../src/tools.js";
 
 function mockFetch(body: unknown) {
   const fn = vi.fn(async () => ({

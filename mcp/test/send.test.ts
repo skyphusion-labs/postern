@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PosternClient, PosternError, USER_AGENT } from "../src/client";
+import { PosternClient, PosternError, USER_AGENT } from "../src/client.js";
 
 // Capture each fetch call so we can assert method, headers, URL, and JSON body.
 function mockFetch(status: number, body: unknown) {

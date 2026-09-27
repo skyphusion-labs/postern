@@ -21,9 +21,9 @@
 
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
-import { PosternClient } from "../src/client";
+import { PosternClient } from "../src/client.js";
 import { z } from "zod";
-import { READ_TOOLS, SEND_TOOLS, type ToolDef } from "../src/tools";
+import { READ_TOOLS, SEND_TOOLS, type ToolDef } from "../src/tools.js";
 
 interface RouteRow {
   id: string;
