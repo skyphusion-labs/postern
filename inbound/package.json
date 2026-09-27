@@ -5,7 +5,7 @@
   "description": "CF Email Worker: ingests inbound mail into D1 + Vectorize for agent consumption",
   "scripts": {
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "routes:emit": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/emit-route-table.mjs",
     "sync-webmail": "node scripts/sync-webmail.mjs",
     "setup-email-routing": "node scripts/setup-email-routing.mjs",
@@ -18,6 +18,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260822.1",
+    "@types/node": "22.20.4",
     "@vitest/coverage-istanbul": "^5.0.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1",

@@ -28,7 +28,9 @@ function msg(over: Partial<OutboundMessage> = {}): OutboundMessage {
 }
 
 function mockFetch(status: number, body: unknown) {
-  return vi.fn(async () =>
+  // Declare the parameters this stands in for, so mock.calls carries their types and a
+  // test asserting on the init object is genuinely checked rather than cast blind (#638).
+  return vi.fn(async (_url: string, _init: RequestInit) =>
     new Response(body === null ? null : JSON.stringify(body), {
       status,
       headers: { "content-type": "application/json" },

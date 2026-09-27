@@ -12,7 +12,9 @@ function req(path: string, token = "test-token"): Request {
 }
 
 function bytes(s: string): ArrayBuffer {
-  return new TextEncoder().encode(s).buffer;
+  // TextEncoder allocates a FRESH, never-shared buffer; @types/node widens .buffer to
+  // ArrayBufferLike, which is why the narrowing is explicit here (#638).
+  return new TextEncoder().encode(s).buffer as ArrayBuffer;
 }
 
 describe("attachment bytes endpoint", () => {

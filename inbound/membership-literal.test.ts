@@ -21,6 +21,8 @@
 import { describe, it, expect } from "vitest";
 import * as store from "./src/store";
 import { readFileSync } from "node:fs";
+// node URL, not the workers-types global: these are file URLs fed to node:fs (#638).
+import { URL } from "node:url";
 import { realEnv, putInbound, putOutbound } from "./realdb";
 
 // Two real addresses differing at ONE position, where the wildcard-bearing one is the

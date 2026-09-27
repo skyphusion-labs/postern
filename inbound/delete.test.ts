@@ -8,7 +8,7 @@ import { makeFakeEnv } from "./fakes";
 async function seed(
   env: Env,
   ctx: ExecutionContext,
-  settle: () => Promise<unknown[]>,
+  settle: () => Promise<void>,
   id: string,
   text: string,
 ) {

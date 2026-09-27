@@ -6,6 +6,8 @@
 // pattern-matches SQL strings and would "pass" a corrupted predicate.
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
+// node URL, not the workers-types global: these are file URLs fed to node:fs (#638).
+import { URL } from "node:url";
 import * as store from "./src/store";
 
 export function realEnv(

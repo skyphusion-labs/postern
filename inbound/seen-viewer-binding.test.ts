@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
+// node URL, not the workers-types global: these are file URLs fed to node:fs (#638).
+import { URL } from "node:url";
 import { handleApi } from "./src/api";
 import * as store from "./src/store";
 import { hashSecret } from "./src/smtpcreds";

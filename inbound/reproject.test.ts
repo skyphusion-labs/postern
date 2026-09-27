@@ -11,7 +11,7 @@ import { makeFakeEnv } from "./fakes";
 async function put(
   env: Env,
   ctx: ExecutionContext,
-  settle: () => Promise<unknown[]>,
+  settle: () => Promise<void>,
   m: { id: string; date: string; text?: string },
 ) {
   await store.put(

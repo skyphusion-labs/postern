@@ -44,7 +44,7 @@ async function put(
 async function seedTwoSenders(
   env: Env,
   ctx: ExecutionContext,
-  settle: () => Promise<unknown[]>,
+  settle: () => Promise<void>,
 ) {
   await put(env, ctx, {
     id: "alice-out@example.com",

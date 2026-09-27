@@ -7,7 +7,7 @@ describe("projected size (#342)", () => {
   it("stores projectedSize on put and exposes it on get + list summary", async () => {
     const { env, ctx, settle } = makeFakeEnv();
     const body = "hello projected";
-    const att = new TextEncoder().encode("attach-bytes").buffer;
+    const att = new TextEncoder().encode("attach-bytes").buffer as ArrayBuffer;
     await store.put(
       env,
       {
