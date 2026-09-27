@@ -39,8 +39,8 @@ describe("durable mailbox operations (#352)", () => {
     await seed(env, ctx);
     await settle();
 
-    expect(await store.setFlags(env, ["one@example.com"], { flagged: true, answered: true })).toBe(1);
-    expect(await store.moveMessages(env, ["one@example.com"], "trash")).toBe(1);
+    expect(await store.setFlags(env, ["one@example.com"], { flagged: true, answered: true }, "estate")).toBe(1);
+    expect(await store.moveMessages(env, ["one@example.com"], "trash", "estate")).toBe(1);
     const trash = await store.list(env, { mailbox: "trash" });
     expect(trash.items[0]).toMatchObject({
       messageId: "one@example.com",
@@ -52,7 +52,7 @@ describe("durable mailbox operations (#352)", () => {
     expect(trash.items[0].trashedAt).toBeTruthy();
     expect((await store.list(env, {})).items).toHaveLength(0);
 
-    expect(await store.moveMessages(env, ["one@example.com"], null)).toBe(1);
+    expect(await store.moveMessages(env, ["one@example.com"], null, "estate")).toBe(1);
     expect((await store.list(env, {})).items[0]).toMatchObject({
       messageId: "one@example.com",
       mailbox: null,

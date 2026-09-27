@@ -336,7 +336,7 @@ describe("#422 regression controls: the token path is untouched", () => {
     const { env, ctx, raw } = sessionEnv();
     await seedEstate(env, ctx);
     const cookie = await sessionCookie(env, raw, ME);
-    await store.setSeen(env, ["out-alice@x"], true, ME, ME);
+    await store.setSeen(env, ["out-alice@x"], true, [ME], ME);
 
     const res = await handleApi(sessionGet(`/api/messages?to=${ALICE}`, cookie), env, ctx);
     const body = (await res.json()) as { items: Array<{ messageId: string; seen: boolean }> };

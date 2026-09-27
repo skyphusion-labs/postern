@@ -137,27 +137,27 @@ describe("delivered-set membership matches an address literally", () => {
 
     it("store.setSeen: a viewer-scoped write does not reach a lookalike's mail", async () => {
       const { env } = await seeded();
-      expect(await store.setSeen(env, ["victim@x"], true, undefined, WILDCARD_VIEWER)).toBe(0);
+      expect(await store.setSeen(env, ["victim@x"], true, [WILDCARD_VIEWER])).toBe(0);
       expect(
-        await store.setSeen(env, ["victim@x"], true, undefined, PLAIN_RECIPIENT),
+        await store.setSeen(env, ["victim@x"], true, [PLAIN_RECIPIENT]),
         "inverse control: the real recipient may mark its own mail read",
       ).toBe(1);
     });
 
     it("store.setFlags: a viewer-scoped flag write does not reach a lookalike's mail", async () => {
       const { env } = await seeded();
-      expect(await store.setFlags(env, ["victim@x"], { flagged: true }, WILDCARD_VIEWER)).toBe(0);
+      expect(await store.setFlags(env, ["victim@x"], { flagged: true }, [WILDCARD_VIEWER])).toBe(0);
       expect(
-        await store.setFlags(env, ["victim@x"], { flagged: true }, PLAIN_RECIPIENT),
+        await store.setFlags(env, ["victim@x"], { flagged: true }, [PLAIN_RECIPIENT]),
         "inverse control",
       ).toBe(1);
     });
 
     it("store.moveMessages: a viewer-scoped move does not reach a lookalike's mail", async () => {
       const { env } = await seeded();
-      expect(await store.moveMessages(env, ["victim@x"], "trash", WILDCARD_VIEWER)).toBe(0);
+      expect(await store.moveMessages(env, ["victim@x"], "trash", [WILDCARD_VIEWER])).toBe(0);
       expect(
-        await store.moveMessages(env, ["victim@x"], "trash", PLAIN_RECIPIENT),
+        await store.moveMessages(env, ["victim@x"], "trash", [PLAIN_RECIPIENT]),
         "inverse control",
       ).toBe(1);
     });

@@ -1044,16 +1044,37 @@ function membershipClause(
   };
 }
 
-/** "delivered to V, or authored by V" for ANY address in the viewer set (#425).
+/** WHOSE mail a scoped store call may touch.
+ *
+ *  The estate case is the LITERAL `"estate"`, never an absent argument and never an empty
+ *  array, so it cannot be reached by omission: a bare address is not assignable to this
+ *  type, and a member scope must be written as an array. An EMPTY array is a real answer
+ *  and it means NOTHING is reachable; "I resolved this caller and it came out with no
+ *  addresses" is the fail-closed case, not a licence to touch the estate.
+ *
+ *  Same discipline as `MessageReadScope` (GHSA-49mc-vh6w-95h4), applied to the paths that
+ *  WRITE. It is what stops the next state-changing call site from acquiring estate reach by
+ *  forgetting an argument: there is no argument to forget, and the two meanings that used
+ *  to share one representation (`undefined`) no longer have one. */
+export type AccessScope = readonly string[] | "estate";
+
+/** "delivered to V, or authored by V" for ANY address in the scope (#425).
  *
  *  One address produces one fragment; a set produces a parenthesised OR of the same
- *  fragment, so a role member reaches ROLE mail and nothing else widens. An EMPTY set
- *  produces no SQL, and each call site decides what that means: estate for the
- *  optional-scope writers, a flat refusal for messageAccessible. `alias` matches the
- *  surrounding statement, so list/search/folders share this definition instead of
- *  keeping aliased copies of it. */
-function accessClause(viewers: readonly string[], alias?: string): { sql: string; binds: string[] } {
-  if (viewers.length === 0) return { sql: "", binds: [] };
+ *  fragment, so a role member reaches ROLE mail and nothing else widens. `"estate"`
+ *  produces no SQL at all, deliberately unconstrained: the static operator token, the IMAP
+ *  door and the same-account RPC entrypoint are estate-wide by construction and each says
+ *  so with the literal. An EMPTY member set produces `1=0`, which matches nothing, and that
+ *  is the answer the old shape could not give: an absent viewer produced no SQL, so "no
+ *  identity for this caller" and "this caller may see everything" were the same string.
+ *  `alias` matches the surrounding statement, so list/search/folders share this definition
+ *  instead of keeping aliased copies of it. */
+function accessClause(scope: AccessScope, alias?: string): { sql: string; binds: string[] } {
+  if (scope === "estate") return { sql: "", binds: [] };
+  const viewers = viewerList(scope);
+  // Matches nothing rather than throwing: every call site already treats an id it cannot
+  // reach as skipped, so a refusal reads exactly like an unknown id.
+  if (viewers.length === 0) return { sql: "1=0", binds: [] };
   const p = alias ? `${alias}.` : "";
   const parts: string[] = [];
   const binds: string[] = [];
@@ -1065,6 +1086,22 @@ function accessClause(viewers: readonly string[], alias?: string): { sql: string
   return { sql: parts.length === 1 ? parts[0] : `(${parts.join(" OR ")})`, binds };
 }
 
+/** The READ paths' documented default: a read with no bound viewer is an ESTATE read.
+ *
+ *  The static operator token, the IMAP door and the shared public demo mailbox all rely on
+ *  it, so it stays. It lives HERE, once, as a deliberate and greppable mapping rather than
+ *  inside accessClause, where the state-changing paths would inherit it too. Only the read
+ *  projections may use it. */
+function readScopeOf(viewer: string | readonly string[] | undefined): AccessScope {
+  // ONLY an absent viewer is estate. An argument that was PASSED and resolved to no
+  // addresses stays empty, and the shared predicate then matches nothing: a caller that
+  // tried to state a scope and came up empty is exactly the fail-closed case, and reading
+  // it as estate is the defect this type exists to remove, on the read paths as much as on
+  // the write ones.
+  if (viewer === undefined) return "estate";
+  return viewerList(viewer);
+}
+
 /**
  * Set the read state (#seen) on a set of messages by message_id, returning how many
  * rows changed. The single writer for the seen flag: the IMAP \Seen store, a webmail
@@ -1072,30 +1109,30 @@ function accessClause(viewers: readonly string[], alias?: string): { sql: string
  * is a no-op (SQLite reports 0 changes). Unknown ids are silently skipped (they simply
  * match no row). An empty id list is a no-op that never touches D1.
  *
- * `viewer` (#410) restricts every write to messages that viewer can actually SEE --
- * the same delivered-to / from-addr predicate setFlags and moveMessages apply, and the
- * same one messageAccessible uses for the single-message routes. It is passed for
- * SESSION-authed callers only; a Bearer caller (the IMAP door) omits it and keeps the
- * pre-#410 estate behavior byte for byte. An id the viewer cannot see is skipped, not
- * refused, exactly as an unknown id is.
+ * `scope` (#410) restricts every write to messages that scope can actually SEE -- the same
+ * delivered-to / from-addr predicate setFlags and moveMessages apply, and the same one
+ * messageAccessible uses for the single-message routes. It is REQUIRED and there is no
+ * estate default: a bound caller passes its member set, and an estate-wide caller (the
+ * static operator token, the IMAP door) passes the literal `"estate"` out loud. An id the
+ * scope cannot reach is skipped, not refused, exactly as an unknown id is.
  *
- * Since #425 it may be a SET (the session identity PLUS the role queues that identity
- * belongs to), so a member can mark role mail read. `forRecipient` is unaffected and
- * stays the ONE person the override belongs to: the widened set decides which messages
+ * A member scope may be a SET since #425 (the session identity PLUS the role queues that
+ * identity belongs to), so a member can mark role mail read. `forRecipient` is unaffected
+ * and stays the ONE person the override belongs to: the widened set decides which messages
  * are REACHABLE, never whose read state is written.
  */
 export async function setSeen(
   env: Env,
   messageIds: string[],
   seen: boolean,
+  scope: AccessScope,
   forRecipient?: string,
-  viewer?: string | readonly string[],
 ): Promise<number> {
   if (messageIds.length === 0) return 0;
   const placeholders = messageIds.map(() => "?").join(", ");
-  // The viewer-accessibility predicate, identical to setFlags/moveMessages and to
-  // messageAccessible: the message was delivered to the viewer, or the viewer sent it.
-  const clause = accessClause(viewerList(viewer));
+  // The accessibility predicate, identical to setFlags/moveMessages and to
+  // messageAccessible: the message was delivered to the scope, or the scope sent it.
+  const clause = accessClause(scope);
   const access = clause.sql ? ` AND ${clause.sql}` : "";
   const accessBinds = clause.binds;
 
@@ -1135,11 +1172,12 @@ export async function setSeen(
     .bind(seen ? 1 : 0, ...messageIds, ...accessBinds)
     .all<{ message_id: string }>();
   const touched = (res.results ?? []).map((r) => r.message_id);
-  // Realign the per-recipient overrides. WITHOUT a viewer this stays byte-identical
-  // to before #410 (every requested id, unknown ones matching nothing); WITH a viewer
-  // only the rows the viewer was actually allowed to touch are realigned, so the gate
-  // cannot be sidestepped through the override table.
-  const realignIds = viewer ? touched : messageIds;
+  // Realign the per-recipient overrides. Under `"estate"` this stays byte-identical to
+  // before #410 (every requested id, unknown ones matching nothing); under a MEMBER scope
+  // only the rows that scope was actually allowed to touch are realigned, so the gate
+  // cannot be sidestepped through the override table. An empty member scope therefore
+  // realigns nothing, which is the same nothing it was allowed to update.
+  const realignIds = scope === "estate" ? messageIds : touched;
   if (realignIds.length > 0) {
     const realign = realignIds.map(() => "?").join(", ");
     await env.DB.prepare(
@@ -1156,7 +1194,7 @@ export async function setFlags(
   env: Env,
   messageIds: string[],
   set: { flagged?: boolean; answered?: boolean },
-  viewer?: string,
+  scope: AccessScope,
 ): Promise<number> {
   if (messageIds.length === 0 || (set.flagged === undefined && set.answered === undefined)) return 0;
   const assignments: string[] = [];
@@ -1170,9 +1208,9 @@ export async function setFlags(
     binds.push(set.answered ? 1 : 0);
   }
   const placeholders = messageIds.map(() => "?").join(", ");
-  // The same accessClause every other viewer-scoped path uses, so a flag write cannot
-  // drift from the read it mirrors.
-  const clause = accessClause(viewerList(viewer));
+  // The same accessClause every other scoped path uses, so a flag write cannot drift
+  // from the read it mirrors.
+  const clause = accessClause(scope);
   const access = clause.sql ? ` AND ${clause.sql}` : "";
   const res = await env.DB.prepare(
     `UPDATE messages SET ${assignments.join(", ")} WHERE message_id IN (${placeholders})${access} RETURNING message_id`,
@@ -1209,18 +1247,27 @@ async function allocateFolderUid(env: Env, folder: string): Promise<{ uid: numbe
   return row;
 }
 
-/** Move messages between the mutually-exclusive durable system boxes. */
+/** Move messages between the mutually-exclusive durable system boxes.
+ *
+ *  `scope` is REQUIRED, exactly as on setSeen: a member set, or the literal `"estate"`
+ *  named out loud.
+ *
+ *  It gates BOTH statements that can decide the outcome, the placement read AND the
+ *  UPDATE. The UPDATE used to carry no predicate of its own and inherited its only guard
+ *  from the SELECT above it, which is one refactor away from having none: a write states
+ *  its own constraint, or it is not constrained. */
 export async function moveMessages(
   env: Env,
   messageIds: string[],
   mailbox: MailboxPlacement,
-  viewer?: string,
+  scope: AccessScope,
 ): Promise<number> {
   let updated = 0;
-  const clause = accessClause(viewerList(viewer));
+  const clause = accessClause(scope);
+  const access = clause.sql ? ` AND ${clause.sql}` : "";
   for (const id of messageIds) {
     const row = await env.DB.prepare(
-      "SELECT mailbox FROM messages WHERE message_id = ? " + (clause.sql ? `AND ${clause.sql}` : ""),
+      `SELECT mailbox FROM messages WHERE message_id = ?${access}`,
     )
       .bind(id, ...clause.binds)
       .first<{ mailbox: string | null }>();
@@ -1230,8 +1277,8 @@ export async function moveMessages(
     const now = new Date().toISOString();
     const statements = [
       env.DB.prepare(
-        "UPDATE messages SET mailbox = ?, trashed_at = ? WHERE message_id = ?",
-      ).bind(mailbox, mailbox === "trash" ? now : null, id),
+        `UPDATE messages SET mailbox = ?, trashed_at = ? WHERE message_id = ?${access}`,
+      ).bind(mailbox, mailbox === "trash" ? now : null, id, ...clause.binds),
       env.DB.prepare("DELETE FROM mailbox_placement WHERE message_id = ?").bind(id),
     ];
     if (mailbox && placement) {
@@ -1563,11 +1610,12 @@ export async function messageAccessible(
   identity: string | readonly string[],
   requireTrash = false,
 ): Promise<boolean> {
+  // An EMPTY set is refused rather than read as estate, and that refusal now comes from
+  // accessClause itself (`1=0`) instead of a guard kept here: this runs only to SCOPE a
+  // caller, so "no addresses" can only mean the scope is unanswerable, and the fail-closed
+  // answer to that is no. A bare `readonly string[]` is passed, never `"estate"`, so the
+  // type makes an unscoped accessibility check unwritable.
   const clause = accessClause(viewerList(identity));
-  // An EMPTY set is refused rather than read as estate: this runs only to SCOPE a
-  // caller, so "no addresses" can only mean the scope is unanswerable, and the
-  // fail-closed answer to that is no.
-  if (!clause.sql) return false;
   const row = await env.DB.prepare(
     "SELECT message_id FROM messages WHERE message_id = ? " +
       `AND ${clause.sql} ` +
@@ -1704,7 +1752,7 @@ export async function thread(
   threadId: string,
   viewer?: string | readonly string[],
 ): Promise<StoredMessage[]> {
-  const clause = accessClause(viewerList(viewer));
+  const clause = accessClause(readScopeOf(viewer));
   const res = await env.DB.prepare(
     `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
@@ -2140,7 +2188,7 @@ export async function folders(
   const identity = viewer?.trim().toLowerCase() || undefined;
   // The shared accessClause, aliased to this statement, so the rail counts exactly what
   // the list and read paths would show.
-  const accessPredicate = accessClause(identity ? [identity] : [], "m");
+  const accessPredicate = accessClause(identity ? [identity] : "estate", "m");
   const access = accessPredicate.sql || "1=1";
   // The per-recipient read override as a JOIN rather than the seenProjection()
   // correlated subquery: message_seen_by is PRIMARY KEY (message_id, recipient), so with

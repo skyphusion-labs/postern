@@ -73,7 +73,7 @@ describe("#350 store lenses (real SQLite)", () => {
     // Inbound lands unread everywhere (messages.seen = 0).
     expect((await store.getUnscoped(env, "in@skyphusion.org"))!.seen).toBe(false);
 
-    const n = await store.setSeen(env, ["in@skyphusion.org"], true, "bob@skyphusion.org");
+    const n = await store.setSeen(env, ["in@skyphusion.org"], true, "estate", "bob@skyphusion.org");
     expect(n).toBe(1);
     // B's effective seen is now read.
     const bob = await store.list(env, { to: "bob@skyphusion.org", direction: "inbound" });
@@ -85,7 +85,7 @@ describe("#350 store lenses (real SQLite)", () => {
   it("scoped setSeen skips ids that do not exist (no junk overrides)", async () => {
     const { env, ctx, raw } = realEnv();
     await putInbound(env, ctx, { id: "real@skyphusion.org", from: "ext@gmail.com", to: "bob@skyphusion.org" });
-    const n = await store.setSeen(env, ["real@skyphusion.org", "ghost@skyphusion.org"], true, "bob@skyphusion.org");
+    const n = await store.setSeen(env, ["real@skyphusion.org", "ghost@skyphusion.org"], true, "estate", "bob@skyphusion.org");
     expect(n).toBe(1);
     const recips = (raw.prepare("SELECT message_id FROM message_seen_by").all() as { message_id: string }[]).map((r) => r.message_id);
     expect(recips).toEqual(["real@skyphusion.org"]);
@@ -95,7 +95,7 @@ describe("#350 store lenses (real SQLite)", () => {
     const { env, ctx, raw } = realEnv();
     await putOutbound(env, ctx, { id: "ab@skyphusion.org", from: "alice@skyphusion.org", to: ["bob@skyphusion.org"] });
     // Override seeded seen=0; messages.seen=1.
-    await store.setSeen(env, ["ab@skyphusion.org"], false); // legacy, no `for`
+    await store.setSeen(env, ["ab@skyphusion.org"], false, "estate"); // legacy, no `for`
     expect((await store.getUnscoped(env, "ab@skyphusion.org"))!.seen).toBe(false); // messages.seen flipped
     const ov = raw.prepare("SELECT seen FROM message_seen_by WHERE message_id = ? AND recipient = ?").get("ab@skyphusion.org", "bob@skyphusion.org") as { seen: number };
     expect(ov.seen).toBe(0); // existing override realigned to the same value
@@ -107,7 +107,7 @@ describe("#350 store lenses (real SQLite)", () => {
     let hits = await store.search(env, { q: "photosynthesis", to: "bob@skyphusion.org", mode: "fts" });
     expect(hits.items.map((h) => h.message.messageId)).toEqual(["ab@skyphusion.org"]);
     expect(hits.items[0].message.seen).toBe(false);
-    await store.setSeen(env, ["ab@skyphusion.org"], true, "bob@skyphusion.org");
+    await store.setSeen(env, ["ab@skyphusion.org"], true, "estate", "bob@skyphusion.org");
     hits = await store.search(env, { q: "photosynthesis", to: "bob@skyphusion.org", mode: "fts" });
     expect(hits.items[0].message.seen).toBe(true);
   });
@@ -132,12 +132,12 @@ describe("#350 store lenses (real SQLite)", () => {
     // A's Sent still shows it seen.
     expect((await store.list(env, { from: "alice@skyphusion.org" })).items[0].seen).toBe(true);
     // B marks read (for=B): A's row-level state untouched.
-    await store.setSeen(env, ["fc792@skyphusion.org"], true, "bob@skyphusion.org");
+    await store.setSeen(env, ["fc792@skyphusion.org"], true, "estate", "bob@skyphusion.org");
     expect((await store.list(env, { to: "bob@skyphusion.org", lens: "inbox" })).items[0].seen).toBe(true);
     expect((await store.getUnscoped(env, "fc792@skyphusion.org"))!.seen).toBe(true); // messages.seen was 1 all along
     // Legacy unscoped mark-read still works.
     await putInbound(env, ctx, { id: "legacy@skyphusion.org", from: "ext@gmail.com", to: "bob@skyphusion.org" });
-    expect(await store.setSeen(env, ["legacy@skyphusion.org"], true)).toBe(1);
+    expect(await store.setSeen(env, ["legacy@skyphusion.org"], true, "estate")).toBe(1);
     expect((await store.getUnscoped(env, "legacy@skyphusion.org"))!.seen).toBe(true);
   });
 });
@@ -216,7 +216,7 @@ describe("#350 semantic/hybrid viewer scope (fake env)", () => {
     expect(ids).not.toContain("tc@skyphusion.org"); // never delivered to bob: no leak
     expect(res.items.find((h) => h.message.messageId === "tb@skyphusion.org")!.message.seen).toBe(false);
 
-    await store.setSeen(env, ["tb@skyphusion.org"], true, "bob@skyphusion.org");
+    await store.setSeen(env, ["tb@skyphusion.org"], true, "estate", "bob@skyphusion.org");
     res = await store.search(env, { q: "deploy release", mode: "semantic", to: "bob@skyphusion.org" });
     expect(res.items.find((h) => h.message.messageId === "tb@skyphusion.org")!.message.seen).toBe(true);
   });

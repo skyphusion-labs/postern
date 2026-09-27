@@ -44,7 +44,7 @@ describe("search filters (#354)", () => {
       ctx,
     );
     await settle();
-    await store.moveMessages(env, ["f1@x"], "archive");
+    await store.moveMessages(env, ["f1@x"], "archive", "estate");
 
     const archived = await store.search(env, {
       q: "invoice",
@@ -95,7 +95,7 @@ describe("search filters (#354)", () => {
       ctx,
     );
     await settle();
-    await store.setSeen(env, ["d2@x"], true);
+    await store.setSeen(env, ["d2@x"], true, "estate");
 
     const mid = await store.search(env, {
       q: "needle",
