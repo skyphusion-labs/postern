@@ -14,7 +14,11 @@ function fakeServer() {
 
 describe("SEND_TOOLS surface", () => {
   it("exposes exactly the v1.1 send tools, all scope=send", () => {
-    expect(SEND_TOOLS.map((t) => t.name).sort()).toEqual(["mailbox_reply", "mailbox_send"]);
+    expect(SEND_TOOLS.map((t) => t.name).sort()).toEqual([
+      "mailbox_draft_create", "mailbox_draft_delete", "mailbox_draft_get",
+      "mailbox_draft_send", "mailbox_draft_update", "mailbox_drafts_list",
+      "mailbox_reply", "mailbox_send",
+    ]);
     expect(SEND_TOOLS.every((t) => t.scope === "send")).toBe(true);
   });
 });
@@ -29,14 +33,22 @@ describe("scope gate (the default-OFF send seam)", () => {
   it("a send-scoped server registers both send tools", () => {
     const { server, handlers } = fakeServer();
     const names = registerTools(server, {} as any, new Set<Scope>(["send"]), SEND_TOOLS);
-    expect(names.sort()).toEqual(["mailbox_reply", "mailbox_send"]);
-    expect([...handlers.keys()].sort()).toEqual(["mailbox_reply", "mailbox_send"]);
+    expect(names.sort()).toEqual([
+      "mailbox_draft_create", "mailbox_draft_delete", "mailbox_draft_get",
+      "mailbox_draft_send", "mailbox_draft_update", "mailbox_drafts_list",
+      "mailbox_reply", "mailbox_send",
+    ]);
+    expect([...handlers.keys()].sort()).toEqual([
+      "mailbox_draft_create", "mailbox_draft_delete", "mailbox_draft_get",
+      "mailbox_draft_send", "mailbox_draft_update", "mailbox_drafts_list",
+      "mailbox_reply", "mailbox_send",
+    ]);
   });
 
   it("a read-scoped server still registers all read tools (read MCP unchanged)", () => {
     const { server } = fakeServer();
     const names = registerTools(server, {} as any, new Set<Scope>(["read"]), READ_TOOLS);
-    expect(names.sort()).toEqual(["mailbox_get", "mailbox_get_attachment", "mailbox_list", "mailbox_search", "mailbox_thread"]);
+    expect(names.sort()).toEqual(["mailbox_folders", "mailbox_get", "mailbox_get_attachment", "mailbox_list", "mailbox_search", "mailbox_thread"]);
   });
 });
 

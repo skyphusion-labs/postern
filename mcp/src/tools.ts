@@ -7,7 +7,16 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PosternClient, PosternError } from "./client.js";
-import type { SearchField, SearchMode } from "./types.js";
+import type { DraftInput, SearchField, SearchMode } from "./types.js";
+
+// Repeated verbatim in every draft tool description on purpose. An agent reads ONE
+// tool description, never the set, so the identity requirement has to be in each of
+// them or it is effectively in none: a caller holding a static operator token needs to
+// know why it was refused at the moment it reads the tool it is about to call.
+const DRAFT_NOTE =
+  "Server-side drafts are IDENTITY-OWNED: the owner comes from the token, never from an " +
+  "argument, so a static operator token is refused with E_IDENTITY_REQUIRED and the tool " +
+  "says so rather than returning an empty result. ";
 
 export type Scope = "read" | "send";
 
@@ -38,6 +47,27 @@ function fail(err: unknown): TextResult {
   return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
 }
 
+/** Tool arguments (snake_case, the MCP convention here) to the client's DraftInput
+ *  (camelCase, the worker's wire names). Only keys the caller actually supplied are
+ *  carried, because the worker reads an absent key as a CLEARED field: mapping an
+ *  unsupplied argument to undefined and then sending it would blank a field nobody
+ *  mentioned. `draft_id` and `updated_at` are addressing and concurrency, not content,
+ *  so they are deliberately not part of this. */
+function draftInputFrom(a: any): DraftInput {
+  const out: DraftInput = {};
+  if (a.to !== undefined) out.to = a.to;
+  if (a.cc !== undefined) out.cc = a.cc;
+  if (a.bcc !== undefined) out.bcc = a.bcc;
+  if (a.subject !== undefined) out.subject = a.subject;
+  if (a.body_text !== undefined) out.bodyText = a.body_text;
+  if (a.body_html !== undefined) out.bodyHtml = a.body_html;
+  if (a.in_reply_to !== undefined) out.inReplyTo = a.in_reply_to;
+  if (a.thread_id !== undefined) out.threadId = a.thread_id;
+  if (a.compose_mode !== undefined) out.composeMode = a.compose_mode;
+  if (a.source_message_id !== undefined) out.sourceMessageId = a.source_message_id;
+  return out;
+}
+
 const DIRECTION = z.enum(["inbound", "outbound"]);
 // A viewer-relative VIEW, as opposed to the stored wire fact `direction` filters
 // (worker #403). inbox = mail delivered to the viewer that the viewer did not write
@@ -49,6 +79,9 @@ const MODE = z.enum(["fts", "substr", "semantic", "hybrid"]);
 // placement, archive|trash|junk = that placement only; omitted = the default
 // (unfoldered) placement, unchanged.
 const MAILBOX = z.enum(["archive", "trash", "junk", "all"]);
+// How a draft was composed (worker draftMode, api.ts). reply/replyAll/forward each need a
+// source_message_id; the worker refuses an unknown value rather than defaulting it.
+const DRAFT_MODE = z.enum(["new", "reply", "replyAll", "forward"]);
 // How a reply picks its recipients (worker ReplyRequest.mode, mailbox.ts): 'reply' is
 // the sender only, 'replyAll' derives the original To/Cc server-side from STORED state,
 // excluding the sender. Named for the worker field, not the tool.
@@ -333,6 +366,29 @@ export const READ_TOOLS: ToolDef[] = [
       };
     },
   },
+  {
+    name: "mailbox_folders",
+    scope: "read",
+    description:
+      "List the mailbox folders with a message count and an unread count for each, plus any " +
+      "shared role queues the caller may read. Use this to orient BEFORE paging messages: it " +
+      "answers 'where is there mail and how much' in one call, which mailbox_list cannot. " +
+      "The counts are computed server-side with the same predicates a read uses, so they " +
+      "agree with what mailbox_list would return for the same folder. An entry carrying a " +
+      "'role' field is a shared QUEUE, not a personal folder; its presence is the signal, so " +
+      "never parse the id to decide. Under an identity-bound token the server scopes the " +
+      "counts to that identity and ignores 'to'.",
+    inputSchema: {
+      to: z
+        .string()
+        .optional()
+        .describe("scope the unread counts to this address; ignored when the token is identity-bound"),
+    },
+    handler: async (client, a) => {
+      const folders = await client.folders({ to: a.to });
+      return { count: folders.length, folders };
+    },
+  },
 ];
 
 // v1.1 send tools (scope "send"). MUTATING: they actually send mail as the estate,
@@ -422,6 +478,138 @@ export const SEND_TOOLS: ToolDef[] = [
         attachments: mapAttachments(a.attachments),
       });
       return { sent: true, messageId: result.messageId, threadId: result.threadId, providerMessageId: result.providerMessageId ?? null };
+    },
+  },
+  // --- server-side drafts ---
+  //
+  // These carry scope "send" because that is the scope the worker's route table demands,
+  // and only mailbox_draft_send actually delivers anything. The rest compose. They need
+  // MORE than the scope, though: the routes are identity-owned, so a static operator
+  // token holding `send` still gets E_IDENTITY_REQUIRED (403) on every one of them. Each
+  // description says so, because an agent that cannot tell "refused" from "empty" will
+  // report the wrong thing to its user.
+  {
+    name: "mailbox_drafts_list",
+    scope: "send",
+    description:
+      "List the caller's own saved drafts. " + DRAFT_NOTE +
+      "Each draft carries an 'updatedAt' which mailbox_draft_update REQUIRES, so list or get " +
+      "first and keep that value.",
+    inputSchema: {},
+    handler: async (client) => {
+      const drafts = await client.listDrafts();
+      return { count: drafts.length, drafts };
+    },
+  },
+  {
+    name: "mailbox_draft_get",
+    scope: "send",
+    description:
+      "Fetch one of the caller's own drafts by id, including the 'updatedAt' that an update " +
+      "must echo back. " + DRAFT_NOTE +
+      "A draft that does not exist and one owned by another identity are the SAME answer " +
+      "(found: false), deliberately, so this cannot be used to probe for other identities.",
+    inputSchema: {
+      draft_id: z.string().min(1).describe("the draft id (from mailbox_drafts_list or a create)"),
+    },
+    handler: async (client, a) => {
+      const draft = await client.getDraft(a.draft_id);
+      if (!draft) return { found: false, draftId: a.draft_id };
+      return { found: true, draft };
+    },
+  },
+  {
+    name: "mailbox_draft_create",
+    scope: "send",
+    description:
+      "Create a new server-side draft. This does NOT send anything; use mailbox_draft_send " +
+      "when it is ready. " + DRAFT_NOTE +
+      "Returns the new draft including its id and 'updatedAt'. Set 'compose_mode' to reply, " +
+      "replyAll or forward together with 'source_message_id' to make the eventual send thread " +
+      "against an existing message; the default is a fresh message.",
+    inputSchema: {
+      to: z.string().optional().describe("recipient(s), comma or newline separated as the user typed them"),
+      cc: z.string().optional().describe("cc recipient(s), same format as to"),
+      bcc: z.string().optional().describe("bcc recipient(s), same format as to"),
+      subject: z.string().optional().describe("the subject line"),
+      body_text: z.string().optional().describe("plain-text body"),
+      body_html: z.string().optional().describe("HTML body"),
+      in_reply_to: z.string().optional().describe("the Message-ID this draft answers"),
+      thread_id: z.string().optional().describe("the thread this draft belongs to"),
+      compose_mode: DRAFT_MODE.optional().describe("new (default), reply, replyAll or forward; the last three need source_message_id"),
+      source_message_id: z.string().optional().describe("the stored message a reply/replyAll/forward is built from"),
+    },
+    handler: async (client, a) => {
+      const draft = await client.createDraft(draftInputFrom(a));
+      return { created: true, draft };
+    },
+  },
+  {
+    name: "mailbox_draft_update",
+    scope: "send",
+    description:
+      "Update one of the caller's own drafts. " + DRAFT_NOTE +
+      "This is a READ-MODIFY-WRITE: pass 'updated_at' exactly as the last read returned it. " +
+      "A stale or missing value is refused with E_CONFLICT instead of overwriting a " +
+      "concurrent edit, and the answer to that refusal is to read the draft again and retry " +
+      "with its current 'updated_at'. Any field you OMIT is CLEARED, so send the whole draft " +
+      "as you want it to end up, not just the part you changed.",
+    inputSchema: {
+      draft_id: z.string().min(1).describe("the draft id to update"),
+      updated_at: z.string().min(1).describe("the draft's current updatedAt, from mailbox_draft_get or a previous write"),
+      to: z.string().optional().describe("recipient(s), comma or newline separated"),
+      cc: z.string().optional().describe("cc recipient(s)"),
+      bcc: z.string().optional().describe("bcc recipient(s)"),
+      subject: z.string().optional().describe("the subject line"),
+      body_text: z.string().optional().describe("plain-text body"),
+      body_html: z.string().optional().describe("HTML body"),
+      in_reply_to: z.string().optional().describe("the Message-ID this draft answers"),
+      thread_id: z.string().optional().describe("the thread this draft belongs to"),
+      compose_mode: DRAFT_MODE.optional().describe("new, reply, replyAll or forward"),
+      source_message_id: z.string().optional().describe("the stored message a reply/replyAll/forward is built from"),
+    },
+    handler: async (client, a) => {
+      const draft = await client.updateDraft(a.draft_id, draftInputFrom(a), a.updated_at);
+      return { updated: true, draft };
+    },
+  },
+  {
+    name: "mailbox_draft_delete",
+    scope: "send",
+    description:
+      "Delete one of the caller's own drafts, discarding it. " + DRAFT_NOTE +
+      "Reports deleted: false when there was nothing to delete, which is not an error.",
+    inputSchema: {
+      draft_id: z.string().min(1).describe("the draft id to discard"),
+    },
+    handler: async (client, a) => {
+      const deleted = await client.deleteDraft(a.draft_id);
+      return { deleted, draftId: a.draft_id };
+    },
+  },
+  {
+    name: "mailbox_draft_send",
+    scope: "send",
+    description:
+      "Send one of the caller's own drafts. MUTATING: this actually delivers mail to the " +
+      "recipients, so use it deliberately, and read the draft back first if you did not just " +
+      "write it. " + DRAFT_NOTE +
+      "The server dispatches, stores the sent copy, and only THEN discards the draft, so a " +
+      "failure leaves the draft intact and retryable rather than half-sent. A reply or " +
+      "forward draft threads against its source message automatically. Returns the sent " +
+      "message id and thread id.",
+    inputSchema: {
+      draft_id: z.string().min(1).describe("the draft id to send"),
+    },
+    handler: async (client, a) => {
+      const result = await client.sendDraft(a.draft_id);
+      return {
+        sent: true,
+        draftId: a.draft_id,
+        messageId: result.messageId,
+        threadId: result.threadId,
+        providerMessageId: result.providerMessageId ?? null,
+      };
     },
   },
 ];
