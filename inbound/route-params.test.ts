@@ -81,6 +81,57 @@ async function seed(env: Env, ctx: ExecutionContext, raw: import("node:sqlite").
 
 type Probe = (env: Env, ctx: ExecutionContext) => Promise<void>;
 
+/** The key sets a read surface actually returned, one entry per row.
+ *
+ *  `fields=` is the one declared parameter that changes the SHAPE of a row rather than
+ *  WHICH rows come back, so the `changes()` helper above (which compares id sets) is
+ *  structurally blind to it: an accepted-and-ignored projection would sail through a
+ *  refusal-only probe. Hence both arms below, and the CONTROL that the unprojected page
+ *  is genuinely wider than the projected one. */
+async function rowKeys(res: Response, pick: (row: any) => any = (row) => row): Promise<string[][]> {
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { items: unknown[] };
+  expect(body.items.length, "no rows: a projection assertion would be vacuous").toBeGreaterThan(0);
+  return body.items.map((row) => Object.keys(pick(row)).sort());
+}
+
+/** Both refusal arms and the applied arm, shared by the two read surfaces.
+ *
+ *  `snippet` is REFUSED on purpose. It is declared on the search hit and on
+ *  mcp/src/types.ts with zero producers (#652, populate-or-delete, undecided); a
+ *  projection that accepted it would answer a key nothing fills, which is the very
+ *  defect #652 exists to settle. The projection must not pre-empt that decision. */
+async function fieldsProbe(
+  env: Env,
+  ctx: ExecutionContext,
+  base: string,
+  sep: string,
+  pick?: (row: any) => any,
+): Promise<void> {
+  await refuses(env, ctx, `${base}${sep}fields=nope`);
+  await refuses(env, ctx, `${base}${sep}fields=`);
+  await refuses(env, ctx, `${base}${sep}fields=uid,nope`);
+  await refuses(env, ctx, `${base}${sep}fields=snippet`);
+  const full = await rowKeys(await handleApi(get(base), env, ctx), pick);
+  const want = ["date", "from", "subject", "uid"];
+  const projected = await rowKeys(
+    await handleApi(get(`${base}${sep}fields=uid,date,from,subject`), env, ctx),
+    pick,
+  );
+  expect(projected.length).toBe(full.length);
+  for (const keys of projected) expect(keys).toEqual(want);
+  // CONTROL: the unprojected row is genuinely wider, so the assertion above is a real
+  // narrowing and not a row that happened to carry four keys all along.
+  for (const keys of full) expect(keys.length).toBeGreaterThan(want.length);
+  // A repeated name cannot repeat a key or reorder the row: projectSummary walks the
+  // TYPE's key order, not the caller's argument order.
+  const dup = await rowKeys(
+    await handleApi(get(`${base}${sep}fields=subject,uid,subject,date,from`), env, ctx),
+    pick,
+  );
+  for (const keys of dup) expect(keys).toEqual(want);
+}
+
 async function refuses(env: Env, ctx: ExecutionContext, path: string): Promise<void> {
   const res = await handleApi(get(path), env, ctx);
   expect(res.status, `${path} should be refused`).toBe(400);
@@ -118,6 +169,7 @@ const LIST_PROBES: Record<string, Probe> = {
   q: async (e, c) => {
     expect(await changes(e, c, "/api/messages", "/api/messages?q=uniqueone")).toEqual(["m-alpha@x"]);
   },
+  fields: async (e, c) => fieldsProbe(e, c, "/api/messages", "?"),
   limit: async (e, c) => {
     expect(await ids(await handleApi(get("/api/messages?limit=1"), e, c))).toHaveLength(1);
   },
@@ -148,6 +200,10 @@ const SEARCH_PROBES: Record<string, Probe> = {
     ]);
   },
   field: async (e, c) => refuses(e, c, "/api/search?q=x&mode=substr&field=nope"),
+  // The PLURAL neighbour of `field` above, and a different axis: `field` picks the
+  // column substr MATCHES, `fields` picks the summary keys hit.message RETURNS. Probed
+  // on hit.message, and `score`/the page envelope stay untouched by construction.
+  fields: async (e, c) => fieldsProbe(e, c, "/api/search?q=keyword", "&", (row) => row.message),
   direction: async (e, c) => refuses(e, c, "/api/search?q=keyword&direction=sideways"),
   lens: async (e, c) => refuses(e, c, "/api/search?q=keyword&lens=nope"),
   seenFor: async (e, c) => refuses(e, c, "/api/search?q=keyword&seenFor=not-an-address"),

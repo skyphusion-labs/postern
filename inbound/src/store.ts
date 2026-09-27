@@ -105,6 +105,60 @@ export interface StoredMessageSummary {
   hasHtml: boolean;
 }
 
+/**
+ * Every key a list/search summary row carries, and the ONLY names `fields=` accepts
+ * (#646).
+ *
+ * A projection may select only what the store already produces. Accepting a name that
+ * is not a key of StoredMessageSummary would hand the caller a column nothing fills --
+ * exactly the shape of #652 (`snippet` declared on the search hit with zero producers),
+ * which is why `snippet` is absent here and `fields=snippet` is a 400 rather than an
+ * empty string. Populating it is a decision #652 owns; a projection must not pre-empt it.
+ *
+ * The two assertions below make this list UNABLE to drift from the type: adding a field
+ * to StoredMessageSummary without adding it here fails `npm run typecheck`, and so does
+ * a name here the type does not have. That gate is why this is a tuple and not a comment.
+ */
+export const SUMMARY_FIELDS = [
+  "uid", "messageId", "direction", "threadId", "from", "to", "subject", "date",
+  "inReplyTo", "trusted", "receivedAt", "seen", "flagged", "answered", "mailbox",
+  "trashedAt", "folderUid", "cc", "bcc", "sender", "replyTo", "deliveredTo",
+  "wireSize", "projectedSize", "projectionVersion", "attachmentCount", "hasHtml",
+] as const;
+
+/** One of the names `fields=` accepts. */
+export type SummaryField = (typeof SUMMARY_FIELDS)[number];
+
+// Exhaustiveness, both directions, at COMPILE time. `never` is the only type that
+// satisfies the constraint, so a key the tuple is missing and a name the type does not
+// have are both typecheck failures rather than a runtime surprise on a live read.
+type ExactlyNever<T extends never> = T;
+type _NoSummaryFieldMissing = ExactlyNever<Exclude<keyof StoredMessageSummary, SummaryField>>;
+type _NoSummaryFieldInvented = ExactlyNever<Exclude<SummaryField, keyof StoredMessageSummary>>;
+
+/**
+ * Narrow a summary row to the requested keys (#646).
+ *
+ * Key order is the TYPE's, never the caller's, so two callers asking for the same set
+ * get byte-identical rows and a response can never depend on argument order.
+ *
+ * This runs at the API EDGE, after the query: what it saves is RESPONSE SIZE, which is
+ * the constraint #631 hit (a 15-day window refused outright as one tool result). It does
+ * NOT narrow the SELECT, so the D1 column and row cost is unchanged; a SQL-level
+ * projection is a separate, separately-measurable change and is not claimed here.
+ */
+export function projectSummary(
+  row: StoredMessageSummary,
+  fields: readonly SummaryField[],
+): Partial<StoredMessageSummary> {
+  const want = new Set<string>(fields);
+  const out: Record<string, unknown> = {};
+  for (const key of SUMMARY_FIELDS) {
+    if (want.has(key)) out[key] = row[key];
+  }
+  return out as Partial<StoredMessageSummary>;
+}
+
 export interface ListQuery {
   to?: string;
   from?: string;

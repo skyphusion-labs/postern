@@ -200,6 +200,22 @@ export const READ_TOOLS: ToolDef[] = [
           "reading it, e.g. seenFor=ada@example.com",
       ),
       cursor: z.string().optional().describe("opaque pagination cursor from a previous page"),
+      fields: z.array(z.string().min(1)).optional().describe(
+        // Deliberately spelled out against its SINGULAR neighbour above: an agent that
+        // conflates `field` with `fields` is the predictable failure of this pair, so
+        // each description names the other rather than describing itself in isolation.
+        "NOT the same as `field` (singular, above), which picks the COLUMN substr matches. "
+          + "RESPONSE PROJECTION: return ONLY these summary keys per message, instead of all 27. "
+          + "This is what makes a wide survey fit: a 100-message page is ~64k characters "
+          + "full, ~17k as fields=[\"uid\",\"date\",\"from\",\"subject\"] -- use that to ask "
+          + "'who wrote to this mailbox this month' and only then fetch the bodies you want. "
+          + "It does NOT change WHICH messages come back. An unknown name is REFUSED (never "
+          + "silently dropped), and the error lists every accepted one. Valid names are the "
+          + "summary keys: uid, messageId, direction, threadId, from, to, subject, date, "
+          + "inReplyTo, trusted, receivedAt, seen, flagged, answered, mailbox, trashedAt, "
+          + "folderUid, cc, bcc, sender, replyTo, deliveredTo, wireSize, projectedSize, "
+          + "projectionVersion, attachmentCount, hasHtml.",
+      ),
     },
     handler: async (client, a) => {
       const mode: SearchMode = a.mode ?? "hybrid";
@@ -220,6 +236,7 @@ export const READ_TOOLS: ToolDef[] = [
         hasAttachment: a.hasAttachment,
         seen: a.seen,
         seenFor: a.seenFor,
+        fields: a.fields,
       });
       return {
         query: a.query,
@@ -235,6 +252,9 @@ export const READ_TOOLS: ToolDef[] = [
         hasAttachment: a.hasAttachment ?? null,
         seen: a.seen ?? null,
         seenFor: a.seenFor ?? null,
+        // Echo the projection that was APPLIED, so a reader of this result can tell a
+        // four-key row from a message that genuinely has nothing else stored.
+        fields: a.fields ?? null,
         count: page.items.length,
         ...completeness(page),
         results: page.items,
@@ -255,7 +275,9 @@ export const READ_TOOLS: ToolDef[] = [
       "filter by participant/folder. seenFor names whose read state the seen field " +
       "renders, for a shared address (e.g. a role queue) with no single reader of its own. " +
       "READING THE RESULT: `count` is the size of THIS page, never a total; follow `cursor` " +
-      "to page, where `cursor: null` means there are genuinely no more. `identityScope` " +
+      "to page, where `cursor: null` means there are genuinely no more. To SURVEY a wide " +
+      "window without drowning in envelope metadata, pass fields=[\"uid\",\"date\",\"from\",\"subject\"]; " +
+      "the rows come back with only those keys and the id set is unchanged. `identityScope` " +
       "states whose mail was listed: kind 'member' or 'role' means you were shown a SLICE, " +
       "so an empty result means 'not in your slice', not 'not in the estate'. This tool " +
       "does NOT filter by date; use mailbox_search for that.",
@@ -281,13 +303,28 @@ export const READ_TOOLS: ToolDef[] = [
           "shared/role address with no reader of its own (e.g. to=abuse@ with " +
           "lens=inbox), pass the human reading it, e.g. seenFor=ada@example.com",
       ),
+      fields: z.array(z.string().min(1)).optional().describe(
+        "RESPONSE PROJECTION: return ONLY these summary keys per message, instead of all 27. "
+          + "This is what makes a wide survey fit: a 100-message page is ~64k characters "
+          + "full, ~17k as fields=[\"uid\",\"date\",\"from\",\"subject\"] -- use that to ask "
+          + "'who wrote to this mailbox this month' and only then fetch the bodies you want. "
+          + "It does NOT change WHICH messages come back. An unknown name is REFUSED (never "
+          + "silently dropped), and the error lists every accepted one. Valid names are the "
+          + "summary keys: uid, messageId, direction, threadId, from, to, subject, date, "
+          + "inReplyTo, trusted, receivedAt, seen, flagged, answered, mailbox, trashedAt, "
+          + "folderUid, cc, bcc, sender, replyTo, deliveredTo, wireSize, projectedSize, "
+          + "projectionVersion, attachmentCount, hasHtml.",
+      ),
     },
     handler: async (client, a) => {
-      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, q: a.q, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor });
+      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, q: a.q, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor, fields: a.fields });
       return {
         count: page.items.length,
         ...completeness(page),
         seenFor: a.seenFor ?? null,
+        // See mailbox_search: the applied projection is echoed so a narrow row is
+        // distinguishable from a sparse message.
+        fields: a.fields ?? null,
         messages: page.items,
       };
     },

@@ -84,13 +84,19 @@ describe("an undeclared tool parameter is refused end to end", () => {
   it("mailbox_search refuses an undeclared parameter too (the rule is per-registration, not per-tool)", async () => {
     const { client } = await connected();
 
+    // The decoy used to be `fields`, which #646 then DECLARED on this tool. That would have
+    // left this gate passing for the wrong reason: `fields: "uid,date"` is now a declared key
+    // carrying the wrong TYPE, so the refusal would come from schema validation of a known
+    // parameter and the text would still contain "fields" -- a green test no longer measuring
+    // the undeclared-key rule at all. A decoy has to be a name the schema will never declare.
     const res = await client.callTool({
       name: "mailbox_search",
-      arguments: { query: "hi", fields: "uid,date" },
+      arguments: { query: "hi", notAParameter: "uid,date" },
     });
 
     expect(res.isError).toBe(true);
-    expect((res.content as Array<{ text: string }>)[0].text).toContain("fields");
+    expect((res.content as Array<{ text: string }>)[0].text).toMatch(/Unrecognized key/i);
+    expect((res.content as Array<{ text: string }>)[0].text).toContain("notAParameter");
   });
 
   it("the ADVERTISED schema says so, so a well-behaved client never sends the key", async () => {
@@ -102,7 +108,8 @@ describe("an undeclared tool parameter is refused end to end", () => {
     expect(list.inputSchema.additionalProperties).toBe(false);
     // And the declared properties are still all there: strictness must not have cost the schema.
     expect(Object.keys(list.inputSchema.properties ?? {}).sort()).toEqual(
-      ["cursor", "direction", "from", "lens", "limit", "mailbox", "q", "seenFor", "thread", "to"],
+      ["cursor", "direction", "fields", "from", "lens", "limit", "mailbox", "q", "seenFor",
+        "thread", "to"],
     );
   });
 

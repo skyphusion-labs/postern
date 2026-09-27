@@ -142,12 +142,14 @@ async function emissions(): Promise<Emitted[]> {
       q: "x", mode: "substr", field: "subject", limit: 5, cursor: "c", direction: "inbound",
       to: "a@x.com", from: "b@x.com", lens: "inbox", mailbox: "archive", seenFor: "a@x.com",
       after: "2026-01-01", before: "2026-02-01", hasAttachment: true, seen: false,
+      fields: ["uid", "date", "from", "subject"],
     }),
   );
   await run("list", () =>
     client.list({
       to: "a@x.com", from: "b@x.com", thread: "t", direction: "inbound", lens: "inbox",
       q: "x", limit: 5, cursor: "c", mailbox: "archive", seenFor: "a@x.com",
+      fields: ["uid", "date", "from", "subject"],
     }),
   );
   await run("get", () => client.get("m1"));
@@ -394,6 +396,10 @@ const SAMPLE: Record<string, unknown> = {
   // value being honored.
   draft_id: "d-1", updated_at: "2026-01-01T00:00:00.000Z", body_text: "t", body_html: "<p>h</p>",
   in_reply_to: "<parent@example.com>", compose_mode: "reply", source_message_id: "m-1",
+  // The #646 response projection. A real summary key, because the worker REFUSES an
+  // unknown one: a placeholder here would exercise the forwarding but describe a call no
+  // caller can make.
+  fields: ["uid", "date", "from", "subject"],
 };
 
 /** Keys a tool needs for its handler to reach the wire at all. */

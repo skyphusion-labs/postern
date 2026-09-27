@@ -92,6 +92,15 @@ export interface SearchHit {
   snippet?: string;
 }
 
+/** A hit whose `message` may be a PROJECTION (worker #646, `fields=`).
+ *
+ *  A full SearchHit satisfies this, so it is the honest return type for a call that MAY
+ *  have projected: declaring the full shape when the caller asked for four keys would be
+ *  a type asserting a property the response does not have. */
+export interface ProjectedSearchHit extends Omit<SearchHit, "message"> {
+  message: Partial<MessageSummary>;
+}
+
 export interface Page<T> {
   items: T[];
   /**

@@ -181,10 +181,11 @@
         "seenFor",
         "limit",
         "cursor",
+        "fields",
         "thread",
         "q"
       ],
-      "note": "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404)"
+      "note": "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646)"
     },
     "search": {
       "query": [
@@ -196,6 +197,7 @@
         "seenFor",
         "limit",
         "cursor",
+        "fields",
         "q",
         "mode",
         "field",
@@ -204,7 +206,7 @@
         "hasAttachment",
         "seen"
       ],
-      "note": "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder"
+      "note": "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder. Mind the pair: field (SINGULAR) selects the substr COLUMN MATCHED, fields (PLURAL, #646) selects the summary keys RETURNED on hit.message; both are validated strictly"
     },
     "recipients-recent": {
       "query": [

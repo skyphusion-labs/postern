@@ -16,6 +16,7 @@ import type {
   MailboxFilter,
   Message,
   MessageSummary,
+  ProjectedSearchHit,
   Page,
   ReplyInput,
   SearchField,
@@ -91,7 +92,8 @@ export class PosternClient {
     hasAttachment?: boolean;
     seen?: boolean;
     seenFor?: string;
-  }): Promise<Page<SearchHit>> {
+    fields?: string[];
+  }): Promise<Page<ProjectedSearchHit>> {
     const params: Record<string, string> = { q: args.q };
     if (args.mode) params.mode = args.mode;
     // field selects which column(s) the "substr" mode matches (worker api.ts:206);
@@ -127,8 +129,19 @@ export class PosternClient {
     // caller class the worker allows to name any address here, same as python
     // and the imap door.
     if (args.seenFor) params.seenFor = args.seenFor;
+    // Response PROJECTION (worker #646): which summary keys hit.message carries, NOT
+    // which hits come back. Note the neighbour three fields up: `field` (singular) picks
+    // the substr COLUMN matched; this picks the keys RETURNED. Forwarded as-is so the
+    // worker stays the authority on the allowed names -- it 400s an unknown one with the
+    // full allowed list, which is strictly better than a second copy of that list here
+    // that could drift from the worker's own summary type.
+    // `!== undefined`, not a truthiness test: an explicitly EMPTY projection is a caller
+    // error and must earn the worker's 400, not be read as "no projection asked for".
+    // Silently ignoring it is the same accepted-and-dropped defect this parameter exists
+    // to avoid, just on the client side of the wire.
+    if (args.fields !== undefined) params.fields = args.fields.join(",");
     const body = await this.requestGet("/api/search", params);
-    return page<SearchHit>(body, (body.items as SearchHit[]) ?? []);
+    return page<ProjectedSearchHit>(body, (body.items as ProjectedSearchHit[]) ?? []);
   }
 
   async list(args: {
@@ -142,7 +155,8 @@ export class PosternClient {
     limit?: number;
     cursor?: string;
     seenFor?: string;
-  }): Promise<Page<MessageSummary>> {
+    fields?: string[];
+  }): Promise<Page<Partial<MessageSummary>>> {
     const params: Record<string, string> = {};
     if (args.to) params.to = args.to;
     if (args.from) params.from = args.from;
@@ -159,8 +173,13 @@ export class PosternClient {
     // Read-state projection key (worker #404); see the matching comment in
     // search() above.
     if (args.seenFor) params.seenFor = args.seenFor;
+    // Response projection (worker #646); see the comment in search() above. The return
+    // type is Partial because that is TRUE of both cases: a full row satisfies it, and a
+    // projected row is all this client can promise once a projection was requested.
+    // See search() above: an explicit empty list is forwarded so the worker refuses it.
+    if (args.fields !== undefined) params.fields = args.fields.join(",");
     const body = await this.requestGet("/api/messages", params);
-    return page<MessageSummary>(body, (body.items as MessageSummary[]) ?? []);
+    return page<Partial<MessageSummary>>(body, (body.items as Partial<MessageSummary>[]) ?? []);
   }
 
   async get(messageId: string): Promise<Message | null> {

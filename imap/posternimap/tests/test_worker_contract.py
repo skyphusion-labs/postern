@@ -267,6 +267,16 @@ class ParityTest(unittest.TestCase):
     # and the entry has to leave, so the exclusion cannot quietly outlive its reason.
     NOT_PUSHED_DOWN = {"search": {"after", "before", "hasAttachment", "seen"}}
 
+    # A SECOND, separate exclusion, kept separate ON PURPOSE. NOT_PUSHED_DOWN above is
+    # about FILTERS the door evaluates locally instead of server-side; `fields` (#646) is
+    # not a filter at all, it is a RESPONSE PROJECTION, and the door can never use one:
+    # it renders RFC822 from the summary, so it needs every envelope key on every row
+    # (rfc822.py reads from/to/cc/subject/date/messageId, and FETCH RFC822.SIZE reads
+    # projectedSize). Folding this into NOT_PUSHED_DOWN would have widened a set whose
+    # pin test says it is EXACTLY the locally-evaluated criteria, turning a precise
+    # statement into a vague one. Two reasons, two lists, each with its own pin.
+    NOT_A_FILTER = {"messages-list": {"fields"}, "search": {"fields"}}
+
     def setUp(self) -> None:
         self.calls = _emitted()
 
@@ -283,7 +293,9 @@ class ParityTest(unittest.TestCase):
             if row["id"] not in self.OWNED:
                 continue
             declared = set(PARAMS.get(row["id"], {}).get("query") or [])
-            excluded = self.NOT_PUSHED_DOWN.get(row["id"], set())
+            excluded = self.NOT_PUSHED_DOWN.get(row["id"], set()) | self.NOT_A_FILTER.get(
+                row["id"], set()
+            )
             gap = sorted(declared - self._reachable(row["path"]) - excluded)
             if gap:
                 missing[row["id"]] = gap
@@ -291,9 +303,14 @@ class ParityTest(unittest.TestCase):
 
     def test_no_stale_exclusions(self):
         # An exclusion that the door now DOES send is stale, and a stale exclusion is
-        # how a list like this rots into a permanent excuse.
+        # how a list like this rots into a permanent excuse. Both exclusion sets are
+        # checked, or the newer one would be the unwatched half.
         stale = {}
-        for route_id, names in self.NOT_PUSHED_DOWN.items():
+        merged: dict[str, set[str]] = {}
+        for source in (self.NOT_PUSHED_DOWN, self.NOT_A_FILTER):
+            for route_id, names in source.items():
+                merged.setdefault(route_id, set()).update(names)
+        for route_id, names in merged.items():
             path = next(r["path"] for r in ROUTES if r["id"] == route_id)
             now_sent = sorted(names & self._reachable(path))
             if now_sent:
@@ -304,6 +321,13 @@ class ParityTest(unittest.TestCase):
         # Pin WHICH filters are excluded, so widening the exclusion is a deliberate,
         # reviewable edit rather than a quiet way to make this test pass.
         self.assertEqual({"search": {"after", "before", "hasAttachment", "seen"}}, self.NOT_PUSHED_DOWN)
+
+    def test_the_non_filter_exclusions_are_exactly_the_response_projection(self):
+        # The same pin for the second set, for the same reason: this one must not become
+        # a general-purpose place to drop any parameter the door has not wired.
+        self.assertEqual(
+            {"messages-list": {"fields"}, "search": {"fields"}}, self.NOT_A_FILTER
+        )
 
     def test_control_the_parity_check_can_fail(self):
         self.assertNotIn("nOtApArAm", self._reachable("/api/messages"))
