@@ -261,8 +261,9 @@ interface ListQuery {
   q?: string;                         // FTS over subject + body
   limit?: number;                     // default 50, max 200
   cursor?: string;                    // opaque; encodes (date, id) of the last row
+  fields?: string;                    // RESPONSE projection: comma-separated summary keys (see 10.9)
 }
-interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; seenFor?: string; limit?: number; cursor?: string }
+interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; seenFor?: string; limit?: number; cursor?: string; fields?: string }
 interface Page<T> {
   items: T[];
   cursor?: string | null;   // string = more, here is how. null = THERE ARE NO MORE. ABSENT = incomplete, and no continuation exists.
@@ -479,11 +480,11 @@ none touches D1 directly (#25, #26).
 
 | Method | Route | Purpose | Milestone |
 |---|---|---|---|
-| GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views) | M1 / webmail v2 (#352) / #403 / #404 |
+| GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views; `fields=` = RESPONSE projection, see 10.9) | M1 / webmail v2 (#352) / #403 / #404 / #646 |
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
-| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&to=&from=&direction=&lens=&seenFor=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` / `seenFor` mean exactly what they do on `/api/messages` (#403/#404) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 / #404 |
+| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&fields=&to=&from=&direction=&lens=&seenFor=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` / `seenFor` / `fields` mean exactly what they do on `/api/messages` (#403/#404/#646). Mind the pair: `field` (singular) = the substr COLUMN matched, `fields` (plural) = the summary keys RETURNED | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 / #404 / #646 |
 | GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | GET/POST/DELETE | `/api/session` | webmail native session: POST signs in `{username,password}` -> `Set-Cookie` + identity + caps + CSRF token; GET is whoami/restore; DELETE signs out | webmail v2 (#352) |
@@ -1444,6 +1445,58 @@ are per-person and another person's read state is theirs, so a rendering paramet
 not become a peephole. A static token is estate-scoped by construction (it already reads
 every row) and may name any address, which is what an operator or door read needs. A
 malformed address is `E_VALIDATION_ERROR`, never a silently-dropped parameter.
+
+**WHICH KEYS a read RETURNS: `fields` (#646).** The third independent axis, and the same
+discipline as `seenFor` above: `to=` / the session identity select WHICH ROWS come back,
+`seenFor=` selects WHOSE read state is rendered, and the optional
+`fields=<comma-separated summary keys>` selects WHICH KEYS each returned row carries.
+Nothing else. The row set, the `cursor`, `complete` / `retrievalCap` / `degraded`, and
+`identityScope` are byte-identical to an unprojected read, so a caller can survey a window
+with a projection and then fetch the bodies it decided it wants.
+
+It exists because a wide read could not be made to FIT. #631 recorded a 15-day window at
+`limit: 100` coming back as 129,446 characters and being refused outright as a single tool
+result, with no parameter that would shrink it. **Correcting the record while we are here:
+that size is NOT bodies.** The list/search summary has never carried `bodyText` or
+`bodyHtml` (see `StoredMessageSummary`); the cost is 27 envelope keys per row. Measured on
+`inbound/route-params.test.ts`'s own harness: a 100-row page is 64,121 characters, and
+`fields=uid,date,from,subject` is 16,641, a 3.85x reduction. Both #631 and #646 attribute
+the bulk to projected bodies, and both are wrong on that point; the SIZE problem they
+describe is real.
+
+Accepted names are exactly the keys of `StoredMessageSummary`: `uid`, `messageId`,
+`direction`, `threadId`, `from`, `to`, `subject`, `date`, `inReplyTo`, `trusted`,
+`receivedAt`, `seen`, `flagged`, `answered`, `mailbox`, `trashedAt`, `folderUid`, `cc`,
+`bcc`, `sender`, `replyTo`, `deliveredTo`, `wireSize`, `projectedSize`,
+`projectionVersion`, `attachmentCount`, `hasHtml`. That list is single-sourced as
+`SUMMARY_FIELDS` in `inbound/src/store.ts` with a compile-time exhaustiveness assertion in
+both directions, so a field added to the type and not the list fails `npm run typecheck`
+rather than becoming a projection hole.
+
+Three refusals, all `E_VALIDATION_ERROR`, and each one is the point:
+
+- An **unknown name** is refused, never dropped. A projection that silently discarded a
+  name would answer with fewer keys than the caller asked for and give it no way to tell:
+  the #632/#637 accepted-and-ignored defect in a new hat. The error lists every accepted name.
+- An **empty** `fields=` is refused, including when a client built it from an empty list, so
+  "I asked for a projection" can never be read as "I asked for none".
+- `fields=snippet` is refused. `snippet` is declared on the search hit (and in
+  `mcp/src/types.ts`) with ZERO producers; #652 owns the populate-or-delete decision, and a
+  projection that accepted it would answer a key nothing fills and pre-empt that ruling.
+
+On `/api/search` the projection narrows `hit.message` only; `score` and `snippet` are
+untouched. **`fields` is NOT a filter, and is deliberately not declared alongside the view
+filters** in `inbound/src/routes.ts`: filters change which messages come back, a projection
+changes the shape of each one.
+
+What this does NOT do: it is applied at the API edge, after the query, so it shrinks the
+RESPONSE and not the `SELECT`. The D1 column and row cost of a projected read is unchanged.
+A SQL-level projection is a separate, separately-measurable change and is not claimed here.
+
+`hasAttachment` is worth calling out because #646 lists it as an envelope column: it is a
+search FILTER, not a summary key. The projectable name for the same fact is
+`attachmentCount`. Inventing a `hasAttachment` output field would have created exactly the
+producerless field that `fields=snippet` is refused for.
 
 **Role queues (#404, opt-in, per_account only).** A role address belongs to a FUNCTION,
 so under per-account scoping it is nobody viewer address and its mail is delivered,

@@ -74,6 +74,12 @@ export interface RouteSpec {
 // The view filters shared by the two big read surfaces, declared once so a filter
 // cannot be added to one and silently missed on the other (they share one builder).
 const VIEW = ["to", "from", "direction", "lens", "mailbox", "seenFor", "limit", "cursor"];
+// The response PROJECTION (#646), declared once for the same two surfaces and for the
+// same reason, but deliberately NOT folded into VIEW: VIEW names row FILTERS (WHICH
+// messages come back), `fields` names the response SHAPE (which keys each one carries).
+// Keeping the two lists apart is what stops a later reader from reading a projection as
+// a filter, and stops a filter added here from reaching only one of the two routes.
+const PROJECTION = ["fields"];
 const DRAFT_FIELDS = [
   "to", "cc", "bcc", "subject", "bodyText", "bodyHtml", "inReplyTo", "threadId",
   "composeMode", "sourceMessageId", "updatedAt",
@@ -169,11 +175,11 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
 
   // --- read ---
   { id: "messages-list", method: "GET", path: "/api/messages", match: "exact", scope: "read", auth: "bearer",
-    query: [...VIEW, "thread", "q"],
-    note: "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404)" },
+    query: [...VIEW, ...PROJECTION, "thread", "q"],
+    note: "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646)" },
   { id: "search", method: "GET", path: "/api/search", match: "exact", scope: "read", auth: "bearer",
-    query: [...VIEW, "q", "mode", "field", "after", "before", "hasAttachment", "seen"],
-    note: "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder" },
+    query: [...VIEW, ...PROJECTION, "q", "mode", "field", "after", "before", "hasAttachment", "seen"],
+    note: "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder. Mind the pair: field (SINGULAR) selects the substr COLUMN MATCHED, fields (PLURAL, #646) selects the summary keys RETURNED on hit.message; both are validated strictly" },
   { id: "recipients-recent", method: "GET", path: "/api/recipients/recent", match: "exact", scope: "read",
     auth: "bearer", query: ["viewer", "to", "limit"],
     note: "a bound identity wins; an unbound BYO token must name viewer= or to=, never an estate dump" },

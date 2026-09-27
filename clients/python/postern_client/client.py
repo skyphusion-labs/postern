@@ -275,6 +275,7 @@ class PosternClient:
         q: Optional[str] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
+        fields: Optional[Sequence[str]] = None,
     ) -> dict[str, Any]:
         """GET /api/messages. Returns {items: [summary...], cursor: str|None}.
 
@@ -286,6 +287,12 @@ class PosternClient:
         for the direction-default INBOX/Sent view. `seen_for` sets WHOSE read
         state is projected (#404) without touching which rows come back, which
         is what a shared role queue needs (to=the role, seen_for=the human).
+
+        `fields` is a RESPONSE PROJECTION (#646): the summary keys each row
+        carries, not which rows come back. A 100-row page is ~64k characters
+        over 27 keys; ``fields=["uid", "date", "from", "subject"]`` is ~17k, so
+        a wide survey fits where the full projection does not. An unknown name
+        is REFUSED by the worker with the full allowed list, never dropped.
         """
         params: dict[str, str] = {}
         if to:
@@ -308,6 +315,12 @@ class PosternClient:
             params["limit"] = str(limit)
         if cursor:
             params["cursor"] = cursor
+        # `is not None`, not truthiness: an explicitly EMPTY projection is a caller
+        # error and must earn the worker's 400 rather than be read here as "no
+        # projection asked for", which is the same accepted-and-dropped defect
+        # `fields` exists to avoid.
+        if fields is not None:
+            params["fields"] = ",".join(fields)
         return self._json("GET", "/api/messages", params=params)
 
     def get_message(self, message_id: str) -> Optional[dict[str, Any]]:
@@ -345,6 +358,7 @@ class PosternClient:
         seen: Optional[bool] = None,
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
+        fields: Optional[Sequence[str]] = None,
     ) -> dict[str, Any]:
         """GET /api/search. Returns {items: [{message, ...}], cursor: str|None}.
 
@@ -357,6 +371,16 @@ class PosternClient:
         `after` / `before` bound the date range; `has_attachment` and `seen` are
         booleans. The worker validates all of these strictly, so a typo is a
         clean 400 rather than a silently-dropped filter.
+
+        Mind the PAIR here: `field` (singular) selects the substr COLUMN
+        matched; `fields` (plural) projects each hit's `message` to the named
+        summary keys. Different axes -- what is matched versus what is returned.
+
+        `fields` is a RESPONSE PROJECTION (#646): the summary keys each row
+        carries, not which rows come back. A 100-row page is ~64k characters
+        over 27 keys; ``fields=["uid", "date", "from", "subject"]`` is ~17k, so
+        a wide survey fits where the full projection does not. An unknown name
+        is REFUSED by the worker with the full allowed list, never dropped.
         """
         params: dict[str, str] = {"q": q}
         if mode:
@@ -387,6 +411,9 @@ class PosternClient:
             params["limit"] = str(limit)
         if cursor:
             params["cursor"] = cursor
+        # See list_messages: an explicit empty list is forwarded so the worker refuses it.
+        if fields is not None:
+            params["fields"] = ",".join(fields)
         return self._json("GET", "/api/search", params=params)
 
     def get_attachment(self, message_id: str, index: int) -> Attachment:

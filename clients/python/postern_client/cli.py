@@ -50,6 +50,18 @@ def _attachments(paths: Optional[Sequence[str]]) -> Optional[list[OutboundAttach
     return [OutboundAttachment.from_path(p) for p in paths]
 
 
+def _split_fields(raw: Optional[str]) -> Optional[list[str]]:
+    """Split --fields into the name list the client sends.
+
+    Empty names are dropped here, but an EMPTY RESULT is passed through as an empty
+    list rather than None, so `--fields ,,` reaches the worker and earns its 400 instead
+    of being silently read as "no projection asked for".
+    """
+    if raw is None:
+        return None
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _emit(obj: object) -> None:
     json.dump(obj, sys.stdout, indent=2, ensure_ascii=False, sort_keys=True)
     sys.stdout.write("\n")
@@ -157,6 +169,12 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--q", help="free-text filter")
     ls.add_argument("--limit", type=int)
     ls.add_argument("--cursor", help="pagination cursor from a previous page")
+    ls.add_argument(
+        "--fields",
+        help="comma-separated summary keys to return per row, e.g. uid,date,from,subject "
+        "(a RESPONSE projection: it narrows each row, never which rows come back; "
+        "an unknown name is refused with the allowed list)",
+    )
 
     g = sub.add_parser("get", help="get one message by id")
     g.add_argument("message_id")
@@ -198,6 +216,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="only messages WITHOUT attachments",
     )
     sc.add_argument("--seen", dest="seen", action="store_true", default=None, help="only messages already read")
+    sc.add_argument(
+        # Note the neighbour: --field (singular) above picks the substr COLUMN matched;
+        # --fields (plural) picks the keys each hit's message returns.
+        "--fields",
+        help="comma-separated summary keys to return per row, e.g. uid,date,from,subject "
+        "(a RESPONSE projection: it narrows each row, never which rows come back; "
+        "an unknown name is refused with the allowed list)",
+    )
     sc.add_argument("--unseen", dest="seen", action="store_false", help="only unread messages")
     sc.add_argument("--limit", type=int)
     sc.add_argument("--cursor")
@@ -396,6 +422,7 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
                 q=args.q,
                 limit=args.limit,
                 cursor=args.cursor,
+                fields=_split_fields(args.fields),
             )
         )
         return 0
@@ -430,6 +457,7 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
                 seen=args.seen,
                 limit=args.limit,
                 cursor=args.cursor,
+                fields=_split_fields(args.fields),
             )
         )
         return 0

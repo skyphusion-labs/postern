@@ -390,13 +390,20 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const sessionIdentity = sessionViewer(resolution);
       const role = roleReadScope(env, sessionIdentity, url.searchParams);
       const query = parseListQuery(url, sessionIdentity);
+      // Validated BEFORE the query runs, so a bogus projection costs no D1 read.
+      const fields = parseFields(url.searchParams);
       if (role) applyRoleScope(query, role, sessionIdentity as string);
       else if (sessionIdentity) query.viewer = sessionIdentity;
       const page = await store.list(env, query);
+      // Projection is a RESPONSE narrowing (#646) and touches nothing else: the row set,
+      // the cursor, and identityScope are byte-identical to an unprojected read, so a
+      // caller can page a projected survey and then fetch the bodies it decided it wants.
+      const items = fields ? page.items.map((m) => store.projectSummary(m, fields)) : page.items;
       return json({
         ok: true,
         identityScope: readScopeReport(sessionIdentity, role),
         ...page,
+        items,
       });
     }
 
@@ -647,6 +654,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
+      // The response projection (#646), validated here with the other query parameters
+      // so a bogus `fields` is refused before any retrieval runs. It narrows hit.message
+      // only; `score` and the page envelope are untouched.
+      const fields = parseFields(url.searchParams);
       // Viewer-relative view (#403), same rules as /api/messages: refuses an
       // unknown value, refuses lens+direction, refuses a lens with no viewer.
       const sessionIdentity = sessionViewer(resolution);
@@ -689,10 +700,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // `...page` carries `complete` / `retrievalCap` / `degraded` when the mode could not
       // answer exhaustively, so both halves of #631 (whose mail, and how much of it) are
       // answered in the envelope instead of left for the caller to assume.
+      const items = fields
+        ? page.items.map((hit) => ({ ...hit, message: store.projectSummary(hit.message, fields) }))
+        : page.items;
       return json({
         ok: true,
         identityScope: readScopeReport(sessionIdentity, role),
         ...page,
+        items,
       });
     }
 
@@ -1000,6 +1015,47 @@ function parseSeenFor(p: URLSearchParams, sessionIdentity?: string): string | un
     );
   }
   return value;
+}
+
+/** The response PROJECTION (#646): which summary KEYS come back, never which rows do.
+ *
+ *  #631 asked for this because a survey of one 15-day window could not be made to fit a
+ *  single tool result and there was no parameter that would shrink it. Measured on this
+ *  suite's own harness, a 100-row page is 64,121 characters over 27 keys per row;
+ *  `fields=uid,date,from,subject` is 16,641, a 3.85x reduction. (Note for anyone citing
+ *  #631 or #646: NO body is in either number. The list summary has never carried
+ *  bodyText or bodyHtml, so the size is envelope metadata alone, not bodies.)
+ *
+ *  Refused strictly, and that is the point. A projection that dropped an unknown name
+ *  would answer with fewer fields than the caller asked for and give it no way to tell:
+ *  the #632/#637 accepted-and-ignored defect in a new hat. So an unknown name, and an
+ *  empty list, are both a 400 naming what was wrong.
+ *
+ *  Mind the NEIGHBOUR on /api/search: `field` (SINGULAR) is the substr COLUMN selector,
+ *  `fields` (PLURAL) is this projection. Different axes -- what is MATCHED versus what
+ *  is RETURNED -- so each validates strictly and each refusal names only itself. The
+ *  singular's own fate is #651's; this does not touch it. */
+function parseFields(p: URLSearchParams): readonly import("./store").SummaryField[] | undefined {
+  const raw = p.get("fields");
+  if (raw === null) return undefined;
+  const names = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  if (names.length === 0) {
+    throw new MailboxError(
+      "E_VALIDATION_ERROR",
+      `fields must name at least one summary field: ${store.SUMMARY_FIELDS.join(",")}`,
+    );
+  }
+  const allowed = new Set<string>(store.SUMMARY_FIELDS);
+  const unknown = names.filter((n) => !allowed.has(n));
+  if (unknown.length > 0) {
+    throw new MailboxError(
+      "E_VALIDATION_ERROR",
+      `fields: unknown summary field ${unknown.join(", ")}; allowed: ${store.SUMMARY_FIELDS.join(",")}`,
+    );
+  }
+  // De-duplicated by projectSummary, which walks the TYPE's key order rather than this
+  // list, so a repeated name cannot repeat a key or reorder the row.
+  return names as import("./store").SummaryField[];
 }
 
 function parseListQuery(url: URL, sessionIdentity?: string): import("./store").ListQuery {

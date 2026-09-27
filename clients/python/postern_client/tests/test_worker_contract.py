@@ -94,6 +94,7 @@ def _emitted() -> list[dict[str, Any]]:
     c.list_messages(
         to="a@x.com", from_addr="b@x.com", thread="t1", direction="inbound",
         mailbox="archive", seen_for="a@x.com", q="hi", limit=5, cursor="c1",
+        fields=["uid", "date", "from", "subject"],
     )
     # lens is mutually exclusive with direction at the worker, so it gets its own call.
     c.list_messages(to="a@x.com", lens="inbox")
@@ -101,6 +102,7 @@ def _emitted() -> list[dict[str, Any]]:
         "q", mode="substr", field="subject", direction="inbound", to="a@x.com",
         from_addr="b@x.com", mailbox="trash", seen_for="a@x.com", after="2026-01-01",
         before="2026-02-01", has_attachment=True, seen=False, limit=5, cursor="c1",
+        fields=["uid", "date", "from", "subject"],
     )
     c.search("q", lens="sent", to="a@x.com")
     c.get_message("m1")
