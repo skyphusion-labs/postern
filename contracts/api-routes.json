@@ -266,7 +266,7 @@
       "match": "exact",
       "scope": "read",
       "auth": "bearer",
-      "note": "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646)"
+      "note": "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646); after=/before= are INCLUSIVE at BOTH ends, ISO-8601 date or timestamp, a bare date covering its whole named day, and a bogus value is refused not applied (#647)"
     },
     {
       "id": "search",
@@ -275,7 +275,7 @@
       "match": "exact",
       "scope": "read",
       "auth": "bearer",
-      "note": "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder. Mind the pair: field (SINGULAR) selects the substr COLUMN MATCHED, fields (PLURAL, #646) selects the summary keys RETURNED on hit.message; both are validated strictly"
+      "note": "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder. Mind the pair: field (SINGULAR) selects the substr COLUMN MATCHED, fields (PLURAL, #646) selects the summary keys RETURNED on hit.message; both are validated strictly. after=/before= are the SAME inclusive, canonicalized, strictly-refused bounds messages-list uses (#647); they were unvalidated here until then"
     },
     {
       "id": "recipients-recent",

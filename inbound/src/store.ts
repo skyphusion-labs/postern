@@ -182,6 +182,12 @@ export interface ListQuery {
    * recipient-relative. Never accepted directly from a query parameter. */
   viewer?: string;
   q?: string; // FTS over subject + body
+  /** Inclusive lower bound on messages.date (#647). CANONICAL: the API edge has already
+   *  normalized it to the exact form this column stores, which is what lets a plain string
+   *  comparison be correct. Never take a raw caller value here. */
+  after?: string;
+  /** Inclusive upper bound on messages.date (#647). CANONICAL, as `after`. */
+  before?: string;
   limit?: number; // default 50, max 200
   cursor?: string; // opaque; encodes (date, id) of the last row
 }
@@ -2154,6 +2160,10 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
       where.push("m.mailbox IS NULL");
     }
   }
+  // The date window (#647), the SAME predicate the search modes use, placed here so the
+  // pre-existing bind order (seen, fts, membership, from, thread, direction, mailbox, then
+  // the cursor seek) is unchanged for every caller that sends no bounds.
+  pushDateRange(where, binds, q);
 
   const cur = decodeCursor(q.cursor);
   if (cur) {
@@ -2404,6 +2414,33 @@ export async function search(env: Env, q: SearchQuery): Promise<Page<SearchHit>>
   }
 }
 
+/**
+ * The ONE date-range predicate, shared by list() and every search mode (#647).
+ *
+ * It used to live only inside pushCommonSearchFilters, so /api/messages had no date filter
+ * at all and adding one meant either a second copy of this or this function. #647 asked for
+ * one definition explicitly, so the predicate moved out here and both callers use it.
+ *
+ * Both bounds are INCLUSIVE, and they can only BE inclusive because the API edge
+ * canonicalizes every accepted value to the exact form this column stores
+ * (Date.toISOString()), which is what makes a plain string comparison correct. Three
+ * boundary defects lived in the gap between those two facts before #647; parseDateBound in
+ * api.ts and docs/CONTRACT.md 10.9 carry the measurements.
+ *
+ * Pushes `after` then `before`, matching the order the WHERE fragments go in, which is all
+ * D1 positional binds require of a caller.
+ */
+function pushDateRange(where: string[], binds: unknown[], q: { after?: string; before?: string }): void {
+  if (q.after) {
+    where.push("m.date >= ?");
+    binds.push(q.after);
+  }
+  if (q.before) {
+    where.push("m.date <= ?");
+    binds.push(q.before);
+  }
+}
+
 /** Shared SQL predicates for mailbox/date/attachment/seen across search modes (#354). */
 function pushCommonSearchFilters(
   where: string[],
@@ -2420,14 +2457,7 @@ function pushCommonSearchFilters(
       where.push("m.mailbox IS NULL");
     }
   }
-  if (q.after) {
-    where.push("m.date >= ?");
-    binds.push(q.after);
-  }
-  if (q.before) {
-    where.push("m.date <= ?");
-    binds.push(q.before);
-  }
+  pushDateRange(where, binds, q);
   if (q.hasAttachment === true) {
     where.push("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.message_id)");
   } else if (q.hasAttachment === false) {

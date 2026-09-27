@@ -116,7 +116,8 @@ export class PosternClient {
     // Durable-folder scope (worker #352/#354, api.ts): "all" = every placement,
     // archive|trash|junk = that placement only.
     if (args.mailbox) params.mailbox = args.mailbox;
-    // Inclusive ISO date bounds on messages.date (worker #354).
+    // Inclusive ISO date bounds on messages.date (worker #354, semantics fixed in #647: both
+    // ends inclusive, a bare date covering its whole named day, a bogus value refused).
     if (args.after) params.after = args.after;
     if (args.before) params.before = args.before;
     // Booleans forward as "true"/"false"; the worker accepts 0|1|true|false
@@ -156,6 +157,8 @@ export class PosternClient {
     cursor?: string;
     seenFor?: string;
     fields?: string[];
+    after?: string;
+    before?: string;
   }): Promise<Page<Partial<MessageSummary>>> {
     const params: Record<string, string> = {};
     if (args.to) params.to = args.to;
@@ -178,6 +181,11 @@ export class PosternClient {
     // projected row is all this client can promise once a projection was requested.
     // See search() above: an explicit empty list is forwarded so the worker refuses it.
     if (args.fields !== undefined) params.fields = args.fields.join(",");
+    // Inclusive ISO date bounds (worker #647). Forwarded verbatim: the worker validates the
+    // shape AND the calendar, canonicalizes a bare date to its whole named day, and 400s
+    // anything else, so a second opinion here could only disagree with it.
+    if (args.after) params.after = args.after;
+    if (args.before) params.before = args.before;
     const body = await this.requestGet("/api/messages", params);
     return page<Partial<MessageSummary>>(body, (body.items as Partial<MessageSummary>[]) ?? []);
   }

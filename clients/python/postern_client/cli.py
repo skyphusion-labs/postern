@@ -170,6 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--limit", type=int)
     ls.add_argument("--cursor", help="pagination cursor from a previous page")
     ls.add_argument(
+        "--after",
+        help="INCLUSIVE lower bound: ISO date (2026-01-31) or timestamp; a bogus value is refused",
+    )
+    ls.add_argument(
+        "--before",
+        help="INCLUSIVE upper bound: a bare date covers that WHOLE day (through 23:59:59.999)",
+    )
+    ls.add_argument(
         "--fields",
         help="comma-separated summary keys to return per row, e.g. uid,date,from,subject "
         "(a RESPONSE projection: it narrows each row, never which rows come back; "
@@ -200,8 +208,14 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--from", dest="from_addr")
     sc.add_argument("--mailbox", choices=["archive", "trash", "junk", "all"])
     sc.add_argument("--seen-for", dest="seen_for", metavar="ADDR")
-    sc.add_argument("--after", help="only messages at or after this date/timestamp")
-    sc.add_argument("--before", help="only messages at or before this date/timestamp")
+    sc.add_argument(
+        "--after",
+        help="INCLUSIVE lower bound: ISO date (2026-01-31) or timestamp; a bogus value is refused",
+    )
+    sc.add_argument(
+        "--before",
+        help="INCLUSIVE upper bound: a bare date covers that WHOLE day (through 23:59:59.999)",
+    )
     sc.add_argument(
         "--has-attachment",
         dest="has_attachment",
@@ -423,6 +437,8 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
                 limit=args.limit,
                 cursor=args.cursor,
                 fields=_split_fields(args.fields),
+                after=args.after,
+                before=args.before,
             )
         )
         return 0

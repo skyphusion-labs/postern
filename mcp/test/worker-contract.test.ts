@@ -150,6 +150,7 @@ async function emissions(): Promise<Emitted[]> {
       to: "a@x.com", from: "b@x.com", thread: "t", direction: "inbound", lens: "inbox",
       q: "x", limit: 5, cursor: "c", mailbox: "archive", seenFor: "a@x.com",
       fields: ["uid", "date", "from", "subject"],
+      after: "2026-01-01", before: "2026-02-01",
     }),
   );
   await run("get", () => client.get("m1"));

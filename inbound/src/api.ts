@@ -636,8 +636,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
-      const after = url.searchParams.get("after") ?? undefined;
-      const before = url.searchParams.get("before") ?? undefined;
+      // Was `searchParams.get("after") ?? undefined`, with NO validation and no
+      // canonicalization: that is defects 2 and 3 in parseDateBound's list, and it is why
+      // this route now uses the same parser /api/messages does instead of its own read.
+      const after = parseDateBound(url.searchParams.get("after"), "after");
+      const before = parseDateBound(url.searchParams.get("before"), "before");
       const hasAttParam = url.searchParams.get("hasAttachment");
       if (hasAttParam !== null && hasAttParam !== "0" && hasAttParam !== "1" &&
           hasAttParam !== "true" && hasAttParam !== "false") {
@@ -1017,6 +1020,91 @@ function parseSeenFor(p: URLSearchParams, sessionIdentity?: string): string | un
   return value;
 }
 
+/** A date bound on `messages.date`, validated STRICTLY and CANONICALIZED (#647).
+ *
+ *  ONE definition for both read surfaces. #647 asked for `after`/`before` on
+ *  `/api/messages` "sharing the parsing and the semantics /api/search already uses". Those
+ *  semantics turned out to be broken in three ways, all measured on the real engine before
+ *  this was written, so sharing them as they were would have doubled each defect onto a
+ *  second route instead of fixing it:
+ *
+ *  1. `before` was documented INCLUSIVE since #354 and was not, for a date-only value.
+ *     `before=2026-01-31` dropped every message ON the 31st, because
+ *     "2026-01-31T12:00:00.000Z" > "2026-01-31" as a string. A caller asking for January
+ *     silently lost its last day. `inbound/src/webmail.ts` compensated for this in the
+ *     CLIENT (`+ "T23:59:59.999Z"`), so the webmail was right and every other door was
+ *     wrong about the same documented parameter: exactly the one-definition-two-behaviours
+ *     drift #647 exists to prevent. That compensation now lives here, once, for every door.
+ *  2. A BOGUS value was accepted and silently applied, and the two ends failed in opposite
+ *     directions. `before=yesterday` returned EVERY row (the filter vanished, since
+ *     "yesterday" sorts above any ISO string) while `after=yesterday` returned ZERO. A
+ *     zero-row answer from a typo is the single worst shape in this repo: #631 was Conrad
+ *     unable to tell "never ingested" from "not retrieved", and this manufactures that
+ *     ambiguity from a spelling mistake.
+ *  3. Even a FULL timestamp mis-compared when its form differed from the stored one.
+ *     `after=2026-06-01T00:00:00Z` EXCLUDED a message stored at
+ *     "2026-06-01T00:00:00.000Z", because "Z" > "." lexically. An inclusive bound that
+ *     excludes the instant it names is the same off-by-one wearing a third hat.
+ *
+ *  The root cause of all three is comparing a caller's string against a column whose format
+ *  the caller does not know. So the fix is one rule: accept only a real ISO-8601 date or
+ *  timestamp, then canonicalize it to the exact form the column stores (Date.toISOString()),
+ *  and only then let SQL compare strings. A date-only bound expands to the whole named day,
+ *  which is what makes "inclusive" true at both ends rather than only at the lower one.
+ */
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_TIME_RE = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?([Zz]|[+-]\d{2}:\d{2})?$/;
+
+function parseDateBound(raw: string | null, name: "after" | "before"): string | undefined {
+  if (raw === null) return undefined;
+  const value = raw.trim();
+  // An EMPTY bound is refused rather than read as "no bound asked for": a client that built
+  // it from a cleared form field must learn that, not receive the unfiltered estate.
+  if (value === "") {
+    throw new MailboxError(
+      "E_VALIDATION_ERROR",
+      `${name} must be an ISO-8601 date (2026-01-31) or timestamp (2026-01-31T12:00:00Z)`,
+    );
+  }
+  const dateOnly = DATE_ONLY_RE.test(value);
+  if (!dateOnly && !DATE_TIME_RE.test(value)) {
+    throw new MailboxError(
+      "E_VALIDATION_ERROR",
+      `${name} must be an ISO-8601 date (2026-01-31) or timestamp (2026-01-31T12:00:00Z), not ${JSON.stringify(value)}`,
+    );
+  }
+  // Shape is not validity, and Date.parse is NOT a sufficient calendar check here. Measured
+  // while writing the probe for this: `Date.parse("2026-02-30T00:00:00.000Z")` does not
+  // return NaN, it ROLLS OVER to March 2, so a validator that trusted it would accept an
+  // impossible day and silently answer for a different one. `new Date("2026-02-30")` alone
+  // does reject, so the leniency depends on whether a time part is present, which is exactly
+  // the kind of engine detail a gate must not rest on. So the calendar is checked by
+  // ROUND TRIP on the date part: build the UTC instant from the components and require the
+  // components to come back unchanged. A rollover cannot survive that.
+  const [y, mo, d] = value.slice(0, 10).split("-").map(Number);
+  const midnight = new Date(Date.UTC(y, mo - 1, d));
+  if (
+    midnight.getUTCFullYear() !== y ||
+    midnight.getUTCMonth() !== mo - 1 ||
+    midnight.getUTCDate() !== d
+  ) {
+    throw new MailboxError(
+      "E_VALIDATION_ERROR",
+      `${name} is not a real calendar date: ${JSON.stringify(value)}`,
+    );
+  }
+  const instant = dateOnly
+    ? Date.parse(`${value}T${name === "before" ? "23:59:59.999" : "00:00:00.000"}Z`)
+    : Date.parse(value);
+  if (Number.isNaN(instant)) {
+    throw new MailboxError(
+      "E_VALIDATION_ERROR",
+      `${name} is not a real date: ${JSON.stringify(value)}`,
+    );
+  }
+  return new Date(instant).toISOString();
+}
+
 /** The response PROJECTION (#646): which summary KEYS come back, never which rows do.
  *
  *  #631 asked for this because a survey of one 15-day window could not be made to fit a
@@ -1073,6 +1161,9 @@ function parseListQuery(url: URL, sessionIdentity?: string): import("./store").L
       ? mailbox
       : undefined,
     q: p.get("q") ?? undefined,
+    // The date window (#647). Canonicalized here, so store.list compares like-for-like.
+    after: parseDateBound(p.get("after"), "after"),
+    before: parseDateBound(p.get("before"), "before"),
     limit: parseLimit(url),
     cursor: p.get("cursor") ?? undefined,
   };

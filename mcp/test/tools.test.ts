@@ -19,6 +19,44 @@ describe("READ_TOOLS surface", () => {
   });
 });
 
+describe("mailbox_list date window (#647)", () => {
+  it("declares after and before on its input schema", () => {
+    const keys = Object.keys(tool("mailbox_list").inputSchema);
+    for (const k of ["after", "before"]) expect(keys).toContain(k);
+  });
+
+  it("forwards them to client.list and echoes the applied window", async () => {
+    const client: any = { list: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const out: any = await tool("mailbox_list").handler(client, {
+      after: "2026-01-01",
+      before: "2026-01-31",
+    });
+    expect(client.list).toHaveBeenCalledWith(
+      expect.objectContaining({ after: "2026-01-01", before: "2026-01-31" }),
+    );
+    // Echoed, so an empty page inside a window is distinguishable from an empty mailbox.
+    expect(out.after).toBe("2026-01-01");
+    expect(out.before).toBe("2026-01-31");
+  });
+
+  it("echoes null when no window was asked for, never a remembered one", async () => {
+    const client: any = { list: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const out: any = await tool("mailbox_list").handler(client, {});
+    expect(out.after).toBeNull();
+    expect(out.before).toBeNull();
+  });
+
+  it("says INCLUSIVE at both ends, which a caller cannot learn from the response (#647)", () => {
+    // #647 required the inclusivity be stated in the tool description, because the shape of
+    // the answer does not reveal it. Asserted, so the statement cannot quietly go missing.
+    const schema: any = tool("mailbox_list").inputSchema;
+    for (const k of ["after", "before"]) {
+      expect(schema[k].description ?? "").toMatch(/INCLUSIVE/i);
+    }
+    expect(schema.before.description ?? "").toMatch(/WHOLE day|23:59:59/);
+  });
+});
+
 describe("mailbox_search", () => {
   it("declares from, mailbox, after, before, hasAttachment, and seen on its input schema (#419 sync)", () => {
     const keys = Object.keys(tool("mailbox_search").inputSchema);

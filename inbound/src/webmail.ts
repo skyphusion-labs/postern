@@ -942,8 +942,15 @@ export const WEBMAIL_HTML = `<!doctype html>
   function searchFilterParams() {
     var p = {};
     if (state.filters.from) p.from = state.filters.from;
-    if (state.filters.after) p.after = state.filters.after + "T00:00:00.000Z";
-    if (state.filters.before) p.before = state.filters.before + "T23:59:59.999Z";
+    // The bare <input type="date"> value goes on the wire as-is (#647). This used to append
+    // "T00:00:00.000Z" / "T23:59:59.999Z" here, which was CORRECT and was the only place in
+    // the estate that got the inclusive upper bound right: the Worker compared a bare date
+    // as a string and so silently dropped the whole named day, which means the webmail was
+    // right and every other door was wrong about the same documented parameter. The Worker
+    // now canonicalizes a bare date to its full named day for every caller, so keeping this
+    // would be a second implementation of a rule the server owns, and a second one drifts.
+    if (state.filters.after) p.after = state.filters.after;
+    if (state.filters.before) p.before = state.filters.before;
     if (state.filters.seen === true) p.seen = "1";
     if (state.filters.seen === false) p.seen = "0";
     if (state.filters.hasAttachment === true) p.hasAttachment = "1";

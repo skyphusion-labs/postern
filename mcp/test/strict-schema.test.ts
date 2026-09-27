@@ -12,6 +12,16 @@
 // and read like a date-windowed answer, because zod stripped two parameters the tool never
 // declared and the call succeeded anyway. A supplied filter that is silently dropped is worse
 // than one that is rejected, because the caller reasonably believes it applied.
+//
+// THAT EXAMPLE IS NOW HISTORY, in two steps, and this file had to change with it. #632 turned
+// the strip into a refusal; #647 then DECLARED after/before on mailbox_list, so the original
+// call is now answered rather than refused. The rule under test is unchanged and still
+// load-bearing for every name the tools do not declare, so the arms below keep proving it with
+// a decoy that will never become a real parameter. The old decoy could not stay: once a name is
+// declared, the refusal it triggers is schema validation of a KNOWN key, which proves nothing
+// about unknown ones. (The sibling arm in this file had the same problem with `fields` after
+// #646, for the same reason.) A positive arm now pins that mailbox_list HONORS the window,
+// which is what stops this file from silently going back to asserting the old behaviour.
 
 import { describe, expect, it, vi } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -45,13 +55,15 @@ async function connected() {
 }
 
 describe("an undeclared tool parameter is refused end to end", () => {
-  it("mailbox_list REFUSES after/before instead of stripping them and answering anyway", async () => {
+  it("mailbox_list REFUSES an undeclared parameter instead of stripping it and answering anyway", async () => {
     const { client, fakeClient } = await connected();
 
-    // The exact call from #631.
+    // The decoy used to be `after`/`before`, the exact call from #631. #647 declares both, so
+    // that call is now a legitimate windowed read (pinned by the arm below) and cannot test
+    // this rule any more. The decoy has to be a name the schema will never declare.
     const res = await client.callTool({
       name: "mailbox_list",
-      arguments: { direction: "inbound", after: "2026-08-27", before: "2026-08-28", limit: 20 },
+      arguments: { direction: "inbound", notAParameter: "x", alsoNotOne: "y", limit: 20 },
     });
 
     // The SDK surfaces a validation failure as an error RESULT rather than a transport
@@ -60,11 +72,32 @@ describe("an undeclared tool parameter is refused end to end", () => {
     expect(res.isError).toBe(true);
     const text = (res.content as Array<{ text: string }>)[0].text;
     expect(text).toMatch(/Unrecognized key/i);
-    expect(text).toContain("after");
-    expect(text).toContain("before");
+    expect(text).toContain("notAParameter");
+    expect(text).toContain("alsoNotOne");
     // The stronger half: the refusal happened BEFORE any work, so no request was made and the
     // caller cannot receive a plausible-looking answer to a question it did not ask.
     expect(fakeClient.list).not.toHaveBeenCalled();
+  });
+
+  it("#647: the call from #631 is now HONORED, and the window reaches the client", async () => {
+    const { client, fakeClient } = await connected();
+
+    // The literal #631 call. It is the regression guard for this whole file: if mailbox_list
+    // ever loses after/before again, the refusal arm above would still pass (a dropped
+    // declaration makes them unknown keys again) and nothing else would notice.
+    const res = await client.callTool({
+      name: "mailbox_list",
+      arguments: { direction: "inbound", after: "2026-08-27", before: "2026-08-28", limit: 20 },
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(fakeClient.list).toHaveBeenCalledTimes(1);
+    expect(fakeClient.list.mock.calls[0][0]).toMatchObject({
+      direction: "inbound",
+      after: "2026-08-27",
+      before: "2026-08-28",
+      limit: 20,
+    });
   });
 
   it("CONTROL: the same call WITHOUT the undeclared parameters succeeds", async () => {
@@ -108,8 +141,8 @@ describe("an undeclared tool parameter is refused end to end", () => {
     expect(list.inputSchema.additionalProperties).toBe(false);
     // And the declared properties are still all there: strictness must not have cost the schema.
     expect(Object.keys(list.inputSchema.properties ?? {}).sort()).toEqual(
-      ["cursor", "direction", "fields", "from", "lens", "limit", "mailbox", "q", "seenFor",
-        "thread", "to"],
+      ["after", "before", "cursor", "direction", "fields", "from", "lens", "limit", "mailbox",
+        "q", "seenFor", "thread", "to"],
     );
   });
 

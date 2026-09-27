@@ -189,8 +189,12 @@ export const READ_TOOLS: ToolDef[] = [
       from: z.string().optional().describe("filter by sender address"),
       lens: LENS.optional().describe("viewer view (needs to=): inbox = delivered to them and not written by them; sent = written by them. Not combinable with direction"),
       mailbox: MAILBOX.optional().describe("filter by durable folder placement: archive, trash, junk, or all (every placement); omitted = the default unfoldered placement"),
-      after: z.string().optional().describe("inclusive ISO date lower bound on the message date"),
-      before: z.string().optional().describe("inclusive ISO date upper bound on the message date"),
+      after: z.string().optional().describe("INCLUSIVE lower bound on the message date: ISO-8601, either a bare date "
+        + "(2026-01-31, meaning from 00:00:00 that day) or a full timestamp "
+        + "(2026-01-31T12:00:00Z). A bogus value is REFUSED, never silently ignored."),
+      before: z.string().optional().describe("INCLUSIVE upper bound on the message date: ISO-8601, either a bare date "
+        + "(2026-01-31, which covers that WHOLE day through 23:59:59.999) or a full "
+        + "timestamp. Both ends are inclusive. A bogus value is REFUSED, never silently ignored."),
       hasAttachment: z.boolean().optional().describe("true = only messages with >=1 attachment; false = only messages with none"),
       seen: z.boolean().optional().describe("filter on read state: true = seen, false = unread"),
       seenFor: z.string().optional().describe(
@@ -280,7 +284,9 @@ export const READ_TOOLS: ToolDef[] = [
       "the rows come back with only those keys and the id set is unchanged. `identityScope` " +
       "states whose mail was listed: kind 'member' or 'role' means you were shown a SLICE, " +
       "so an empty result means 'not in your slice', not 'not in the estate'. This tool " +
-      "does NOT filter by date; use mailbox_search for that.",
+      "filters by date with after/before (INCLUSIVE at both ends), so a window can be " +
+      "enumerated exhaustively here rather than through the relevance-ranked search path -- " +
+      "which matters because a ranked search cannot prove a message is absent, and this can.",
     inputSchema: {
       to: z.string().optional().describe("filter by recipient address"),
       from: z.string().optional().describe("filter by sender address"),
@@ -303,6 +309,12 @@ export const READ_TOOLS: ToolDef[] = [
           "shared/role address with no reader of its own (e.g. to=abuse@ with " +
           "lens=inbox), pass the human reading it, e.g. seenFor=ada@example.com",
       ),
+      after: z.string().optional().describe("INCLUSIVE lower bound on the message date: ISO-8601, either a bare date "
+        + "(2026-01-31, meaning from 00:00:00 that day) or a full timestamp "
+        + "(2026-01-31T12:00:00Z). A bogus value is REFUSED, never silently ignored."),
+      before: z.string().optional().describe("INCLUSIVE upper bound on the message date: ISO-8601, either a bare date "
+        + "(2026-01-31, which covers that WHOLE day through 23:59:59.999) or a full "
+        + "timestamp. Both ends are inclusive. A bogus value is REFUSED, never silently ignored."),
       fields: z.array(z.string().min(1)).optional().describe(
         "RESPONSE PROJECTION: return ONLY these summary keys per message, instead of all 27. "
           + "This is what makes a wide survey fit: a 100-message page is ~64k characters "
@@ -317,7 +329,7 @@ export const READ_TOOLS: ToolDef[] = [
       ),
     },
     handler: async (client, a) => {
-      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, q: a.q, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor, fields: a.fields });
+      const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, q: a.q, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor, fields: a.fields, after: a.after, before: a.before });
       return {
         count: page.items.length,
         ...completeness(page),
@@ -325,6 +337,11 @@ export const READ_TOOLS: ToolDef[] = [
         // See mailbox_search: the applied projection is echoed so a narrow row is
         // distinguishable from a sparse message.
         fields: a.fields ?? null,
+        // The applied window, echoed for the same reason: an empty page inside a window is a
+        // different fact from an empty mailbox, and the caller should not have to remember
+        // what it asked for to tell them apart.
+        after: a.after ?? null,
+        before: a.before ?? null,
         messages: page.items,
       };
     },
@@ -676,6 +693,11 @@ export function registerTools(
       // worse than one that is rejected, because the caller reasonably believes it applied.
       // That is how `mailbox_list after=... before=...` returned newest-N while reading like
       // a date-windowed answer (#631).
+      //
+      // That example is now HISTORY on both counts, and the order matters: #632 made the
+      // strip a refusal, and #647 made the parameters real, so the same call is now answered
+      // rather than refused. The rule this comment defends is unchanged and still load-bearing
+      // for every parameter the tools do NOT declare; only its illustration was fixed.
       { description: t.description, inputSchema: z.object(t.inputSchema).strict() },
       async (args: unknown) => {
         try {
