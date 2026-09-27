@@ -130,6 +130,22 @@ interface SentMessage {
   }[];
 }
 
+/** What SQLite would match for a `LIKE ? ESCAPE '\\'` pattern, as a plain substring.
+ *
+ *  The store escapes every LIKE pattern it binds (store.escapeLikeMeta), so a fake that
+ *  compared the RAW bind would look for the escape characters literally and match
+ *  nothing. Unwrap the leading/trailing wildcards, then undo the escapes in the reverse
+ *  order they were applied. Refs GHSA-pjv6-4xmx-29cw. */
+function likeNeedle(pattern: string): string {
+  return pattern
+    .replace(/^%/, "")
+    .replace(/%$/, "")
+    .replace(/\\%/g, "%")
+    .replace(/\\_/g, "_")
+    .replace(/\\\\/g, "\\")
+    .toLowerCase();
+}
+
 export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): FakeEnvResult {
   const rows: Row[] = [];
   const atts: AttRow[] = [];
@@ -188,7 +204,17 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           const row = rows.find((r) => r.message_id === id);
           if (!row) return { meta: { changes: 0 } };
           const cur = row.delivered_to ?? `,${row.to_addr},`;
-          if (cur.toLowerCase().includes(`,${extra.toLowerCase()},`)) return { meta: { changes: 0 } };
+          if (cur.toLowerCase().includes(likeNeedle(String(bound[2])))) return { meta: { changes: 0 } };
+          // The same same-message condition the production statement carries, since this
+          // append is keyed on message_id alone. Binds: extra(0), id(1), membership
+          // pattern(2), from(3), subject(4), body_text(5). Refs GHSA-pjv6-4xmx-29cw.
+          if (
+            (row.from_addr ?? "") !== String(bound[3]) ||
+            (row.subject ?? "") !== String(bound[4]) ||
+            (row.body_text ?? "") !== String(bound[5])
+          ) {
+            return { meta: { changes: 0 } };
+          }
           row.delivered_to = `${cur}${extra},`;
           return { meta: { changes: 1 } };
         }
@@ -452,10 +478,19 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
             not_current: notCurrent,
           } as unknown as T;
         }
-        if (/SELECT thread_id FROM messages WHERE message_id/i.test(sql)) {
+        // Also the post-conflict read, which selects the content columns beside
+        // thread_id so store.put can tell a true dedup from a reused Message-ID.
+        if (/SELECT thread_id(, from_addr, subject, body_text)? FROM messages WHERE message_id/i.test(sql)) {
           const id = bound[0] as string;
           const row = rows.find((r) => r.message_id === id);
-          return (row ? { thread_id: row.thread_id } : null) as T | null;
+          return (row
+            ? {
+                thread_id: row.thread_id,
+                from_addr: row.from_addr,
+                subject: row.subject,
+                body_text: row.body_text,
+              }
+            : null) as T | null;
         }
         if (/FROM messages WHERE message_id = \? LIMIT 1/i.test(sql)) {
           const id = bound[0] as string;
@@ -569,6 +604,18 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           const current = existing.delivered_to ?? `,${existing.to_addr},`;
           if (current.toLowerCase().includes(`,${merge_rcpt.toLowerCase()},`)) {
             return { results: [] as unknown as T[] }; // already a member: no-op
+          }
+          // The production DO UPDATE WHERE also requires that the stored row holds the
+          // SAME MESSAGE before appending a recipient to delivered_to. A fake that
+          // merged regardless would report a delivered_to the store would never write,
+          // and every suite built on this fake would inherit that answer. Refs
+          // GHSA-pjv6-4xmx-29cw.
+          if (
+            (existing.from_addr ?? "") !== (b[1] as string) ||
+            (existing.subject ?? "") !== (b[3] as string) ||
+            (existing.body_text ?? "") !== (b[6] as string)
+          ) {
+            return { results: [] as unknown as T[] }; // different message: no merge
           }
           existing.delivered_to = `${current}${merge_rcpt},`;
           const is_fresh = existing.delivered_to === delivered_set ? 1 : 0;
@@ -764,23 +811,25 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
               ),
             );
           }
-          // M8 (#178/#189): COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE
-          // '%,' || ? || ',%'. Bind is the bare lower-cased address; match the
-          // delivered set (falling back to a v1 row's to_addr), delimiter-safe.
+          // M8 (#178/#189): COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE ?
+          // ESCAPE. The bind is the delimited, ESCAPED pattern (store.membershipPattern),
+          // so unwrap it to the ",addr," needle and match the delivered set, falling back
+          // to a v1 row's to_addr. Delimiter-safe, and literal: a `_` in the address is a
+          // `_`, not a wildcard.
           if (/COALESCE\(m\.delivered_to/i.test(sql)) {
-            const v = String(bound[i++]).toLowerCase();
+            const needle = likeNeedle(String(bound[i++]));
             if (/OR lower\(m\.from_addr\) = \?/i.test(sql)) {
               const from = String(bound[i++]).toLowerCase();
               work = work.filter((r) =>
-                (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`) ||
+                (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(needle) ||
                 r.from_addr.toLowerCase() === from,
               );
             } else {
-              work = work.filter((r) => (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(`,${v},`));
+              work = work.filter((r) => (r.delivered_to ?? `,${r.to_addr},`).toLowerCase().includes(needle));
             }
           }
           if (/lower\(m\.from_addr\) LIKE \?/i.test(sql)) {
-            const v = String(bound[i++]).replace(/%/g, "").toLowerCase();
+            const v = likeNeedle(String(bound[i++]));
             work = work.filter((r) => r.from_addr.toLowerCase().includes(v));
           }
           if (/m\.thread_id = \?/i.test(sql)) {
