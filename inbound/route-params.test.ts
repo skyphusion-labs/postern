@@ -69,6 +69,12 @@ async function seed(env: Env, ctx: ExecutionContext, raw: import("node:sqlite").
     id: "m-trashed@x", from: BOB, to: ME, subject: "delta subject",
     body: "keyword uniquefour", date: "2026-04-10T00:00:00.000Z",
   });
+  // MIDDAY on the boundary day, for the #647 inclusivity arms. A row exactly at midnight
+  // would pass a broken `before=<day>` by accident, so it has to be inside the day.
+  await putInbound(env, ctx, {
+    id: "m-boundary@x", from: BOB, to: ME, subject: "boundary subject",
+    body: "keyword uniquefive", date: "2026-01-31T12:00:00.000Z",
+  });
   raw.prepare("UPDATE messages SET mailbox = 'trash' WHERE message_id = ?").run("m-trashed@x");
   raw.prepare("UPDATE messages SET seen = 1 WHERE message_id = ?").run("m-beta@x");
   raw
@@ -93,6 +99,62 @@ async function rowKeys(res: Response, pick: (row: any) => any = (row) => row): P
   const body = (await res.json()) as { items: unknown[] };
   expect(body.items.length, "no rows: a projection assertion would be vacuous").toBeGreaterThan(0);
   return body.items.map((row) => Object.keys(pick(row)).sort());
+}
+
+/** The date-window probe, shared by both read surfaces (#647).
+ *
+ *  It asserts the three defects measured on the real engine before #647 STAY fixed, because
+ *  each one passed the old refuses-or-changes bar while answering wrongly:
+ *
+ *  1. INCLUSIVE AT BOTH ENDS for a bare date. `before=<the boundary day>` must RETURN a
+ *     message stored at midday on that day. It did not: "...T12:00:00.000Z" > "2026-01-31"
+ *     as a string, so a caller asking for January silently lost the 31st.
+ *  2. A BOGUS value is REFUSED, not applied. `before=yesterday` used to return EVERY row
+ *     and `after=yesterday` ZERO rows, in both cases 200 OK. The zero case is the one that
+ *     matters: a typo that reads as "no mail in that window" is #631's own ambiguity,
+ *     manufactured from a spelling mistake.
+ *  3. A FULL TIMESTAMP whose form differs from the stored one still compares right.
+ *     `after=<midnight>Z` used to EXCLUDE a row stored at `<midnight>.000Z` because
+ *     "Z" > "." lexically.
+ *
+ *  The seeded row at 2026-01-31T12:00:00.000Z exists only for arm 1; without a row INSIDE
+ *  the boundary day the inclusivity assertion cannot fail and would be decoration. */
+async function dateProbe(
+  env: Env,
+  ctx: ExecutionContext,
+  base: string,
+  sep: string,
+): Promise<void> {
+  // 2. Refusals first, both ends, including the empty bound and a plausible impossible day.
+  for (const bad of ["yesterday", "not-a-date", "2026-13-45", "", "31/01/2026", "2026-02-30"]) {
+    await refuses(env, ctx, `${base}${sep}after=${encodeURIComponent(bad)}`);
+    await refuses(env, ctx, `${base}${sep}before=${encodeURIComponent(bad)}`);
+  }
+
+  // 1. A bare date covers its WHOLE named day, at both ends.
+  const onBoundary = await ids(await handleApi(get(`${base}${sep}before=2026-01-31`), env, ctx));
+  expect(onBoundary, "before=<day> must INCLUDE a message stored at midday on that day").toContain(
+    "m-boundary@x",
+  );
+  const afterBoundary = await ids(await handleApi(get(`${base}${sep}after=2026-01-31`), env, ctx));
+  expect(afterBoundary, "after=<day> must include that same message").toContain("m-boundary@x");
+  // CONTROL: the bound is a real filter, not a passthrough that includes everything.
+  const before10 = await ids(await handleApi(get(`${base}${sep}before=2026-01-10`), env, ctx));
+  expect(before10, "before=2026-01-10 must EXCLUDE the 31st").not.toContain("m-boundary@x");
+  expect(before10.length, "and must still return something, else the arm above is vacuous")
+    .toBeGreaterThan(0);
+
+  // 3. A full timestamp naming an instant INCLUDES a row stored at that instant.
+  const atInstant = await ids(
+    await handleApi(get(`${base}${sep}after=2026-01-31T12:00:00Z`), env, ctx),
+  );
+  expect(atInstant, "an inclusive bound must include the instant it names").toContain("m-boundary@x");
+
+  // Both ends together bound a window.
+  const window = await ids(
+    await handleApi(get(`${base}${sep}after=2026-01-31&before=2026-01-31`), env, ctx),
+  );
+  expect(window).toEqual(["m-boundary@x"]);
 }
 
 /** Both refusal arms and the applied arm, shared by the two read surfaces.
@@ -170,6 +232,11 @@ const LIST_PROBES: Record<string, Probe> = {
     expect(await changes(e, c, "/api/messages", "/api/messages?q=uniqueone")).toEqual(["m-alpha@x"]);
   },
   fields: async (e, c) => fieldsProbe(e, c, "/api/messages", "?"),
+  after: async (e, c) => dateProbe(e, c, "/api/messages", "?"),
+  // Same probe, because after/before are ONE definition shared with search (#647). Running
+  // it under both names is deliberate: the coverage gate demands a probe per declared name,
+  // and a bound that only works when its partner is absent is a real failure mode.
+  before: async (e, c) => dateProbe(e, c, "/api/messages", "?"),
   limit: async (e, c) => {
     expect(await ids(await handleApi(get("/api/messages?limit=1"), e, c))).toHaveLength(1);
   },
@@ -234,15 +301,12 @@ const SEARCH_PROBES: Record<string, Probe> = {
       "m-trashed@x",
     ]);
   },
-  after: async (e, c) => {
-    const recent = await changes(e, c, "/api/search?q=keyword", "/api/search?q=keyword&after=2026-03-01");
-    expect(recent).not.toContain("m-alpha@x");
-  },
-  before: async (e, c) => {
-    expect(await changes(e, c, "/api/search?q=keyword", "/api/search?q=keyword&before=2026-01-31")).toEqual([
-      "m-alpha@x",
-    ]);
-  },
+  // These used to be a bare changes() on each end. That bar is met by a filter that answers
+  // the WRONG rows, which is what both of these did: before=2026-01-31 returned ["m-alpha@x"]
+  // and looked right precisely because no seeded row sat inside the 31st. The shared probe
+  // now pins the boundary, the refusals and the canonicalization.
+  after: async (e, c) => dateProbe(e, c, "/api/search?q=keyword", "&"),
+  before: async (e, c) => dateProbe(e, c, "/api/search?q=keyword", "&"),
   limit: async (e, c) => {
     expect(await ids(await handleApi(get("/api/search?q=keyword&limit=1"), e, c))).toHaveLength(1);
   },

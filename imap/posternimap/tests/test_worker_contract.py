@@ -265,7 +265,13 @@ class ParityTest(unittest.TestCase):
     # answered locally by design. This is an exclusion with a rationale, not a gap
     # ledger: if the door ever pushes one of these down, the stale check below fails
     # and the entry has to leave, so the exclusion cannot quietly outlive its reason.
-    NOT_PUSHED_DOWN = {"search": {"after", "before", "hasAttachment", "seen"}}
+    # messages-list joins search here for after/before once #647 declares them on both:
+    # the reason is unchanged (Twisted answers SINCE/BEFORE over the summaries already
+    # loaded for the selected folder), and it now applies to the route that gained them.
+    NOT_PUSHED_DOWN = {
+        "messages-list": {"after", "before"},
+        "search": {"after", "before", "hasAttachment", "seen"},
+    }
 
     # A SECOND, separate exclusion, kept separate ON PURPOSE. NOT_PUSHED_DOWN above is
     # about FILTERS the door evaluates locally instead of server-side; `fields` (#646) is
@@ -320,7 +326,13 @@ class ParityTest(unittest.TestCase):
     def test_the_exclusions_are_exactly_the_criteria_twisted_evaluates_locally(self):
         # Pin WHICH filters are excluded, so widening the exclusion is a deliberate,
         # reviewable edit rather than a quiet way to make this test pass.
-        self.assertEqual({"search": {"after", "before", "hasAttachment", "seen"}}, self.NOT_PUSHED_DOWN)
+        self.assertEqual(
+            {
+                "messages-list": {"after", "before"},
+                "search": {"after", "before", "hasAttachment", "seen"},
+            },
+            self.NOT_PUSHED_DOWN,
+        )
 
     def test_the_non_filter_exclusions_are_exactly_the_response_projection(self):
         # The same pin for the second set, for the same reason: this one must not become

@@ -262,6 +262,8 @@ interface ListQuery {
   limit?: number;                     // default 50, max 200
   cursor?: string;                    // opaque; encodes (date, id) of the last row
   fields?: string;                    // RESPONSE projection: comma-separated summary keys (see 10.9)
+  after?: string;                     // INCLUSIVE lower bound on messages.date (see 10.9)
+  before?: string;                    // INCLUSIVE upper bound, a bare date covering its whole day
 }
 interface SearchQuery { q: string; mode?: "fts" | "substr" | "semantic" | "hybrid"; field?: "subject" | "body" | "text"; direction?: "inbound" | "outbound"; lens?: "inbox" | "sent"; seenFor?: string; limit?: number; cursor?: string; fields?: string }
 interface Page<T> {
@@ -480,7 +482,7 @@ none touches D1 directly (#25, #26).
 
 | Method | Route | Purpose | Milestone |
 |---|---|---|---|
-| GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views; `fields=` = RESPONSE projection, see 10.9) | M1 / webmail v2 (#352) / #403 / #404 / #646 |
+| GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&after=&before=&fields=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views; `fields=` = RESPONSE projection, see 10.9; `after=` / `before=` = INCLUSIVE date bounds, see 10.9) | M1 / webmail v2 (#352) / #403 / #404 / #646 / #647 |
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
@@ -1215,7 +1217,8 @@ substr:
 
 - `mailbox=` -- same folder lens as `/api/messages` (`archive` / `trash` / `junk` / `all`, or
   unset for the direction-default views)
-- `after=` / `before=` -- ISO-8601 inclusive bounds on `messages.date`
+- `after=` / `before=` -- ISO-8601 inclusive bounds on `messages.date`, on BOTH read
+  surfaces since #647, and genuinely inclusive at both ends since #647 (see 10.9)
 - `hasAttachment=0|1` -- EXISTS / NOT EXISTS over `attachments` for the message
 - `seen=0|1` -- effective per-viewer seen (same COALESCE path as list)
 
@@ -1497,6 +1500,59 @@ A SQL-level projection is a separate, separately-measurable change and is not cl
 search FILTER, not a summary key. The projectable name for the same fact is
 `attachmentCount`. Inventing a `hasAttachment` output field would have created exactly the
 producerless field that `fields=snippet` is refused for.
+
+**WHICH ROWS a date window RETURNS: `after` / `before` (#354, #647).** The fourth axis, and
+the last of the four a read can vary independently: `to=` / the session identity select whose
+rows, `seenFor=` whose read state is rendered, `fields=` which keys come back, and
+`after=` / `before=` which window. **Both ends are INCLUSIVE.**
+
+Accepted on `/api/messages` since #647; before that only `/api/search` had them, so the one
+date-capable path was the relevance-ranked one. That mattered more than a missing convenience:
+a ranked, floored search cannot prove a message is ABSENT (#631, #632 F3), so "was anything
+delivered in this window" had no exhaustive answer. It has one now, and #632 F1's correction
+stands: `mailbox_list` never silently ignored date filters, it never accepted them.
+
+A value is an ISO-8601 **bare date** (`2026-01-31`) or a **full timestamp**
+(`2026-01-31T12:00:00Z`, offsets allowed). A bare `after` means from `00:00:00.000` that day;
+a bare `before` means through `23:59:59.999` that day, so `after=2026-01-01&before=2026-01-31`
+is the whole of that January. Anything else is `E_VALIDATION_ERROR`, including an empty value
+and an impossible calendar day.
+
+**Three boundary defects lived here before #647, and all three were MEASURED on the real
+engine, not reasoned about.** They are recorded because each one passed the route-params bar
+(refused-when-bogus or changes-the-answer) while answering wrongly, which is the failure shape
+this contract keeps running into:
+
+1. **`before` was documented inclusive since #354 and was not**, for a bare date.
+   `before=2026-01-31` dropped every message ON the 31st, because
+   `"2026-01-31T12:00:00.000Z" > "2026-01-31"` as a string. A caller asking for January
+   silently lost its last day. `webmail/index.html` compensated for this in the CLIENT
+   (appending `T23:59:59.999Z`), which means the webmail was correct and **every other door
+   was wrong about the same documented parameter** -- one definition, two behaviours, decided
+   by which door you came through. That compensation now lives on the Worker, once, and the
+   webmail sends the bare date like everyone else.
+2. **A bogus value was accepted and silently applied, failing in opposite directions at the
+   two ends.** `before=yesterday` returned EVERY row (the predicate vanished, since
+   `"yesterday"` sorts above any ISO string) while `after=yesterday` returned ZERO, both
+   `200 OK`. The zero case is the serious one: #631 was Conrad unable to distinguish "never
+   ingested" from "not retrieved", and this manufactured that exact ambiguity out of a typo.
+3. **A full timestamp mis-compared when its form differed from the stored one.**
+   `after=2026-06-01T00:00:00Z` EXCLUDED a message stored at `2026-06-01T00:00:00.000Z`,
+   because `"Z" > "."` lexically. An inclusive bound that excludes the instant it names.
+
+The single root cause of all three is comparing a caller's string against a column whose
+format the caller cannot see. So there is one rule: **validate the shape AND the calendar,
+canonicalize to the exact form the column stores (`Date.toISOString()`), and only then let SQL
+compare strings.** `parseDateBound` in `inbound/src/api.ts` is that rule, shared by both
+routes; `pushDateRange` in `inbound/src/store.ts` is the single predicate, shared by `list()`
+and every search mode. The calendar check is a round trip through `Date.UTC`, deliberately
+**not** `Date.parse`: measured, `Date.parse("2026-02-30T00:00:00.000Z")` does not return `NaN`,
+it rolls over to March 2, while `new Date("2026-02-30")` does reject. A validator resting on
+that difference would accept an impossible day and answer for a different one.
+
+The IMAP door does not push these down: Twisted answers `SINCE`/`BEFORE` over the summaries
+already loaded for the selected folder, which is why `messages-list` joins `search` in that
+door's `NOT_PUSHED_DOWN` ledger rather than being wired.
 
 **Role queues (#404, opt-in, per_account only).** A role address belongs to a FUNCTION,
 so under per-account scoping it is nobody viewer address and its mail is delivered,

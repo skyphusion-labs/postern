@@ -80,6 +80,12 @@ const VIEW = ["to", "from", "direction", "lens", "mailbox", "seenFor", "limit", 
 // Keeping the two lists apart is what stops a later reader from reading a projection as
 // a filter, and stops a filter added here from reaching only one of the two routes.
 const PROJECTION = ["fields"];
+// The date window (#647), shared for the third time for the same reason: it was on `search`
+// only, so the enumeration route could not answer "narrow this to a window" at all and the
+// only date-capable path was the relevance-ranked one, which cannot prove absence. Declared
+// as its own list because it is a ROW filter but not a VIEW filter: it takes no viewer and
+// means the same thing with or without one.
+const DATE_RANGE = ["after", "before"];
 const DRAFT_FIELDS = [
   "to", "cc", "bcc", "subject", "bodyText", "bodyHtml", "inReplyTo", "threadId",
   "composeMode", "sourceMessageId", "updatedAt",
@@ -175,11 +181,11 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
 
   // --- read ---
   { id: "messages-list", method: "GET", path: "/api/messages", match: "exact", scope: "read", auth: "bearer",
-    query: [...VIEW, ...PROJECTION, "thread", "q"],
-    note: "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646)" },
+    query: [...VIEW, ...PROJECTION, ...DATE_RANGE, "thread", "q"],
+    note: "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646); after=/before= are INCLUSIVE at BOTH ends, ISO-8601 date or timestamp, a bare date covering its whole named day, and a bogus value is refused not applied (#647)" },
   { id: "search", method: "GET", path: "/api/search", match: "exact", scope: "read", auth: "bearer",
-    query: [...VIEW, ...PROJECTION, "q", "mode", "field", "after", "before", "hasAttachment", "seen"],
-    note: "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder. Mind the pair: field (SINGULAR) selects the substr COLUMN MATCHED, fields (PLURAL, #646) selects the summary keys RETURNED on hit.message; both are validated strictly" },
+    query: [...VIEW, ...PROJECTION, ...DATE_RANGE, "q", "mode", "field", "hasAttachment", "seen"],
+    note: "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder. Mind the pair: field (SINGULAR) selects the substr COLUMN MATCHED, fields (PLURAL, #646) selects the summary keys RETURNED on hit.message; both are validated strictly. after=/before= are the SAME inclusive, canonicalized, strictly-refused bounds messages-list uses (#647); they were unvalidated here until then" },
   { id: "recipients-recent", method: "GET", path: "/api/recipients/recent", match: "exact", scope: "read",
     auth: "bearer", query: ["viewer", "to", "limit"],
     note: "a bound identity wins; an unbound BYO token must name viewer= or to=, never an estate dump" },

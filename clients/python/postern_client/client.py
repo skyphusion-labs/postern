@@ -276,6 +276,8 @@ class PosternClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
         fields: Optional[Sequence[str]] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
     ) -> dict[str, Any]:
         """GET /api/messages. Returns {items: [summary...], cursor: str|None}.
 
@@ -293,6 +295,13 @@ class PosternClient:
         over 27 keys; ``fields=["uid", "date", "from", "subject"]`` is ~17k, so
         a wide survey fits where the full projection does not. An unknown name
         is REFUSED by the worker with the full allowed list, never dropped.
+
+        `after` / `before` are INCLUSIVE ISO-8601 bounds on the message date
+        (#647). Either end takes a bare date (``2026-01-31``) or a full
+        timestamp; a bare `before` covers that WHOLE day through 23:59:59.999,
+        so ``after="2026-01-01", before="2026-01-31"`` is all of that January.
+        The worker validates the shape AND the calendar and refuses a bogus
+        value, so a typo is a 400 rather than a silently empty window.
         """
         params: dict[str, str] = {}
         if to:
@@ -321,6 +330,13 @@ class PosternClient:
         # `fields` exists to avoid.
         if fields is not None:
             params["fields"] = ",".join(fields)
+        # Inclusive date bounds (#647). Forwarded verbatim: the worker owns the
+        # shape, calendar and canonicalization rules, so a second opinion here
+        # could only disagree with it.
+        if after:
+            params["after"] = after
+        if before:
+            params["before"] = before
         return self._json("GET", "/api/messages", params=params)
 
     def get_message(self, message_id: str) -> Optional[dict[str, Any]]:
@@ -368,8 +384,9 @@ class PosternClient:
         fact, `lens` the viewer view (needs `to`, refuses `direction`),
         `mailbox` scopes a durable folder so a Trash search cannot match
         arrival-view rows, `seen_for` sets the read-state projection key.
-        `after` / `before` bound the date range; `has_attachment` and `seen` are
-        booleans. The worker validates all of these strictly, so a typo is a
+        `after` / `before` are INCLUSIVE bounds on the message date and take a
+        bare date or a full timestamp, a bare `before` covering its whole named
+        day (#647); `has_attachment` and `seen` are booleans. The worker validates all of these strictly, so a typo is a
         clean 400 rather than a silently-dropped filter.
 
         Mind the PAIR here: `field` (singular) selects the substr COLUMN

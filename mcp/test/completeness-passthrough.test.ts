@@ -128,9 +128,20 @@ describe("the tool DESCRIPTIONS tell the agent what it may conclude", () => {
     expect(d).toMatch(/identityScope/);
   });
 
-  it("mailbox_list declares that it does NOT filter by date", () => {
-    // The specific wrong assumption that cost a real search: the dates live on search only, and
-    // nothing in this tool's schema or prose used to say so.
-    expect(tool("mailbox_list").description).toMatch(/does NOT filter by date/i);
+  it("mailbox_list declares that it DOES filter by date, and that both ends are inclusive", () => {
+    // This assertion is the inverse of what it was, and the inversion is the point of #647.
+    // It used to require the prose to say "does NOT filter by date", because the dates lived
+    // on search only and nothing in this tool said so -- the specific wrong assumption that
+    // cost a real search (#631). Now the tool HAS the filter, so the same assertion kept
+    // as-is would have pinned a limitation that no longer exists and forced the prose to lie.
+    // What has to stay true is that the description answers the date question truthfully,
+    // whichever way the answer goes, so it is asserted in the new direction.
+    const d = tool("mailbox_list").description;
+    expect(d).toMatch(/after\/before/i);
+    expect(d).toMatch(/INCLUSIVE/i);
+    expect(d).not.toMatch(/does NOT filter by date/i);
+    // And the reason it matters, which is the half an agent acts on: an exhaustive window
+    // here can prove absence, where the ranked search path cannot.
+    expect(d).toMatch(/cannot prove|absent/i);
   });
 });
