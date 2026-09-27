@@ -6,4 +6,4 @@
 // sets rootDir: "src", so importing a file above it breaks the build. The literal
 // is a copy, but it is a copy the test makes impossible to ship wrong -- see
 // mcp/test/version.test.ts.
-export const VERSION = "1.4.1";
+export const VERSION = "1.5.0";

@@ -8,9 +8,12 @@ function tool(name: string) {
 }
 
 describe("READ_TOOLS surface", () => {
-  it("exposes exactly the v1 read tools, all scope=read", () => {
+  it("exposes exactly the read tools, all scope=read", () => {
     expect(READ_TOOLS.map((t) => t.name).sort()).toEqual(
-      ["mailbox_get", "mailbox_get_attachment", "mailbox_list", "mailbox_search", "mailbox_thread"],
+      [
+        "mailbox_folders", "mailbox_get", "mailbox_get_attachment", "mailbox_list",
+        "mailbox_search", "mailbox_thread",
+      ],
     );
     expect(READ_TOOLS.every((t) => t.scope === "read")).toBe(true);
   });

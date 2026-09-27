@@ -1,11 +1,18 @@
 // HTTP client over the Postern mailbox API. Zero runtime deps beyond Node's global
 // fetch (Node >= 18). Every request carries a custom User-Agent: the API sits behind
 // Cloudflare, which 403s default bot UAs ("error 1010"), so a real UA is mandatory
-// and must never regress. Read methods (search/list/get/thread) GET the read door;
-// write methods (send/reply) POST the write door and require a send-scoped token.
+// and must never regress. Read methods (search/list/get/thread/folders) GET the read door;
+// write methods (send/reply plus the draft surface) use the write door and require a
+// send-scoped token. The draft routes additionally require a token BOUND to an identity:
+// a static operator token has no trustworthy owner to attribute a draft to, so the worker
+// answers E_IDENTITY_REQUIRED (403), which this client surfaces verbatim rather than
+// flattening into an empty result.
 
 import type {
   Direction,
+  Draft,
+  DraftInput,
+  FolderSummary,
   MailboxFilter,
   Message,
   MessageSummary,
@@ -237,6 +244,17 @@ export class PosternClient {
     return (body.messages as Message[]) ?? [];
   }
 
+  // GET /api/folders. Server-authoritative counts computed with the SAME placement and
+  // access predicates the list and read paths use, so the rail cannot disagree with what
+  // a read would return. `to` scopes the unread counts; under a bound identity the worker
+  // overrides it server-side, which is why this client sends it and never assumes it won.
+  async folders(args: { to?: string } = {}): Promise<FolderSummary[]> {
+    const params: Record<string, string> = {};
+    if (args.to) params.to = args.to;
+    const body = await this.requestGet("/api/folders", params);
+    return (body.folders as FolderSummary[]) ?? [];
+  }
+
   // --- write (send scope) ---
 
   // POST /api/send. The worker owns From-enforcement, DKIM signing, threading, and
@@ -250,6 +268,69 @@ export class PosternClient {
   // to / subject / In-Reply-To / References / thread; we forward the new body.
   async reply(input: ReplyInput): Promise<SendResult> {
     const body = await this.requestPost("/api/reply", input);
+    return this.asSendResult(body);
+  }
+
+  // --- server-side drafts (send scope AND a bound identity) ---
+  //
+  // Identity-owned by construction: every route below derives the owner from the token,
+  // never from an argument, so there is no caller-supplied owner to get wrong and no way
+  // to name someone else's draft id. A static operator token gets E_IDENTITY_REQUIRED.
+
+  async listDrafts(): Promise<Draft[]> {
+    const body = await this.requestGet("/api/drafts", {});
+    return (body.drafts as Draft[]) ?? [];
+  }
+
+  // Null on 404, matching get(): an id that is not there and an id that is not YOURS are
+  // deliberately the same answer, so a probe learns nothing about another identity.
+  async getDraft(id: string): Promise<Draft | null> {
+    try {
+      const body = await this.requestGet(`/api/drafts/${encodeURIComponent(id)}`, {});
+      return (body.draft as Draft) ?? null;
+    } catch (err) {
+      if (err instanceof PosternError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
+  // The worker reads an ABSENT key as a CLEARED field, so what is NOT in this payload is
+  // as load-bearing as what is. A spread is enough and a filter would be theatre:
+  // JSON.stringify omits an undefined value, so an unset optional never reaches the wire
+  // in the first place. What WOULD blank a field is defaulting one here (`?? null`), which
+  // serializes, so this deliberately defaults nothing.
+  async createDraft(input: DraftInput): Promise<Draft | null> {
+    const body = await this.requestPost("/api/drafts", { ...input });
+    return (body.draft as Draft) ?? null;
+  }
+
+  // PUT is a READ-MODIFY-WRITE and `updatedAt` is the value read. The worker refuses a
+  // stale or absent one with 409 E_CONFLICT rather than overwriting a concurrent edit, so
+  // omitting it is not a shortcut, it is a guaranteed conflict on an existing draft.
+  async updateDraft(id: string, input: DraftInput, updatedAt?: string): Promise<Draft | null> {
+    const payload: Record<string, unknown> = { ...input };
+    if (updatedAt !== undefined) payload.updatedAt = updatedAt;
+    const body = await this.request("PUT", `/api/drafts/${encodeURIComponent(id)}`, payload);
+    return (body.draft as Draft) ?? null;
+  }
+
+  // True when a row was removed, false on 404. A delete of something already gone is not
+  // an error to an agent, and saying so beats making it parse one.
+  async deleteDraft(id: string): Promise<boolean> {
+    try {
+      await this.request("DELETE", `/api/drafts/${encodeURIComponent(id)}`, undefined);
+      return true;
+    } catch (err) {
+      if (err instanceof PosternError && err.status === 404) return false;
+      throw err;
+    }
+  }
+
+  // POST /api/drafts/{id}/send. The worker dispatches, stores the sent copy, and deletes
+  // the draft ONLY after both succeed, so any failure leaves the draft retryable. This
+  // client therefore reports a failure as a failure and never as a partial success.
+  async sendDraft(id: string): Promise<SendResult> {
+    const body = await this.requestPost(`/api/drafts/${encodeURIComponent(id)}/send`, {});
     return this.asSendResult(body);
   }
 
@@ -272,7 +353,11 @@ export class PosternClient {
     return this.request("POST", path, payload);
   }
 
-  private async request(method: "GET" | "POST", pathAndQuery: string, payload: unknown): Promise<Record<string, any>> {
+  private async request(
+    method: "GET" | "POST" | "PUT" | "DELETE",
+    pathAndQuery: string,
+    payload: unknown,
+  ): Promise<Record<string, any>> {
     const url = this.base + pathAndQuery;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
@@ -309,9 +394,12 @@ export class PosternClient {
         403,
       );
     }
-    if (resp.status === 400 || resp.status === 413) {
-      // Caller-fixable validation/size errors from the mailbox core (e.g. invalid
-      // recipient, body too large). Surface the worker's message so the agent can fix it.
+    if (resp.status === 400 || resp.status === 409 || resp.status === 413) {
+      // Caller-fixable validation/size/concurrency errors from the mailbox core (e.g.
+      // invalid recipient, body too large, a stale draft `updatedAt`). Surface the
+      // worker's message so the agent can fix it. 409 is here because without it a draft
+      // conflict arrived as a bare "HTTP 409", and E_CONFLICT is the one thing the caller
+      // needs in order to know the answer is re-read and retry rather than give up.
       const detail = await safeErrorMessage(resp);
       throw new PosternError(`Postern API rejected the request (HTTP ${resp.status})${detail ? `: ${detail}` : ""}`, resp.status);
     }

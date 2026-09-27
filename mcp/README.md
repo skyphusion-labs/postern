@@ -15,9 +15,14 @@ flowchart LR
     mcp -->|HTTPS Bearer| api[Postern Mailbox API]
 ```
 
-- **Read tools** (always on): search, list, read a message, read a thread.
-- **Send tools** (v1.1, **opt-in**): `mailbox_send` / `mailbox_reply`, registered when
-  a send credential is configured (see env below).
+- **Read tools** (always on): search, list, read a message, read a thread, list folders.
+- **Send tools** (v1.1, **opt-in**): `mailbox_send` / `mailbox_reply` plus the draft
+  surface, registered when a send credential is configured (see env below).
+- **The draft tools additionally need a BOUND identity** (v1.5). A draft has an owner, and
+  a static operator token has no trustworthy one to attribute it to, so the worker answers
+  `E_IDENTITY_REQUIRED` (403) and the tool surfaces that verbatim instead of an empty list.
+  Use a per-identity registry token with `"scopes": ["read","send"]`, as the multi-person
+  note below already recommends. `mailbox_folders` has no such requirement.
 - **Multi-person use (#544):** give each person a **per-identity registry token** with
   `"scopes": ["read"]` (or `["read","send"]`) and put **that** token in
   `POSTERN_API_TOKEN`. The worker forces every read to that identity. Do **not** share
@@ -35,6 +40,7 @@ flowchart LR
 | `mailbox_get` | Fetch one full message (headers + body text + attachment metadata) by `message_id`. | `GET /api/messages/{id}` |
 | `mailbox_get_attachment` | Fetch one attachment as base64 **bytes** by `message_id` + zero-based `index` (the index into the `mailbox_get` attachment metadata). Returns `filename`, `mimeType`, `size`, `content` (base64). Oversize attachments are **refused with a clear error, never truncated** (cap: `POSTERN_MCP_MAX_ATTACHMENT_BYTES`, default 5 MiB). | `GET /api/messages/{id}/attachments/{i}` |
 | `mailbox_thread` | Fetch every message in a thread by `thread_id`. | `GET /api/threads/{id}` |
+| `mailbox_folders` | List the folders with a message count and an unread count each, plus any shared role queues the caller may read. Use it to ORIENT before paging: it answers "where is there mail, and how much" in one call, which `mailbox_list` cannot. Counts are computed server-side with the same predicates a read uses, so they agree with what `mailbox_list` returns for the same folder. An entry carrying `role` is a shared QUEUE, and that field's presence is the signal, so never parse the id. `to` scopes the unread counts and is ignored under an identity-bound token. | `GET /api/folders` |
 
 ### Send (scope `send`, opt-in)
 
@@ -42,6 +48,12 @@ flowchart LR
 |---|---|---|
 | `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`, and `attachments` (each `content` base64 + optional `filename`, `mime_type`). The worker caps attachment count and total size and rejects an oversize set with a clear error. With a per-identity token the worker stamps `From` to the bound identity; any caller `from` is discarded. | `POST /api/send` |
 | `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`, `mode` (`reply` default, or `replyAll` to include the original recipients, derived server-side from stored state), `quote_original`, and `attachments` (same shape and worker-enforced caps as `mailbox_send`; carried by `/api/reply` since #363). | `POST /api/reply` |
+| `mailbox_drafts_list` | List the caller's own saved drafts. Each carries the `updatedAt` that an update must echo back. | `GET /api/drafts` |
+| `mailbox_draft_get` | Fetch one own draft by `draft_id`, including its current `updatedAt`. A draft that does not exist and one owned by another identity are deliberately the SAME answer (`found: false`). | `GET /api/drafts/{id}` |
+| `mailbox_draft_create` | Open a new draft. Sends nothing. Optional `to` / `cc` / `bcc` / `subject` / `body_text` / `body_html` / `in_reply_to` / `thread_id`, plus `compose_mode` (`new` default, or `reply` / `replyAll` / `forward` with `source_message_id`) so the eventual send threads against an existing message. | `POST /api/drafts` |
+| `mailbox_draft_update` | Update an own draft. **Read-modify-write:** pass `updated_at` exactly as the last read returned it; a stale or missing value is refused with `E_CONFLICT` rather than overwriting a concurrent edit. Any field you OMIT is CLEARED, so send the whole draft as you want it to end up. | `PUT /api/drafts/{id}` |
+| `mailbox_draft_delete` | Discard an own draft. Reports `deleted: false` when there was nothing to delete, which is not an error. | `DELETE /api/drafts/{id}` |
+| `mailbox_draft_send` | Send an own draft. **MUTATING.** The worker dispatches, stores the sent copy, and only THEN discards the draft, so a failure leaves it intact and retryable rather than half-sent. A reply/forward draft threads against its source automatically. | `POST /api/drafts/{id}/send` |
 
 Send tools are **MUTATING**: they deliver mail. They register only when a send token
 is present (see below). The server owns From-enforcement, DKIM signing, threading, and

@@ -136,6 +136,67 @@ export type ViewLens = "inbox" | "sent";
 // as `{ ok: true, ...SendResult }`; the client unwraps to this. threadId is the
 // thread the sent copy joined; providerMessageId is best-effort (provider/transport
 // dependent), so a caller threads/stores on the core messageId, never on it.
+/**
+ * A folder rail entry, mirroring the worker's `FolderSummary` (inbound store.ts).
+ *
+ * `id` is a fixed personal folder or `role:<address>` for a shared queue. `role` carries
+ * that queue's ADDRESS and its PRESENCE is what tells a caller the entry is a queue, so a
+ * client never parses the id nor keeps its own list of role addresses.
+ */
+export interface FolderSummary {
+  id: string;
+  label: string;
+  count: number;
+  unread: number;
+  /** Durable-folder UIDVALIDITY; absent on arrival views. */
+  uidValidity?: number;
+  /** The role queue address, absent on personal folders. */
+  role?: string;
+}
+
+/** How a draft was composed, mirroring the worker's `DraftComposeMode`. */
+export type DraftComposeMode = "new" | "reply" | "replyAll" | "forward";
+
+/**
+ * A server-side draft, mirroring the worker's `Draft` (inbound store.ts).
+ *
+ * `updatedAt` is load-bearing and not decoration: an update must carry the value it read,
+ * so editing a draft is a read-modify-write and a concurrent edit is a refusal rather than
+ * a silent overwrite.
+ */
+export interface Draft {
+  id: string;
+  identity: string;
+  to: string | null;
+  cc: string | null;
+  bcc: string | null;
+  subject: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+  inReplyTo: string | null;
+  threadId: string | null;
+  composeMode: DraftComposeMode;
+  sourceMessageId: string | null;
+  uid: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The fields a draft create or update may set. Every one is optional and omitted means
+ *  null, matching the worker's `draftInput`, which reads an absent key as a cleared field. */
+export interface DraftInput {
+  to?: string;
+  cc?: string;
+  bcc?: string;
+  subject?: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  inReplyTo?: string;
+  threadId?: string;
+  composeMode?: DraftComposeMode;
+  sourceMessageId?: string;
+}
+
 export interface SendResult {
   messageId: string;
   threadId: string;

@@ -1,6 +1,6 @@
 {
   "name": "@skyphusion/postern-mcp",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Model Context Protocol server for Postern: read tools over the mailbox API (search/list/get/thread/get_attachment), plus optional send tools (mailbox_send / mailbox_reply, with attachments) behind a send-scoped token.",
   "license": "MIT",
   "type": "module",

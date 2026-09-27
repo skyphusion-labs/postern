@@ -163,8 +163,27 @@ async function emissions(): Promise<Emitted[]> {
 
   // Optional surfaces: present only once the client grows them (#415). Calling a
   // method that does not exist records nothing, which parity then reports as a gap.
+  // The draft surface (#644). Identity-owned on the worker side, which does not change what
+  // goes on the WIRE, and the wire is all this file measures.
+  await run("listDrafts", () => client.listDrafts());
+  await run("getDraft", () => client.getDraft("d1"));
+  await run("createDraft", () =>
+    client.createDraft({
+      to: "a@x.com", cc: "c@x.com", bcc: "b@x.com", subject: "s", bodyText: "t",
+      bodyHtml: "<p>t</p>", inReplyTo: "<p@x.com>", threadId: "t1", composeMode: "reply",
+      sourceMessageId: "m1",
+    }),
+  );
+  await run("updateDraft", () =>
+    client.updateDraft("d1", { subject: "s2", bodyText: "t2" }, "2026-01-01T00:00:00.000Z"),
+  );
+  await run("deleteDraft", () => client.deleteDraft("d1"));
+  await run("sendDraft", () => client.sendDraft("d1"));
+
   for (const [label, call] of [
-    ["folders", () => client.folders?.({})],
+    // `to` is passed, not omitted: the parity arm below measures which declared parameters
+    // this client can REACH, and a call that never sends `to` reports it as unreachable.
+    ["folders", () => client.folders?.({ to: "a@x.com" })],
     ["setSeen", () => client.setSeen?.(["m1"], true)],
     ["setFlags", () => client.setFlags?.(["m1"], { flagged: true })],
     ["move", () => client.move?.(["m1"], "archive")],
@@ -280,6 +299,10 @@ describe("#417 SOUNDNESS: everything the MCP client emits exists in the worker t
 const KNOWN_PARITY_GAPS: Record<string, string[]> = {
   "/api/messages": [],
   "/api/search": [],
+  // #644: the client reaches the one parameter this route declares, so the entry is empty
+  // from birth. It is listed anyway, because a key with an empty list is what makes a
+  // FUTURE declared parameter on this route fail here instead of going unnoticed.
+  "/api/folders": [],
 };
 
 describe("#417 PARITY: what the worker honors, the client can reach", () => {
@@ -315,7 +338,19 @@ describe("#417 PARITY: what the worker honors, the client can reach", () => {
       // client demonstrably CAN send must read as stale if it were listed, and one it
       // cannot must read as a live gap.
       const can = await reachable(path);
-      expect(can.size, "no parameters recorded at all: the ledger is measuring nothing").toBeGreaterThan(3);
+      // The floor is DERIVED from what this route declares, not a literal (#644). It used to
+      // be `> 3`, a number that happened to fit the two big read surfaces and that no route
+      // with fewer declared parameters could ever clear, so adding a small route to the
+      // ledger would have failed here for a reason that has nothing to do with parity.
+      // Derived, it is also STRICTER on the big routes than the literal ever was: /api/search
+      // must now record all fifteen, not four.
+      const row = ROUTES.find((r) => r.path === path && r.method === "GET")!;
+      const expected = (PARAMS[row.id]?.query ?? []).length - KNOWN_PARITY_GAPS[path].length;
+      expect(expected, "this route declares nothing, so the ledger cannot measure it").toBeGreaterThan(0);
+      expect(
+        can.size,
+        `recorded ${can.size} of ${expected} reachable parameters: the ledger is measuring less than it should`,
+      ).toBeGreaterThanOrEqual(expected);
       expect([...can].filter((n) => can.has(n)).length).toBeGreaterThan(0); // stale arm fires
       expect(["nOtApArAm"].filter((n) => !can.has(n))).toEqual(["nOtApArAm"]); // gap arm fires
     });
@@ -353,6 +388,12 @@ const SAMPLE: Record<string, unknown> = {
   index: 0, subject: "s", text: "t", html: "<p>h</p>", cc: "c@example.com",
   bcc: "d@example.com", reply_to: "r@example.com", quote_original: true,
   attachments: [{ content: "QQ==", filename: "a.txt", mime_type: "text/plain" }],
+  // Draft surface. `compose_mode` is deliberately NOT "new": "new" is the worker's default
+  // for an absent value, so a sample of "new" would still change the emitted body (the key
+  // appears) and the forwarding arm would pass for a reason that has nothing to do with the
+  // value being honored.
+  draft_id: "d-1", updated_at: "2026-01-01T00:00:00.000Z", body_text: "t", body_html: "<p>h</p>",
+  in_reply_to: "<parent@example.com>", compose_mode: "reply", source_message_id: "m-1",
 };
 
 /** Keys a tool needs for its handler to reach the wire at all. */
@@ -364,6 +405,16 @@ const REQUIRED: Record<string, string[]> = {
   mailbox_get_attachment: ["message_id", "index"],
   mailbox_send: ["to", "subject", "text"],
   mailbox_reply: ["message_id", "text"],
+  mailbox_folders: [],
+  // A draft create needs nothing: an empty draft is a legitimate thing to open, and the
+  // worker mints the id. Everything else is addressed by id, and an update additionally
+  // carries the `updated_at` it read (read-modify-write, not an optional nicety).
+  mailbox_drafts_list: [],
+  mailbox_draft_get: ["draft_id"],
+  mailbox_draft_create: [],
+  mailbox_draft_update: ["draft_id", "updated_at"],
+  mailbox_draft_delete: ["draft_id"],
+  mailbox_draft_send: ["draft_id"],
 };
 
 /** Everything a request carries, VALUES included: a key whose presence changes only a value
