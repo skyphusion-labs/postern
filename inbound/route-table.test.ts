@@ -29,6 +29,8 @@
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+// node URL, not the workers-types global: these are file URLs fed to node:fs (#638).
+import { URL } from "node:url";
 import { ROUTE_TABLE, matchRoute, requiredScope, type RouteScope } from "./src/routes";
 
 // ---------------------------------------------------------------------------

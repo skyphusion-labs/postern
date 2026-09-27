@@ -1,0 +1,20 @@
+{
+  // The TEST type project (#638). `tsconfig.json` checks src/ alone and is
+  // deliberately left as it is: src must NOT see node types, or a Worker-illegal
+  // `process`/`Buffer` reference in src would start type-checking clean and fail
+  // only at runtime. This project is ADDITIVE, and `npm run typecheck` runs both.
+  //
+  // `include` is an exhaustive GLOB, never a file list. A file list would leave a
+  // newly added test file in no project at all, silently unchecked, which is the
+  // exact defect this project exists to close: the silence looks identical to a pass.
+  //
+  // src/ is included so the test files resolve their imports against real source
+  // rather than a declaration shadow.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The tests are the one place both runtimes meet: they drive Worker code
+    // (workers-types) through a real node:sqlite engine in realdb.ts (node).
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["*.ts", "src/**/*.ts"]
+}

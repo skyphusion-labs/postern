@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import * as store from "./src/store";
 import { makeFakeEnv } from "./fakes";
 import { sha256hex } from "./src/ingest";
+import { vectorizeOf } from "./test-support";
 
 // #134: reconcile / orphan-vector audit. These tests pin the read-only audit -- the
 // expected-id scheme matching embedAndUpsert, the exact orphan count from
@@ -12,7 +13,7 @@ import { sha256hex } from "./src/ingest";
 async function seed(
   env: Env,
   ctx: ExecutionContext,
-  settle: () => Promise<unknown[]>,
+  settle: () => Promise<void>,
   m: { id: string; direction: "inbound" | "outbound"; to: string; text: string; date: string },
 ) {
   await store.put(
@@ -76,7 +77,7 @@ describe("reconcile orphan-vector audit (#134)", () => {
     // Orphan: a vector whose message_id is NOT in D1 (the message was deleted). Reuse
     // the live vector's values so it surfaces as a near neighbour under sampling.
     const liveVec = (vectors as { id: string; values: number[] }[])[0];
-    await env.VECTORIZE.upsert([
+    await vectorizeOf(env).upsert([
       { id: await vid("ghost@x", 0), values: liveVec.values, metadata: { message_id: "ghost@x", chunk: 0 } },
     ]);
 
@@ -98,7 +99,7 @@ describe("reconcile orphan-vector audit (#134)", () => {
     // Orphan under an OLD id scheme (id is NOT base.chunk) but metadata.message_id is
     // the STILL-LIVE message -- exactly cause (b).
     const liveVec = (vectors as { id: string; values: number[] }[])[0];
-    await env.VECTORIZE.upsert([
+    await vectorizeOf(env).upsert([
       { id: "legacyid-stays-0", values: liveVec.values, metadata: { message_id: "stays@x", chunk: 0 } },
     ]);
 
@@ -114,7 +115,7 @@ describe("reconcile orphan-vector audit (#134)", () => {
     const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
     await seed(env, ctx, settle, { id: "anchor@x", direction: "inbound", to: "conrad@skyphusion.org", text: "deploy release invoice payment", date: "2026-05-01T00:00:00.000Z" });
     const liveVec = (vectors as { id: string; values: number[] }[])[0];
-    await env.VECTORIZE.upsert([
+    await vectorizeOf(env).upsert([
       { id: await vid("gone@x", 0), values: liveVec.values, metadata: { message_id: "gone@x", chunk: 0 } }, // (a)
       { id: "legacy-anchor-0", values: liveVec.values, metadata: { message_id: "anchor@x", chunk: 0 } }, // (b)
     ]);
@@ -148,7 +149,7 @@ describe("reconcile orphan-vector audit (#134)", () => {
   it("is READ-ONLY: the index is byte-identical before and after a reconcile", async () => {
     const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
     await seed(env, ctx, settle, { id: "ro@x", direction: "inbound", to: "conrad@skyphusion.org", text: "deploy release invoice", date: "2026-07-01T00:00:00.000Z" });
-    await env.VECTORIZE.upsert([
+    await vectorizeOf(env).upsert([
       { id: await vid("dead@x", 0), values: (vectors as { values: number[] }[])[0].values, metadata: { message_id: "dead@x", chunk: 0 } },
     ]);
     const before = (vectors as { id: string }[]).map((v) => v.id).sort();
@@ -179,7 +180,7 @@ describe("reconcile orphan-vector audit (#134)", () => {
     const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
     await seed(env, ctx, settle, { id: "alive@x", direction: "inbound", to: "conrad@skyphusion.org", text: "deploy release invoice", date: "2026-09-01T00:00:00.000Z" });
     const liveVec = (vectors as { values: number[] }[])[0];
-    await env.VECTORIZE.upsert([
+    await vectorizeOf(env).upsert([
       { id: "alive@x", values: liveVec.values, metadata: { date: "2026-09-01T00:00:00.000Z", subject: "subject", from: "sender@example.com" } },
     ]);
     const r = await store.reconcile(env, { includeOrphanIds: true });
@@ -196,7 +197,7 @@ describe("reconcile orphan-vector audit (#134)", () => {
     const { env, ctx, settle, vectors } = makeFakeEnv({ VECTORIZE_FOR: "" });
     await seed(env, ctx, settle, { id: "present@x", direction: "inbound", to: "conrad@skyphusion.org", text: "render gpu video", date: "2026-09-02T00:00:00.000Z" });
     const liveVec = (vectors as { values: number[] }[])[0];
-    await env.VECTORIZE.upsert([
+    await vectorizeOf(env).upsert([
       { id: "deadbeefcafef00d", values: liveVec.values, metadata: { date: "2026-09-02T00:00:00.000Z", subject: "subject", from: "sender@example.com" } },
     ]);
     const r = await store.reconcile(env, {});
@@ -210,7 +211,7 @@ describe("reconcile orphan-vector audit (#134)", () => {
     await seed(env, ctx, settle, { id: "anchor2@x", direction: "inbound", to: "conrad@skyphusion.org", text: "deploy release invoice", date: "2026-09-03T00:00:00.000Z" });
     const liveVec = (vectors as { values: number[] }[])[0];
     // Metadata points at a (date,subject) that is NOT any live message -> deleted.
-    await env.VECTORIZE.upsert([
+    await vectorizeOf(env).upsert([
       { id: "facade00deadc0de", values: liveVec.values, metadata: { date: "2001-01-01T00:00:00.000Z", subject: "long gone", from: "sender@example.com" } },
     ]);
     const r = await store.reconcile(env, {});

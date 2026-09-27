@@ -15,6 +15,8 @@
 import { describe, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
+// node URL, not the workers-types global: these are file URLs fed to node:fs (#638).
+import { URL } from "node:url";
 import * as store from "./src/store";
 
 function realEnv(): { env: Env; ctx: ExecutionContext } {

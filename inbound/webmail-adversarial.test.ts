@@ -143,7 +143,7 @@ describe("phase 6: attachment content-type / filename (#355)", () => {
       attachments: [{
         filename: 'evil"\r\nX-Injected: 1.html',
         mimeType: "text/html",
-        content: new TextEncoder().encode("<script>alert(1)</script>").buffer,
+        content: new TextEncoder().encode("<script>alert(1)</script>").buffer as ArrayBuffer,
       }],
     }, ctx);
     await settle();

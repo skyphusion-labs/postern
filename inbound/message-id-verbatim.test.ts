@@ -17,6 +17,7 @@ import { ingest, normalizeMessageId, sha256hex, MAX_STORED_MESSAGE_ID_BYTES, typ
 import * as store from "./src/store";
 import { handleApi } from "./src/api";
 import { realEnv } from "./realdb";
+import type { DatabaseSync } from "node:sqlite";
 
 // A GitHub thread root in the shape the fc#1112 watcher parses, long enough that the
 // pre-#486 cutoff would have collapsed it.
@@ -34,11 +35,11 @@ function inbound(over: Partial<ParsedInbound> = {}): ParsedInbound {
   };
 }
 
-function rowCount(raw: { prepare: (sql: string) => { get: () => unknown } }): number {
+function rowCount(raw: DatabaseSync): number {
   return Number((raw.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number }).n);
 }
 
-function deliveredTo(raw: { prepare: (sql: string) => { get: (...a: unknown[]) => unknown } }, id: string): string {
+function deliveredTo(raw: DatabaseSync, id: string): string {
   const row = raw.prepare("SELECT delivered_to FROM messages WHERE message_id = ?").get(id) as
     | { delivered_to: string | null }
     | undefined;

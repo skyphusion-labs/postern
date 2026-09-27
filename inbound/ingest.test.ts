@@ -94,7 +94,7 @@ describe("ingest", () => {
 
   it("stores attachment bytes to R2 and metadata to D1", async () => {
     const { env, ctx, settle, r2, atts } = makeFakeEnv();
-    const content = new TextEncoder().encode("file data").buffer;
+    const content = new TextEncoder().encode("file data").buffer as ArrayBuffer;
     await ingest(env, baseMsg({ attachments: [{ filename: "a.txt", mimeType: "text/plain", content }] }), ctx);
     await settle();
     expect(r2).toHaveLength(1);

@@ -21,7 +21,7 @@ function req(method: string, path: string, opts: { token?: string; body?: unknow
   });
 }
 
-async function sendOne(env: Env, ctx: ExecutionContext, settle: () => Promise<unknown[]>, subject: string): Promise<string> {
+async function sendOne(env: Env, ctx: ExecutionContext, settle: () => Promise<void>, subject: string): Promise<string> {
   const res = await handleApi(
     req("POST", "/api/send", { token: "test-token", body: { to: "d@example.com", subject, text: "yo" } }),
     env,

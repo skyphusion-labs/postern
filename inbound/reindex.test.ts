@@ -9,7 +9,7 @@ import { makeFakeEnv } from "./fakes";
 async function put(
   env: Env,
   ctx: ExecutionContext,
-  settle: () => Promise<unknown[]>,
+  settle: () => Promise<void>,
   m: { id: string; direction: "inbound" | "outbound"; to: string; text: string; date: string },
 ) {
   await store.put(

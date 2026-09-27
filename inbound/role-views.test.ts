@@ -125,7 +125,9 @@ describe("#425 a MEMBER reads the role queue, and INBOX stays personal", () => {
     await seed(e, ctx);
     const ada = await signIn(e, raw, ADA);
     const res = await handleApi(get("/api/folders", ada), e, ctx);
-    const body = (await res.json()) as { folders: Array<{ id: string; label: string; role?: string; unread: number }> };
+    // The REAL projection type, not a hand-rolled copy of it: a local shape silently
+    // omitted count and the assertion below could never be type-checked (#638).
+    const body = (await res.json()) as { folders: store.FolderSummary[] };
     const role = body.folders.find((f) => f.role === ROLE);
     expect(role).toBeTruthy();
     expect(role!.id).toBe(`role:${ROLE}`);

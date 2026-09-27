@@ -183,7 +183,7 @@ describe("reply routing to stored Reply-To (#189)", () => {
 });
 
 describe("search direction (#128)", () => {
-  async function seedBoth(env: Env, ctx: ExecutionContext, settle: () => Promise<unknown[]>) {
+  async function seedBoth(env: Env, ctx: ExecutionContext, settle: () => Promise<void>) {
     await ingest(env, { messageId: "s-in@example.com", from: "x@example.com", to: "conrad@skyphusion.org", subject: "deploy status", text: "deploy status inbound", date: "2026-01-01T00:00:00.000Z" }, ctx);
     await settle();
     await store.put(

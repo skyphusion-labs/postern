@@ -100,7 +100,7 @@ interface PlacementRow {
 export interface FakeEnvResult {
   env: Env;
   ctx: ExecutionContext;
-  settle: () => Promise<unknown[]>;
+  settle: () => Promise<void>;
   rows: Row[];
   atts: AttRow[];
   r2: { key: string; bytes: ArrayBuffer }[];
@@ -799,7 +799,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
               .replace(/\\\\/g, "\\")
               .toLowerCase();
             work = work.filter((r) =>
-              likeCols.some((c) => String((r as Record<string, unknown>)[c] ?? "").toLowerCase().includes(needle)),
+              likeCols.some((c) => String((r as unknown as Record<string, unknown>)[c] ?? "").toLowerCase().includes(needle)),
             );
           }
           if (/messages_fts MATCH \?/i.test(sql)) {
@@ -1013,7 +1013,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
     },
   } as unknown as ExecutionContext;
 
-  return { env, ctx, settle: () => Promise.all(pending), rows, atts, r2, vectors, vectorLedger, messageSeenBy, sent };
+  return { env, ctx, settle: async () => { await Promise.all(pending); }, rows, atts, r2, vectors, vectorLedger, messageSeenBy, sent };
 }
 
 
