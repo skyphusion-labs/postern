@@ -1,0 +1,29 @@
+{
+  // The TEST type project (#641), the mcp half of the defect #638 found in inbound.
+  // `tsconfig.json` is the BUILD project: it checks src/ alone, emits to dist/ and is
+  // deliberately left exactly as it is.
+  //
+  // This project is ADDITIVE, and `npm run typecheck` runs both.
+  //
+  // `include` is an exhaustive GLOB, never a file list. A file list would leave a newly
+  // added test file in no project at all, silently unchecked, which is the exact defect
+  // this project exists to close: that silence looks identical to a pass.
+  //
+  // src/ is included so the test files resolve their imports against real source rather
+  // than a declaration shadow.
+  //
+  // WHY THE THREE OVERRIDES, because they are not cosmetic and a probe without them
+  // measures the instrument instead of the tests (#641): the build project sets
+  // `rootDir: src` because it BUILDS, unlike inbound which is noEmit throughout. Under
+  // that rootDir every file in test/ is rejected with TS6059 for sitting outside it,
+  // BEFORE anything inside it is type-checked, so the run reports 10 rootDir errors and
+  // zero findings and looks like a measurement. `rootDir: "."` plus `noEmit` is what
+  // makes this project check the tests; `declaration: false` follows from noEmit.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

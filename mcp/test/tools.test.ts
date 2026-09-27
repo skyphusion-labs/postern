@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { READ_TOOLS } from "../src/tools";
+import { READ_TOOLS } from "../src/tools.js";
 
 function tool(name: string) {
   const t = READ_TOOLS.find((x) => x.name === name);

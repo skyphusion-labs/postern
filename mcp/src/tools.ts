@@ -18,7 +18,14 @@ export interface ToolDef {
   scope: Scope;
   description: string;
   // A Zod raw shape (object of validators) -> the tool's JSON input schema.
-  inputSchema: z.ZodRawShape;
+  //
+  // `Record<string, z.ZodType>` and not `z.ZodRawShape`: in zod 4 the raw-shape alias
+  // types its values as the CORE `$ZodType`, which carries no `.parse`, while every value
+  // in the literals below is a classic `z.ZodType` that does. The looser alias threw the
+  // information away, so a test asserting on a declared validator (`inputSchema.lens.parse`)
+  // could not type-check even though the object genuinely holds one. `z.object()` accepts
+  // this, because a classic ZodType IS a $ZodType.
+  inputSchema: Record<string, z.ZodType>;
   handler: (client: PosternClient, args: any) => Promise<unknown>;
 }
 

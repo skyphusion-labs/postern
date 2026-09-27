@@ -17,16 +17,25 @@ import { describe, expect, it, vi } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { READ_TOOLS, registerTools, type Scope } from "../src/tools";
+import { READ_TOOLS, registerTools, type Scope } from "../src/tools.js";
 
 async function connected() {
+  // The fake keeps its OWN type, so the assertions below can read `.list` as the mock it
+  // is. The one cast is at the boundary where the fake meets the production signature, and
+  // it stays there: casting to PosternClient here and back to a mock at every assertion is
+  // what made those assertions un-type-checkable.
   const fakeClient = {
     list: vi.fn().mockResolvedValue({ items: [], cursor: null }),
     search: vi.fn().mockResolvedValue({ items: [], cursor: null }),
-  } as unknown as Parameters<typeof registerTools>[1];
+  };
 
   const server = new McpServer({ name: "postern-test", version: "0.0.0" });
-  registerTools(server, fakeClient, new Set<Scope>(["read"]), READ_TOOLS);
+  registerTools(
+    server,
+    fakeClient as unknown as Parameters<typeof registerTools>[1],
+    new Set<Scope>(["read"]),
+    READ_TOOLS,
+  );
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -55,7 +64,7 @@ describe("an undeclared tool parameter is refused end to end", () => {
     expect(text).toContain("before");
     // The stronger half: the refusal happened BEFORE any work, so no request was made and the
     // caller cannot receive a plausible-looking answer to a question it did not ask.
-    expect((fakeClient as { list: ReturnType<typeof vi.fn> }).list).not.toHaveBeenCalled();
+    expect(fakeClient.list).not.toHaveBeenCalled();
   });
 
   it("CONTROL: the same call WITHOUT the undeclared parameters succeeds", async () => {
@@ -69,7 +78,7 @@ describe("an undeclared tool parameter is refused end to end", () => {
     // This is what makes the refusal above meaningful rather than a broken tool: the gate has a
     // reachable world in which it passes.
     expect(res.isError).toBeFalsy();
-    expect((fakeClient as { list: ReturnType<typeof vi.fn> }).list).toHaveBeenCalledTimes(1);
+    expect(fakeClient.list).toHaveBeenCalledTimes(1);
   });
 
   it("mailbox_search refuses an undeclared parameter too (the rule is per-registration, not per-tool)", async () => {
@@ -104,7 +113,7 @@ describe("an undeclared tool parameter is refused end to end", () => {
 
     // #632 F17: the worker declares `q` on messages-list and PosternClient could always send it;
     // the tool schema was the only thing standing between an agent and the filter.
-    expect((fakeClient as { list: ReturnType<typeof vi.fn> }).list).toHaveBeenCalledWith(
+    expect(fakeClient.list).toHaveBeenCalledWith(
       expect.objectContaining({ q: "invoice" }),
     );
   });

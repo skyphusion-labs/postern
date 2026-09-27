@@ -1,8 +1,8 @@
 // Without this the advertised version is a hand-maintained copy that can drift
 // silently; with it, a drifted copy cannot pass CI.
 import { describe, expect, it } from "vitest";
-import { VERSION } from "../src/version";
-import pkg from "../package.json";
+import { VERSION } from "../src/version.js";
+import pkg from "../package.json" with { type: "json" };
 
 describe("version", () => {
   it("advertised serverInfo version matches package.json (no npm drift)", () => {

@@ -2,8 +2,8 @@
 // arrive". The defect class is a false PASS, so each case asserts what must NOT be
 // on the wire (a swallowed filter, an invented parameter) as well as what must.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PosternClient } from "../src/client";
-import { READ_TOOLS } from "../src/tools";
+import { PosternClient } from "../src/client.js";
+import { READ_TOOLS } from "../src/tools.js";
 
 function mockFetch(body: unknown) {
   const calls: { url: string; init: any }[] = [];

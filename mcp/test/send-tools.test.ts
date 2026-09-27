@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { READ_TOOLS, SEND_TOOLS, registerTools, type Scope } from "../src/tools";
+import { READ_TOOLS, SEND_TOOLS, registerTools, type Scope } from "../src/tools.js";
 
 // A minimal McpServer double: capture (name -> handler) from registerTool.
 function fakeServer() {

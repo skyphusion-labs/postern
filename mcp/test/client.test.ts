@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PosternClient, PosternError, USER_AGENT } from "../src/client";
+import { PosternClient, PosternError, USER_AGENT } from "../src/client.js";
 
 function mockFetch(status: number, body: unknown) {
   const calls: { url: string; init: any }[] = [];
