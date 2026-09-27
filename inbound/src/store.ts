@@ -374,7 +374,63 @@ export async function messageExists(env: Env, messageId: string): Promise<boolea
   return !!row;
 }
 
+/** The content two deliveries of ONE message necessarily agree on.
+ *
+ *  INVARIANT: a merge widens `delivered_to` only between deliveries of the SAME message.
+ *  `message_id` is UNIQUE and it is supplied with the message rather than derived here,
+ *  so on its own it identifies a row, not a message; `delivered_to` is the column every
+ *  access check reads (accessClause), so the merge asks this question too and only
+ *  widens on a yes. Refs GHSA-pjv6-4xmx-29cw.
+ *
+ *  FROM + SUBJECT + BODY, and deliberately NOT date: a message arriving with no Date
+ *  header is stamped `new Date()` at ingest, so two per-recipient invocations of ONE
+ *  delivery would disagree on it and a legitimate second recipient would be forked off
+ *  into its own row. The body carries the comparison regardless: it is a pure function
+ *  of the MIME bytes and therefore identical across per-recipient invocations of one
+ *  delivery.
+ *
+ *  `sameMessageSql` is the SQL half of this same predicate and the two must agree;
+ *  both COALESCE to '' so a legacy NULL column is not read as a mismatch. Kept adjacent
+ *  for that reason, and message-identity.test.ts pins the pair against a real engine. */
+function sameMessageAs(
+  row: { from_addr: string | null; subject: string | null; body_text: string | null },
+  input: StoreInput,
+): boolean {
+  return (
+    (row.from_addr ?? "") === input.from &&
+    (row.subject ?? "") === input.subject &&
+    (row.body_text ?? "") === input.bodyText
+  );
+}
+
+/** The SQL half of `sameMessageAs`, for the alias the surrounding statement uses.
+ *  Binds, in order: from, subject, bodyText. */
+function sameMessageSql(alias: string): string {
+  const p = alias ? `${alias}.` : "";
+  return `COALESCE(${p}from_addr,'') = ? AND COALESCE(${p}subject,'') = ? AND COALESCE(${p}body_text,'') = ?`;
+}
+
+/** The id a colliding DIFFERENT message is stored under. Derived, so it is
+ *  DETERMINISTIC: a retry of that same delivery resolves to the same row instead of
+ *  minting a new one on every attempt. */
+async function forkedMessageId(input: StoreInput): Promise<string> {
+  return await sha256hex(
+    `${input.messageId}\u0000${input.from}\u0000${input.subject}\u0000${input.bodyText}`,
+  );
+}
+
 export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): Promise<PutResult> {
+  return await putRow(env, input, ctx, false);
+}
+
+/** `forked` marks the one retry `put` allows itself: the stored id was already taken by
+ *  a different message, so this call is storing the delivery under its derived id. */
+async function putRow(
+  env: Env,
+  input: StoreInput,
+  ctx: ExecutionContext,
+  forked: boolean,
+): Promise<PutResult> {
   const receivedAt = new Date().toISOString();
   const threadId = await resolveThreadId(env.DB, input.messageId, input.inReplyTo, input.references);
 
@@ -395,6 +451,10 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
   // invisible. `extraRcpts` closes that, right below the upsert.
   const mergeRcpt = deliveredList[0];
   const extraRcpts = deliveredList.slice(1);
+  // Already-a-member is a no-op, and the address is matched LITERALLY -- the same
+  // membershipClause the read paths use, so the write guard and the access check agree
+  // on what "is on the delivered set" means. Refs GHSA-pjv6-4xmx-29cw.
+  const mergeGuard = membershipClause(mergeRcpt, { alias: "messages", negated: true });
 
   // ONE atomic upsert, safe under CF's concurrent per-recipient invocations of the
   // SAME Message-ID (#178). On conflict we MERGE the new recipient into the row's
@@ -438,7 +498,8 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(message_id) DO UPDATE SET
        delivered_to = COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') || ? || ','
-       WHERE COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') NOT LIKE '%,' || ? || ',%'
+       WHERE ${mergeGuard.sql}
+         AND ${sameMessageSql("messages")}
      RETURNING thread_id, (delivered_to = ?) AS is_fresh`,
   )
     .bind(
@@ -471,7 +532,10 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
       // seen, so a redelivery to a new recipient keeps the row's current read state.
       input.direction === "outbound" ? 1 : 0,
       mergeRcpt,
-      mergeRcpt,
+      ...mergeGuard.binds,
+      input.from,
+      input.subject,
+      input.bodyText,
       deliveredSet,
     )
     .all<{ thread_id: string | null; is_fresh: number }>();
@@ -486,25 +550,56 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
   // invocations of the SAME Message-ID) and it stays exactly as it was. These run only
   // when a delivery actually carries extra addresses, which today means only mail to a
   // configured role address.
+  //
+  // It carries BOTH of the upsert's guards, for the same reasons: it is keyed on
+  // message_id alone, so the same-message condition is what keeps it on a row holding
+  // this delivery, and the membership guard is the escaped one.
   for (const extra of extraRcpts) {
+    const guard = membershipClause(extra, { negated: true });
     await env.DB.prepare(
       `UPDATE messages
           SET delivered_to = COALESCE(delivered_to, ',' || to_addr || ',') || ? || ','
         WHERE message_id = ?
-          AND COALESCE(delivered_to, ',' || to_addr || ',') NOT LIKE '%,' || ? || ',%'`,
+          AND ${guard.sql}
+          AND ${sameMessageSql("")}`,
     )
-      .bind(extra, input.messageId, extra)
+      .bind(extra, input.messageId, ...guard.binds, input.from, input.subject, input.bodyText)
       .run();
   }
 
   const returned = (res.results ?? [])[0];
   if (!returned) {
-    // DO UPDATE WHERE was false: this exact recipient is already on the row (a
-    // retry / delivery loop). True dedup, no-op; resolve the thread for a
-    // consistent return.
-    const existing = await env.DB.prepare("SELECT thread_id FROM messages WHERE message_id = ? LIMIT 1")
+    // DO UPDATE WHERE was false, which is TWO situations that must not be conflated
+    // (refs GHSA-pjv6-4xmx-29cw):
+    //
+    //   1. This exact recipient is already on the row -- a retry / delivery loop of a
+    //      message we hold. True dedup, a no-op, and the pre-existing behavior.
+    //   2. The row holds a DIFFERENT message under this Message-ID, so the merge
+    //      correctly declined to widen its delivered_to (sameMessageAs). What is left is
+    //      to store THIS delivery, under its own identity. Never merged, and never
+    //      dropped: dropping it would be lost mail.
+    //
+    // This read runs only on a conflict, never on the fresh-insert path.
+    const existing = await env.DB.prepare(
+      "SELECT thread_id, from_addr, subject, body_text FROM messages WHERE message_id = ? LIMIT 1",
+    )
       .bind(input.messageId)
-      .first<{ thread_id: string | null }>();
+      .first<{
+        thread_id: string | null;
+        from_addr: string | null;
+        subject: string | null;
+        body_text: string | null;
+      }>();
+    if (existing && !sameMessageAs(existing, input)) {
+      if (forked) {
+        // The DERIVED id collided too, and again with different content. That id is a
+        // sha256 over the message identifier plus the content, so there is no ordinary
+        // route to this state. Fail loudly -- the transport retries and an operator sees
+        // it -- rather than drop the message or widen a delivered_to to place it.
+        throw new Error("store: message identity could not be resolved without a collision");
+      }
+      return await putRow(env, { ...input, messageId: await forkedMessageId(input) }, ctx, true);
+    }
     return { messageId: input.messageId, stored: false, merged: false, threadId: existing?.thread_id ?? threadId };
   }
 
@@ -897,23 +992,77 @@ function viewerList(viewer: string | readonly string[] | undefined): string[] {
   return out;
 }
 
+// --- LIKE plumbing: ONE escaper, ONE membership predicate -------------------
+//
+// INVARIANT: an address is matched LITERALLY everywhere the store asks whether a viewer
+// is on the delivered set. That set is a ",a,b," string and membership is a SQL LIKE
+// over it, so every pattern this file binds is built by the helpers below and by nothing
+// else. An address is DATA, never a pattern.
+//
+// ONE helper rather than a rule each call site remembers: the predicate had nine call
+// sites, and a convention applied nine times independently is a convention the tenth
+// site can miss. membership-literal.test.ts fails if a LIKE appears in this file without
+// its ESCAPE. Refs GHSA-pjv6-4xmx-29cw.
+
+/** Escape LIKE metacharacters, BACKSLASH FIRST (CONTRACT 10.8): the ESCAPE character
+ *  itself must be escaped before the wildcards, or a literal backslash in the input
+ *  would corrupt the escape that follows it. Order: \ -> \\, then % -> \%, then _ -> \_.
+ *  Pairs with `ESCAPE '\'` on every LIKE that consumes its output; one without the
+ *  other does nothing. */
+function escapeLikeMeta(raw: string): string {
+  return raw.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+/** A CONTAINS pattern for free text (substring search): escaped, then wrapped in the
+ *  wildcards the caller actually asked for. */
+function escapeLikePattern(raw: string): string {
+  return `%${escapeLikeMeta(raw)}%`;
+}
+
+/** The bound value for `membershipClause`: ",addr," as a LIKE pattern. The delimiters
+ *  and the surrounding wildcards are OURS -- they are what makes the match
+ *  delimiter-safe -- and everything the ADDRESS contributes is escaped to a literal. */
+function membershipPattern(address: string): string {
+  return `%,${escapeLikeMeta(address)},%`;
+}
+
+/** "this address is on the delivered set": the one membership predicate.
+ *
+ *  `alias` is the table alias the surrounding statement uses ("m", "messages", or none);
+ *  `negated` gives the NOT LIKE form the delivered-set write guards need. SQL and binds
+ *  come back TOGETHER, which is the point: a call site never writes the pattern, so it
+ *  cannot write one the escaper did not produce. */
+function membershipClause(
+  address: string,
+  opts: { alias?: string; negated?: boolean } = {},
+): { sql: string; binds: string[] } {
+  const p = opts.alias ? `${opts.alias}.` : "";
+  const set = `COALESCE(${p}delivered_to, ',' || ${p}to_addr || ',')`;
+  return {
+    sql: `${set} ${opts.negated ? "NOT LIKE" : "LIKE"} ? ESCAPE '\\'`,
+    binds: [membershipPattern(address)],
+  };
+}
+
 /** "delivered to V, or authored by V" for ANY address in the viewer set (#425).
  *
- *  One address produces the exact pre-#425 fragment, bind for bind, so every existing
- *  call is byte-identical; a set produces a parenthesised OR of the same fragment, so a
- *  role member reaches ROLE mail and nothing else widens. An EMPTY set produces no SQL,
- *  and each call site decides what that means: estate for the optional-scope writers, a
- *  flat refusal for messageAccessible. */
-function accessClause(viewers: readonly string[]): { sql: string; binds: string[] } {
+ *  One address produces one fragment; a set produces a parenthesised OR of the same
+ *  fragment, so a role member reaches ROLE mail and nothing else widens. An EMPTY set
+ *  produces no SQL, and each call site decides what that means: estate for the
+ *  optional-scope writers, a flat refusal for messageAccessible. `alias` matches the
+ *  surrounding statement, so list/search/folders share this definition instead of
+ *  keeping aliased copies of it. */
+function accessClause(viewers: readonly string[], alias?: string): { sql: string; binds: string[] } {
   if (viewers.length === 0) return { sql: "", binds: [] };
-  const one =
-    "(COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)";
+  const p = alias ? `${alias}.` : "";
+  const parts: string[] = [];
   const binds: string[] = [];
-  for (const viewer of viewers) binds.push(viewer, viewer);
-  return {
-    sql: viewers.length === 1 ? one : `(${viewers.map(() => one).join(" OR ")})`,
-    binds,
-  };
+  for (const viewer of viewers) {
+    const member = membershipClause(viewer, { alias });
+    parts.push(`(${member.sql} OR lower(${p}from_addr) = ?)`);
+    binds.push(...member.binds, viewer);
+  }
+  return { sql: parts.length === 1 ? parts[0] : `(${parts.join(" OR ")})`, binds };
 }
 
 /**
@@ -1021,15 +1170,14 @@ export async function setFlags(
     binds.push(set.answered ? 1 : 0);
   }
   const placeholders = messageIds.map(() => "?").join(", ");
-  let access = "";
-  if (viewer) {
-    access =
-      " AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)";
-  }
+  // The same accessClause every other viewer-scoped path uses, so a flag write cannot
+  // drift from the read it mirrors.
+  const clause = accessClause(viewerList(viewer));
+  const access = clause.sql ? ` AND ${clause.sql}` : "";
   const res = await env.DB.prepare(
     `UPDATE messages SET ${assignments.join(", ")} WHERE message_id IN (${placeholders})${access} RETURNING message_id`,
   )
-    .bind(...binds, ...messageIds, ...(viewer ? [viewer.toLowerCase(), viewer.toLowerCase()] : []))
+    .bind(...binds, ...messageIds, ...clause.binds)
     .all<{ message_id: string }>();
   return (res.results ?? []).length;
 }
@@ -1069,14 +1217,12 @@ export async function moveMessages(
   viewer?: string,
 ): Promise<number> {
   let updated = 0;
+  const clause = accessClause(viewerList(viewer));
   for (const id of messageIds) {
     const row = await env.DB.prepare(
-      "SELECT mailbox FROM messages WHERE message_id = ? " +
-        (viewer
-          ? "AND (COALESCE(delivered_to, ',' || to_addr || ',') LIKE '%,' || ? || ',%' OR lower(from_addr) = ?)"
-          : ""),
+      "SELECT mailbox FROM messages WHERE message_id = ? " + (clause.sql ? `AND ${clause.sql}` : ""),
     )
-      .bind(id, ...(viewer ? [viewer.toLowerCase(), viewer.toLowerCase()] : []))
+      .bind(id, ...clause.binds)
       .first<{ mailbox: string | null }>();
     if (!row || normalizeMailbox(row.mailbox) === mailbox) continue;
 
@@ -1655,8 +1801,9 @@ function recipientWhere(
     return out;
   }
   if (viewer) {
-    out.membership = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
-    out.membershipBinds = [viewer];
+    const member = membershipClause(viewer, { alias: "m" });
+    out.membership = member.sql;
+    out.membershipBinds = member.binds;
   }
   if (viewer && lens === "inbox") {
     out.direction = "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))";
@@ -1691,19 +1838,26 @@ function accountWhere(
   lens?: ViewLens,
   recipient?: string,
 ): { membership: string | null; membershipBinds: unknown[]; direction: string | null; directionBinds: unknown[] } {
-  const delivered = "COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'";
+  // ONE membership predicate, and the bound value comes back WITH it, so the viewer
+  // and the recipient filter are both matched literally.
+  const viewerMember = membershipClause(viewer, { alias: "m" });
+  const delivered = viewerMember.sql;
   // The recipient filter is delivered-set membership, exactly the predicate `to=`
   // means on every other auth path (recipientWhere), so one address filters the
   // same way whether the caller holds a session or a token.
+  const recipientMember = recipient ? membershipClause(recipient, { alias: "m" }) : null;
   const filtered = (base: string | null, binds: unknown[]) => {
-    if (!recipient) return { membership: base, membershipBinds: binds };
+    if (!recipientMember) return { membership: base, membershipBinds: binds };
     return base
-      ? { membership: `(${base}) AND ${delivered}`, membershipBinds: [...binds, recipient] }
-      : { membership: delivered, membershipBinds: [recipient] };
+      ? {
+          membership: `(${base}) AND ${recipientMember.sql}`,
+          membershipBinds: [...binds, ...recipientMember.binds],
+        }
+      : { membership: recipientMember.sql, membershipBinds: [...recipientMember.binds] };
   };
   if (lens === "inbox") {
     return {
-      ...filtered(delivered, [viewer]),
+      ...filtered(delivered, [...viewerMember.binds]),
       direction: "(m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr) <> ?))",
       directionBinds: [viewer],
     };
@@ -1720,7 +1874,7 @@ function accountWhere(
   // Account boundary (delivered to V or authored by V), plus the exact stored
   // direction when one was asked for.
   return {
-    ...filtered(`(${delivered} OR lower(m.from_addr) = ?)`, [viewer, viewer]),
+    ...filtered(`(${delivered} OR lower(m.from_addr) = ?)`, [...viewerMember.binds, viewer]),
     direction: direction ? "m.direction = ?" : null,
     directionBinds: direction ? [direction] : [],
   };
@@ -1879,8 +2033,8 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     binds.push(...rv.membershipBinds);
   }
   if (q.from) {
-    where.push("lower(m.from_addr) LIKE ?");
-    binds.push(`%${q.from.toLowerCase()}%`);
+    where.push("lower(m.from_addr) LIKE ? ESCAPE '\\'");
+    binds.push(escapeLikePattern(q.from.toLowerCase()));
   }
   if (q.thread) {
     where.push("m.thread_id = ?");
@@ -1984,9 +2138,10 @@ export async function folders(
   roles: readonly string[] = [],
 ): Promise<FolderSummary[]> {
   const identity = viewer?.trim().toLowerCase() || undefined;
-  const access = identity
-    ? "(COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%' OR lower(m.from_addr) = ?)"
-    : "1=1";
+  // The shared accessClause, aliased to this statement, so the rail counts exactly what
+  // the list and read paths would show.
+  const accessPredicate = accessClause(identity ? [identity] : [], "m");
+  const access = accessPredicate.sql || "1=1";
   // The per-recipient read override as a JOIN rather than the seenProjection()
   // correlated subquery: message_seen_by is PRIMARY KEY (message_id, recipient), so with
   // the recipient pinned the join matches at most one row per message and cannot inflate
@@ -2001,7 +2156,7 @@ export async function folders(
     binds: unknown[];
     role?: string;
   }
-  const identityBinds = identity ? [identity, identity] : [];
+  const identityBinds = [...accessPredicate.binds];
   const specs: FolderSpec[] = [
     {
       id: "inbox",
@@ -2010,7 +2165,7 @@ export async function folders(
         ? "m.mailbox IS NULL AND " + access +
           " AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))"
         : "m.mailbox IS NULL AND m.direction='inbound'",
-      binds: identity ? [identity, identity, identity] : [],
+      binds: identity ? [...accessPredicate.binds, identity] : [],
     },
     {
       id: "sent",
@@ -2038,15 +2193,16 @@ export async function folders(
     const role = raw.trim().toLowerCase();
     if (!role) continue;
     const at = role.indexOf("@");
+    const roleMember = membershipClause(role, { alias: "m" });
     specs.push({
       id: `role:${role}`,
       label: at > 0 ? role.slice(0, at) : role,
       role,
       predicate:
         "m.mailbox IS NULL" +
-        " AND COALESCE(m.delivered_to, ',' || m.to_addr || ',') LIKE '%,' || ? || ',%'" +
+        ` AND ${roleMember.sql}` +
         " AND (m.direction='inbound' OR (m.direction='outbound' AND lower(m.from_addr) <> ?))",
-      binds: [role, role],
+      binds: [...roleMember.binds, role],
     });
   }
 
@@ -2224,8 +2380,8 @@ async function ftsSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
     binds.push(...rv.membershipBinds);
   }
   if (q.from) {
-    where.push("lower(m.from_addr) LIKE ?");
-    binds.push(`%${q.from.toLowerCase()}%`);
+    where.push("lower(m.from_addr) LIKE ? ESCAPE '\\'");
+    binds.push(escapeLikePattern(q.from.toLowerCase()));
   }
   if (rv.direction) {
     where.push(rv.direction);
@@ -2300,14 +2456,6 @@ function substrColumns(field: SearchField): readonly string[] {
   }
 }
 
-// Escape LIKE metacharacters, BACKSLASH FIRST (CONTRACT 10.8): the ESCAPE char
-// itself must be escaped before the wildcards, or a literal backslash in q would
-// corrupt the following escape. Order: \ -> \\, then % -> \%, then _ -> \_.
-function escapeLikePattern(raw: string): string {
-  const esc = raw.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-  return `%${esc}%`;
-}
-
 async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const limit = clampLimit(q.limit);
   const raw = q.q ?? "";
@@ -2338,8 +2486,8 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     binds.push(...rv.membershipBinds);
   }
   if (q.from) {
-    where.push("lower(m.from_addr) LIKE ?");
-    binds.push(`%${q.from.toLowerCase()}%`);
+    where.push("lower(m.from_addr) LIKE ? ESCAPE '\\'");
+    binds.push(escapeLikePattern(q.from.toLowerCase()));
   }
   if (rv.direction) {
     where.push(rv.direction);

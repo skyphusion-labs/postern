@@ -34,6 +34,17 @@ export function realEnv(
         },
       };
     },
+    // D1 `batch` over the same engine. The store uses it wherever two writes must
+    // land together (moveMessages), so a suite that omits it cannot measure those
+    // paths at all: the call throws before the predicate under test is ever
+    // evaluated, and the failure reads like a defect in the predicate. Sequential
+    // rather than transactional, which is the one way this differs from D1; no
+    // caller here depends on rollback.
+    async batch(statements: { run(): Promise<{ meta: { changes: number } }> }[]) {
+      const out = [];
+      for (const s of statements) out.push(await s.run());
+      return out;
+    },
   };
   const env = {
     DB,

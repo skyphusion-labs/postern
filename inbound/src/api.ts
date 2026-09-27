@@ -1215,8 +1215,12 @@ async function handleImapImport(
     replyTo: header("reply-to") || null,
     wireSize: raw.byteLength,
   }, ctx);
+  // `result.messageId`, never the id computed above: the store owns message identity and
+  // may store this delivery under a derived id when the one in the imported headers is
+  // already taken by a different message. Placing the pre-store id would file the wrong
+  // row, or none at all.
   const mailbox = folder === "sent" ? null : folder;
-  if (mailbox) await store.moveMessages(env, [messageId], mailbox);
+  if (mailbox) await store.moveMessages(env, [result.messageId], mailbox);
   return json({ ok: true, ...result, mailbox }, result.stored ? 201 : 200);
 }
 

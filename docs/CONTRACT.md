@@ -980,9 +980,36 @@ ON CONFLICT(message_id) DO UPDATE SET
   END;
 ```
 
-(Illustrative; the real statement binds the bare recipient once. The `COALESCE(...,
-to_addr)` arm seeds `delivered_to` from a v1 row's envelope address on its first merge, so
-pre-0006 rows join the new world lazily and correctly.)
+(Illustrative; the real statement binds the recipient membership pattern once. The
+`COALESCE(..., to_addr)` arm seeds `delivered_to` from a v1 row's envelope address on its
+first merge, so pre-0006 rows join the new world lazily and correctly.)
+
+**A MERGE REQUIRES THE SAME MESSAGE, not just the same `message_id`.** `message_id` is
+UNIQUE and it arrives WITH the message rather than being derived by the store, so on its
+own it identifies a ROW, not a message. `delivered_to` is the column every access check
+filters on (10.3), so the merge is what decides who may read a stored message, and it
+widens only when the incoming delivery IS the stored row's message. The upsert's
+`DO UPDATE ... WHERE` therefore carries two conditions, and the `FILE_ALSO_UNDER` append
+(10.2b) carries both as well since it is keyed on `message_id` alone:
+
+1. the incoming envelope recipient is not already on `delivered_to` (the idempotence
+   guard, which makes a retry a true no-op), and
+2. `from_addr`, `subject` and `body_text` on the stored row equal this delivery's, each
+   `COALESCE`d to `''` so a legacy NULL column is not read as a difference.
+
+**`date` is deliberately NOT compared.** A message arriving with no `Date` header is
+stamped `new Date()` at ingest, so two per-recipient invocations of ONE delivery would
+disagree on it and a legitimate second recipient would be forked off into its own row.
+`body_text` carries the comparison: it is a pure function of the MIME bytes, so
+per-recipient invocations of one delivery agree on it by construction.
+
+**When condition 2 fails the delivery is STORED, never dropped**, under a derived id:
+`sha256(message_id \0 from \0 subject \0 bodyText)`. That id is deterministic, so a
+retry of the same delivery resolves to the same row instead of minting a new one per
+attempt, and `store.put()` returns the id it actually wrote in `PutResult.messageId`.
+**Callers must place and reference the row by `result.messageId`, never by the id they
+passed in.** If the derived id ALSO collides with a different message, `put` throws rather
+than drop the message or widen a `delivered_to` to place it. Refs GHSA-pjv6-4xmx-29cw.
 
 - `store.put()` returns `{ stored: false, merged: true, threadId }` on a merge;
   `{ stored: false, merged: false }` stays the true-dedup (retry/loop) result. Attachments,
@@ -1248,6 +1275,14 @@ Rules:
   `LIKE ? ESCAPE '\'`, so the escape character itself must be escaped before the
   wildcards, in this order: `\` -> `\\`, THEN `%` -> `\%`, THEN `_` -> `\_`. Doing
   `%`/`_` first would let a literal backslash in `q` corrupt the following escape.
+- **THIS RULE IS NOT SEARCH-ONLY. It binds every `LIKE` in the store, including the
+  delivered-set membership predicate the access checks are built from** (10.3). An
+  address is DATA, never a pattern: `_` and `%` in a viewer address are literal
+  characters, so a viewer matches its own mail and nothing merely shaped like it. One
+  escaper (`escapeLikeMeta`) and one membership helper (`membershipClause`) serve every
+  call site, read and write, aliased or not, so there is no second copy to drift; a `LIKE`
+  that appears in `store.ts` without its `ESCAPE` clause fails
+  `inbound/membership-literal.test.ts`. Refs GHSA-pjv6-4xmx-29cw.
   So `50%` and `a\b` match literally. `q` is a bound param (no injection).
 - **ASCII-only case folding.** SQLite `LIKE` folds case for ASCII only, while the IMAP
   door's in-memory fallback uses full-Unicode `.lower()`. So the door pushes to `substr`
