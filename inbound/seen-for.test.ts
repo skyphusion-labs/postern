@@ -58,7 +58,7 @@ describe("#404 seenFor renders another recipient's seen state, and only that", (
   it("projects the named recipient's override while the row set stays identical", async () => {
     const { env, ctx } = realEnv();
     await seedRoleMail(env, ctx);
-    await store.setSeen(env, ["r1@skyphusion.org"], true, OWNER); // conrad read it
+    await store.setSeen(env, ["r1@skyphusion.org"], true, "estate", OWNER); // conrad read it
 
     const roleView = await store.list(env, { to: ROLE });
     const asOwner = await store.list(env, { to: ROLE, seenFor: OWNER });
@@ -75,7 +75,7 @@ describe("#404 seenFor renders another recipient's seen state, and only that", (
   it("is byte-identical to today when absent", async () => {
     const { env, ctx } = realEnv();
     await seedRoleMail(env, ctx);
-    await store.setSeen(env, ["r1@skyphusion.org"], true, OWNER);
+    await store.setSeen(env, ["r1@skyphusion.org"], true, "estate", OWNER);
     const before = await store.list(env, { to: ROLE });
     const explicitRole = await store.list(env, { to: ROLE, seenFor: ROLE });
     expect(explicitRole.items[0].seen).toBe(before.items[0].seen);
@@ -91,7 +91,7 @@ describe("#404 seenFor renders another recipient's seen state, and only that", (
     const { env, ctx } = realEnv();
     await seedRoleMail(env, ctx, "read@skyphusion.org");
     await seedRoleMail(env, ctx, "unread@skyphusion.org");
-    await store.setSeen(env, ["read@skyphusion.org"], true, OWNER);
+    await store.setSeen(env, ["read@skyphusion.org"], true, "estate", OWNER);
 
     const unreadForOwner = await store.search(env, {
       q: "phishing", mode: "fts", to: ROLE, seenFor: OWNER, seen: false,
@@ -115,7 +115,7 @@ describe("#404 seenFor renders another recipient's seen state, and only that", (
     const lensed = await store.list(env, { to: ROLE, lens: "inbox", seenFor: OWNER });
     const plain = await store.list(env, { to: ROLE, lens: "inbox" });
     expect(lensed.items.map((m) => m.messageId)).toEqual(plain.items.map((m) => m.messageId));
-    await store.setSeen(env, ["r1@skyphusion.org"], true, OWNER);
+    await store.setSeen(env, ["r1@skyphusion.org"], true, "estate", OWNER);
     expect((await store.list(env, { to: ROLE, lens: "inbox", seenFor: OWNER })).items[0].seen).toBe(true);
     expect((await store.list(env, { to: ROLE, lens: "inbox" })).items[0].seen).toBe(false);
   });
@@ -123,7 +123,7 @@ describe("#404 seenFor renders another recipient's seen state, and only that", (
   it("applies in the SQL search modes (fts + substr), same rows either way", async () => {
     const { env, ctx } = realEnv();
     await seedRoleMail(env, ctx);
-    await store.setSeen(env, ["r1@skyphusion.org"], true, OWNER);
+    await store.setSeen(env, ["r1@skyphusion.org"], true, "estate", OWNER);
     for (const mode of ["fts", "substr"] as const) {
       const plain = await store.search(env, { q: "phishing", mode, to: ROLE });
       const asOwner = await store.search(env, { q: "phishing", mode, to: ROLE, seenFor: OWNER });
@@ -150,7 +150,7 @@ describe("#404 seenFor in the score-ranked modes", () => {
       ctx,
     );
     await settle();
-    await store.setSeen(env, ["r1@skyphusion.org"], true, OWNER);
+    await store.setSeen(env, ["r1@skyphusion.org"], true, "estate", OWNER);
     for (const mode of ["semantic", "hybrid"] as const) {
       const plain = await store.search(env, { q: "phishing", mode, to: ROLE });
       const asOwner = await store.search(env, { q: "phishing", mode, to: ROLE, seenFor: OWNER });
@@ -165,7 +165,7 @@ describe("#404 seenFor at the API edge", () => {
   it("a static (estate) token may name any address on both endpoints", async () => {
     const { env, ctx } = realEnv();
     await seedRoleMail(env, ctx);
-    await store.setSeen(env, ["r1@skyphusion.org"], true, OWNER);
+    await store.setSeen(env, ["r1@skyphusion.org"], true, "estate", OWNER);
     const list = await body(await handleApi(get(`/api/messages?to=${ROLE}&seenFor=${OWNER}`), env, ctx));
     expect(list.ok).toBe(true);
     expect(list.items[0].seen).toBe(true);
@@ -205,7 +205,7 @@ describe("#404 a session may only name itself", () => {
   it("serves seenFor for the session's own identity", async () => {
     const { env, ctx, cookie } = await sessionEnv();
     await seedRoleMail(env, ctx);
-    await store.setSeen(env, ["r1@skyphusion.org"], true, OWNER);
+    await store.setSeen(env, ["r1@skyphusion.org"], true, "estate", OWNER);
     const res = await handleApi(get(`/api/messages?seenFor=${OWNER}`, { cookie }), env, ctx);
     expect(res.status).toBe(200);
     const out = await body(res);

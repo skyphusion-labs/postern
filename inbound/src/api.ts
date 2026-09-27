@@ -262,8 +262,9 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // `for`. A mismatched explicit `for` is refused rather than silently rewritten.
       //
       // Static estate Bearer tokens (POSTERN_API_TOKEN / _READ / IMAP door) are
-      // UNTOUCHED: they stay estate-scoped and may pass `for` (#350/#357).
-      let viewer: string | readonly string[] | undefined;
+      // UNTOUCHED: they stay estate-scoped and may pass `for` (#350/#357), and they now
+      // say so with the literal instead of by omitting an argument.
+      let scope: store.AccessScope = "estate";
       const boundMember = boundReadMember(resolution);
       if (boundMember) {
         const bound = boundMember.trim().toLowerCase();
@@ -277,9 +278,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // Reachability is the SET (identity plus its role queues, #425) so a member can
         // mark queue mail read; the override written is still keyed to the ONE person
         // above. Widening what you may touch is not widening whose state you write.
-        viewer = sessionReadScope(env, resolution);
+        //
+        // The `?? []` is the fail-closed half and it is deliberate: sessionReadScope cannot
+        // be empty for a caller that HAS a bound member, so this branch is unreachable
+        // today, but an empty member set is the honest answer to "bound, yet no addresses
+        // resolved" and the store matches it to nothing. It must never fall back to estate.
+        scope = sessionReadScope(env, resolution) ?? [];
       }
-      const updated = await store.setSeen(env, body.ids as string[], body.seen, forRecipient, viewer);
+      const updated = await store.setSeen(env, body.ids as string[], body.seen, scope, forRecipient);
       return json({ ok: true, updated });
     }
 
@@ -298,13 +304,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "set requires boolean flagged and/or answered" }, 400);
       }
       // Bound reader (session or registry with read cap, #544): only touch own mail.
-      // Static estate tokens omit viewer and keep IMAP/operator estate behavior.
-      const flagViewer = boundReadMember(resolution);
+      // Static estate tokens name `"estate"` and keep IMAP/operator behavior.
       const updated = await store.setFlags(
         env,
         body.ids as string[],
         { flagged: raw.flagged as boolean | undefined, answered: raw.answered as boolean | undefined },
-        flagViewer,
+        memberWriteScope(resolution),
       );
       return json({ ok: true, updated });
     }
@@ -317,12 +322,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (body.mailbox !== null && body.mailbox !== "archive" && body.mailbox !== "trash" && body.mailbox !== "junk") {
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "mailbox must be archive, trash, junk, or null" }, 400);
       }
-      const moveViewer = boundReadMember(resolution);
       const updated = await store.moveMessages(
         env,
         body.ids as string[],
         body.mailbox,
-        moveViewer,
+        memberWriteScope(resolution),
       );
       return json({ ok: true, updated });
     }
@@ -847,6 +851,19 @@ function boundReadMember(resolution: AuthResolution): string | undefined {
   return undefined;
 }
 
+/** WHOSE mail a state-changing mailbox write may touch (flags, move).
+ *
+ *  The single bound member, never its role queues: the #404 ruling makes a role view read
+ *  plus \Seen only, so a member must not file or flag mail on behalf of every other member
+ *  of a queue. A resolution with no bound member is a static operator/IMAP token, estate-wide
+ *  by construction, and states that with the literal rather than by omission -- which is the
+ *  whole point of `store.AccessScope`: there is no argument to leave off, so a route added
+ *  later cannot inherit estate reach by forgetting one. */
+function memberWriteScope(resolution: AuthResolution): store.AccessScope {
+  const member = boundReadMember(resolution);
+  return member ? [member] : "estate";
+}
+
 /** The ROLE queue a bound session is asking to read, or null (#425).
  *
  *  Returns non-null ONLY when the session names a `to=` that is a role address the
@@ -1220,7 +1237,9 @@ async function handleImapImport(
   // already taken by a different message. Placing the pre-store id would file the wrong
   // row, or none at all.
   const mailbox = folder === "sent" ? null : folder;
-  if (mailbox) await store.moveMessages(env, [result.messageId], mailbox);
+  // Estate, said out loud: this files a row this handler just created, on behalf of an
+  // operator-scoped door token, so there is no member to scope the placement to.
+  if (mailbox) await store.moveMessages(env, [result.messageId], mailbox, "estate");
   return json({ ok: true, ...result, mailbox }, result.stored ? 201 : 200);
 }
 

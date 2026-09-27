@@ -36,13 +36,13 @@ describe("store seen state", () => {
     await ingest(env, { messageId: "m2@example.com", from: "a@example.com", to: "c@skyphusion.org", subject: "s2", text: "t", date: "2026-01-02T00:00:00.000Z" }, ctx);
     await settle();
 
-    const n = await store.setSeen(env, ["m1@example.com", "m2@example.com"], true);
+    const n = await store.setSeen(env, ["m1@example.com", "m2@example.com"], true, "estate");
     expect(n).toBe(2);
     expect((await store.getUnscoped(env, "m1@example.com"))!.seen).toBe(true);
     expect((await store.getUnscoped(env, "m2@example.com"))!.seen).toBe(true);
 
     // Mark one back to unread.
-    expect(await store.setSeen(env, ["m1@example.com"], false)).toBe(1);
+    expect(await store.setSeen(env, ["m1@example.com"], false, "estate")).toBe(1);
     expect((await store.getUnscoped(env, "m1@example.com"))!.seen).toBe(false);
     expect((await store.getUnscoped(env, "m2@example.com"))!.seen).toBe(true);
   });
@@ -51,8 +51,8 @@ describe("store seen state", () => {
     const { env, ctx, settle } = makeFakeEnv();
     await ingest(env, { messageId: "only@example.com", from: "a@example.com", to: "c@skyphusion.org", subject: "s", text: "t", date: "2026-01-01T00:00:00.000Z" }, ctx);
     await settle();
-    expect(await store.setSeen(env, [], true)).toBe(0);
-    expect(await store.setSeen(env, ["nope@example.com"], true)).toBe(0);
+    expect(await store.setSeen(env, [], true, "estate")).toBe(0);
+    expect(await store.setSeen(env, ["nope@example.com"], true, "estate")).toBe(0);
     expect((await store.getUnscoped(env, "only@example.com"))!.seen).toBe(false);
   });
 });

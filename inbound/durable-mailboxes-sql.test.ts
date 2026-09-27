@@ -111,8 +111,8 @@ describe("durable mailbox production SQL (#352)", () => {
     const { env, ctx } = realEnv();
     await seed(env, ctx, "one@example.com", "conrad@skyphusion.org");
 
-    expect(await store.setFlags(env, ["one@example.com"], { flagged: true })).toBe(1);
-    expect(await store.moveMessages(env, ["one@example.com"], "trash")).toBe(1);
+    expect(await store.setFlags(env, ["one@example.com"], { flagged: true }, "estate")).toBe(1);
+    expect(await store.moveMessages(env, ["one@example.com"], "trash", "estate")).toBe(1);
     const trash = await store.list(env, { mailbox: "trash" });
     expect(trash.items[0]).toMatchObject({
       messageId: "one@example.com",
@@ -127,7 +127,7 @@ describe("durable mailbox production SQL (#352)", () => {
     expect((await store.folders(env, "conrad@skyphusion.org"))
       .find((f) => f.id === "trash")?.uidValidity).toBe(firstValidity);
 
-    expect(await store.moveMessages(env, ["one@example.com"], null)).toBe(1);
+    expect(await store.moveMessages(env, ["one@example.com"], null, "estate")).toBe(1);
     expect((await store.list(env, {})).items[0]).toMatchObject({ mailbox: null, trashedAt: null });
   });
 
@@ -156,7 +156,7 @@ describe("durable mailbox production SQL (#352)", () => {
   it("hard delete removes the placement ledger with the message", async () => {
     const { env, ctx, raw } = realEnv();
     await seed(env, ctx, "delete@example.com", "conrad@skyphusion.org");
-    await store.moveMessages(env, ["delete@example.com"], "archive");
+    await store.moveMessages(env, ["delete@example.com"], "archive", "estate");
     expect((raw.prepare("SELECT COUNT(*) AS n FROM mailbox_placement").get() as { n: number }).n).toBe(1);
     expect(await store.deleteMessage(env, "delete@example.com", ctx)).toBe(true);
     expect((raw.prepare("SELECT COUNT(*) AS n FROM mailbox_placement").get() as { n: number }).n).toBe(0);
