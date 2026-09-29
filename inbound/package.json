@@ -19,7 +19,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260822.1",
     "@types/node": "22.20.4",
-    "@vitest/coverage-istanbul": "^5.0.1",
+    "@vitest/coverage-istanbul": "^5.0.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1",
     "wrangler": "^4.125.0"
