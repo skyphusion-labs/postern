@@ -10,6 +10,7 @@ Twisted (the portal IS Twisted cred plumbing).
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from posternimap.auth import (
     AuthBackendError,
@@ -22,7 +23,7 @@ from posternimap.config import Config, ConfigError
 
 
 def _cfg(**over) -> Config:
-    base = dict(api_url="https://postern.example", auth_mode="token")
+    base: dict[str, Any] = dict(api_url="https://postern.example", auth_mode="token")
     base.update(over)
     return Config(**base)
 

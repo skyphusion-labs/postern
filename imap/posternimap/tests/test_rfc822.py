@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import email
 import unittest
+from typing import Any
 
 from posternimap.client import Attachment, Message, MessageSummary
 from posternimap.rfc822 import (
@@ -15,7 +16,7 @@ from posternimap.rfc822 import (
 
 
 def _msg(**over) -> Message:
-    base = dict(
+    base: dict[str, Any] = dict(
         message_id="abc123",
         direction="inbound",
         thread_id="abc123",
@@ -158,7 +159,7 @@ class RenderTest(unittest.TestCase):
 
 
 def _summary(**over) -> MessageSummary:
-    base = dict(
+    base: dict[str, Any] = dict(
         uid=1,
         message_id="abc123",
         direction="inbound",

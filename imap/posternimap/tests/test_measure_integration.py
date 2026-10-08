@@ -94,7 +94,7 @@ class ConfigToEmitIntegrationTest(unittest.TestCase):
                 breaker=breaker,
             )
 
-        account_mod.PosternClient = _factory  # type: ignore[assignment]
+        account_mod.PosternClient = _factory  # type: ignore[misc, assignment]  # monkeypatch: a factory rebinds a class name; mypy reports both codes
         self.addCleanup(setattr, account_mod, "PosternClient", self._real_client)
 
     def _account(self, env: Dict[str, str]) -> Any:

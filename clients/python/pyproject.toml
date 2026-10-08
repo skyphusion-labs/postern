@@ -48,4 +48,3 @@ python_version = "3.10"
 warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["postern_client"]
-exclude = "postern_client/tests/"
