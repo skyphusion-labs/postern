@@ -36,12 +36,13 @@ git config user.email "test@example.net"
 git config user.name "preflight test"
 git remote add origin "${work}/origin.git"
 
-mkdir -p .github/scripts clients/python/postern_client inbound mcp
+mkdir -p .github/scripts clients/python/postern_client inbound/src mcp
 cp "${scripts_src}/tag-preflight.sh" "${scripts_src}/changelog-section.sh" .github/scripts/
 
-write_pyproject() { printf "[build-system]\nrequires = [\"setuptools\"]\n\n[project]\nname = \"postern-client\"\nversion = \"%s\"\n" "$1" > clients/python/pyproject.toml; }
+write_pyproject() { printf "[build-system]\nrequires = [\"setuptools\"]\n\n[project]\nname = \"postern-client\"\nversion = \"%s\"\n\n[tool.mypy]\npython_version = \"3.10\"\n" "$1" > clients/python/pyproject.toml; }
 write_dunder()    { printf "__version__ = \"%s\"\n" "$1" > clients/python/postern_client/__init__.py; }
 write_inbound()   { printf "{\n  \"name\": \"postern-inbound\",\n  \"version\": \"%s\"\n}\n" "$1" > inbound/package.json; }
+write_ts()        { printf "// fixture\nexport const VERSION = \"%s\";\n" "$1" > inbound/src/version.ts; }
 write_mcp()       { printf "{\n  \"name\": \"@skyphusion/postern-mcp\",\n  \"version\": \"%s\"\n}\n" "$1" > mcp/package.json; }
 write_changelog() {
   # Dated heading on purpose: the repo real style, the one the old exact-line
@@ -52,6 +53,7 @@ write_changelog() {
 write_pyproject 1.2.3
 write_dunder 1.2.3
 write_inbound 1.2.3
+write_ts 1.2.3
 write_mcp 3.4.5
 write_changelog 1.2.3
 
@@ -90,7 +92,7 @@ run_case() {
 }
 
 echo "release track, v* tag"
-run_case "clean release tag passes (dated CHANGELOG heading and all four pins)" \
+run_case "clean release tag passes (dated CHANGELOG heading and all four pins; pyproject python_version must not confuse the reader)" \
   0 "Tag preflight (release): PASS" release refs/tags/v1.2.3 v1.2.3 "$main_sha"
 
 write_pyproject 1.2.4
@@ -107,6 +109,14 @@ write_inbound 1.0.1
 run_case "inbound/package.json drift fails (item 8: the frozen pin)" \
   1 "inbound/package.json version is 1.0.1, expected 1.2.3" release refs/tags/v1.2.3 v1.2.3 "$main_sha"
 write_inbound 1.2.3
+
+write_ts 1.2.2
+run_case "inbound/src/version.ts drift fails (#689: /health would misreport)" \
+  1 "inbound/src/version.ts VERSION is 1.2.2, expected 1.2.3" release refs/tags/v1.2.3 v1.2.3 "$main_sha"
+rm -f inbound/src/version.ts
+run_case "missing version.ts fails instead of reading as no-drift" \
+  1 "inbound/src/version.ts VERSION: could not read a version" release refs/tags/v1.2.3 v1.2.3 "$main_sha"
+write_ts 1.2.3
 
 rm -f inbound/package.json
 run_case "unreadable pin fails instead of reading as no-drift" \
@@ -136,6 +146,11 @@ write_dunder 1.2.9
 run_case "cross-pin drift fails even with no tag to compare against" \
   1 "version pins disagree" release refs/heads/main main "$main_sha"
 write_dunder 1.2.3
+
+write_ts 1.2.8
+run_case "version.ts drift fails on a non-tag ref" \
+  1 "version pins disagree" release refs/heads/main main "$main_sha"
+write_ts 1.2.3
 
 write_changelog 9.9.9
 run_case "missing CHANGELOG is advisory on a non-tag ref" \

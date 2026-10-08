@@ -28,13 +28,16 @@
 # Checks:
 #   ancestry (BOTH tracks, EVERY ref, hard): GITHUB_SHA is an ancestor of
 #     origin/main, so no unreviewed commit deploys, publishes, or rolls.
-#   release track on a v* tag (hard, all four pins plus the ledger):
+#   release track on a v* tag (hard, three version pins, the version.ts copy, plus the ledger):
 #     tag == clients/python/pyproject.toml [project] version
 #     tag == clients/python/postern_client/__init__.py __version__
 #     tag == inbound/package.json version            (#418 item 8)
+#     tag == inbound/src/version.ts VERSION          (#689; /health reports it)
+#   mcp/package.json is NOT read by the release track. It belongs to the
+#   separate postern-mcp-v* track below.
 #     CHANGELOG.md has a non-empty `## v<version>` section  (#418 item 2)
 #   release track on a NON-tag ref (workflow_dispatch, push to main):
-#     the three pins agree with EACH OTHER (hard: cross-pin drift is the exact
+#     the three pins and the version.ts copy agree with EACH OTHER (hard: cross-pin drift is the exact
 #       defect class this gate exists for and it never depends on tag timing)
 #     CHANGELOG section for the pinned version (WARNING only: a dispatch is a
 #       recovery path, not a release ledger, and a merge to main ships nothing)
@@ -98,6 +101,13 @@ json_version() {
   ' "$1" 2>/dev/null
 }
 
+# inbound/src/version.ts is the value /health reports. Anchor on the whole
+# `export const VERSION = "x"` statement so no other line in any file can match.
+ts_version() {
+  sed -n 's/^export const VERSION[ \t]*=[ \t]*"\([^"]*\)".*/\1/p' \
+    inbound/src/version.ts 2>/dev/null | head -1
+}
+
 check_pin() {
   local label="$1" want="$2" got="$3"
   if [ -z "$got" ]; then
@@ -137,6 +147,7 @@ if [ "$track" = "release" ]; then
       check_pin "clients/python/pyproject.toml version" "$version" "$(pyproject_version)"
       check_pin "postern_client.__version__" "$version" "$(dunder_version)"
       check_pin "inbound/package.json version" "$version" "$(json_version inbound/package.json)"
+      check_pin "inbound/src/version.ts VERSION" "$version" "$(ts_version)"
       if notes="$(bash "${here}/changelog-section.sh" "$version" 2>&1)"; then
         note "CHANGELOG.md has a non-empty ## v${version} section"
       else
@@ -150,10 +161,11 @@ if [ "$track" = "release" ]; then
     py="$(pyproject_version)"
     du="$(dunder_version)"
     inb="$(json_version inbound/package.json)"
-    if [ -z "$py" ] || [ -z "$du" ] || [ -z "$inb" ]; then
-      fail "lockstep unreadable (pyproject=\"${py}\" __version__=\"${du}\" inbound=\"${inb}\")"
-    elif [ "$py" != "$du" ] || [ "$py" != "$inb" ]; then
-      fail "version pins disagree: pyproject=${py} __version__=${du} inbound/package.json=${inb}"
+    tsv="$(ts_version)"
+    if [ -z "$py" ] || [ -z "$du" ] || [ -z "$inb" ] || [ -z "$tsv" ]; then
+      fail "lockstep unreadable (pyproject=\"${py}\" __version__=\"${du}\" inbound=\"${inb}\" version.ts=\"${tsv}\")"
+    elif [ "$py" != "$du" ] || [ "$py" != "$inb" ] || [ "$py" != "$tsv" ]; then
+      fail "version pins disagree: pyproject=${py} __version__=${du} inbound/package.json=${inb} version.ts=${tsv}"
     else
       note "version pins agree (${py}) on non-tag ref ${ref_name:-HEAD}"
       if bash "${here}/changelog-section.sh" "$py" >/dev/null 2>&1; then
