@@ -339,6 +339,62 @@ class PosternClient:
             params["before"] = before
         return self._json("GET", "/api/messages", params=params)
 
+    def count_messages(
+        self,
+        *,
+        to: Optional[str] = None,
+        from_addr: Optional[str] = None,
+        thread: Optional[str] = None,
+        direction: Optional[str] = None,
+        lens: Optional[str] = None,
+        mailbox: Optional[str] = None,
+        seen_for: Optional[str] = None,
+        q: Optional[str] = None,
+        after: Optional[str] = None,
+        before: Optional[str] = None,
+    ) -> int:
+        """GET /api/messages?countOnly=1. How many messages match (#648).
+
+        Returns the total only. "How many match this" was otherwise answerable
+        only by paging the whole result and counting, which for any window worth
+        asking about is a payload problem. It is also the cheapest way to decide
+        whether to spend a real query, and the only way to tell "nothing
+        matches" from "the page was truncated".
+
+        The total honours every filter below AND the same access scope the rows
+        get, because the worker computes it from the same predicate. So it is
+        always a number you could reach by paging the same query.
+
+        There is deliberately no `limit`, `cursor` or `fields` parameter here.
+        All three describe the rows a count does not return, and the worker
+        REFUSES them alongside countOnly rather than ignoring one, so offering
+        them would only let a caller build a request that cannot succeed.
+        """
+        params: dict[str, str] = {"countOnly": "1"}
+        if to:
+            params["to"] = to
+        if from_addr:
+            params["from"] = from_addr
+        if thread:
+            params["thread"] = thread
+        if direction:
+            params["direction"] = direction
+        if lens:
+            params["lens"] = lens
+        if mailbox:
+            params["mailbox"] = mailbox
+        if seen_for:
+            params["seenFor"] = seen_for
+        if q:
+            params["q"] = q
+        if after:
+            params["after"] = after
+        if before:
+            params["before"] = before
+        body = self._json("GET", "/api/messages", params=params)
+        total = body.get("total")
+        return int(total) if isinstance(total, (int, float)) else 0
+
     def get_message(self, message_id: str) -> Optional[dict[str, Any]]:
         """GET /api/messages/{id}. Returns the message dict, or None if absent."""
         try:

@@ -106,6 +106,20 @@ def _emitted() -> list[dict[str, Any]]:
     )
     # lens is mutually exclusive with direction at the worker, so it gets its own call.
     c.list_messages(to="a@x.com", lens="inbox")
+    # #648. Driven with filters, because PARITY measures which declared parameters this
+    # client can REACH and a bare call would report them all unreachable.
+    c.count_messages(
+        to="a@x.com",
+        from_addr="b@x.com",
+        thread="t-1",
+        direction="inbound",
+        lens="inbox",
+        mailbox="all",
+        seen_for="a@x.com",
+        q="kw",
+        after="2026-01-01",
+        before="2026-01-31",
+    )
     c.search(
         "q", mode="substr", field="subject", direction="inbound", to="a@x.com",
         from_addr="b@x.com", mailbox="trash", seen_for="a@x.com", after="2026-01-01",

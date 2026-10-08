@@ -2166,14 +2166,37 @@ function toFtsQuery(q: string): string {
  * FTS match over subject + body. All filter values are bound params; the FTS
  * query is sanitized to a phrase expression (no injection, no syntax errors).
  */
-export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSummary>> {
-  const limit = clampLimit(q.limit);
+/**
+ * The row predicate for a list read, as ONE builder (#648).
+ *
+ * Extracted so a COUNT and the ROWS it counts cannot be filtered differently. A count
+ * computed from a SECOND predicate is a number the caller cannot reach by paging, and it
+ * is worse than no count at all: it reads as authoritative and nothing contradicts it.
+ * `folders` already shares one set of predicates between its counts and the rows those
+ * counts describe, for exactly this reason; this is that discipline applied to the
+ * enumeration route.
+ *
+ * It deliberately EXCLUDES the seen projection's bind. That bind belongs to the SELECT
+ * column list rather than to the predicate (see seenProjection), so it stays at the call
+ * site, which is the only place that can put it BEFORE these binds. A COUNT has no such
+ * column and must not carry it.
+ *
+ * `matchesNothing` is the q-was-all-punctuation case. It is a property of the QUERY, not
+ * of the SQL, so it is returned rather than encoded as a `WHERE 0`: both callers have to
+ * answer it, and they have to answer it the same way.
+ *
+ * `cursor: false` omits the keyset seek. A count is of the WHOLE match set; counting the
+ * remainder after a cursor would answer a question nobody asked, which is why the API
+ * edge refuses `countOnly` together with `cursor` instead of quietly picking one.
+ */
+function listPredicate(
+  q: ListQuery,
+  opts: { cursor: boolean },
+): { sql: string; binds: unknown[]; matchesNothing: boolean } {
   const accountViewer = q.viewer?.trim().toLowerCase() || undefined;
   const recipientViewer = q.to?.trim().toLowerCase() || undefined;
-  const sp = seenProjection(seenKey(q));
-  const seenExpr = sp.expr;
   const where: string[] = [];
-  const binds: unknown[] = [...sp.binds];
+  const binds: unknown[] = [];
 
   const useFts = typeof q.q === "string" && q.q.trim().length > 0;
   const ftsExpr = useFts ? toFtsQuery(q.q as string) : "";
@@ -2183,7 +2206,7 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
     binds.push(ftsExpr);
   } else if (useFts && !ftsExpr) {
     // q was all punctuation/whitespace: matches nothing.
-    return { items: [], cursor: null };
+    return { sql: "", binds: [], matchesNothing: true };
   }
 
   // Recipient view (#178 delivered-set membership) at the `to` slot; the
@@ -2222,28 +2245,43 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   // the cursor seek) is unchanged for every caller that sends no bounds.
   pushDateRange(where, binds, q);
 
-  const cur = decodeCursor(q.cursor);
-  if (cur) {
-    // Keyset seek: rows strictly older than the cursor tuple (date, id).
-    where.push("(m.date < ? OR (m.date = ? AND m.id < ?))");
-    binds.push(cur.date, cur.date, cur.id);
+  if (opts.cursor) {
+    const cur = decodeCursor(q.cursor);
+    if (cur) {
+      // Keyset seek: rows strictly older than the cursor tuple (date, id).
+      where.push("(m.date < ? OR (m.date = ? AND m.id < ?))");
+      binds.push(cur.date, cur.date, cur.id);
+    }
   }
 
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  return {
+    sql: where.length ? `WHERE ${where.join(" AND ")}` : "",
+    binds,
+    matchesNothing: false,
+  };
+}
+
+export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSummary>> {
+  const limit = clampLimit(q.limit);
+  const sp = seenProjection(seenKey(q));
+  const pred = listPredicate(q, { cursor: true });
+  if (pred.matchesNothing) return { items: [], cursor: null };
+
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
-            m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
+            m.date, m.in_reply_to, m.trusted, m.received_at, ${sp.expr} AS seen,
             m.delivered_to, m.cc_addr, m.bcc_addr, m.sender_addr, m.reply_to_addr, m.wire_size,
             m.projected_size, m.projection_version,
             m.flagged, m.answered, m.mailbox, m.trashed_at,
             (SELECT mp.folder_uid FROM mailbox_placement mp WHERE mp.message_id=m.message_id AND mp.folder=m.mailbox) AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
-       FROM messages m ${whereSql}
+       FROM messages m ${pred.sql}
       ORDER BY m.date DESC, m.id DESC
       LIMIT ?`;
+  // The seen bind lives in the SELECT column list, so it MUST precede the WHERE binds.
   // Fetch one extra row to know whether another page exists.
-  binds.push(limit + 1);
+  const binds = [...sp.binds, ...pred.binds, limit + 1];
 
   const res = await env.DB.prepare(sql).bind(...binds).all<SummaryRow>();
   const rows = res.results ?? [];
@@ -2253,6 +2291,31 @@ export async function list(env: Env, q: ListQuery): Promise<Page<StoredMessageSu
   const last = page[page.length - 1];
   const cursor = hasMore && last ? encodeCursor(last.date, last.id) : null;
   return { items, cursor };
+}
+
+/**
+ * How many messages match a list query (#648), under the SAME predicate `list` uses.
+ *
+ * "How many match this" was only answerable by paging the whole result and counting,
+ * which is the payload problem that made #631 unanswerable. It is also the cheapest way
+ * for a caller to decide whether to spend a real query, and the only way to tell "nothing
+ * matches" from "the page was truncated".
+ *
+ * The count carries NO limit and NO cursor: both describe a page, and this describes the
+ * match set. It shares `listPredicate` with the rows rather than re-deriving the filters,
+ * so the number is always reachable by paging the same query.
+ *
+ * COUNT(*) over `messages m` is exact for this predicate: the row SELECT's extra columns
+ * (folder_uid, hasHtml, attachment_count) are correlated subqueries in the projection and
+ * join nothing, so they cannot change which rows the WHERE admits.
+ */
+export async function countList(env: Env, q: ListQuery): Promise<number> {
+  const pred = listPredicate(q, { cursor: false });
+  if (pred.matchesNothing) return 0;
+  const row = await env.DB.prepare(`SELECT COUNT(*) AS total FROM messages m ${pred.sql}`)
+    .bind(...pred.binds)
+    .first<{ total: number }>();
+  return row?.total ?? 0;
 }
 
 export type SystemFolderId = "inbox" | "sent" | "all" | "drafts" | "trash" | "junk" | "archive";

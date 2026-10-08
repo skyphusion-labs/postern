@@ -434,8 +434,27 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const query = parseListQuery(url, sessionIdentity);
       // Validated BEFORE the query runs, so a bogus projection costs no D1 read.
       const fields = parseFields(url.searchParams);
+      // countOnly (#648), mirroring POST /api/admin/reproject's own countOnly (#520):
+      // answer "how many match this" without paging the result. Until now that question
+      // was only answerable by paging the WHOLE result and counting, which is the payload
+      // problem that made #631 unanswerable, and it is also the cheapest way for a caller
+      // to decide whether to spend a real query at all.
+      const countOnly = parseCountOnly(url.searchParams);
+      if (countOnly instanceof Response) return countOnly;
       if (role) applyRoleScope(query, role, sessionIdentity as string);
       else if (sessionIdentity) query.viewer = sessionIdentity;
+      if (countOnly) {
+        // AFTER the scope application above, deliberately: the count runs on the SAME
+        // `query` object the rows would have been read from, so it cannot report a number
+        // outside the caller's access scope. A count that ignored scope would be a
+        // disclosure channel, telling an identity-scoped caller how much mail exists
+        // outside its own slice.
+        const total = await store.countList(env, query);
+        // No items and no cursor: both describe a page, and this describes the match set.
+        // `identityScope` stays, because it is what makes the number interpretable --
+        // "0" means a different thing under a member scope than under an estate one.
+        return json({ ok: true, identityScope: readScopeReport(sessionIdentity, role), total });
+      }
       const page = await store.list(env, query);
       // Projection is a RESPONSE narrowing (#646) and touches nothing else: the row set,
       // the cursor, and identityScope are byte-identical to an unprojected read, so a
@@ -1199,6 +1218,45 @@ function parseFields(p: URLSearchParams): readonly import("./store").SummaryFiel
   // De-duplicated by projectSummary, which walks the TYPE's key order rather than this
   // list, so a repeated name cannot repeat a key or reorder the row.
   return names as import("./store").SummaryField[];
+}
+
+/**
+ * `countOnly` on /api/messages (#648): a boolean, or a 400 Response to return as-is.
+ *
+ * Accepts the SAME 0|1|true|false vocabulary /api/search already uses for `hasAttachment`
+ * and `seen`, so the surface has one spelling for a boolean rather than two.
+ *
+ * It also REFUSES `limit`, `cursor` and `fields` alongside it, which is the part worth
+ * explaining. All three describe the ROWS, and a count returns none, so accepting one and
+ * ignoring it is precisely the accepted-and-dropped defect this whole cluster is about: a
+ * caller sending `countOnly=1&limit=10` could reasonably read the answer as a count capped
+ * at ten. Refusing is the only option that cannot be misread. This matches how the surface
+ * already treats a contradictory combination (`lens` with `direction`): a clean 400, never
+ * a quietly different answer.
+ */
+function parseCountOnly(p: URLSearchParams): boolean | Response {
+  const raw = p.get("countOnly");
+  if (raw === null) return false;
+  if (raw !== "0" && raw !== "1" && raw !== "true" && raw !== "false") {
+    return json(
+      { ok: false, error: "E_VALIDATION_ERROR", message: "countOnly must be 0|1|true|false" },
+      400,
+    );
+  }
+  if (raw === "0" || raw === "false") return false;
+  for (const name of ["limit", "cursor", "fields"]) {
+    if (p.get(name) !== null) {
+      return json(
+        {
+          ok: false,
+          error: "E_VALIDATION_ERROR",
+          message: `countOnly counts the whole match set, so it cannot be combined with ${name}`,
+        },
+        400,
+      );
+    }
+  }
+  return true;
 }
 
 function parseListQuery(url: URL, sessionIdentity?: string): import("./store").ListQuery {
