@@ -55,6 +55,32 @@ flowchart LR
 | `mailbox_draft_delete` | Discard an own draft. Reports `deleted: false` when there was nothing to delete, which is not an error. | `DELETE /api/drafts/{id}` |
 | `mailbox_draft_send` | Send an own draft. **MUTATING.** The worker dispatches, stores the sent copy, and only THEN discards the draft, so a failure leaves it intact and retryable rather than half-sent. A reply/forward draft threads against its source automatically. | `POST /api/drafts/{id}/send` |
 
+### Organize (scope `organize`, opt-in)
+
+| Tool | What it does | Wraps |
+|---|---|---|
+| `mailbox_mark_seen` | Mark stored messages read or unread: `ids` + `seen` (true = read). Optional `for_recipient` records the state for ONE address instead of the mailbox-wide flag, which is what a shared/role address needs so two readers do not inherit each other's unread counts. An identity-bound token may only write its OWN state: the server REFUSES a `for_recipient` that disagrees with the token rather than rewriting it, and binds the write to that identity even when `for_recipient` is omitted. The result therefore does NOT echo `for_recipient`, because the server, not your argument, decides whose state was written. | `POST /api/messages/seen` |
+| `mailbox_set_flags` | Set `flagged` (starred) and/or `answered` on `ids`. Supply at least one; a call setting neither is REFUSED rather than treated as a no-op. A flag you omit is LEFT ALONE, not cleared. | `POST /api/messages/flags` |
+| `mailbox_move` | File `ids` into a durable folder: `mailbox` = `archive` / `trash` / `junk`, or `null` to restore the default unfoldered view. A SOFT move: `trash` files a message in Trash, it never erases it. `null` is a real destination here, not a missing value. | `POST /api/messages/move` |
+
+Organize tools are **MUTATING**, but only over this mailbox's own view of its mail: read
+state, flags, and which folder a message sits in. Nothing here sends or deletes anything.
+
+**All three answer with COUNTS, never per-id results**, and that is the one thing to read
+carefully. Each returns `updated` (how many stored messages the server matched),
+`requested` (how many ids you sent), and `unchanged` (the difference). The server counts
+every message row it reached, so re-applying a value a message already had still counts.
+So `unchanged` above 0 means some ids are unknown to the store or outside what your token
+may reach, and **the answer cannot say which ones**. Do not treat your id list as the list
+that landed; re-read those ids with `mailbox_list` or `mailbox_get` to see their real
+state. Duplicate ids in one call also count toward `unchanged`.
+
+These routes carry the `organize` scope (#685), which a `read` token deliberately does
+NOT satisfy: reading mail and filing mail are separate grants. The tools therefore
+register only when an organize-capable credential is configured (see below). A tool that
+is advertised and always 403s is worse than an absent tool, because an agent cannot tell
+a missing grant from a broken route.
+
 Send tools are **MUTATING**: they deliver mail. They register only when a send token
 is present (see below). The server owns From-enforcement, DKIM signing, threading, and
 storing the sent copy; the tools forward a composed message and return the core
@@ -142,6 +168,8 @@ For production, use `"command": "npx", "args": ["-y", "@skyphusion/postern-mcp"]
 | `POSTERN_API_TOKEN` | yes | -- | Bearer for **read** tools. Prefer a **per-identity registry** token with `scopes` including `read` (#544). An estate `POSTERN_API_TOKEN` / `_READ` remains estate-wide. |
 | `POSTERN_SEND_TOKEN` | no | (unset) | Bearer for **send** tools. When set, send tools register and use it. With a per-identity token the worker binds From. **Mutating; opt-in.** |
 | `POSTERN_MCP_SEND` | no | (unset) | Set to `1` to register send tools using `POSTERN_API_TOKEN` as the send credential (for a single registry token with `scopes: ["read","send"]`). |
+| `POSTERN_ORGANIZE_TOKEN` | no | (unset) | Bearer for **organize** tools (read state, flags, placement). When set, those tools register and use it. The worker slot that issues exactly this grant is `POSTERN_API_TOKEN_ORGANIZE` (#692); an `imap` token also satisfies `organize`. **Mutating; opt-in.** |
+| `POSTERN_MCP_ORGANIZE` | no | (unset) | Set to `1` to register organize tools using `POSTERN_API_TOKEN` as the organize credential (for a single registry token with `scopes: ["read","organize"]`, or a `both` token). Only the literal `1` enables it. |
 | `POSTERN_API_TIMEOUT_MS` | no | `15000` | per-request timeout (ms) |
 | `POSTERN_MCP_MAX_ATTACHMENT_BYTES` | no | `5242880` (5 MiB) | max bytes `mailbox_get_attachment` will return; a larger attachment is **refused with a clear error, never truncated**. Raise it (up to the API-side 25 MiB ceiling) for hosts that tolerate bigger tool results. |
 
