@@ -49,3 +49,42 @@ warn_redundant_casts = true
 # Twisted ships partial stubs; do not fail the gate on its untyped internals.
 ignore_missing_imports = true
 files = ["posternimap"]
+# postern#680: check the BODY of untyped functions too (most test methods have no
+# annotations, so mypy skipped them). The modules below still fail with it on and are
+# DEFERRED, not fixed: 289 errors in 27 modules (python -m mypy --check-untyped-defs,
+# mypy 2.4.0, Python 3.14). Each override is one module and is meant to be deleted
+# as that module is fixed. Do not add a module here; new code is checked.
+check_untyped_defs = true
+
+# postern#680 deferred modules (error count each, at the time of enabling).
+[[tool.mypy.overrides]]
+module = [
+    "posternimap.tests.test_server_e2e",  # 57
+    "posternimap.tests.test_rfc822",  # 48
+    "posternimap.tests.test_auth_backends",  # 25
+    "posternimap.tests.test_serialization",  # 23
+    "posternimap.tests.test_mailbox",  # 21
+    "posternimap.server",  # 15
+    "posternimap.tests.test_header_one_string_e2e",  # 11
+    "posternimap.tests.test_auth",  # 10
+    "posternimap.tests.test_utf8_accept_e2e",  # 10
+    "posternimap.tests.test_worker_contract",  # 9
+    "posternimap.tests.test_breaker",  # 7
+    "posternimap.tests.test_reactor_surface",  # 7
+    "posternimap.tests.test_http_transport",  # 6
+    "posternimap.tests.test_reactor_nonblocking",  # 6
+    "posternimap.tests.test_size_literal_e2e",  # 5
+    "posternimap.tests.test_roles_fetch",  # 4
+    "posternimap.tests.test_throttle",  # 4
+    "posternimap.tests.test_client",  # 3
+    "posternimap.tests.test_pool_saturation",  # 3
+    "posternimap.tests.test_bodystructure_filename_e2e",  # 2
+    "posternimap.tests.test_list_wildcard",  # 2
+    "posternimap.tests.test_per_account",  # 2
+    "posternimap.tests.test_proxywrap",  # 2
+    "posternimap.tests.test_snapshot_stability",  # 2
+    "posternimap.tests.test_tls",  # 2
+    "posternimap.threaded",  # 2
+    "posternimap.tests.test_role_folders",  # 1
+]
+check_untyped_defs = false
