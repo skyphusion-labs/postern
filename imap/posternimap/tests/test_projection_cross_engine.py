@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import unittest
 from pathlib import Path
+from typing import Any
 
 from posternimap.client import Attachment, Message
 from posternimap.rfc822 import render_rfc822
@@ -48,6 +49,7 @@ _NODE = shutil.which("node")
 
 def _render_ts(project_input: dict) -> bytes:
     """Render `project_input` through the REAL inbound/src/rfc822Project.ts."""
+    assert _NODE is not None, "node not on PATH (callers are skipUnless-guarded)"
     proc = subprocess.run(
         [
             _NODE,
@@ -78,11 +80,11 @@ def _render_py(message: Message) -> bytes:
 # is filled in per-case by the test (single-digit vs double-digit day) so the SAME
 # four shapes exercise both.
 def _shapes(date_iso: str, message_id: str):
-    att = {"filename": "inv.pdf", "mime": "application/pdf", "size": 265}
+    att: dict[str, Any] = {"filename": "inv.pdf", "mime": "application/pdf", "size": 265}
     py_att = Attachment(filename=att["filename"], mime=att["mime"], size=att["size"])
 
     def py_msg(**over) -> Message:
-        base = dict(
+        base: dict[str, Any] = dict(
             message_id=message_id,
             direction="inbound",
             thread_id=message_id,
@@ -139,7 +141,7 @@ def _shared_fixture_pairs():
     date = "2026-06-18T12:00:00Z"
 
     def py_msg(**over) -> Message:
-        base = dict(
+        base: dict[str, Any] = dict(
             message_id="abc123",
             direction="inbound",
             thread_id="abc123",
