@@ -8,6 +8,7 @@ It speaks the real wire shapes from CONTRACT section 4.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import urllib.parse
@@ -69,6 +70,33 @@ def _parse_raw_mime(raw: bytes) -> Dict[str, str]:
             headers[m.group(1).decode("ascii").lower()] = m.group(2).decode("utf-8", "replace").strip()
     headers["_body"] = body.decode("utf-8", "replace")
     return headers
+
+
+def _same_message(
+    row: Dict[str, Any], from_value: str, subject: str, body: str
+) -> bool:
+    """Mirrors inbound/src/store.ts `sameMessageAs` (refs GHSA-pjv6-4xmx-29cw).
+
+    FROM + SUBJECT + BODY, and deliberately NOT date or recipients: a Message-ID
+    identifies a ROW, not a message, so this is the predicate that decides whether a
+    colliding id is the same message or a different one. Both halves COALESCE absent
+    to "" so a missing field is not read as a mismatch.
+    """
+    return (
+        (row.get("from") or "") == from_value
+        and (row.get("subject") or "") == subject
+        and (row.get("bodyText") or "") == body
+    )
+
+
+def _forked_message_id(
+    message_id: str, from_value: str, subject: str, body: str
+) -> str:
+    """Mirrors inbound/src/store.ts `forkedMessageId`: sha256 over the id plus the
+    content, so a retry of the SAME delivery resolves to the same derived row rather
+    than minting a new one per attempt."""
+    joined = "\x00".join((message_id, from_value, subject, body))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 def _bare_address(value: str) -> str:
@@ -602,6 +630,33 @@ class FakeTransport:
             return 403, json.dumps({"ok": False, "error": "E_IDENTITY_MISMATCH"}).encode()
         message_id = (headers.get("message-id") or "").strip("<>") or f"imported-{self._draft_uid}"
         mailbox = None if folder == "sent" else folder
+        subject = headers.get("subject", "")
+        body = headers.get("_body", "")
+        from_value = from_hdr or identity
+        # LOCKSTEP with inbound/src/store.ts putRow (#643). `messages.message_id` is
+        # UNIQUE in D1 (migrations 0000 / 0005), so the store CANNOT hold two rows
+        # under one id and putRow therefore RESOLVES a collision instead of inserting:
+        # the same message is a no-op dedup (stored false), a DIFFERENT message is
+        # stored under a DERIVED id and never dropped. A fake that simply appended a
+        # second row would be more permissive than production on exactly the axis the
+        # Sent-APPEND id-collision tests exercise, so a door fix could pass here and
+        # still lose mail in production. Change both together.
+        existing_row = next(
+            (m for m in self.messages if m.get("messageId") == message_id), None
+        )
+        if existing_row is not None:
+            if _same_message(existing_row, from_value, subject, body):
+                return 200, json.dumps(
+                    {
+                        "ok": True,
+                        "messageId": message_id,
+                        "stored": False,
+                        "merged": False,
+                        "threadId": existing_row.get("threadId"),
+                        "mailbox": mailbox,
+                    }
+                ).encode()
+            message_id = _forked_message_id(message_id, from_value, subject, body)
         next_folder_uid = max(
             (int(m.get("folderUid") or 0) for m in self.messages), default=0
         ) + 1
@@ -609,22 +664,34 @@ class FakeTransport:
             "messageId": message_id,
             "direction": "outbound" if outbound else "inbound",
             "threadId": message_id,
-            "from": from_hdr or identity,
+            "from": from_value,
             "to": headers.get("to", "") or identity,
-            "subject": headers.get("subject", ""),
+            "subject": subject,
             "date": headers.get("date") or "2026-07-18T00:00:00Z",
             "inReplyTo": None,
             "trusted": outbound,
             "receivedAt": "2026-07-18T00:00:00Z",
             "attachmentCount": 0,
-            "bodyText": headers.get("_body", ""),
+            "bodyText": body,
             "mailbox": mailbox,
         }
         if mailbox is not None:
             m["folderUid"] = next_folder_uid
             self._uidvalidity_for(mailbox)
         self.messages.insert(0, m)
-        return 201, json.dumps({"ok": True, "mailbox": mailbox}).encode()
+        # The real handler answers with the STORE's result spread into the envelope
+        # (`messageId`, `stored`, `merged`, `threadId`) and 201 only when a row was
+        # actually created, so a caller can tell a store from a dedup.
+        return 201, json.dumps(
+            {
+                "ok": True,
+                "messageId": message_id,
+                "stored": True,
+                "merged": False,
+                "threadId": message_id,
+                "mailbox": mailbox,
+            }
+        ).encode()
 
     def _folders(self, params):
         """GET /api/folders -- server-authoritative counts + durable UIDVALIDITY

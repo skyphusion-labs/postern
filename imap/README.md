@@ -48,14 +48,22 @@ in #12.
   prompt. IMAP FETCH serves base64 wire bytes (never cte=binary, which strips CR from
   PDFs). Every other write -- any other flag,
   mailbox create/rename/delete -- is refused cleanly (tagged `NO`).
-- **`APPEND` is accepted as a no-op for Sent and Drafts.** A mail client copies its own sent message
-  into `Sent` after submission; the Postern submission path already records the
-  outbound message in the store, so the proxy acknowledges the `APPEND` (it never
-  fails the client) and does NOT double-store. The sent mail appears once, via the
-  store, on the next `SELECT`. Apple Mail auto-saves mid-compose into `Drafts`;
-  Postern acknowledges that APPEND so the client keeps its local draft without an
-  error dialog. Drafts has no server-side store and remains empty after reconnect.
-  `SUBSCRIBE`/`UNSUBSCRIBE` are likewise accepted.
+- **`APPEND` persists or refuses; it is never a silent no-op** (#352 section 3.2).
+  An OK means the message is in the mailbox, which is what the IMAP contract
+  promises a client, so the door never acknowledges an APPEND it did not store.
+  A mail client copies its own sent message into `Sent` after submission, and the
+  submission path already recorded that outbound copy, so the door first tries to
+  recognise the APPEND as that same message: an exact match on `Message-ID` PLUS the
+  store's own message identity (from + subject + body), or a recent outbound row
+  agreeing on from + to + subject inside a short window. On a match the APPEND is
+  acknowledged and nothing is double-stored. On a MISS the raw MIME is persisted
+  through `POST /api/imap/import` rather than dropped. An id that merely COLLIDES
+  with a different message is not a match and does not suppress the store (#643).
+  Apple Mail auto-saves mid-compose into `Drafts`, and those drafts are DURABLE
+  server-side via `POST /api/imap/drafts`, so they survive a reconnect and are
+  visible from another device; a Drafts APPEND needs `POSTERN_API_TOKEN_IMAP` plus a
+  bound identity and is refused out loud without them.
+  `SUBSCRIBE`/`UNSUBSCRIBE` are accepted.
 - **Mailboxes with RFC 6154 special-use attributes**, so a real client
   (Thunderbird) auto-maps its folders and never tries to CREATE them. `INBOX`,
   `Sent`, and `All` are direction-filtered views over the one store; the rest are
@@ -350,7 +358,7 @@ without Twisted:
 | `auth.py` | core no / portal yes | `resolve_token` (#32/#77) + the native/ldap/pam backends + the Twisted cred portal |
 | `message.py` | yes | `IMessage`/`IMessagePart` over a rendered message |
 | `mailbox.py` | yes | `IMailbox` (snapshot, fetch, status, `\Seen`, delete/EXPUNGE) |
-| `account.py` | yes | `IAccount`: the special-use mailbox set (INBOX/Sent/All + empty Drafts/Trash/Junk/Archive), Sent/Drafts APPEND no-op |
+| `account.py` | yes | `IAccount`: the special-use mailbox set (INBOX/Sent/All + Drafts/Trash/Junk/Archive) and `appendability()`, the per-folder APPEND classifier |
 | `server.py` | yes | the `IMAP4Server` factory + reactor wiring |
 | `__main__.py` | -- | `python -m posternimap` entrypoint |
 
@@ -549,12 +557,15 @@ injectable transport, so no network is touched.
 - **Read-only, except the `\Seen` flag.** Read/unread state is persisted (a `STORE`
   of `\Seen` round-trips to `POST /api/messages/seen`); every other write is refused.
   Sending is the structured API's job.
-- **APPEND is accepted only where it is safe or required for client compatibility.** INBOX/Sent/All accept a client's
-  APPEND as a no-op (the store is the source of truth; a post-send Sent copy is
-  already persisted). Drafts also accepts APPEND as a no-op because Apple Mail
-  auto-saves while composing; the draft stays client-local and is not available
-  from another device. The remaining placeholder folders (Trash/Junk/Archive/Notes)
-  have no backing store, so they REJECT APPEND with a tagged NO (#109).
+- **APPEND is persist-or-refuse, per folder** (#352 section 3.2; `account.
+  appendability()` is the classifier). `Sent` matches the APPEND against the
+  already-stored outbound copy and persists it through the import seam on a miss.
+  `Drafts` persists server-side, so a draft is durable and reachable from another
+  device. `Trash`/`Junk`/`Archive` move an existing message into the folder, or
+  persist a genuinely new one. `INBOX`/`All` REFUSE with a tagged NO, because a new
+  message has no honest home in a direction-filtered view over the store, and
+  `Notes` refuses as a pure placeholder (#109). What never happens in any of them is
+  an OK with nothing stored.
 - **UIDs are an interim ordinal over the date-ordered snapshot**, with a constant
   `UIDVALIDITY`. This preserves a client cache across reconnects in the common
   case, but per RFC 3501 it is NOT a true UID: it shifts (silently, under constant

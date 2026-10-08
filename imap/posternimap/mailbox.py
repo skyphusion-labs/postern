@@ -131,6 +131,31 @@ def _body_text(msg: PyMessage) -> str:
     return text if isinstance(text, str) else ""
 
 
+def _same_stored_message(existing: Message, parsed: PyMessage) -> bool:
+    """Is a stored row carrying this Message-ID actually the SAME message (#643)?
+
+    `messages.message_id` is UNIQUE in the store (inbound/migrations 0000 / 0005), so
+    an id identifies a ROW, never a message. The store therefore defines message
+    identity separately, as FROM + SUBJECT + BODY and deliberately NOT date and NOT
+    recipients (`sameMessageAs` / `sameMessageSql` in inbound/src/store.ts, refs
+    GHSA-pjv6-4xmx-29cw), and uses that predicate to decide between a dedup and
+    storing the delivery under a derived id. The door asks the SAME question, against
+    the same three fields, so the two seams cannot disagree about what "already
+    stored" means; that disagreement was the whole defect.
+
+    The ASYMMETRY here is deliberate and is what makes this safe. Being stricter than
+    the store costs one import round trip, which the worker then settles
+    authoritatively (it answers `stored: false` for a true duplicate). Being looser
+    drops the message while reporting OK, which is #643. So when the comparison cannot
+    be made confidently, it must come out FALSE and let the store decide.
+    """
+    return (
+        (existing.from_addr or "") == header_text(parsed.get("From") or "").strip()
+        and (existing.subject or "") == header_text(parsed.get("Subject") or "")
+        and (existing.body_text or "") == _body_text(parsed)
+    )
+
+
 @implementer(imap4.IMailbox)
 class PosternMailbox:
     """An IMAP view of the Postern mailbox, scoped by direction and/or mailbox=."""
@@ -846,12 +871,30 @@ class PosternMailbox:
         Message-ID, so a client APPEND carries a different id. Matching recent
         outbound by from+to+subject within a short window avoids the copy-failed
         regression without a spurious second row on a genuine hit.
+
+        Two matchers, and they answer different questions. The id check is an exact
+        dedup: same id AND same message (`_same_stored_message`, the store's own
+        predicate), which means this message is already filed. The from+to+subject
+        window matcher below is the deliberate heuristic for the case the ids
+        legitimately DIFFER, so it cannot compare bodies: a client's own copy and the
+        core's stored copy of one message are not byte-identical. Its looseness is
+        bounded by _SENT_MATCH_WINDOW; the id check has no such bound, which is why it
+        is the one that must be exact (#643).
         """
         mid = _message_id_header(parsed)
         if mid:
             existing = self._client.get_message(mid)
-            if existing is not None and existing.direction == "outbound":
+            if (
+                existing is not None
+                and existing.direction == "outbound"
+                and _same_stored_message(existing, parsed)
+            ):
+                # A genuine duplicate: this message IS in the mailbox, so the OK the
+                # caller reports is honest and a second row would be spurious.
                 return
+            # An id match on a DIFFERENT message is NOT evidence of storage (#643).
+            # Fall through to the matcher and then to the import seam, so the APPEND
+            # either lands or is refused out loud -- never OK with nothing stored.
         from_addr = _bare_addr(_header_addrs(parsed, "From"))
         to_addr = _bare_addr(_header_addrs(parsed, "To"))
         subject = _norm_subject(parsed.get("Subject") or "")
