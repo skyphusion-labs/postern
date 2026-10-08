@@ -307,12 +307,30 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
 | `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
 | `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import`, plus the `organize` routes (#685); the authenticated door asserts the account identity |
+| `POSTERN_API_TOKEN_ORGANIZE` | `organize` | `POST /api/messages/seen`/`flags`/`move` only (#692). NOT `GET /api/folders`, which is a read. Cannot read, send, hard-delete, reach admin, or write through the `imap` seam |
 | `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read`: list/search/get forced to that identity (cannot widen via `to=`). `organize` (#685): mark read / flags / move, still forced to that identity. Never delete/admin. |
 
-**The `organize` scope (#685).** `POST /api/messages/seen`, `/flags` and `/move` change
-stored state: read state, flags, and which folder a message sits in. They demand
-`organize`, which is held by `both`, by an `imap` token, by a webmail session, and by a
-registry entry that lists `organize` in its `scopes`.
+**The `organize` scope (#685), and its own slot (#692).** `POST /api/messages/seen`,
+`/flags` and `/move` change stored state: read state, flags, and which folder a message
+sits in. They demand `organize`, which is held by `POSTERN_API_TOKEN_ORGANIZE`, by
+`both`, by an `imap` token, by a webmail session, and by a registry entry that lists
+`organize` in its `scopes`.
+
+`POSTERN_API_TOKEN_ORGANIZE` arrived one release after the scope did. #685 and #687 named
+the power and shipped no key for it, so the only ways to grant organize were the IMAP
+door's `imap` token, which makes two consumers share one credential, or a `both` token,
+which also reaches send, delete and the admin routes. Both are wider than the grant.
+Issue this slot to a machine that must file mail and must not read it: a CI probe, or a
+filing bot.
+
+The grant runs ONE WAY. An `imap` token carries organize, and an `organize` token does
+NOT carry imap. It also does not carry read, send, delete or admin. In particular an
+organize-only token is refused on `GET /api/folders`, which stays `read`: listing folders
+reads the mailbox and changes nothing in it. Filing mail does not require seeing the
+cabinet.
+
+The slot is additive. A deployment that leaves it unset behaves exactly as it did before
+#692: the IMAP door and `both` still organize, and a `read` token is still refused.
 
 A `read` token does NOT hold it. Reading mail and filing mail are separate grants, so an
 operator who issues a read-only token can tell from its name that it changes nothing. This
@@ -323,7 +341,7 @@ power.
 of the scope wall, so a registry entry with `organize` still touches only its own mail,
 and a static token with no bound identity remains estate-wide exactly as before.
 
-The five STATIC slots each hold a **comma-separated SET of tokens** (#154):
+The six STATIC slots each hold a **comma-separated SET of tokens** (#154):
 entries are trimmed, empty entries ignored, and a bearer matching ANY member
 resolves to that slot's scope. A single bare value (no comma) is a one-element
 set -- the pre-#154 format, unchanged. The point is per-CONSUMER tokens within

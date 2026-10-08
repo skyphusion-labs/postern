@@ -131,8 +131,11 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   // These three CHANGE stored state: read state, flags, and which folder a message sits
   // in. `organize` names that power on its own, so the grant an operator issues to READ
   // a mailbox is separate from the grant to re-file one, and a token's name says which
-  // it is. An `imap` token carries it (see scopeSatisfies); a `read` token does not.
-  // `GET /api/folders` stays `read`: listing folders does not change any of them.
+  // it is. POSTERN_API_TOKEN_ORGANIZE (#692) is the slot that issues exactly that
+  // grant; an `imap` token also carries it (see scopeSatisfies), and a `read` token
+  // does not.
+  // `GET /api/folders` stays `read`: listing folders does not change any of them, so
+  // an organize-only token is refused there too (#692).
   { id: "messages-seen", method: "POST", path: "/api/messages/seen", match: "exact", scope: "organize",
     auth: "bearer", body: ["ids", "seen", "for"],
     note: "`for` writes a per-recipient override; under a session it must be the session identity (#410)" },
@@ -243,13 +246,29 @@ export function requiredScope(method: string, path: string): RouteScope | null {
  * `admin` is satisfied solely by `both`: read/send tokens cannot reach the
  * credential-provisioning routes.
  *
- * `organize` (#685) is the one scope satisfied by a DIFFERENT kind: an `imap` token
- * carries it, because the IMAP door is the machine client the organize routes exist for
- * and it already has its own token slot. A `read` token does NOT carry it. Reading mail
- * and filing mail are separate grants, so a token issued to read cannot change what the
- * mailbox looks like. `send` and `delete` are deliberately not accepted either: reusing
- * one of them would put two unrelated powers behind one name, which is the shape that
- * made the organize routes sit under `read` in the first place.
+ * `organize` is the one scope that TWO kinds satisfy: its own `organize` token, and an
+ * `imap` token.
+ *
+ * The `imap` arm came first (#685), because the IMAP door is the machine client the
+ * organize routes exist for and it already had a token slot. It keeps the grant, so no
+ * deployed door has to re-provision.
+ *
+ * The `organize` arm is #692. #687 shipped the scope with no slot of its own, so an
+ * operator who wanted to grant organize and nothing else had to hand over the door's
+ * key or a `both` key. One makes two consumers share a credential; the other also
+ * reaches send, delete and admin. Naming a power and then having no key for it is the
+ * per-function-keys rule broken by omission.
+ *
+ * A `read` token still does NOT carry organize. Reading mail and filing mail are
+ * separate grants, so a token issued to read cannot change what the mailbox looks like.
+ * `send` and `delete` are deliberately not accepted either: reusing one of them would
+ * put two unrelated powers behind one name, which is the shape that made the organize
+ * routes sit under `read` in the first place.
+ *
+ * The new arm is ONE-WAY. An `organize` token satisfies organize and nothing else, so
+ * it is refused on read, send, delete, imap and admin. `GET /api/folders` stays `read`
+ * (see the table above), which means an organize-only token cannot list folders.
+ * Listing folders reads the mailbox and changes nothing in it, so it is a read.
  */
 export function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (have === "both") return true;
@@ -257,6 +276,6 @@ export function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (need === "send") return have === "send";
   if (need === "delete") return have === "delete";
   if (need === "imap") return have === "imap";
-  if (need === "organize") return have === "imap";
+  if (need === "organize") return have === "organize" || have === "imap";
   return false; // admin: only `both`
 }
