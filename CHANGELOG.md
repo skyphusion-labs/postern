@@ -11,7 +11,12 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
-## Unreleased
+## v1.5.0
+
+MINOR: `organize` becomes its own token scope. Breaking in two narrow
+configurations, both fail-closed and loud, each with a one-step operator action
+below. No `PROJECTION_VERSION` or `POSTERN_IMAP_UIDVALIDITY` bump: the wire format
+and the door projection are unchanged.
 
 - **inbound: `organize` is now its own token scope (#685). BREAKING for two
   configurations, both fail-closed and loud.** `POST /api/messages/seen`, `/flags`
