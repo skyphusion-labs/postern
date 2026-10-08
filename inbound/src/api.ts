@@ -1219,11 +1219,42 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+/** The identity an authenticated IMAP door asserts it is acting as (#619).
+ *
+ *  This is the only thing between a door token and the account it speaks for, and five
+ *  routes reach it: GET / POST / PUT / DELETE on /api/imap/drafts, and the APPEND at
+ *  POST /api/imap/import, which FILES a message under whatever comes back from here.
+ *
+ *  It used to read ALLOWED_FROM_DOMAIN directly and AND the domain comparison behind
+ *  the variable's own truthiness:
+ *
+ *      const allowed = (env.ALLOWED_FROM_DOMAIN || "").trim().toLowerCase();
+ *      if (!EMAIL_RE.test(identity) || (allowed && identity.split("@")[1] !== allowed))
+ *
+ *  so on a deploy with the variable unset the comparison collapsed and every well-formed
+ *  address was accepted. #615/#617 fixed five sites that fell back to a hardcoded domain;
+ *  this sixth one was out of scope there because it BORROWS no domain, and it had the
+ *  opposite defect: not a wrong answer, no answer at all. Unset must therefore REFUSE
+ *  here, exactly as the other seams do, and the helper is the only read of the variable
+ *  so a null can no longer be mistaken for "no domain policy".
+ *
+ *  Two distinct refusals on the DOMAIN (the missing-field 400 above is a third), and
+ *  the difference is for whoever reads the log:
+ *    - 500 E_INTERNAL_SERVER_ERROR: the OPERATOR has not configured the domain. The
+ *      request had no way to be right, so blaming it with a 403 would send the reader
+ *      hunting a bad token. Same code and message as the other #615 seams.
+ *    - 403 E_IDENTITY_NOT_ALLOWED: the domain IS configured and this identity is off it.
+ *
+ *  Request shape is still validated before config, matching handleCredentialUpsert
+ *  (a missing username is its 400 before the unset domain is its 500). */
 function requireImapIdentity(value: unknown, env: Env): string {
   if (typeof value !== "string") throw new MailboxError("E_FIELD_MISSING", "identity is required");
   const identity = value.trim().toLowerCase();
-  const allowed = (env.ALLOWED_FROM_DOMAIN || "").trim().toLowerCase();
-  if (!EMAIL_RE.test(identity) || (allowed && identity.split("@")[1] !== allowed)) {
+  const allowed = allowedFromDomain(env);
+  if (!allowed) {
+    throw new MailboxError("E_INTERNAL_SERVER_ERROR", "ALLOWED_FROM_DOMAIN is not configured", 500);
+  }
+  if (!EMAIL_RE.test(identity) || identity.split("@")[1] !== allowed) {
     throw new MailboxError("E_IDENTITY_NOT_ALLOWED", "identity is not allowed", 403);
   }
   return identity;

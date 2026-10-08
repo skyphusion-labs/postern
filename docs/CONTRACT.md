@@ -502,7 +502,7 @@ none touches D1 directly (#25, #26).
 | GET/POST | `/api/drafts/{id}/attachments` | list or stage raw attachment bytes for an identity-owned draft | webmail v2 (#353) |
 | DELETE | `/api/drafts/{id}/attachments/{attachmentId}` | remove one staged attachment and its R2 bytes | webmail v2 (#353) |
 | POST | `/api/drafts/{id}/send` | load staged attachments, send through the one send core, then remove the draft and staging only after success | webmail v2 (#352/#353) |
-| GET/POST/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity | webmail v2 (#352) |
+| GET/POST/PUT/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity; PUT is the autosave revision, mirroring `PUT /api/drafts/{id}` | webmail v2 (#352) |
 | POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it; `rawMime` decoding past **22 MiB** is `413 E_PAYLOAD_TOO_LARGE` BEFORE the MIME is parsed | webmail v2 (#352/#493) |
 | DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope) | (#278/#352) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
@@ -556,6 +556,26 @@ bytes per 3, so the largest payload that can reach the handler already decodes t
 than an arithmetic side effect of the body cap, and it stays reachable, so the refusal is provable
 against the real handler instead of being dead code. A larger APPEND ceiling means raising the body
 cap and this together, in that order.
+
+**The asserted identity on `/api/imap/*` (#619).** The door token authenticates the DOOR; it carries
+no bound identity, so every call names the already-authenticated account it is acting as (`identity`,
+in the query for GET/DELETE and in the body for POST/PUT, and in the body for the import APPEND).
+That name is not taken on trust: it must be a valid bare address **on `ALLOWED_FROM_DOMAIN`**, and
+all five routes check it through the one helper (`requireImapIdentity` in `inbound/src/api.ts`).
+Three distinct refusals, so a reader can tell whose fault a failure is:
+
+| Condition | Answer |
+|---|---|
+| `identity` absent or not a string | `400 E_FIELD_MISSING`, "identity is required" |
+| `ALLOWED_FROM_DOMAIN` unset on the deploy | `500 E_INTERNAL_SERVER_ERROR`, "ALLOWED_FROM_DOMAIN is not configured" |
+| `identity` malformed, or on another domain | `403 E_IDENTITY_NOT_ALLOWED`, "identity is not allowed" |
+
+The middle row is the point of #619. The unset case used to SKIP the domain comparison rather than
+refuse it, so on a deploy that had never set the variable any well-formed address was accepted as
+the identity, and the import APPEND would file a message under it. It is an operator-config fault,
+not a caller fault, which is why it answers `500` with the same code and message as the other
+fail-closed `ALLOWED_FROM_DOMAIN` seams (#615) and not the `403` beside it. Nothing is written on
+any of the three refusals.
 
 `POST /api/admin/reindex` is the **backfill** (#116 ws4): it (re)embeds the EXISTING mailbox into
 the semantic index so history predating the live index -- and all historical outbound -- becomes
