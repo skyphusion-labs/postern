@@ -48,6 +48,4 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 # Twisted ships partial stubs; do not fail the gate on its untyped internals.
 ignore_missing_imports = true
-# The type gate covers the proxy source; tests use kwargs dicts mypy cannot infer.
 files = ["posternimap"]
-exclude = "posternimap/tests/"

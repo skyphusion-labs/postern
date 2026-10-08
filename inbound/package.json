@@ -14,11 +14,11 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "postal-mime": "^3.0.0"
+    "postal-mime": "^4.0.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260822.1",
-    "@types/node": "22.20.4",
+    "@types/node": "26.6.4",
     "@vitest/coverage-istanbul": "^5.0.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1",

@@ -15,6 +15,7 @@ import ssl
 import sys
 import types
 import unittest
+from typing import Any
 
 from posternimap.auth import AuthBackendError, LDAPBinder, PAMAuthenticator
 from posternimap.config import Config, ConfigError
@@ -28,7 +29,7 @@ JOAN_DN = "uid=joan,ou=people,dc=ex,dc=com"
 
 
 def _cfg(**over) -> Config:
-    base = dict(api_url="https://x", auth_mode="ldap", service_token="svc")
+    base: dict[str, Any] = dict(api_url="https://x", auth_mode="ldap", service_token="svc")
     base.update(over)
     return Config(**base)
 

@@ -53,6 +53,7 @@ from __future__ import annotations
 import io
 import threading
 import unittest
+from typing import Any
 
 try:
     from twisted.internet import defer, reactor, task
@@ -107,7 +108,7 @@ def _fixture_messages():
 
 
 def _config(**over) -> Config:
-    base = dict(
+    base: dict[str, Any] = dict(
         api_url="https://x",
         auth_mode="token",
         api_timeout=5.0,

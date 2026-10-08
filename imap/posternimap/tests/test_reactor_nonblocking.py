@@ -521,11 +521,6 @@ class FetchWarmMirrorsSpewBodyTest(unittest.TestCase):
     is the drift this module exists to prevent.
     """
 
-    def _query(self, spec: bytes):
-        from twisted.mail import imap4
-
-        return imap4._FetchParser().parseString(spec) or imap4._FetchParser().parse(spec)
-
     def _reads(self, spec: bytes):
         from twisted.mail import imap4
 
