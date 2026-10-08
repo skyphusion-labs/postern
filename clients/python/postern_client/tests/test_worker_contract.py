@@ -68,6 +68,13 @@ def match_route(method: str, path: str) -> Optional[dict[str, Any]]:
     return None
 
 
+def must_match(method: str, path: str) -> dict[str, Any]:
+    """match_route for a route the test expects to exist; a miss fails loudly."""
+    row = match_route(method, path)
+    assert row is not None, f"no route for {method} {path}"
+    return row
+
+
 def accepted(row: Optional[dict[str, Any]], kind: str) -> set[str]:
     """The query/body names api-params.json declares for a matched route row."""
     if not row:
@@ -173,11 +180,11 @@ class FixtureTest(unittest.TestCase):
         self.assertTrue(accepted(match_route("POST", "/api/send"), "body"))
 
     def test_the_matcher_resolves_the_declared_shapes_and_can_miss(self):
-        self.assertEqual(match_route("GET", "/api/messages")["id"], "messages-list")
-        self.assertEqual(match_route("GET", "/api/messages/m1")["id"], "message-get")
-        self.assertEqual(match_route("GET", "/api/messages/m1/attachments/0")["scope"], "read")
-        self.assertEqual(match_route("DELETE", "/api/messages/m1")["scope"], "delete")
-        self.assertEqual(match_route("POST", "/api/drafts/d1/send")["scope"], "send")
+        self.assertEqual(must_match("GET", "/api/messages")["id"], "messages-list")
+        self.assertEqual(must_match("GET", "/api/messages/m1")["id"], "message-get")
+        self.assertEqual(must_match("GET", "/api/messages/m1/attachments/0")["scope"], "read")
+        self.assertEqual(must_match("DELETE", "/api/messages/m1")["scope"], "delete")
+        self.assertEqual(must_match("POST", "/api/drafts/d1/send")["scope"], "send")
         # A miss is possible, so a passing match means something.
         self.assertIsNone(match_route("GET", "/api/not-a-route"))
         self.assertIsNone(match_route("PUT", "/api/messages"))
