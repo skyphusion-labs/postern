@@ -18,7 +18,7 @@ mismatched MCP tag fails before it publishes.
   and `/move` change stored state: read state, flags, and which folder a message
   sits in. They were declared `read`-scoped, on the argument that managing your own
   read state is a side effect of reading. That argument does not cover flags or
-  placement, so one grant covered both reading a mailbox and re-filing it.
+  placement, so the vocabulary had no term for "may change organize state".
 
   These three routes now demand `organize`. It is held by `both`, by an `imap`
   token, by a webmail session, and by a `POSTERN_SEND_IDENTITIES` entry that lists

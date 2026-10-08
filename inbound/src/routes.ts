@@ -129,11 +129,10 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
 
   // --- read-state + placement: `organize`-scoped (#685) ---
   // These three CHANGE stored state: read state, flags, and which folder a message sits
-  // in. They used to be `read`-scoped on the argument that managing your own read state
-  // is a side effect of reading. That argument does not cover flags or placement, and it
-  // put a state-changing power behind the grant an operator issues to read, so a
-  // read-only token could re-file a whole mailbox. `organize` names that power on its
-  // own. An `imap` token carries it (see scopeSatisfies); a `read` token does not.
+  // in. `organize` names that power on its own, so the grant an operator issues to READ
+  // a mailbox is separate from the grant to re-file one, and a token's name says which
+  // it is. An `imap` token carries it (see scopeSatisfies); a `read` token does not.
+  // `GET /api/folders` stays `read`: listing folders does not change any of them.
   { id: "messages-seen", method: "POST", path: "/api/messages/seen", match: "exact", scope: "organize",
     auth: "bearer", body: ["ids", "seen", "for"],
     note: "`for` writes a per-recipient override; under a session it must be the session identity (#410)" },
