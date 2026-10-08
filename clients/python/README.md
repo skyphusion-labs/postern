@@ -212,7 +212,8 @@ API's parsed JSON, so the keys match the worker contract exactly.
 | `reply` | `POST /api/reply` | `{messageId, threadId, ...}` |
 | `list_messages` | `GET /api/messages` | `{items: [summary], cursor}` |
 | `get_message` | `GET /api/messages/{id}` | message dict or `None` |
-| `get_thread` | `GET /api/threads/{id}` | `[message]` |
+| `get_thread` | `GET /api/threads/{id}` | `[message]` (ONE page, default 20; takes `limit`/`cursor`) |
+| `get_thread_page` | `GET /api/threads/{id}` | `{messages, cursor}` -- use this when "is that the whole thread" matters; `cursor is None` means yes |
 | `search` | `GET /api/search` | `{items: [{message, ...}], cursor}` |
 | `get_attachment` | `GET /api/messages/{id}/attachments/{i}` | `Attachment(body, mime, filename)` |
 | `get_folders` | `GET /api/folders` | `[folder]` (unread counts, UIDVALIDITY) |

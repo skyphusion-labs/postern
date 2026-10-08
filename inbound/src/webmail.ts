@@ -1854,7 +1854,11 @@ export const WEBMAIL_HTML = `<!doctype html>
         clear(box);
         var msgs = body.messages || [];
         if (msgs.length <= 1) { return; }
-        box.appendChild(el("h3", { text: "Thread (" + msgs.length + ")" }));
+        // The worker bounds a thread read (#649) and says so with a cursor. Printing just
+        // the page length would claim the thread HAS that many messages, which is the
+        // completeness lie the bound exists to prevent, moved to the human door.
+        var partial = body.cursor ? ", first page" : "";
+        box.appendChild(el("h3", { text: "Thread (" + msgs.length + partial + ")" }));
         msgs.forEach(function (tm) {
           var t = el("div", { class: "t-item" }, [
             el("div", { text: (tm.from || "") + "  -  " + fmtDate(tm.date) }),

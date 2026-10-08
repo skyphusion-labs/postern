@@ -226,8 +226,10 @@ every mode (fts / substr / semantic / hybrid), not only substr. The webmail
 filter chips keep the active query in page state for the current tab.
 
 Thread panel loads (`GET /api/threads/{threadId}`) are **not** search: they list
-every stored sibling in the thread for the current viewer, independent of the
-list/search filter chips. Searching finds messages; opening a hit then loads its
+the stored siblings in the thread for the current viewer, independent of the
+list/search filter chips. The read is BOUNDED (#649, default 20), so the panel
+heading reads `Thread (N, first page)` when the worker reports a cursor. Printing
+only `N` would claim the thread has that many messages. Searching finds messages; opening a hit then loads its
 full thread for reading.
 
 Recent-recipients autocomplete (`GET /api/recipients/recent`) is D-CONTACTS-1:

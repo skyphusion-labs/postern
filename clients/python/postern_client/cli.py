@@ -187,8 +187,13 @@ def build_parser() -> argparse.ArgumentParser:
     g = sub.add_parser("get", help="get one message by id")
     g.add_argument("message_id")
 
-    t = sub.add_parser("thread", help="get every message in a thread")
+    t = sub.add_parser("thread", help="get one page of a thread, oldest first")
     t.add_argument("thread_id")
+    # #649: the worker bounds a thread read, so the paging controls are part of the command
+    # rather than an advanced extra. Without them a long thread could only be read as its
+    # first page.
+    t.add_argument("--limit", type=int, help="max messages in this page (default 20, max 200)")
+    t.add_argument("--cursor", help="cursor from a previous page; omit for the first page")
 
     sc = sub.add_parser("search", help="search messages")
     sc.add_argument("query")
@@ -452,7 +457,10 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
         return 0
 
     if cmd == "thread":
-        _emit(client.get_thread(args.thread_id))
+        # The PAGE, not the bare list: the worker bounds a thread read (#649), so emitting
+        # only the messages would present a first page as a whole conversation. The cursor
+        # rides in the output, where a caller and a human can both see it.
+        _emit(client.get_thread_page(args.thread_id, limit=args.limit, cursor=args.cursor))
         return 0
 
     if cmd == "search":

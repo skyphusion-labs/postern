@@ -90,6 +90,9 @@ const { messageId } = await env.MAILBOX.send({
 `send()` throws on failure; the thrown error carries `.code` (an `E_*` string)
 and `.message`. Wrap in try/catch and log the code. The RPC entrypoint also
 exposes `reply`, `get`, `thread`, `list`, and `search`, mirroring the HTTP API.
+`thread(threadId, opts?)` returns a `Page<StoredMessage>` since #649, like `list`
+and `search` on the same entrypoint: it is bounded (default 20, max 200) and
+`cursor: null` is the positive claim that you have the whole thread.
 
 ## External callers (public HTTPS endpoint)
 

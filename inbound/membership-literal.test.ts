@@ -89,10 +89,10 @@ describe("delivered-set membership matches an address literally", () => {
       const row = await store.getUnscoped(env, "victim@x");
       const threadId = row?.threadId ?? "victim@x";
 
-      const leaked = await store.thread(env, threadId, WILDCARD_VIEWER);
+      const leaked = (await store.thread(env, threadId, WILDCARD_VIEWER)).items;
       expect(leaked.map((m) => m.messageId), "no row may come back under a lookalike").toEqual([]);
 
-      const real = await store.thread(env, threadId, PLAIN_RECIPIENT);
+      const real = (await store.thread(env, threadId, PLAIN_RECIPIENT)).items;
       expect(real.map((m) => m.messageId), "inverse control: the recipient sees its thread").toEqual([
         "victim@x",
       ]);

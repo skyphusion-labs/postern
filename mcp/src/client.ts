@@ -266,9 +266,24 @@ export class PosternClient {
     };
   }
 
-  async thread(threadId: string): Promise<Message[]> {
-    const body = await this.requestGet(`/api/threads/${encodeURIComponent(threadId)}`, {});
-    return (body.messages as Message[]) ?? [];
+  /**
+   * GET /api/threads/{id}. One BOUNDED page of a thread, oldest first (worker #649).
+   *
+   * This used to return `Message[]` and the worker used to answer the WHOLE thread, bodies
+   * included, with no limit and no cursor. A `Page` is the honest return type now: the
+   * cursor is the only truncation signal, and `cursor: null` is the positive claim that
+   * this is the whole thread rather than its first page. Returning a bare array while the
+   * worker paged would have hidden exactly the fact the worker now reports.
+   */
+  async thread(
+    threadId: string,
+    args: { limit?: number; cursor?: string } = {},
+  ): Promise<Page<Message>> {
+    const params: Record<string, string> = {};
+    if (args.limit !== undefined) params.limit = String(args.limit);
+    if (args.cursor) params.cursor = args.cursor;
+    const body = await this.requestGet(`/api/threads/${encodeURIComponent(threadId)}`, params);
+    return page<Message>(body, (body.messages as Message[]) ?? []);
   }
 
   // GET /api/folders. Server-authoritative counts computed with the SAME placement and

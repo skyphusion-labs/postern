@@ -666,6 +666,14 @@ class PosternClient:
         return AttachmentBytes(body=raw, mime=mime, filename=filename)
 
     def get_thread(self, thread_id: str) -> list[Message]:
+        """ONE PAGE of a thread, oldest first.
+
+        The worker bounds this read (#649, default 20) and reports a `cursor`
+        when more remain. This helper returns the messages only and DROPS that
+        cursor, which is safe today because the door has no thread command and
+        nothing calls this outside the tests. A future caller that needs the
+        whole thread must follow the cursor rather than trust this list.
+        """
         body = self._get(f"/api/threads/{urllib.parse.quote(thread_id, safe='')}", {})
         return [Message.from_json(m) for m in body.get("messages", [])]
 

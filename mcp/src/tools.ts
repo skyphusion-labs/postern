@@ -362,13 +362,36 @@ export const READ_TOOLS: ToolDef[] = [
   {
     name: "mailbox_thread",
     scope: "read",
-    description: "Fetch every message in a thread, ordered, by thread id (e.g. to read a full conversation).",
+    description:
+      "Read one BOUNDED page of a thread, oldest first, by thread id. It returns at most "
+      + "`limit` messages (default 20), NOT the whole conversation: a thread row carries the "
+      + "full body, so an unbounded thread read is how one long conversation fills an entire "
+      + "tool result. READING THE RESULT: `cursor` is the only signal that tells a COMPLETE "
+      + "thread from a FIRST PAGE. `cursor: null` means you have the whole thread; a non-null "
+      + "cursor means there are more messages and you must pass it back to continue. `count` "
+      + "is the size of THIS page, never the length of the thread.",
     inputSchema: {
       thread_id: z.string().min(1).describe("the thread id (as returned by search/list/get)"),
+      limit: z.number().int().positive().max(200).optional().describe(
+        "max messages in this page (default 20, max 200). Lower than the list default on "
+          + "purpose: these rows carry full bodies",
+      ),
+      cursor: z.string().optional().describe(
+        "opaque pagination cursor from a previous page's `cursor`; omit for the first page",
+      ),
     },
     handler: async (client, a) => {
-      const messages = await client.thread(a.thread_id);
-      return { threadId: a.thread_id, count: messages.length, messages };
+      const page = await client.thread(a.thread_id, { limit: a.limit, cursor: a.cursor });
+      return {
+        threadId: a.thread_id,
+        // The size of THIS page. Named `count` for continuity with the other read tools,
+        // and the description says plainly that it is not the thread length.
+        count: page.items.length,
+        // Surfaced so an agent can tell a whole thread from a first page without having to
+        // compare `count` against a limit it may not have set.
+        cursor: page.cursor ?? null,
+        messages: page.items,
+      };
     },
   },
   {

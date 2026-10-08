@@ -806,11 +806,24 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     }
 
     // --- read: a thread ---
+    //
+    // Bounded and keyset-paginated since #649. It used to select EVERY message in the
+    // thread, each one a full body, so the size of the answer was the size of the
+    // conversation. `cursor` is the truncation signal and the only one: per the Page
+    // contract, `cursor: null` is a POSITIVE claim that this is the whole thread, so a
+    // non-null cursor says "first page, not thread". A second flag would be two names for
+    // one fact.
     if (request.method === "GET" && path.startsWith("/api/threads/")) {
       const id = decodeURIComponent(path.slice("/api/threads/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "thread id required" }, 400);
-      const messages = await store.thread(env, id, sessionReadScope(env, resolution));
-      return json({ ok: true, threadId: id, messages });
+      const page = await store.thread(env, id, sessionReadScope(env, resolution), {
+        limit: parseLimit(url),
+        cursor: url.searchParams.get("cursor") ?? undefined,
+      });
+      // `messages` keeps its name and its position, so a caller that read the whole thread
+      // before still reads messages; what changed is that it is now a bounded page and the
+      // response SAYS whether more exist.
+      return json({ ok: true, threadId: id, messages: page.items, cursor: page.cursor });
     }
 
     return json({ ok: false, error: "not_found" }, 404);

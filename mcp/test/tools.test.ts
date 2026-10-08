@@ -163,12 +163,37 @@ describe("mailbox_get", () => {
 });
 
 describe("mailbox_thread", () => {
-  it("maps to client.thread and counts messages", async () => {
-    const client: any = { thread: vi.fn().mockResolvedValue([{ messageId: "m1" }, { messageId: "m2" }]) };
+  it("maps to client.thread and counts THIS PAGE", async () => {
+    const client: any = {
+      thread: vi.fn().mockResolvedValue({ items: [{ messageId: "m1" }, { messageId: "m2" }], cursor: null }),
+    };
     const out: any = await tool("mailbox_thread").handler(client, { thread_id: "t1" });
-    expect(client.thread).toHaveBeenCalledWith("t1");
+    expect(client.thread).toHaveBeenCalledWith("t1", { limit: undefined, cursor: undefined });
     expect(out.count).toBe(2);
     expect(out.threadId).toBe("t1");
+    expect(out.cursor).toBeNull();
+  });
+
+  it("forwards limit and cursor, and SURFACES a non-null cursor (#649)", async () => {
+    // The agent-visible half of the bound: without the cursor on the result, a first page
+    // and a whole thread are indistinguishable in a tool response.
+    const client: any = {
+      thread: vi.fn().mockResolvedValue({ items: [{ messageId: "m1" }], cursor: "cur-2" }),
+    };
+    const out: any = await tool("mailbox_thread").handler(client, {
+      thread_id: "t1", limit: 1, cursor: "cur-1",
+    });
+    expect(client.thread).toHaveBeenCalledWith("t1", { limit: 1, cursor: "cur-1" });
+    expect(out.count).toBe(1);
+    expect(out.cursor).toBe("cur-2");
+  });
+
+  it("says in its description that the cursor is what distinguishes a page from a thread", () => {
+    // A caller cannot learn this from the shape, so #649 requires it be stated. Asserted so
+    // the statement cannot quietly go missing, the same way #647 pinned INCLUSIVE.
+    const d = tool("mailbox_thread").description;
+    expect(d).toMatch(/cursor: null/i);
+    expect(d).toMatch(/first page/i);
   });
 });
 

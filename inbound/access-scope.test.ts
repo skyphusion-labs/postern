@@ -87,9 +87,11 @@ describe("AccessScope: the read projections agree with the writes", () => {
   it("thread separates an absent viewer from an empty one", async () => {
     const { env } = await seeded();
     const threadId = (await store.getUnscoped(env, MINE))?.threadId as string;
-    expect((await store.thread(env, threadId)).length, "absent = estate").toBe(1);
-    expect((await store.thread(env, threadId, [])).length, "empty member set").toBe(0);
-    expect((await store.thread(env, threadId, [STRANGER])).length, "another member").toBe(0);
-    expect((await store.thread(env, threadId, [OWNER])).length, "the owner").toBe(1);
+    // `.items` since #649: a thread read is a bounded PAGE. The access-scope property under
+    // test is unchanged, which is the point of reading it through the new shape.
+    expect((await store.thread(env, threadId)).items.length, "absent = estate").toBe(1);
+    expect((await store.thread(env, threadId, [])).items.length, "empty member set").toBe(0);
+    expect((await store.thread(env, threadId, [STRANGER])).items.length, "another member").toBe(0);
+    expect((await store.thread(env, threadId, [OWNER])).items.length, "the owner").toBe(1);
   });
 });

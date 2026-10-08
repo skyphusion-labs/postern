@@ -85,7 +85,32 @@ async function seed(env: Env, ctx: ExecutionContext, raw: import("node:sqlite").
     .run("m-alpha@x");
 }
 
-type Probe = (env: Env, ctx: ExecutionContext) => Promise<void>;
+type Probe = (
+  env: Env,
+  ctx: ExecutionContext,
+  raw: import("node:sqlite").DatabaseSync,
+) => Promise<void>;
+
+/** Put every seeded row in ONE thread and return its id (#649).
+ *
+ *  Through `raw`, because putInbound takes no inReplyTo and the probe needs a thread with
+ *  several members. Same escape hatch seed() uses for the trash and seen fixtures. */
+function seedThread(raw: import("node:sqlite").DatabaseSync): string {
+  const id = "t-probe";
+  raw.prepare("UPDATE messages SET thread_id = ?").run(id);
+  return id;
+}
+
+/** A thread read, as the response body. */
+async function threadBody(
+  env: Env,
+  ctx: ExecutionContext,
+  path: string,
+): Promise<{ messages: Array<{ messageId: string }>; cursor: string | null }> {
+  const res = await handleApi(get(path), env, ctx);
+  expect(res.status, `${path} should be 200`).toBe(200);
+  return (await res.json()) as { messages: Array<{ messageId: string }>; cursor: string | null };
+}
 
 /** The key sets a read surface actually returned, one entry per row.
  *
@@ -253,6 +278,35 @@ const LIST_PROBES: Record<string, Probe> = {
   },
 };
 
+// #649: the thread route declares parameters now, so they are proved live here like every
+// other declared parameter rather than trusted because the code looks right.
+const THREAD_PROBES: Record<string, Probe> = {
+  limit: async (e, c, raw) => {
+    const id = seedThread(raw);
+    const page = await threadBody(e, c, `/api/threads/${id}?limit=2`);
+    expect(page.messages).toHaveLength(2);
+    // CONTROL: the unlimited read is WIDER, so limit genuinely narrowed rather than
+    // matching a thread that happened to hold two.
+    const full = await threadBody(e, c, `/api/threads/${id}`);
+    expect(full.messages.length).toBeGreaterThan(2);
+  },
+  cursor: async (e, c, raw) => {
+    const id = seedThread(raw);
+    const page1 = await threadBody(e, c, `/api/threads/${id}?limit=2`);
+    expect(page1.cursor, "no cursor: the pagination probe would be vacuous").toBeTruthy();
+    const page2 = await threadBody(
+      e,
+      c,
+      `/api/threads/${id}?limit=2&cursor=${encodeURIComponent(page1.cursor as string)}`,
+    );
+    const first = page1.messages.map((m) => m.messageId);
+    const second = page2.messages.map((m) => m.messageId);
+    expect(second, "the second page repeated the first").not.toEqual(first);
+    // Oldest-first, so the cursor must move FORWARD: no row may appear in both pages.
+    expect(second.filter((m) => first.includes(m))).toEqual([]);
+  },
+};
+
 const SEARCH_PROBES: Record<string, Probe> = {
   q: async (e, c) => {
     expect(await ids(await handleApi(get("/api/search?q=uniqueone"), e, c))).toEqual(["m-alpha@x"]);
@@ -341,7 +395,7 @@ describe("#417 the two contract files join", () => {
     // an absent row mean "nobody looked".
     const takesNothing = [
       "health", "root", "robots", "sitemap", "webmail", "mta-sts", "ingest", "session-refresh",
-      "message-get", "thread-get", "message-delete", "mobileconfig",
+      "message-get", "message-delete", "mobileconfig",
       "admin-smtp-credential-delete", "admin-roles", "imap-roles",
     ];
     const withRows = new Set(Object.keys(PARAMS.params));
@@ -354,6 +408,7 @@ describe("#417 every declared query parameter is LIVE against the real handler",
   for (const [id, probes] of [
     ["messages-list", LIST_PROBES],
     ["search", SEARCH_PROBES],
+    ["thread-get", THREAD_PROBES],
   ] as const) {
     const declared = PARAMS.params[id].query ?? [];
 
@@ -365,7 +420,7 @@ describe("#417 every declared query parameter is LIVE against the real handler",
       it(`${id}?${param}= is refused when bogus, or changes the answer`, async () => {
         const { env, ctx, raw } = realEnv();
         await seed(env, ctx, raw);
-        await probes[param](env, ctx);
+        await probes[param](env, ctx, raw);
       });
     }
   }

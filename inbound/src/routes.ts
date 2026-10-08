@@ -203,7 +203,8 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "message-get", method: "GET", path: "/api/messages/", match: "prefix", scope: "read", auth: "bearer",
     template: "/api/messages/{id}", note: "single message and its /attachments/{i} sub-route" },
   { id: "thread-get", method: "GET", path: "/api/threads/", match: "prefix", scope: "read", auth: "bearer",
-    template: "/api/threads/{id}" },
+    template: "/api/threads/{id}", query: ["limit", "cursor"],
+    note: "bounded and keyset-paginated (#649): it used to select EVERY message in the thread, bodies included, with no LIMIT and no cursor. Oldest first, so the keyset reads FORWARD through the same (date, id) tuple the other read routes use. Default 20, lower than the summary default because a thread row carries full bodies; max 200. `cursor: null` is the POSITIVE claim that this is the whole thread, so a non-null cursor means first page, not thread" },
 ];
 
 function methodMatches(spec: RouteSpec, method: string): boolean {

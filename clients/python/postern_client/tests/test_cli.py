@@ -86,10 +86,25 @@ class ReadCliTest(unittest.TestCase):
         self.assertIn("not found", err)
 
     def test_thread(self):
-        t = FakeTransport(body=b'{"ok":true,"messages":[{"messageId":"a"}]}')
+        # The PAGE since #649, not a bare list: the worker bounds a thread read, so the
+        # cursor has to reach the output or a first page prints as a whole conversation.
+        t = FakeTransport(body=b'{"ok":true,"messages":[{"messageId":"a"}],"cursor":null}')
         code, out, _ = run(["thread", "t1"], t)
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)[0]["messageId"], "a")
+        body = json.loads(out)
+        self.assertEqual(body["messages"][0]["messageId"], "a")
+        # None is the positive claim that this IS the whole thread.
+        self.assertIsNone(body["cursor"])
+
+    def test_thread_truncated_shows_the_cursor(self):
+        t = FakeTransport(body=b'{"ok":true,"messages":[{"messageId":"a"}],"cursor":"cur-2"}')
+        code, out, _ = run(["thread", "t1", "--limit", "1"], t)
+        self.assertEqual(code, 0)
+        body = json.loads(out)
+        # Without this the command would present one message as the entire thread.
+        self.assertEqual(body["cursor"], "cur-2")
+        # The flag reached the wire, named exactly rather than substring-matched.
+        self.assertEqual(t.last_query().get("limit"), ["1"])
 
     def test_search(self):
         t = FakeTransport(body=b'{"ok":true,"items":[],"cursor":null}')
