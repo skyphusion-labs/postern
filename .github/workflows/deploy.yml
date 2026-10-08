@@ -64,6 +64,12 @@ name: deploy
 #   unlocks leg 6's REGRESSION GUARD. Without it the smoke can only ask "may this token
 #   organize?", which a worker that had LOST the scope wall would also answer yes to; the
 #   guard asks the one question only a correct worker passes. Unset is reported as a GAP.
+#   No secret is needed to PIN the probe to this release: the smoke step passes the tag
+#   as POSTERN_EXPECT_VERSION, and leg 0 polls GET /health until the live instance
+#   reports it. A deploy does not land everywhere at once, and an unpinned probe can
+#   measure the version being replaced. See pinToVersion() in inbound/smoke.mjs for the
+#   race that made this necessary, and for why it is not the same check as the
+#   version_id read-back below.
 #   POSTERN_SMOKE_IDENTITY_TOKEN (per-identity send bearer) unlocks the leg-9 drafts
 #   LIFECYCLE (create, read back, stale-PUT 409 E_CONFLICT, PUT, delete); without it
 #   that block SKIPs and the drafts routes are never proven against the live
@@ -261,6 +267,16 @@ jobs:
       # operator has the smoke secrets configured (the same ones smoke-staging.yml
       # uses), and says so when it does not, so a skipped probe never reads as a
       # passed one. Outbound + store checks only; no MX poll on the release path.
+      #
+      # POSTERN_EXPECT_VERSION pins the probe to THIS release. The step above proves
+      # the UPLOAD by comparing Cloudflare version_id UUIDs; it never reads a semver
+      # and it cannot see which version an edge POP answers with. The smoke asks the
+      # running artifact instead, and refuses to measure anything until /health agrees
+      # with the tag. Without that, a probe racing a converging edge can assert against
+      # the PREVIOUS version and report a regression guard green while the newly
+      # deployed code has lost the thing being guarded (#692).
+      #
+      # github.ref_name is the tag (v1.5.0); smoke.mjs strips the leading "v".
       - name: Probe the live instance (inbound/smoke.mjs)
         if: startsWith(github.ref, 'refs/tags/v')
         working-directory: inbound
@@ -274,6 +290,7 @@ jobs:
           POSTERN_NO_ORGANIZE_TOKEN: ${{ secrets.POSTERN_SMOKE_NO_ORGANIZE_TOKEN }}
           POSTERN_FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
           POSTERN_TO: ${{ secrets.POSTERN_SMOKE_TO }}
+          POSTERN_EXPECT_VERSION: ${{ github.ref_name }}
         run: |
           set -eo pipefail
           if [ -z "$POSTERN_BASE_URL" ] || [ -z "$POSTERN_API_TOKEN" ] || [ -z "$POSTERN_FROM" ] || [ -z "$POSTERN_TO" ]; then

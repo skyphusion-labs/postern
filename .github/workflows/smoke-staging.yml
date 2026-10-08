@@ -20,6 +20,14 @@ name: smoke-staging
 #   POSTERN_SMOKE_FROM       -- allowed From address for POST /api/send
 #   POSTERN_SMOKE_TO         -- recipient the smoke can address (need not be readable)
 #
+# This run is deliberately NOT pinned to an expected version: there is no tag on a
+# nightly, and POSTERN_EXPECT_VERSION must be an explicit input rather than something
+# the smoke derives for itself. Leg 0 therefore reports a GAP naming what is unpinned.
+# That is correct here and it is not noise: a nightly is not racing a deploy, so the
+# version it measures is whatever has been live for hours. The deploy path is where the
+# race lives, and deploy.yml pins it there. To pin a one-off dispatch, run the script
+# by hand with POSTERN_EXPECT_VERSION set.
+#
 # Skips cleanly when secrets are absent (forks, fresh clones).
 
 on:
