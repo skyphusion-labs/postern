@@ -43,7 +43,7 @@ const MANIFEST = JSON.parse(readFileSync(new URL("../contracts/api-routes.json",
 const API_TS = readFileSync(new URL("./src/api.ts", import.meta.url), "utf8");
 
 const SCOPED = MANIFEST.routes.filter((r) => r.scope !== null);
-const ALL_SCOPES = ["read", "send", "delete", "imap"] as const;
+const ALL_SCOPES = ["read", "send", "delete", "imap", "organize"] as const;
 
 // One token per scope, plus the unscoped `both`. These are the env names the
 // worker itself resolves (POSTERN_API_TOKEN* in resolveToken), so the scope
@@ -54,6 +54,7 @@ const TOKENS: Record<string, string> = {
   send: "tok-send",
   delete: "tok-delete",
   imap: "tok-imap",
+  organize: "tok-organize",
 };
 
 function env() {
@@ -63,6 +64,7 @@ function env() {
     POSTERN_API_TOKEN_SEND: TOKENS.send,
     POSTERN_API_TOKEN_DELETE: TOKENS.delete,
     POSTERN_API_TOKEN_IMAP: TOKENS.imap,
+    POSTERN_API_TOKEN_ORGANIZE: TOKENS.organize,
   });
 }
 

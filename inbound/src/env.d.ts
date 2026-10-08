@@ -163,6 +163,26 @@ interface Env {
    */
   POSTERN_API_TOKEN_IMAP?: string;
   /**
+   * Optional per-function ORGANIZE-scoped mailbox token slot (#692). Holds a
+   * comma-separated SET of tokens (#154, the same format as the READ, SEND and
+   * DELETE slots). A caller presenting ANY member reaches only the three organize
+   * routes: POST /api/messages/seen, /flags and /move. It cannot read the store,
+   * send, hard-delete, or reach admin routes. `GET /api/folders` is declared `read`,
+   * so this slot does not reach it either: listing folders reads the mailbox.
+   *
+   * #687 gave `organize` its own scope and gave it no slot of its own. An operator
+   * could then grant organize only through the IMAP door's `imap` token or through a
+   * full `both` key. The first makes CI and the door share one credential; the second
+   * also reaches send, delete and the admin routes. Both are wider than the grant,
+   * which is the per-function-keys rule broken by omission. Issue this slot to a CI
+   * probe or a filing bot that must re-file mail and must not read it.
+   *
+   * `both` and `imap` still satisfy organize, so no deployment has to re-provision.
+   * Independent of POSTERN_API_TOKEN. wrangler secret put POSTERN_API_TOKEN_ORGANIZE.
+   * Leave unset to keep the single-token (`both`) posture.
+   */
+  POSTERN_API_TOKEN_ORGANIZE?: string;
+  /**
    * Optional per-identity SEND registry (#28). A JSON object mapping the sha256 HEX
    * of a send token -> its bound sender identity { from, displayName? }. MANY tokens,
    * each the SAME send scope but a DISTINCT, authoritative From, so crew + released

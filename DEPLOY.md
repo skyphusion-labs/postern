@@ -230,6 +230,10 @@ npx wrangler secret put POSTERN_API_TOKEN_DELETE
 # imap-scoped (IMAP door): durable Drafts + Trash/Junk/Archive APPEND import (#352);
 # unset means those writes refuse rather than silently no-op
 npx wrangler secret put POSTERN_API_TOKEN_IMAP
+# organize-only: mark read, set flags, move between folders (#692). Not read, not
+# send, not delete, and NOT the folder list, which is a read. What a filing bot or a
+# CI probe holds when it must file mail and must not read it
+npx wrangler secret put POSTERN_API_TOKEN_ORGANIZE
 ```
 
 With `workers_dev` enabled (above), `npm run deploy` prints the deployed URL, e.g.
