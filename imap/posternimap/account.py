@@ -526,9 +526,12 @@ class PosternAccount:
 
         Returns:
           * "refuse"     -- INBOX/All: tagged NO (no honest home for a new message).
-          * "sent"       -- Sent: fallback matcher; OK on hit, refuse on miss.
-          * "drafts"     -- Drafts: persist via POST /api/drafts.
-          * "placement"  -- Trash/Junk/Archive: move existing or refuse new.
+          * "sent"       -- Sent: id-exact + fallback matcher; OK on a hit, and on a
+                            MISS persisted via POST /api/imap/import (core
+                            unblocker 3), not refused.
+          * "drafts"     -- Drafts: persist via POST /api/imap/drafts.
+          * "placement"  -- Trash/Junk/Archive: move an existing message, or persist
+                            a genuinely new one via the same import seam.
           * "placeholder"-- Notes: reject cleanly (tagged NO).
           * "unknown"    -- no such mailbox -> NO [TRYCREATE].
         """

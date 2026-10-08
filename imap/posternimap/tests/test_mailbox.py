@@ -394,6 +394,127 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(len(errs), 1)
         self.assertTrue(errs[0].check(AppendRejectedError))
 
+    def _sent_mailbox_with_import(self, msgs, identity="a@example.com"):
+        """A Sent view wired to the import seam, which is what makes a MISS persist."""
+        from posternimap.mailbox import PosternMailbox
+
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
+        client = PosternClient("https://x", "t", transport=transport)
+        mb = PosternMailbox(
+            client,
+            direction="outbound",
+            page_size=2,
+            imap_client=client,
+            identity=identity,
+        )
+        return mb, transport
+
+    # The APPEND raw used by the id-collision pair below. Same Message-ID as the
+    # seeded row in both tests; the two differ only in whether the CONTENT matches.
+    _COLLIDING_ID = "collide@postern"
+
+    def _colliding_raw(self, subject, body):
+        return (
+            b"From: a@example.com\r\nTo: b@example.com\r\n"
+            + b"Subject: " + subject.encode() + b"\r\n"
+            + b"Message-ID: <" + self._COLLIDING_ID.encode() + b">\r\n"
+            + b"Date: Sat, 18 Jul 2026 12:00:05 +0000\r\n\r\n"
+            + body.encode() + b"\r\n"
+        )
+
+    def test_append_sent_id_match_on_a_different_message_is_persisted(self):
+        """#643: a Sent APPEND whose Message-ID collides with an UNRELATED stored
+        outbound row must still end up in the mailbox.
+
+        The id shortcut in `_append_sent` accepted ANY stored outbound row carrying
+        the same Message-ID, whatever its sender, subject, body or date, and returned
+        the plain `return` that `addMessage` reports to the client as OK -- having
+        stored nothing. The client is told its sent copy was filed and it was not, so
+        it neither retries nor warns.
+
+        An assertion on the IMAP response alone CANNOT see this (the old behaviour
+        returns the same OK this test's fix does), which is exactly why the branch
+        read as correct for so long. So this asserts the message is RETRIEVABLE
+        afterwards, which is the actual APPEND contract.
+        """
+        msgs = [
+            make_message(
+                self._COLLIDING_ID,
+                direction="outbound",
+                body="an entirely different body",
+                **{
+                    "from": "someone-else@example.com",
+                    "to": "nobody@example.com",
+                    "subject": "an unrelated message",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                },
+            )
+        ]
+        mb, transport = self._sent_mailbox_with_import(msgs)
+        raw = self._colliding_raw("the message the user actually sent", "my real body")
+
+        out, errs = [], []
+        mb.addMessage(raw, flags=["\\Seen"], date=None).addCallbacks(
+            out.append, errs.append
+        )
+        self.assertEqual(errs, [])
+        self.assertEqual(out, [None])
+
+        # The assertion the OK cannot make: the store gained the appended message.
+        stored = [
+            m
+            for m in transport.messages
+            if m["subject"] == "the message the user actually sent"
+        ]
+        self.assertEqual(len(stored), 1, "the APPENDed message was not stored")
+        self.assertEqual(stored[0]["bodyText"].strip(), "my real body")
+        # It is filed under a DERIVED id, because `messages.message_id` is UNIQUE and
+        # the colliding id is taken (inbound/src/store.ts forkedMessageId).
+        self.assertNotEqual(stored[0]["messageId"], self._COLLIDING_ID)
+        # ...and the unrelated row that merely shared the id is untouched.
+        original = [
+            m for m in transport.messages if m["messageId"] == self._COLLIDING_ID
+        ]
+        self.assertEqual(len(original), 1)
+        self.assertEqual(original[0]["subject"], "an unrelated message")
+
+    def test_append_sent_id_match_on_the_same_message_is_a_true_dedup(self):
+        """The positive control for the test above, and the reason the fix is a
+        VERIFIED shortcut rather than a deleted one.
+
+        When the colliding id belongs to the SAME message, the message really is
+        already in the mailbox, so OK is honest and a second row would be a spurious
+        duplicate. Without this test, deleting the shortcut outright would also make
+        the test above pass.
+        """
+        msgs = [
+            make_message(
+                self._COLLIDING_ID,
+                direction="outbound",
+                body="my real body\r\n",
+                **{
+                    "from": "a@example.com",
+                    "to": "b@example.com",
+                    "subject": "the message the user actually sent",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                },
+            )
+        ]
+        mb, transport = self._sent_mailbox_with_import(msgs)
+        raw = self._colliding_raw("the message the user actually sent", "my real body")
+
+        out, errs = [], []
+        mb.addMessage(raw, flags=["\\Seen"], date=None).addCallbacks(
+            out.append, errs.append
+        )
+        self.assertEqual(errs, [])
+        self.assertEqual(out, [None])
+        # No second row, and the door settled it locally without an import round trip.
+        self.assertEqual(len(transport.messages), 1)
+        self.assertIsNone(transport.last_import_payload)
+
     def test_append_to_drafts_persists(self):
         from twisted.internet import defer
         from posternimap.mailbox import PosternMailbox
