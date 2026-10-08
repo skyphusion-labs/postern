@@ -202,14 +202,14 @@ describe("mintNativeSession + resolveSession", () => {
     const minted = await mintNativeSession(env, "conrad@skyphusion.org", "hunter2hunter2");
     expect(minted).not.toBeNull();
     expect(minted!.identity.from).toBe("conrad@skyphusion.org");
-    expect(minted!.caps).toEqual(["read", "send", "delete"]);
+    expect(minted!.caps).toEqual(["read", "send", "delete", "organize"]);
     // The stored row holds only the HASH of the id, never the raw cookie value.
     expect(sessions.length).toBe(1);
     expect(sessions[0].id_hash).not.toBe(minted!.rawId);
     const resolved = await resolveSession(env, minted!.rawId);
     expect(resolved).not.toBeNull();
     expect(resolved!.identity.from).toBe("conrad@skyphusion.org");
-    expect(resolved!.caps).toEqual(["read", "send", "delete"]);
+    expect(resolved!.caps).toEqual(["read", "send", "delete", "organize"]);
   });
 
   it("does not resolve an unknown, revoked, or expired cookie", async () => {
@@ -296,7 +296,7 @@ describe("POST /api/session", () => {
     };
     expect(body.ok).toBe(true);
     expect(body.identity.from).toBe("conrad@skyphusion.org");
-    expect(body.capabilities).toEqual(["read", "send", "delete"]);
+    expect(body.capabilities).toEqual(["read", "send", "delete", "organize"]);
     expect(typeof body.csrfToken).toBe("string");
     const cookies = setCookies(res);
     const sessionCk = cookies.find((c) => c.startsWith(SESSION_COOKIE + "="));
@@ -329,7 +329,7 @@ describe("GET /api/session (whoami / restore)", () => {
     const body = (await res.json()) as { ok: boolean; identity: { from: string }; capabilities: string[]; csrfToken: string };
     expect(body.ok).toBe(true);
     expect(body.identity.from).toBe("conrad@skyphusion.org");
-    expect(body.capabilities).toEqual(["read", "send", "delete"]);
+    expect(body.capabilities).toEqual(["read", "send", "delete", "organize"]);
     expect(body.csrfToken).toBe(minted!.csrfToken);
     expect(setCookies(res).some((c) => c.startsWith(SESSION_COOKIE + "="))).toBe(true);
   });

@@ -198,7 +198,7 @@ class FixtureTest(unittest.TestCase):
         # credential split would be silently meaningless.
         self.assertEqual(match_route("POST", "/api/imap/import")["scope"], "imap")
         self.assertEqual(match_route("GET", "/api/messages")["scope"], "read")
-        self.assertEqual(match_route("POST", "/api/messages/seen")["scope"], "read")
+        self.assertEqual(match_route("POST", "/api/messages/seen")["scope"], "organize")
 
 
 @unittest.skipUnless(HAVE_TABLE, SKIP_REASON)

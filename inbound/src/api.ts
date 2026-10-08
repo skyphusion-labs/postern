@@ -231,11 +231,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
 
     // --- read-state: mark messages (un)read (#seen) ---
     // POST /api/messages/seen { ids: string[], seen: boolean } -> { updated }. This
-    // backs the IMAP \Seen flag (the read door STOREs it) and a webmail "mark read",
-    // so a human can tell new mail from mail already read. It is a `read`-scoped route
-    // (see requiredScope): marking read is a side effect of READING the mailbox, so a
-    // read-only token -- what the IMAP proxy commonly holds -- can manage its own read
-    // state without being handed send/admin power. Idempotent; unknown ids are skipped.
+    // backs the IMAP \Seen flag (the door STOREs it) and a webmail "mark read", so a
+    // human can tell new mail from mail already read. It is an `organize`-scoped route
+    // (#685, see requiredScope): it CHANGES stored state, so it needs its own grant
+    // rather than riding on `read`. The IMAP door presents its `imap` token for this.
+    // Idempotent; unknown ids are skipped.
     if (request.method === "POST" && path === "/api/messages/seen") {
       const body = await readJson<{ ids?: unknown; seen?: unknown; for?: unknown }>(request);
       if (!Array.isArray(body.ids) || !body.ids.every((x) => typeof x === "string")) {

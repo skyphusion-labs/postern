@@ -91,6 +91,19 @@ describe("#544 identity-bound read credentials force the viewer", () => {
     });
   }
 
+  // Same bound identity, plus the #685 `organize` grant. The two envs differ in ONE
+  // string, which is what makes the pair below evidence: the refusal and the scoped
+  // write are the same token and the same routes, separated only by the grant.
+  async function organizeIdentityEnv() {
+    const hash = await sha256Hex(IDENTITY_TOKEN);
+    return realEnv({
+      WEBMAIL_AUTH_BACKEND: "native",
+      POSTERN_SEND_IDENTITIES: JSON.stringify({
+        [hash]: { from: IDENTITY, scopes: ["read", "organize"] },
+      }),
+    });
+  }
+
   it("list and search return only the bound identity's mail (not the estate)", async () => {
     const { env, ctx } = await readIdentityEnv();
     await seed(env, ctx);
@@ -125,8 +138,10 @@ describe("#544 identity-bound read credentials force the viewer", () => {
     expect(all.items.map((m) => m.messageId).sort()).toEqual(["mine@x", "theirs@x"]);
   });
 
-  it("flags/move on a registry read token only touch own mail (not estate)", async () => {
-    const { env, ctx } = await readIdentityEnv();
+  it("flags/move on a registry organize token only touch own mail (not estate)", async () => {
+    // `["read", "organize"]`: the grant decides WHICH ROUTES, the bound viewer decides
+    // WHOSE MAIL. This arm is about the second, so the token must clear the first.
+    const { env, ctx } = await organizeIdentityEnv();
     await seed(env, ctx);
     // Flag the other person's message: with bound viewer it must be a no-op (0 updated).
     const flag = await handleApi(
@@ -154,6 +169,38 @@ describe("#544 identity-bound read credentials force the viewer", () => {
     expect(move.status).toBe(200);
     const moveBody = (await move.json()) as { updated: number };
     expect(moveBody.updated, "must not move another identity's mail").toBe(0);
+  });
+
+  it("a registry token granted only read cannot flag or move at all (#685)", async () => {
+    const { env, ctx } = await readIdentityEnv();
+    await seed(env, ctx);
+    // Its OWN message, which the arm above shows an organize-granted token may touch.
+    // So the 403 here is the GRANT refusing, not the viewer predicate.
+    for (const [path, body] of [
+      ["/api/messages/flags", { ids: ["mine@x"], set: { flagged: true } }],
+      ["/api/messages/move", { ids: ["mine@x"], mailbox: "trash" }],
+    ] as Array<[string, unknown]>) {
+      const res = await handleApi(
+        new Request(`https://postern.example${path}`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${IDENTITY_TOKEN}`, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        env,
+        ctx,
+      );
+      expect(res.status, `${path} must refuse a read-only registry token`).toBe(403);
+      expect((await res.json() as { message?: string }).message).toContain("organize");
+    }
+  });
+
+  it("CONTROL: that same read-only token still reads its own mail", async () => {
+    const { env, ctx } = await readIdentityEnv();
+    await seed(env, ctx);
+    const res = await handleApi(bearer("/api/messages", IDENTITY_TOKEN), env, ctx);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Array<{ messageId: string }> };
+    expect(body.items.map((m) => m.messageId)).toEqual(["mine@x"]);
   });
 });
 

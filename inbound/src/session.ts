@@ -78,7 +78,10 @@ function posInt(raw: string | undefined, fallback: number): number {
 // within the one shared mailbox, #352) but NOT admin (never reindex or credential
 // provisioning; admin is held only by a `both` token). Carried as a SET so the
 // authorization gate checks membership rather than collapsing to the single Scope enum.
-const NATIVE_SESSION_CAPS = ["read", "send", "delete"];
+// `organize` (#685) lets the human door change read state, flags and placement. It is
+// snapshotted into the session row at mint, so a session minted before #685 does NOT
+// carry it and is refused on those routes until the user logs in again.
+export const NATIVE_SESSION_CAPS = ["read", "send", "delete", "organize"];
 
 export interface SessionResolution {
   identity: BoundIdentity;   // the bound From (authoritative sender for this session)

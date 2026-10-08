@@ -34,13 +34,21 @@ import { URL } from "node:url";
 import { ROUTE_TABLE, matchRoute, requiredScope, type RouteScope } from "./src/routes";
 
 // ---------------------------------------------------------------------------
-// 1. Derivation: the if-chain this table replaced, copied verbatim as a reference.
+// 1. Derivation: an INDEPENDENT hand-written copy of the scope policy, kept here so the
+//    table-driven `requiredScope` is checked against something that is not itself derived
+//    from the table.
+//
+//    It began as the pre-#417 if-chain copied verbatim. It is no longer verbatim: #685
+//    moved seen/flags/move from `read` to `organize` on purpose. So this function now
+//    tracks the INTENDED policy rather than the historical chain, and a deliberate policy
+//    change has to be made in both places. That duplication is the point of the arm; if
+//    it is ever derived from ROUTE_TABLE it stops being evidence.
 // ---------------------------------------------------------------------------
 function referenceRequiredScope(method: string, path: string): RouteScope | null {
   if (method === "POST" && (path === "/api/send" || path === "/send")) return "send";
   if (method === "POST" && path === "/api/reply") return "send";
-  if (method === "POST" && path === "/api/messages/seen") return "read";
-  if (method === "POST" && (path === "/api/messages/flags" || path === "/api/messages/move")) return "read";
+  if (method === "POST" && path === "/api/messages/seen") return "organize";
+  if (method === "POST" && (path === "/api/messages/flags" || path === "/api/messages/move")) return "organize";
   if (path === "/api/drafts" || path.startsWith("/api/drafts/")) return "send";
   if (path === "/api/imap/drafts" || path.startsWith("/api/imap/drafts/")) return "imap";
   if (method === "POST" && path === "/api/imap/import") return "imap";

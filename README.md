@@ -34,9 +34,20 @@ host. Sitemap: [demo.posternonline.com/sitemap.xml](https://demo.posternonline.c
 Mail **any** address `@posternonline.com` and watch it appear in the mailbox.
 That is the product working: Email Routing -> worker -> D1 store.
 
-The demo token is READ-scoped and public by design: send, reply, and delete are
-refused by the API scope wall, and webmail hides compose for it. The demo mailbox
-is shared and public, so do not mail anything private.
+The demo token is READ-scoped and public by design. Here is what that means.
+
+It can read. It lists messages, reads one, walks a thread, searches, downloads an
+attachment, and lists folders.
+
+It cannot write. The API scope wall refuses send, reply and delete. It also refuses the
+three routes that change stored state: mark read, set flags, and move between folders.
+Those need the `organize` scope, which this token does not carry. Webmail hides compose
+for it.
+
+A read token cannot change anything in the mailbox. If you run your own Postern, a read
+token you issue has the same limits.
+
+The demo mailbox is shared and public, so do not mail anything private.
 
 MCP config for agents:
 
