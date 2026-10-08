@@ -135,10 +135,10 @@ preflight, `.github/scripts/tag-preflight.sh`, and refuses the whole set if the
 tag is not shippable. Before you push `vX.Y.Z`, make sure that commit is on your
 default branch and carries the same version in all three pins
 (`clients/python/pyproject.toml`, `clients/python/postern_client/__init__.py`,
-`inbound/package.json`) plus a non-empty `## vX.Y.Z` section in `CHANGELOG.md`.
+`inbound/package.json`) and in `inbound/src/version.ts` (what `/health` reports), plus a non-empty `## vX.Y.Z` section in `CHANGELOG.md`.
 This is deliberate: it exists because a tag once deployed production while the
 release and publish jobs failed on missing pins. If you run your own fork on your
-own version numbers, bump those three pins and add your CHANGELOG section in the
+own version numbers, bump those three pins and `inbound/src/version.ts`, and add your CHANGELOG section in the
 same commit you tag.
 
 **In a fork, a `v*` tag fires more than the deploy.** The same tag also triggers

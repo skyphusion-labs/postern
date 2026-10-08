@@ -174,7 +174,7 @@ dispatch from a branch never ships prod. Public repo -> GitHub-hosted `ubuntu-la
 
 **Every tag workflow runs ONE shared preflight first** (`.github/workflows/tag-preflight.yml` ->
 `.github/scripts/tag-preflight.sh`), and each lists it in `needs:`, so the tag fan-out is
-all-or-nothing. It asserts the tag equals all four pins, that `CHANGELOG.md` has a non-empty
+all-or-nothing. It asserts the tag equals the three pins plus `inbound/src/version.ts`, that `CHANGELOG.md` has a non-empty
 `## vX.Y.Z` section, and that the tag is on `origin/main`; `postern-mcp-v*` tags get the same gate
 against `mcp/package.json`. Before it existed the five `v*` workflows were peers with no ordering, so
 v1.0.5 deployed production and rolled both door images off a tag whose release + PyPI jobs failed.

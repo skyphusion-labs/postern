@@ -35,7 +35,7 @@ jobs:
   # inbound/package.json), the CHANGELOG section, and tag-on-main ancestry, all
   # asserted once, for every tag workflow, before any of them acts. On a
   # workflow_dispatch there is no tag to compare against, so the preflight
-  # instead asserts the three pins agree with each other, which keeps a recovery
+  # instead asserts the three pins and inbound/src/version.ts agree with each other, which keeps a recovery
   # publish off a half-bumped tree.
   preflight:
     uses: ./.github/workflows/tag-preflight.yml
