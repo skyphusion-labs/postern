@@ -157,7 +157,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         self._utf8_accept = False
         imap4.IMAP4Server.connectionMade(self)
         try:
-            self.transport.setTcpNoDelay(True)
+            self.transport.setTcpNoDelay(True)  # type: ignore[union-attr]  # None raises AttributeError, caught below
         except (AttributeError, RuntimeError):
             # PROXY-wrapped / TLS transports may not expose setTcpNoDelay; harmless.
             pass
@@ -206,12 +206,12 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             return imap4.IMAP4Server.do_FETCH(self, tag, messages, query, uid)
         self._oldTimeout = self.setTimeout(None)
         (
-            maybeDeferred(self.mbox.fetch, messages, uid=uid)
+            maybeDeferred(self.mbox.fetch, messages, uid=uid)  # type: ignore[union-attr,call-overload]  # mbox is set once SELECTED; Twisted types it None
             .addCallback(self._stamp_utf8)
             .addCallback(self._warm_fetch, query)
             .addCallback(iter)
-            .addCallback(self._IMAP4Server__cbFetch, tag, query, uid)
-            .addErrback(self._IMAP4Server__ebFetch, tag)
+            .addCallback(self._IMAP4Server__cbFetch, tag, query, uid)  # type: ignore[attr-defined]  # mypy does not model name mangling
+            .addErrback(self._IMAP4Server__ebFetch, tag)  # type: ignore[attr-defined]  # mypy does not model name mangling
         )
 
     # dispatchCommand reads the class tuple by state name, not getattr(self, "do_FETCH"),
@@ -503,7 +503,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         if not self._utf8_accept:
             return imap4.IMAP4Server.spew_envelope(self, id, msg, _w=_w, _f=_f)
         if _w is None:
-            _w = self.transport.write
+            _w = self.transport.write  # type: ignore[union-attr]  # transport is set while a command runs
         envelope = self._utf8_wire(imap4.getEnvelope(msg))
         _w(b"ENVELOPE " + imap4.collapseNestedLists([envelope]))
 
@@ -511,7 +511,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         if not self._utf8_accept:
             return imap4.IMAP4Server.spew_rfc822header(self, id, msg, _w=_w, _f=_f)
         if _w is None:
-            _w = self.transport.write
+            _w = self.transport.write  # type: ignore[union-attr]  # transport is set while a command runs
         hdrs = self._format_headers_utf8(msg.getHeaders(True))
         _w(b"RFC822.HEADER " + imap4._literal(hdrs))
 
@@ -526,7 +526,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         if not self._utf8_accept or not (part.header or part.mime):
             return imap4.IMAP4Server.spew_body(self, part, id, msg, _w=_w, _f=_f)
         if _w is None:
-            _w = self.transport.write
+            _w = self.transport.write  # type: ignore[union-attr]  # transport is set while a command runs
         # Same part walk as the stock method; it rebinds msg to the addressed subpart.
         for p in part.part:
             if msg.isMultipart():
@@ -550,7 +550,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         the rest of Twisted's structure is untouched.
         """
         if _w is None:
-            _w = self.transport.write
+            _w = self.transport.write  # type: ignore[union-attr]  # transport is set while a command runs
         structure = fix_bodystructure_disposition(imap4.getBodyStructure(msg, True))
         _w(b"BODYSTRUCTURE " + imap4.collapseNestedLists([structure]))
 
@@ -640,7 +640,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
                 lambda _r: self.sendPositiveResponse(tag, b"APPEND complete")
             )
 
-        d = maybeDeferred(self.account.select, name)
+        d = maybeDeferred(self.account.select, name)  # type: ignore[union-attr,call-overload]  # account is set once authenticated
         d.addCallback(_selected)
         d.addErrback(self._IMAP4Server__ebAppend, tag)
 
@@ -946,9 +946,9 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             )
             return
         field, term = pushable
-        maybeDeferred(self.mbox.search_substr, field, term, bool(uid)).addCallback(
+        maybeDeferred(self.mbox.search_substr, field, term, bool(uid)).addCallback(  # type: ignore[union-attr,call-overload]  # mbox is set once SELECTED
             self._cb_push_search, tag
-        ).addErrback(self._IMAP4Server__ebSearch, tag)
+        ).addErrback(self._IMAP4Server__ebSearch, tag)  # type: ignore[attr-defined]  # mypy does not model name mangling
 
     @staticmethod
     def _search_untagged(id_tokens):
@@ -1013,7 +1013,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             from twisted.internet import reactor
 
             reactor.callLater(
-                0,
+                0,  # type: ignore[arg-type]  # zope interface method has no self; mypy reads delay as self
                 self._IMAP4Server__cbManualSearch,
                 list(result[5:]),
                 tag,
