@@ -855,13 +855,33 @@ class PosternMailbox:
         mid = _message_id_header(parsed)
         if mid:
             existing = self._client.get_message(mid)
-            if existing is not None:
+            # A Message-ID identifies a ROW, never a message (see
+            # `_same_stored_message`), so an id match alone does not justify a move:
+            # it would relocate an unrelated message and store nothing while the
+            # client is told OK (the Sent-branch defect of #643). Move only when the
+            # stored row is the same message as the payload: same content, and the
+            # direction the payload implies (sent by the bound identity => outbound,
+            # otherwise inbound). When the identity is unknown the direction cannot
+            # be inferred, so content alone decides. Anything else falls through to
+            # the import seam, where the store settles dedup authoritatively.
+            if (
+                existing is not None
+                and _same_stored_message(existing, parsed)
+                and self._placement_direction_matches(existing, parsed)
+            ):
                 self._client.move_messages([mid], mailbox)
                 return
         # #352 core unblocker 3: a genuine new Trash/Junk/Archive APPEND (no
         # matching existing message) is now PERSISTED via the IMAP-service import
         # seam instead of refused -- never silently dropped.
         self._import_or_reject(raw, mailbox)
+
+    def _placement_direction_matches(self, existing: Message, parsed: PyMessage) -> bool:
+        if not self._identity:
+            return True
+        sender = _bare_addr(_header_addrs(parsed, "From"))
+        implied = "outbound" if sender == _bare_addr(self._identity) else "inbound"
+        return existing.direction == implied
 
     def _append_sent(self, parsed: PyMessage, raw: bytes) -> None:
         """Sent APPEND: fallback matcher (#352 section 3.2). Hit -> OK; miss ->

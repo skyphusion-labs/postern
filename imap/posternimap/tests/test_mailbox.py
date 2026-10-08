@@ -515,6 +515,116 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(len(transport.messages), 1)
         self.assertIsNone(transport.last_import_payload)
 
+    def _trash_mailbox_with_import(self, msgs, identity="a@example.com"):
+        """A Trash view wired to the import seam (a MISS persists, a HIT moves)."""
+        from posternimap.mailbox import PosternMailbox
+
+        transport = FakeTransport(msgs, expected_token="t", page_size=2)
+        client = PosternClient("https://x", "t", transport=transport)
+        mb = PosternMailbox(
+            client,
+            mailbox_filter="trash",
+            page_size=2,
+            imap_client=client,
+            identity=identity,
+        )
+        return mb, transport
+
+    def _append_ok(self, mb, raw):
+        out, errs = [], []
+        mb.addMessage(raw, flags=["\\Seen"], date=None).addCallbacks(
+            out.append, errs.append
+        )
+        self.assertEqual(errs, [])
+        self.assertEqual(out, [None])
+
+    def test_append_placement_id_match_on_a_different_message_is_persisted(self):
+        """An APPEND to Trash whose Message-ID collides with an UNRELATED stored
+        message must not move that message, and must store the appended one.
+
+        Before the fix `_append_placement` moved whatever shared the id and returned
+        OK having stored nothing (the same defect #643 fixed for Sent).
+        """
+        msgs = [
+            make_message(
+                self._COLLIDING_ID,
+                direction="inbound",
+                body="an entirely different body",
+                **{
+                    "from": "someone-else@example.com",
+                    "to": "nobody@example.com",
+                    "subject": "an unrelated message",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                },
+            )
+        ]
+        mb, transport = self._trash_mailbox_with_import(msgs)
+        raw = self._colliding_raw("the message the user filed", "my real body")
+        self._append_ok(mb, raw)
+
+        # The unrelated message was NOT moved.
+        self.assertIsNone(transport.last_move_payload)
+        original = [
+            m for m in transport.messages if m["messageId"] == self._COLLIDING_ID
+        ]
+        self.assertEqual(len(original), 1)
+        self.assertNotEqual(original[0].get("mailbox"), "trash")
+        # The appended message WAS stored, into trash.
+        stored = [
+            m for m in transport.messages if m["subject"] == "the message the user filed"
+        ]
+        self.assertEqual(len(stored), 1, "the APPENDed message was not stored")
+        self.assertEqual(stored[0]["bodyText"].strip(), "my real body")
+        self.assertEqual(stored[0].get("mailbox"), "trash")
+
+    def test_append_placement_same_message_still_moves(self):
+        """Positive control: when the id match IS the same message, the APPEND is a
+        placement of that row; nothing is imported and nothing is duplicated."""
+        msgs = [
+            make_message(
+                self._COLLIDING_ID,
+                direction="outbound",
+                body="my real body\r\n",
+                **{
+                    "from": "a@example.com",
+                    "to": "b@example.com",
+                    "subject": "the message the user filed",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                },
+            )
+        ]
+        mb, transport = self._trash_mailbox_with_import(msgs)
+        raw = self._colliding_raw("the message the user filed", "my real body")
+        self._append_ok(mb, raw)
+        self.assertEqual(len(transport.messages), 1)
+        self.assertIsNone(transport.last_import_payload)
+        self.assertEqual(transport.last_move_payload["mailbox"], "trash")
+
+    def test_append_placement_same_content_other_direction_is_persisted(self):
+        """Same From/Subject/Body but the stored row is inbound while the payload is
+        from the bound identity (outbound): not the same message, so no move."""
+        msgs = [
+            make_message(
+                self._COLLIDING_ID,
+                direction="inbound",
+                body="my real body\r\n",
+                **{
+                    "from": "a@example.com",
+                    "to": "b@example.com",
+                    "subject": "the message the user filed",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                },
+            )
+        ]
+        mb, transport = self._trash_mailbox_with_import(msgs)
+        raw = self._colliding_raw("the message the user filed", "my real body")
+        self._append_ok(mb, raw)
+        self.assertIsNone(transport.last_move_payload)
+        self.assertIsNotNone(transport.last_import_payload)
+
     def test_append_to_drafts_persists(self):
         from twisted.internet import defer
         from posternimap.mailbox import PosternMailbox
