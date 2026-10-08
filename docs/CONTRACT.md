@@ -491,12 +491,14 @@ none touches D1 directly (#25, #26).
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | GET/POST/DELETE | `/api/session` | webmail native session: POST signs in `{username,password}` -> `Set-Cookie` + identity + caps + CSRF token; GET is whoami/restore; DELETE signs out | webmail v2 (#352) |
 | POST | `/api/session/refresh` | explicit session extend (a sliding refresh also happens on any authed request) | webmail v2 (#352) |
+| GET | `/api/session` | the COOKIE whoami. A Bearer holder cannot reach it; `GET /api/whoami` above is the token-reachable equivalent | webmail v2 (#352) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean, for?: address}` (un)read; returns `{updated}` (READ-scoped, #seen). Under SESSION auth the viewer is FORCED to the bound identity and a mismatched `for` is `403 E_FORBIDDEN` (#410) | (#seen) |
 | POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
 | POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
 | GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts; durable folders also return `uidValidity` | webmail v2 (#352) |
+| GET | `/api/whoami` | the caller identity and the scope the SERVER imposes on its reads: `{identity, identityScope, roleQueues, capabilities, via}`. `read`-scoped and Bearer-reachable, which `/api/session` is not. `identityScope` is the SAME projection the two read routes emit; `capabilities` is derived by asking the live gate about each scope. Takes no parameters, so it reports the scope a BARE read would get | #650 |
 | GET/POST | `/api/drafts` | list or create an identity-owned server-side draft | webmail v2 (#352) |
 | GET/PUT/DELETE | `/api/drafts/{id}` | read, optimistic-concurrency replace, or discard own draft | webmail v2 (#352) |
 | GET/POST | `/api/drafts/{id}/attachments` | list or stage raw attachment bytes for an identity-owned draft | webmail v2 (#353) |

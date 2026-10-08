@@ -41,7 +41,7 @@ import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sen
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
 // be an if-chain further down this file, which is precisely the knowledge every client
 // had to re-derive by reading this source once and then never re-check.
-import { requiredScope, scopeSatisfies, type RouteScope } from "./routes";
+import { ROUTE_SCOPES, requiredScope, scopeSatisfies, type RouteScope } from "./routes";
 import {
   handleSession,
   resolveSession,
@@ -383,6 +383,48 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         return json({ ok: false, error: "method_not_allowed", message: "GET only" }, 405);
       }
       return handleMobileconfig(request, env);
+    }
+
+    // --- read: who am I, and what scope am I being answered under (#650) ---
+    //
+    // An agent holding a Bearer token could not ask this. `identityScope` was reported
+    // only as a SIDE EFFECT of spending a /api/messages or /api/search query, so a caller
+    // learned its own scope only after it had already chosen the query, and /api/session
+    // resolves the session COOKIE, so a token holder got 401 from the one whoami that
+    // existed. An agent that cannot tell an identity-scoped view from an estate one cannot
+    // interpret its own empty page: "not in the estate" and "not in your slice" are
+    // different facts that call for opposite next actions, and a human reads the webmail
+    // UI and simply knows.
+    //
+    // EVERY field here is derived from the resolution THE GATE ITSELF used, a few lines
+    // above. `capabilities` asks `authorize()` about each ROUTE_SCOPES value instead of
+    // re-deriving what a token may do, and `identityScope` is `readScopeReport`, the same
+    // projection the two read routes emit. A second computation of either fact could drift
+    // from the gate, and a whoami that drifts is worse than silence: a caller has no way
+    // to find out it was lied to.
+    if (request.method === "GET" && path === "/api/whoami") {
+      const member = boundReadMember(resolution);
+      return json({
+        ok: true,
+        // The bound address, or null for a static estate token. `null` is the ANSWER --
+        // "this credential is not bound to an identity" -- never an omitted field, so a
+        // caller never has to read absence as a value.
+        identity: member ?? null,
+        // `role` is null BY CONSTRUCTION: a role view exists only when a read NAMES a
+        // queue with to=, and this route takes no parameters. So this is the scope a BARE
+        // read gets, which is the one a caller cannot work out for itself.
+        identityScope: readScopeReport(member, null),
+        // The queues this identity may ALSO read by naming to=<queue>, from the same
+        // membership map `sessionReadScope` composes the read predicate from. Reporting
+        // identityScope alone would assert a NARROWER reach than the route actually
+        // grants, which is the same completeness defect in the opposite direction.
+        roleQueues: member ? rolesForViewer(env, member) : [],
+        // What the gate will honour, asked of the gate. An `imap` token reports
+        // ["imap","organize"] here because scopeSatisfies grants organize to imap (#685),
+        // which a naive echo of the token's own name would get wrong.
+        capabilities: ROUTE_SCOPES.filter((scope) => authorize(resolution, scope)),
+        via: resolution.viaSession ? "session" : "bearer",
+      });
     }
 
     // --- read: list / filter ---

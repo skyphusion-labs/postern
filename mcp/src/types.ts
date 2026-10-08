@@ -125,6 +125,24 @@ export interface Page<T> {
  * credential sees only its own slice, and before this existed nothing in the response said so,
  * so a zero result was indistinguishable between "not in the estate" and "not in your slice".
  */
+/** What this caller IS, and the scope the SERVER imposes on its reads (worker #650).
+ *
+ *  `identityScope` is the SAME projection /api/messages and /api/search report in their
+ *  envelope. The point of a separate call is ORDER: a caller can learn its scope BEFORE
+ *  choosing a query, instead of inferring it from a page it has already paid for, and an
+ *  empty page means "not in the estate" under one scope and "not in your slice" under
+ *  another. Those two facts call for opposite next actions. */
+export interface WhoAmI {
+  /** The bound mail address, or null for a static estate token. `null` is the ANSWER. */
+  identity: string | null;
+  identityScope: ReadScopeReport;
+  /** Role queues this identity may ALSO read by naming `to=<queue>` on a read. */
+  roleQueues: string[];
+  /** The route scopes the worker's gate will honour for this credential. */
+  capabilities: string[];
+  via: "session" | "bearer";
+}
+
 export type ReadScopeReport =
   | { kind: "estate" }
   | { kind: "member"; addresses: string[] }

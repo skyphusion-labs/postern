@@ -396,7 +396,7 @@ describe("#417 the two contract files join", () => {
     // an absent row mean "nobody looked".
     const takesNothing = [
       "health", "root", "robots", "sitemap", "webmail", "mta-sts", "ingest", "session-refresh",
-      "message-get", "message-delete", "mobileconfig",
+      "message-get", "message-delete", "mobileconfig", "whoami",
       "admin-smtp-credential-delete", "admin-roles", "imap-roles",
     ];
     const withRows = new Set(Object.keys(PARAMS.params));

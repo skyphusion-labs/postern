@@ -303,12 +303,26 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | Worker secret | Scope | Reaches |
 |---|---|---|
 | `POSTERN_API_TOKEN` | `both` | read + send + delete + credential-admin (the egalitarian single-key default) |
-| `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
+| `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...`, plus `GET /api/whoami` (#650) |
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
 | `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
 | `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import`, plus the `organize` routes (#685); the authenticated door asserts the account identity |
 | `POSTERN_API_TOKEN_ORGANIZE` | `organize` | `POST /api/messages/seen`/`flags`/`move` only (#692). NOT `GET /api/folders`, which is a read. Cannot read, send, hard-delete, reach admin, or write through the `imap` seam |
 | `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read`: list/search/get forced to that identity (cannot widen via `to=`). `organize` (#685): mark read / flags / move, still forced to that identity. Never delete/admin. |
+
+**`GET /api/whoami` is `read`-scoped, and that is a decision, not an oversight (#650).**
+The route answers what `readScopeReport` answers: WHOSE MAIL A READ IS BOUND TO. For a
+credential that cannot read, that projection has no truthful value. A send-only, delete-only
+or organize-only token has no bound READ member, so the honest projection computes
+`{kind: "estate"}` and would tell a token that is 403 on every read route that it can read
+the whole estate. A 403 at the gate is the better answer, because a wrong answer here is
+worse than no answer: the caller has no second source to check it against.
+
+The caller this serves is one that has to interpret an empty read page, and that caller is
+read-capable by definition. A send token's own open question is which From the server will
+force on it, which belongs to the send response (#632 F13), not here. If a future
+non-read scope genuinely needs a self-identity call, it needs a projection that can say
+"you cannot read", not a widening of this one.
 
 **The `organize` scope (#685), and its own slot (#692).** `POST /api/messages/seen`,
 `/flags` and `/move` change stored state: read state, flags, and which folder a message
