@@ -50,7 +50,7 @@ from twisted.mail import imap4
 
 from .breaker import breaker_for
 from .client import PosternClient, PosternError
-from .config import ROLE_FOLDER_PREFIX, Config, role_folder_name
+from .config import ROLE_FOLDER_PREFIX, Config, role_folder_name, SERVICE_TOKEN_MODES
 from .mailbox import PosternMailbox
 from .roles import viewer_roles
 from .measure import Meter
@@ -340,6 +340,44 @@ class PosternAccount:
             breaker=self._breaker,
         )
 
+    def _organize_refusal(self) -> Optional[str]:
+        """Why this door cannot perform an `organize` write, or None when it can (#686).
+
+        POST /api/messages/{seen,flags,move} became `organize`-scoped in #685. An `imap`
+        token carries that scope and a `read` token deliberately does not, so the answer
+        turns on WHICH token the door would present.
+
+        POSTERN_API_TOKEN_IMAP set: that is the credential, no refusal. This is the fix:
+        the door picks the right token itself instead of the operator having to widen the
+        door's primary read token.
+
+        Unset, in `token` or `fixed` mode: the primary token is the END USER'S OWN
+        credential (in token mode the IMAP password IS the Postern token), so it may well
+        be a `both` or `imap` token that legitimately carries organize. Refusing here
+        would break doors that work today, so these modes fall back to it and let the
+        worker be the authority on that token's scope.
+
+        Unset, in native/ldap/system: the primary token is the DOOR-held per-function
+        service token, documented as the token the proxy READS the store with, and #685
+        records that it is read-scoped in the common configuration. Presenting it can only
+        earn a 403, so the write is refused HERE with a message naming the variable to
+        set. That is louder and far more diagnosable than a worker 403 relayed through
+        IMAP, and it is the one case where this door KNOWS the token is wrong.
+
+        One line, no CR/LF: this text reaches an IMAP tagged NO (see
+        tests/test_error_passthrough.py on why the wire shape matters).
+        """
+        if self._cfg.service_imap_token:
+            return None
+        if self._cfg.auth_mode not in SERVICE_TOKEN_MODES:
+            return None
+        return (
+            f"read state, flags and placement need POSTERN_API_TOKEN_IMAP in "
+            f"{self._cfg.auth_mode} auth mode: the service token this door reads with is "
+            "read-scoped and the organize routes would refuse it; refusing here rather "
+            "than sending a token that cannot carry the scope"
+        )
+
     def _ensure_role_folders(self) -> Dict[str, _Folder]:
         """Resolve this session role folders, fetching the map at most once (#438).
 
@@ -396,6 +434,9 @@ class PosternAccount:
 
     def _mailbox(self, folder: _Folder, *, list_view: bool) -> PosternMailbox:
         delete_enabled = folder.delete_writable and self._cfg.service_delete_token is not None
+        # Built once and handed to both the IMAP-service seam (drafts/import) and the
+        # organize seam (seen/flags/move): one token, one breaker, one object.
+        imap_client = self._imap_client()
         scoped = self._per_account and self._viewer is not None
         to: Optional[str]
         from_addr: Optional[str]
@@ -459,7 +500,12 @@ class PosternAccount:
             delete_client=self._delete_client(),
             mailbox_filter=folder.mailbox,
             role_queue=folder.role is not None,
-            imap_client=self._imap_client(),
+            imap_client=imap_client,
+            # #686: the organize writes present the imap-scoped token when there is one.
+            # When there is not, organize_refusal says so and the write refuses at the
+            # point of use; see _organize_refusal for why that is mode-dependent.
+            organize_client=imap_client,
+            organize_refusal=self._organize_refusal(),
             identity=self._imap_identity(),
             draft_revisions=self._draft_revisions,
         )
