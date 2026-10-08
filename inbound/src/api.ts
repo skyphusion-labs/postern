@@ -1718,10 +1718,11 @@ function transportAuthorized(request: Request, env: Env): boolean {
 
 // --- Per-function token scopes (#85) + per-identity send registry (#28) ---
 
-// `Scope` (read / send / both) is defined in ./sendidentity (the canonical home for
-// the token-resolution types) and imported above. `both` is the egalitarian default
-// (one key sends and receives, the back-compat path); `read` and `send` are the
-// per-function hardening that bounds a leaked token's blast radius.
+// `Scope` (read / send / delete / imap / organize / both) is defined in
+// ./sendidentity (the canonical home for the token-resolution types) and imported
+// above. `both` is the egalitarian default (one key sends and receives, the
+// back-compat path); every other member is the per-function hardening that bounds a
+// leaked token's blast radius.
 
 // `requiredScope` and `scopeSatisfies` are imported from ./routes above (#417): the
 // route table is the single source and the gate derives from it, so there is no
@@ -1821,8 +1822,9 @@ function roleProjection(env: Env): Array<{ address: string; members: string[] }>
 }
 
 // Authorize a resolution against a required route scope. A session carries an explicit
-// capability SET (checked by membership); a Bearer carries a single Scope (read/send/
-// both) checked by scopeSatisfies. `both` in either form satisfies everything.
+// capability SET (checked by membership); a Bearer carries a single Scope (one of
+// read/send/delete/imap/organize/both) checked by scopeSatisfies. `both` in either
+// form satisfies everything.
 function authorize(resolution: AuthResolution, need: RouteScope): boolean {
   if (resolution.caps) return capsSatisfy(resolution.caps, need);
   return scopeSatisfies(resolution.scope, need);
@@ -1847,17 +1849,19 @@ function isStateChanging(method: string): boolean {
 // header only, never the URL/query.
 //
 // Two stages, in order:
-//   1. The static, named scope tokens (both / read / send), compared constant-time.
+//   1. The static, named scope tokens (both / read / send / delete / imap /
+//      organize), compared constant-time.
 //      Each slot holds a SET of tokens (#154): a comma-separated list, entries
 //      trimmed, empties dropped, so multiple consumers of the same function each
 //      hold their OWN independently-rotatable value. A single bare value (no
 //      comma) is a one-element set, exactly the pre-#154 behavior. The loops do
 //      not break on a match, so the check does not leak WHICH slot or WHICH set
 //      member matched via timing; per-token LENGTH may leak (tokens are
-//      high-entropy), the bytes must not. Precedence is fixed (both, then read,
-//      then send): distinct values are expected, so at most one matches, but on an
-//      accidental value collision the more-permissive `both` wins, to avoid
-//      locking out the primary key. A static match carries NO bound identity
+//      high-entropy), the bytes must not. Precedence is fixed, and it is the order
+//      the table below lists: both, read, send, delete, imap, organize. Distinct
+//      values are expected, so at most one matches, but on an accidental value
+//      collision the more-permissive `both` wins, to avoid locking out the primary
+//      key. A static match carries NO bound identity
 //      (back-compat: From falls back to req.from / DEFAULT_FROM, validated
 //      against ALLOWED_FROM_DOMAIN).
 //   2. Only if no static token matched, the per-identity registry (#28 / #544): hash
@@ -1878,6 +1882,7 @@ async function resolveToken(request: Request, env: Env): Promise<AuthResolution 
     ["send", tokenSet(env.POSTERN_API_TOKEN_SEND)],
     ["delete", tokenSet(env.POSTERN_API_TOKEN_DELETE)],
     ["imap", tokenSet(env.POSTERN_API_TOKEN_IMAP)],
+    ["organize", tokenSet(env.POSTERN_API_TOKEN_ORGANIZE)],
   ];
 
   let matched: Scope | null = null;

@@ -22,8 +22,10 @@
 /** The scope a presented mailbox token carries (canonical home for the #85 type).
  *  `delete` is the #352 (C4) hard-delete scope: DELETE /api/messages/{id} accepts a
  *  `delete` token OR `both`, so the IMAP EXPUNGE credential drops from full-admin
- *  `both` to delete-only least privilege. `both` = read + send + delete + admin. */
-export type Scope = "read" | "send" | "delete" | "imap" | "both";
+ *  `both` to delete-only least privilege. `organize` is the #692 slot for the #685
+ *  scope: read state, flags and placement, and nothing else. `both` = read + send +
+ *  delete + admin. */
+export type Scope = "read" | "send" | "delete" | "imap" | "organize" | "both";
 
 /** Registry-granted functions only. Never delete/admin: those stay on static `both`.
  *
