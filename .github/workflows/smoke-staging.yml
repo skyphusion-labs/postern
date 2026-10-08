@@ -8,6 +8,10 @@ name: smoke-staging
 #   POSTERN_SMOKE_BASE_URL   -- e.g. https://postern.example.com
 #   POSTERN_SMOKE_API_TOKEN  -- read-scoped bearer (or a both-scoped single key)
 #   POSTERN_SMOKE_SEND_TOKEN -- send-scoped bearer (optional; defaults to API token)
+#   POSTERN_SMOKE_ORGANIZE_TOKEN -- organize-scoped bearer (optional, #685; unlocks the
+#     seen / flags / move round-trip. Unset, leg 6 asserts the 403 refusal instead)
+#   POSTERN_SMOKE_NO_ORGANIZE_TOKEN -- a bearer that MUST be refused on the organize
+#     routes (optional, #685; unlocks leg 6's regression guard)
 #   POSTERN_SMOKE_DELETE_TOKEN -- delete-scoped bearer (optional; unlocks the smoke's
 #                               own leg-10 cleanup so runs leave no debris, #496)
 #   POSTERN_SMOKE_IDENTITY_TOKEN -- per-identity send bearer (optional; unlocks the
@@ -72,6 +76,8 @@ jobs:
           POSTERN_SEND_TOKEN: ${{ secrets.POSTERN_SMOKE_SEND_TOKEN }}
           POSTERN_IDENTITY_TOKEN: ${{ secrets.POSTERN_SMOKE_IDENTITY_TOKEN }}
           POSTERN_DELETE_TOKEN: ${{ secrets.POSTERN_SMOKE_DELETE_TOKEN }}
+          POSTERN_ORGANIZE_TOKEN: ${{ secrets.POSTERN_SMOKE_ORGANIZE_TOKEN }}
+          POSTERN_NO_ORGANIZE_TOKEN: ${{ secrets.POSTERN_SMOKE_NO_ORGANIZE_TOKEN }}
           POSTERN_FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
           POSTERN_TO: ${{ secrets.POSTERN_SMOKE_TO }}
         run: |

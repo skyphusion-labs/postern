@@ -38,7 +38,7 @@ and the door projection are unchanged.
   touches only its own mail, and a static token with no bound identity stays
   estate-wide exactly as before.
 
-  **Action for operators, two cases.**
+  **Action for operators, three cases.**
 
   1. An **IMAP door** whose primary token is `read`-scoped loses `\Seen`
      persistence and soft-move to Trash/Junk/Archive. Set `POSTERN_API_TOKEN_IMAP`
@@ -49,6 +49,21 @@ and the door projection are unchanged.
      because capabilities are snapshotted into the session row at mint. Those
      sessions get 403 on mark-read, flag and move until the user logs in again. No
      action beyond a re-login.
+
+  3. **A `POSTERN_SEND_IDENTITIES` registry entry**, and any **static `read` token**,
+     used for these three routes. A registry entry grants `organize` only when its
+     `scopes` array lists the string; `read` does not imply it, deliberately, so
+     upgrading cannot silently widen an existing entry. Add `"organize"` to the
+     `scopes` of any entry that files mail. A static `read` token cannot be granted
+     it at all, by design: use `POSTERN_API_TOKEN_IMAP` (`imap`) or
+     `POSTERN_API_TOKEN` (`both`) for a machine that files mail.
+
+     This case was missing from the first draft of these notes, and it is the one
+     that bit first: `inbound/smoke.mjs` calls these routes with its read-scoped
+     `POSTERN_API_TOKEN`, so the v1.5.0 tag's live smoke probe went red while the
+     deploy and the artifact read-back both passed. The script now takes an optional
+     `POSTERN_ORGANIZE_TOKEN`, and when that is unset it asserts the 403 instead of
+     skipping.
 
   A **read token** issued for sharing (the public demo token is one) now refuses all
   three routes. `README.md` previously said only that send, reply and delete were

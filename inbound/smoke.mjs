@@ -22,7 +22,10 @@
 //      hasAttachment, seen, lens+direction). Read-only, no side effects: it is the
 //      negative half that makes every 200 above mean something.
 //   6. Read state + placement on the message this run created: /api/messages/seen,
-//      /api/messages/flags, /api/messages/move (archive and back), each verified by
+//      /api/messages/flags, /api/messages/move (archive and back). These demand the
+//      `organize` scope (#685): with POSTERN_ORGANIZE_TOKEN set the round-trip runs; with
+//      it unset the section asserts the live worker REFUSES the read token instead, and
+//      reports the round-trip as a GAP. Each verified by
 //      reading the state back, and each restored afterwards.
 //   7. /api/folders answers with server-authoritative counts, and the count moves
 //      when this run files its own message.
@@ -49,6 +52,10 @@
 //   POSTERN_SEND_TOKEN=<send-scoped bearer, optional; defaults to POSTERN_API_TOKEN> \
 //   POSTERN_FROM=noreply@<your-domain> \
 //   POSTERN_TO=<a-mailbox-you-can-read>@<your-domain> \
+//   POSTERN_ORGANIZE_TOKEN=<organize-scoped bearer, optional; unlocks the seen/flags/move \
+//                            round-trip. Unset = that section asserts the 403 instead> \
+//   POSTERN_NO_ORGANIZE_TOKEN=<a bearer that MUST be refused on the organize routes, \
+//                            optional; unlocks the regression guard in leg 6> \
 //   POSTERN_IDENTITY_TOKEN=<per-identity send token, optional; unlocks the drafts leg> \
 //   POSTERN_DELETE_TOKEN=<delete-scoped bearer, optional; unlocks cleanup> \
 //   node smoke.mjs [--expect-inbound] [--inbound-subject "..."] [--timeout-ms 120000]
@@ -61,6 +68,10 @@ const cfg = {
   sendToken: process.env.POSTERN_SEND_TOKEN || required("POSTERN_API_TOKEN"),
   from: required("POSTERN_FROM"),
   to: process.env.POSTERN_TO || "",
+  organizeToken: process.env.POSTERN_ORGANIZE_TOKEN || "",
+  // A token the operator asserts must NOT reach the organize routes. Used only to
+  // prove the scope wall still refuses; never used to perform a write.
+  noOrganizeToken: process.env.POSTERN_NO_ORGANIZE_TOKEN || "",
   identityToken: process.env.POSTERN_IDENTITY_TOKEN || "",
   deleteToken: process.env.POSTERN_DELETE_TOKEN || "",
   expectInbound: process.argv.includes("--expect-inbound"),
@@ -82,7 +93,12 @@ function flag(name) {
 }
 
 let passed = 0;
+let gaps = 0;
 function ok(msg) { passed++; console.log(`  ok  ${msg}`); }
+// A property this RUN could not verify, printed so it cannot be mistaken for a pass.
+// An absent check reads like a passed one, which is the whole reason this is not silent
+// and the reason the final line reports the count.
+function gap(msg) { gaps++; console.log(`GAP   ${msg} -- NOT COVERED by this run`); }
 function fail(msg, detail) {
   console.error(`FAIL  ${msg}`);
   if (detail !== undefined) console.error(typeof detail === "string" ? detail : JSON.stringify(detail, null, 2));
@@ -97,6 +113,9 @@ function emailsEqual(a, b) {
 async function api(method, path, { body, auth = true, scope = "read", token } = {}) {
   const headers = { "content-type": "application/json" };
   if (auth) {
+    // `organize` is NOT a scope keyword here on purpose: which token can organize is
+    // resolved once against the live worker in leg 6 and then passed as `token`, so
+    // there is no second place that could hold a different opinion about it.
     const bearer = token || (scope === "send" ? cfg.sendToken : cfg.readToken);
     headers.authorization = `Bearer ${bearer}`;
   }
@@ -294,30 +313,96 @@ async function main() {
   }
 
   // --- 6. read state + placement, on THIS run's own message ---
+  //
+  // These three routes demand the `organize` scope (#685), which `read` does not
+  // satisfy. Which of the configured tokens can reach them depends on the operator's
+  // token shape, and this file documents POSTERN_API_TOKEN as "read-scoped OR
+  // both-scoped" -- and `both` DOES satisfy organize. So the shape cannot be inferred
+  // from which variables are set; assuming it either way makes one valid configuration
+  // fail for the wrong reason.
+  //
+  // So ASK THE LIVE WORKER once, with an empty id list that changes nothing, and let
+  // the answer choose the section:
+  //
+  //   admitted (200) -> exercise the routes and the full state round-trip.
+  //   refused  (403) -> assert the refusal names `organize`, and report the round-trip
+  //                     as a GAP.
+  //
+  // The refused shape is deliberately not a skip. A skipped section that reads as a
+  // pass is the failure this file exists to avoid, and the refusal is itself worth
+  // observing against the deployed artifact: it IS the scope wall, live.
   console.log("\n6. seen / flags / move on the message this run created");
-  {
-    const seen = await api("POST", "/api/messages/seen", { body: { ids: [sentId], seen: false } });
+  const organizeBearer = cfg.organizeToken || cfg.readToken;
+  const organizeProbe = await api("POST", "/api/messages/seen", {
+    token: organizeBearer, body: { ids: [], seen: true },
+  });
+  assert(organizeProbe.status === 200 || organizeProbe.status === 403,
+    "the organize probe answers 200 (granted) or 403 (refused), not something else",
+    organizeProbe);
+  const canOrganize = organizeProbe.status === 200;
+
+  // THE DISCRIMINATOR, and the reason this leg is not decorative.
+  //
+  // Everything else here asks "can the configured token organize?", and a worker that
+  // had LOST the scope wall would answer yes and sail through the round-trip below. So
+  // that question alone cannot tell a fixed worker from a regressed one, and a check
+  // that cannot distinguish two states reports the reassuring one.
+  //
+  // This arm asks the opposite question, which only one of those two workers passes: a
+  // token that must NOT organize has to be REFUSED.
+  //
+  // It takes its OWN variable rather than reusing POSTERN_API_TOKEN, because only the
+  // operator knows a token's intended reach. `both` legitimately organizes, and this
+  // file documents POSTERN_API_TOKEN as read-scoped OR both-scoped, so inferring intent
+  // from the other variables would fail a perfectly good both-token deployment and a
+  // gate that cries wolf on a valid configuration is a gate somebody switches off.
+  // Naming the token makes the claim unambiguous: "this one must be refused."
+  if (cfg.noOrganizeToken) {
+    const denied = await api("POST", "/api/messages/seen", {
+      token: cfg.noOrganizeToken, body: { ids: [], seen: true },
+    });
+    assert(denied.status === 403 && /organize/.test(denied.json?.message || ""),
+      "REGRESSION GUARD: POSTERN_NO_ORGANIZE_TOKEN is refused on the organize routes", denied);
+  } else {
+    gap("a token that must NOT organize is refused (set POSTERN_NO_ORGANIZE_TOKEN to cover it)");
+  }
+
+  if (!canOrganize) {
+    console.log(`   (the configured token lacks organize${cfg.organizeToken ? "" : "; set POSTERN_ORGANIZE_TOKEN to cover the round-trip"}: asserting the scope wall instead)`);
+    for (const [path, body] of [
+      ["/api/messages/seen", { ids: [sentId], seen: false }],
+      ["/api/messages/flags", { ids: [sentId], set: { flagged: true } }],
+      ["/api/messages/move", { ids: [sentId], mailbox: "archive" }],
+    ]) {
+      const res = await api("POST", path, { token: organizeBearer, body });
+      assert(res.status === 403 && /organize/.test(res.json?.message || ""),
+        `POST ${path} is refused with 403 requires organize scope`, res);
+    }
+    gap("the seen / flags / move state round-trip (needs an organize-scoped token)");
+  } else {
+    const seen = await api("POST", "/api/messages/seen", { token: organizeBearer, body: { ids: [sentId], seen: false } });
     assert(seen.status === 200 && seen.json?.updated === 1, "POST /api/messages/seen marks it unread", seen);
     const unread = await summary(sentId);
     assert(unread?.seen === false, "the message reads back UNSEEN", { seen: unread?.seen });
 
-    const reread = await api("POST", "/api/messages/seen", { body: { ids: [sentId], seen: true } });
+    const reread = await api("POST", "/api/messages/seen", { token: organizeBearer, body: { ids: [sentId], seen: true } });
     assert(reread.json?.updated === 1 && (await summary(sentId))?.seen === true,
       "marking it read again is honored (state restored)", reread);
 
     const flags = await api("POST", "/api/messages/flags", {
+      token: organizeBearer,
       body: { ids: [sentId], set: { flagged: true, answered: true } },
     });
     assert(flags.status === 200 && flags.json?.updated === 1, "POST /api/messages/flags returns updated:1", flags);
     const flagged = await summary(sentId);
     assert(flagged?.flagged === true && flagged?.answered === true,
       "flagged + answered read back as set", { flagged: flagged?.flagged, answered: flagged?.answered });
-    await api("POST", "/api/messages/flags", { body: { ids: [sentId], set: { flagged: false, answered: false } } });
+    await api("POST", "/api/messages/flags", { token: organizeBearer, body: { ids: [sentId], set: { flagged: false, answered: false } } });
     const cleared = await summary(sentId);
     assert(cleared?.flagged === false && cleared?.answered === false, "flags cleared again (state restored)",
       { flagged: cleared?.flagged, answered: cleared?.answered });
 
-    const move = await api("POST", "/api/messages/move", { body: { ids: [sentId], mailbox: "archive" } });
+    const move = await api("POST", "/api/messages/move", { token: organizeBearer, body: { ids: [sentId], mailbox: "archive" } });
     assert(move.status === 200 && move.json?.updated === 1, "POST /api/messages/move files it to archive", move);
     const inArchive = await api("GET", "/api/messages?mailbox=archive&limit=50");
     assert((inArchive.json?.items || []).some((m) => m.messageId === sentId),
@@ -325,7 +410,7 @@ async function main() {
     const defaultView = await api("GET", "/api/messages?direction=outbound&limit=50");
     assert(!(defaultView.json?.items || []).some((m) => m.messageId === sentId),
       "and is NO LONGER in the direction-default view", defaultView.json);
-    const restore = await api("POST", "/api/messages/move", { body: { ids: [sentId], mailbox: null } });
+    const restore = await api("POST", "/api/messages/move", { token: organizeBearer, body: { ids: [sentId], mailbox: null } });
     assert(restore.json?.updated === 1, "moving it back to the default view is honored (state restored)", restore);
   }
 
@@ -339,12 +424,19 @@ async function main() {
     assert(archiveOf(before.json), "the archive folder is present", before.json?.folders);
     const baseline = archiveOf(before.json).count;
 
-    await api("POST", "/api/messages/move", { body: { ids: [sentId], mailbox: "archive" } });
-    const after = await api("GET", "/api/folders");
-    assert(archiveOf(after.json).count === baseline + 1,
-      "the archive count MOVES when this run files a message (counts are live, not cached)",
-      { baseline, after: archiveOf(after.json).count });
-    await api("POST", "/api/messages/move", { body: { ids: [sentId], mailbox: null } });
+    // The live-counts property can only be shown by MOVING a message, which needs the
+    // organize scope (#685). Without that token the folder list is still asserted above;
+    // the count-moves property is reported as a gap rather than quietly dropped.
+    if (!canOrganize) {
+      gap("folder counts move on a file (needs an organize-scoped token)");
+    } else {
+      await api("POST", "/api/messages/move", { token: organizeBearer, body: { ids: [sentId], mailbox: "archive" } });
+      const after = await api("GET", "/api/folders");
+      assert(archiveOf(after.json).count === baseline + 1,
+        "the archive count MOVES when this run files a message (counts are live, not cached)",
+        { baseline, after: archiveOf(after.json).count });
+      await api("POST", "/api/messages/move", { token: organizeBearer, body: { ids: [sentId], mailbox: null } });
+    }
   }
 
   // --- 8. attachments, end to end ---
@@ -449,7 +541,7 @@ async function main() {
     }
   }
 
-  console.log(`\nPASS: ${passed} checks green.`);
+  console.log(`\nPASS: ${passed} checks green.${gaps ? ` ${gaps} property(ies) NOT COVERED -- see GAP lines above.` : ""}`);
 }
 
 main().catch((e) => fail("unexpected error", e?.stack || String(e)));
