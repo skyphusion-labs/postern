@@ -7,6 +7,10 @@
 // accounts, or resource names are baked in.
 //
 // What it checks (CONTRACT section 7):
+//   0. The live instance is serving the version this run is supposed to measure.
+//      POSTERN_EXPECT_VERSION names it and GET /health answers; the script polls
+//      until they agree and FAILS on the timeout. Unset, the run is not pinned and
+//      says so as a GAP. See pinToVersion() for why this is leg 0 and not a nicety.
 //   1. The instance is live (GET /health) and the API token works.
 //   2. POST /api/send accepts a message and the sent copy lands in the store
 //      (GET /api/messages?direction=outbound finds it; GET /api/messages/{id}
@@ -39,6 +43,9 @@
 //      set, the full draft lifecycle runs and cleans up after itself.
 //  10. With POSTERN_DELETE_TOKEN set, this run hard-deletes the messages it created,
 //      so a repeated smoke does not accumulate mail in the operator's store.
+//  11. The version did not change under the run. /health is re-read after the last
+//      leg and a different answer VOIDS the run, because the checks above would then
+//      be split across two versions.
 //
 // Deliberately NOT covered here, because both need operator-specific configuration
 // this script refuses to assume: the webmail SESSION path (needs
@@ -58,7 +65,11 @@
 //                            optional; unlocks the regression guard in leg 6> \
 //   POSTERN_IDENTITY_TOKEN=<per-identity send token, optional; unlocks the drafts leg> \
 //   POSTERN_DELETE_TOKEN=<delete-scoped bearer, optional; unlocks cleanup> \
-//   node smoke.mjs [--expect-inbound] [--inbound-subject "..."] [--timeout-ms 120000]
+//   POSTERN_EXPECT_VERSION=<the version the instance MUST be serving, e.g. 1.5.0 or \
+//                            v1.5.0; optional but strongly recommended on a release \
+//                            path. Unset = the run is not pinned and reports a GAP> \
+//   node smoke.mjs [--expect-inbound] [--inbound-subject "..."] [--timeout-ms 120000] \
+//                  [--version-timeout-ms 120000]
 //
 // Exit 0 = all asserted checks passed. Non-zero = first failure (printed).
 
@@ -74,9 +85,17 @@ const cfg = {
   noOrganizeToken: process.env.POSTERN_NO_ORGANIZE_TOKEN || "",
   identityToken: process.env.POSTERN_IDENTITY_TOKEN || "",
   deleteToken: process.env.POSTERN_DELETE_TOKEN || "",
+  // The version this run REQUIRES the live instance to report. A leading "v" is
+  // stripped so a caller can pass the git tag (v1.5.0) or the bare semver (1.5.0)
+  // without the workflow having to munge it. Empty = unpinned; see pinToVersion().
+  expectVersion: (process.env.POSTERN_EXPECT_VERSION || "").trim().replace(/^v/, ""),
   expectInbound: process.argv.includes("--expect-inbound"),
   inboundSubject: flag("--inbound-subject"),
   timeoutMs: Number(flag("--timeout-ms") || 120000),
+  // Separate from --timeout-ms (the inbound MX poll) on purpose: this one bounds how
+  // long the edge is given to converge on the expected version, which is a different
+  // question with a different right answer.
+  versionTimeoutMs: Number(flag("--version-timeout-ms") || 120000),
 };
 
 function required(name) {
@@ -179,6 +198,95 @@ const tag = `postern-smoke ${new Date().toISOString()} ${Math.random().toString(
  * object BEFORE inserting its metadata row, so a row visible here means its bytes are
  * already fetchable at that index.
  */
+/** The version GET /health reports right now, or null when it does not say. */
+async function liveVersion() {
+  const res = await api("GET", "/health", { auth: false });
+  const v = res.json?.version;
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/**
+ * Pin this run to ONE deployed version, and return the version it is pinned to.
+ *
+ * A deploy does not land everywhere at once. During the v1.5.0 tag deploy, leg 6's
+ * organize probe answered 200, and the very next call on the SAME route with the SAME
+ * token answered 403 one second later. The scope gate is route-level and runs before any
+ * handler, so the request body cannot change the answer, and a `both` token can never
+ * see 403. Two consecutive requests hit two different deployed versions while the edge
+ * was still converging.
+ *
+ * That is easy to file as a noisy flake. It is worse than that. Run the same race the
+ * other way, and suppose a future release REGRESSES the organize scope wall:
+ *
+ *   1. Leg 6's probe lands on an OLD isolate, which still has the wall, and gets 403.
+ *   2. canOrganize is therefore false, so the leg asserts the three routes REFUSE.
+ *   3. Those assertions also land on OLD isolates, and get their 403s.
+ *   4. The regression guard PASSES.
+ *
+ * The guard reports the wall intact while the newly deployed code has lost it. That is
+ * the exact regression it exists to catch, and it cannot see it, because it measured the
+ * previous version. A check that cannot distinguish two states reports the reassuring
+ * one.
+ *
+ * So POSTERN_EXPECT_VERSION names the version this run must measure, and this polls
+ * /health until the live instance reports it.
+ *
+ * The value is an INPUT. It is never inferred from what /health happens to answer,
+ * because a smoke that adopts whatever it finds agrees with the PREVIOUS version exactly
+ * as readily as with the new one. Agreeing with the wrong version is the defect, so a
+ * self-derived expectation cannot be the fix. deploy.yml knows the tag and passes it.
+ *
+ * A timeout here FAILS. It does not warn, and it is not a GAP: a GAP means a property
+ * this run chose not to cover, and this is a run that could not start. An unrun check
+ * reports "could not measure", never "passed".
+ *
+ * This is NOT what .github/scripts/verify-worker-deployment.mjs does, and the two must
+ * not be conflated. That step compares Cloudflare `version_id` UUIDs out of the
+ * deployments API, and it proves the UPLOAD. It never reads a semver and it says nothing
+ * about which version an edge POP answers with. This one asks the running artifact.
+ */
+async function pinToVersion() {
+  console.log("0. pin this run to one deployed version");
+  if (!cfg.expectVersion) {
+    const seen = await liveVersion();
+    assert(seen !== null, "GET /health reports a version", { version: seen });
+    // Named rather than silent, and named precisely: the risk is not "no version
+    // check", it is that a run during a deploy can measure the version being replaced.
+    gap(
+      `this run is NOT pinned: it measured whatever ${cfg.baseUrl} was serving (${seen}), ` +
+      `which during a deploy can be the PREVIOUS version -- set POSTERN_EXPECT_VERSION`,
+    );
+    return seen;
+  }
+  const started = Date.now();
+  const deadline = started + cfg.versionTimeoutMs;
+  let seen = await liveVersion();
+  // The sleep is clamped to what is left of the budget, so --version-timeout-ms is a
+  // real bound and not "the budget plus up to one poll interval". The remaining
+  // overshoot is one in-flight request, which is unavoidable and is reported as
+  // waitedMs rather than hidden.
+  while (seen !== cfg.expectVersion && Date.now() < deadline) {
+    await sleep(Math.min(2000, Math.max(0, deadline - Date.now())));
+    seen = await liveVersion();
+  }
+  if (seen !== cfg.expectVersion) {
+    fail(`COULD NOT MEASURE: ${cfg.baseUrl} never reported version ${cfg.expectVersion}`, {
+      wanted: cfg.expectVersion,
+      lastSeen: seen,
+      budgetMs: cfg.versionTimeoutMs,
+      // May exceed budgetMs by one in-flight /health request. Printed next to the
+      // budget so the two are read together and neither looks like a broken bound.
+      waitedMs: Date.now() - started,
+      meaning:
+        "No check below this line ran, so none of them passed and none of them failed. " +
+        "Either the edge did not converge inside --version-timeout-ms, or this is not " +
+        "the instance the release deployed to. This run measured nothing.",
+    });
+  }
+  ok(`GET /health reports the expected version ${cfg.expectVersion} (waited ${Date.now() - started}ms)`);
+  return seen;
+}
+
 async function waitForAttachments(id, want, timeoutMs = 10000, intervalMs = 250) {
   const started = Date.now();
   const deadline = started + timeoutMs;
@@ -193,6 +301,9 @@ async function waitForAttachments(id, want, timeoutMs = 10000, intervalMs = 250)
 async function main() {
   console.log(`Postern smoke against ${cfg.baseUrl}`);
   console.log(`marker subject: "${tag}"\n`);
+
+  // --- 0. pin the run to ONE deployed version (read pinToVersion first) ---
+  const pinnedVersion = await pinToVersion();
 
   // --- 1. liveness + auth ---
   console.log("1. liveness + auth");
@@ -539,6 +650,33 @@ async function main() {
       const gone = await api("GET", `/api/messages/${encodeURIComponent(id)}`);
       assert(gone.status === 404, "and it is GONE afterwards", { status: gone.status });
     }
+  }
+
+  // --- 11. the whole run measured ONE version ---
+  //
+  // Leg 0 proves the run STARTED on the right version. It cannot prove the run stayed
+  // there: a deploy that lands mid-run splits every check above across two versions, and
+  // each half is then a measurement of something nobody asked about. The race this file
+  // was built around can still happen; the point is that it must be LOUD when it does,
+  // not absorbed into a green run.
+  //
+  // The failure message says the RUN is void, deliberately. A version change under a
+  // smoke is not evidence that the service is broken; it is evidence that the instrument
+  // moved. Reporting it as a service failure would send somebody debugging the mailbox.
+  console.log("\n11. the whole run measured ONE deployed version");
+  {
+    const after = await liveVersion();
+    if (after !== pinnedVersion) {
+      fail("VOID RUN: the deployed version CHANGED while this run was measuring it", {
+        atStart: pinnedVersion,
+        atEnd: after,
+        meaning:
+          "The checks above are split across two versions, so this run proves nothing " +
+          "about either one. The service is not necessarily broken: the instrument moved " +
+          "under it. Re-run once the edge has settled.",
+      });
+    }
+    ok(`GET /health still reports ${after}, so every check above measured one version`);
   }
 
   console.log(`\nPASS: ${passed} checks green.${gaps ? ` ${gaps} property(ies) NOT COVERED -- see GAP lines above.` : ""}`);
