@@ -89,7 +89,6 @@ export interface Message extends Omit<MessageSummary, "attachmentCount" | "folde
 export interface SearchHit {
   message: MessageSummary;
   score?: number;
-  snippet?: string;
 }
 
 /** A hit whose `message` may be a PROJECTION (worker #646, `fields=`).
