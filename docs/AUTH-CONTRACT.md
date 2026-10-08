@@ -306,8 +306,22 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...` only |
 | `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
 | `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
-| `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import` only; the authenticated door asserts the account identity |
-| `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read`: list/search/get forced to that identity (cannot widen via `to=`). Never delete/admin. |
+| `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import`, plus the `organize` routes (#685); the authenticated door asserts the account identity |
+| `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read`: list/search/get forced to that identity (cannot widen via `to=`). `organize` (#685): mark read / flags / move, still forced to that identity. Never delete/admin. |
+
+**The `organize` scope (#685).** `POST /api/messages/seen`, `/flags` and `/move` change
+stored state: read state, flags, and which folder a message sits in. They demand
+`organize`, which is held by `both`, by an `imap` token, by a webmail session, and by a
+registry entry that lists `organize` in its `scopes`.
+
+A `read` token does NOT hold it. Reading mail and filing mail are separate grants, so an
+operator who issues a read-only token can tell from its name that it changes nothing. This
+is also why `organize` is not folded into `send` or `delete`: one name should mean one
+power.
+
+`organize` never widens WHOSE mail a caller reaches. The viewer predicate is independent
+of the scope wall, so a registry entry with `organize` still touches only its own mail,
+and a static token with no bound identity remains estate-wide exactly as before.
 
 The five STATIC slots each hold a **comma-separated SET of tokens** (#154):
 entries are trimmed, empty entries ignored, and a bearer matching ANY member

@@ -11,6 +11,44 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+- **inbound: `organize` is now its own token scope (#685). BREAKING for two
+  configurations, both fail-closed and loud.** `POST /api/messages/seen`, `/flags`
+  and `/move` change stored state: read state, flags, and which folder a message
+  sits in. They were declared `read`-scoped, on the argument that managing your own
+  read state is a side effect of reading. That argument does not cover flags or
+  placement, so one grant covered both reading a mailbox and re-filing it.
+
+  These three routes now demand `organize`. It is held by `both`, by an `imap`
+  token, by a webmail session, and by a `POSTERN_SEND_IDENTITIES` entry that lists
+  `organize` in its `scopes`. A `read` token does not hold it, so a token issued to
+  read a mailbox cannot change what the mailbox looks like.
+
+  `send` and `delete` were deliberately not reused: one scope name should mean one
+  power, and overloading either would hide the distinction again.
+
+  What this does NOT change: whose mail a caller reaches. The viewer predicate is
+  independent of the scope wall, so a registry entry granted `organize` still
+  touches only its own mail, and a static token with no bound identity stays
+  estate-wide exactly as before.
+
+  **Action for operators, two cases.**
+
+  1. An **IMAP door** whose primary token is `read`-scoped loses `\Seen`
+     persistence and soft-move to Trash/Junk/Archive. Set `POSTERN_API_TOKEN_IMAP`
+     to an `imap`-scoped worker token. Without it the worker answers
+     `403 requires organize scope`. The door's own token selection for these three
+     calls is tracked separately in #686.
+  2. **Webmail sessions minted before this change** lack the `organize` capability,
+     because capabilities are snapshotted into the session row at mint. Those
+     sessions get 403 on mark-read, flag and move until the user logs in again. No
+     action beyond a re-login.
+
+  A **read token** issued for sharing (the public demo token is one) now refuses all
+  three routes. `README.md` previously said only that send, reply and delete were
+  refused; it now states what a read token can and cannot do.
+
 ## v1.4.5
 
 PATCH: relay stdlib CVE pin + inbound/mcp dep bumps. No

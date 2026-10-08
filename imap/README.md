@@ -128,7 +128,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_AUTH_MODE` | no | `token` | `token`, `fixed`, `native`, `ldap`, or `system` (`pam` aliases `system`) |
 | `POSTERN_API_TOKEN` | in `fixed`/`native`/`ldap`/`system` | -- | the token the proxy presents: the login token in `fixed`, the per-function **service** token in `native`/`ldap`/`system` |
 | `POSTERN_API_TOKEN_DELETE` | no | -- | optional `both`-scoped member for EXPUNGE only (#278); separate from the read token |
-| `POSTERN_API_TOKEN_IMAP` | in `per_account` with role queues | -- | `imap`-scoped service token (#352) for durable Drafts / APPEND import AND the role-membership read (#438); own worker slot, unset = those writes refuse and NO role queue is served |
+| `POSTERN_API_TOKEN_IMAP` | in `per_account` with role queues; and for `\Seen` / soft-move (#685) | -- | `imap`-scoped service token (#352) for durable Drafts / APPEND import, the role-membership read (#438), AND the `organize` routes (#685: seen / flags / move); own worker slot, unset = those writes refuse and NO role queue is served |
 | `POSTERN_IMAP_USERNAME` | in `fixed` | -- | the login username in `fixed` mode |
 | `POSTERN_TRANSPORT_TOKEN` | in `native` | -- | transport-seam bearer for `POST /api/smtp-auth` (mirrors the relay) |
 | `POSTERN_SMTP_AUTH_URL` | no | `${POSTERN_API_URL}/api/smtp-auth` | the `native` auth endpoint |
@@ -556,6 +556,9 @@ injectable transport, so no network is touched.
 
 - **Read-only, except the `\Seen` flag.** Read/unread state is persisted (a `STORE`
   of `\Seen` round-trips to `POST /api/messages/seen`); every other write is refused.
+  **Since #685 that round-trip needs the `organize` scope**, which a `read` token does
+  not carry. Set `POSTERN_API_TOKEN_IMAP` (an `imap`-scoped worker token) or the worker
+  answers `403 requires organize scope` and `\Seen` stops sticking.
   Sending is the structured API's job.
 - **APPEND is persist-or-refuse, per folder** (#352 section 3.2; `account.
   appendability()` is the classifier). `Sent` matches the APPEND against the

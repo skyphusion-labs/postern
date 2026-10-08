@@ -25,8 +25,13 @@
  *  `both` to delete-only least privilege. `both` = read + send + delete + admin. */
 export type Scope = "read" | "send" | "delete" | "imap" | "both";
 
-/** Registry-granted functions only. Never delete/admin: those stay on static `both`. */
-export type IdentityCap = "read" | "send";
+/** Registry-granted functions only. Never delete/admin: those stay on static `both`.
+ *
+ *  `organize` (#685) is opt-in per entry and grants the read-state / flags / placement
+ *  routes. An entry holding it still only reaches its OWN mail: the viewer predicate is
+ *  independent of the scope wall, so the grant widens WHICH ROUTES the entry may call,
+ *  never WHOSE mail it may touch. */
+export type IdentityCap = "read" | "send" | "organize";
 
 /**
  * A mail identity bound to a registry token. `from` is AUTHORITATIVE for send (the
@@ -40,7 +45,7 @@ export interface BoundIdentity {
 
 /**
  * One registry hit: bound identity plus the capability SET used by authorize()
- * (membership, like webmail sessions). Caps are only "read" and/or "send".
+ * (membership, like webmail sessions). Caps are "read", "send" and/or "organize".
  */
 export interface RegistryHit {
   identity: BoundIdentity;
@@ -87,7 +92,7 @@ export async function sha256Hex(input: string): Promise<string> {
  * Each entry is validated -- the key must be a 64-char lowercase sha256 hex and `from`
  * a well-formed address; a bad entry is skipped, not fatal.
  *
- * `scopes` (optional, #544): array of "read" and/or "send". Omitted or empty defaults
+ * `scopes` (optional, #544): array of "read", "send" and/or "organize" (#685). Omitted or empty defaults
  * to `["send"]` so every pre-#544 registry entry stays send-only. Unknown strings are
  * ignored; if nothing valid remains after filtering, the entry is skipped.
  *
@@ -150,13 +155,17 @@ export function parseRegistry(
   return map;
 }
 
-/** Default scopes=["send"] for back-compat with every pre-#544 registry entry. */
+/** Default scopes=["send"] for back-compat with every pre-#544 registry entry.
+ *
+ *  `organize` is NOT implied by `read` (#685). An entry that only lists `read` keeps
+ *  read-only reach, so upgrading the worker cannot silently widen an existing entry;
+ *  an operator who wants the organize routes adds the string. */
 function parseIdentityCaps(raw: unknown): IdentityCap[] {
   if (raw === undefined || raw === null) return ["send"];
   if (!Array.isArray(raw)) return ["send"];
   const out: IdentityCap[] = [];
   for (const item of raw) {
-    if (item === "read" || item === "send") {
+    if (item === "read" || item === "send" || item === "organize") {
       if (!out.includes(item)) out.push(item);
     }
   }

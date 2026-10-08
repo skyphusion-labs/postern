@@ -31,7 +31,7 @@
 import type { Scope } from "./sendidentity";
 
 /** The scope a route/method demands. `admin` is satisfied ONLY by a `both` token. */
-export type RouteScope = "read" | "send" | "delete" | "imap" | "admin";
+export type RouteScope = "read" | "send" | "delete" | "imap" | "organize" | "admin";
 
 export interface RouteSpec {
   /** Stable identifier, and the join key for the parameter manifest (#449). */
@@ -127,14 +127,19 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     body: ["messageId", "cc", "bcc", "from", "text", "html", "mode", "quoteOriginal", "attachments"],
     note: "mode reply|replyAll derives the original recipients server-side (#363)" },
 
-  // --- read-state + placement: read-scoped, because managing your own read state IS
-  // reading (the IMAP door often holds only a read token) ---
-  { id: "messages-seen", method: "POST", path: "/api/messages/seen", match: "exact", scope: "read",
+  // --- read-state + placement: `organize`-scoped (#685) ---
+  // These three CHANGE stored state: read state, flags, and which folder a message sits
+  // in. They used to be `read`-scoped on the argument that managing your own read state
+  // is a side effect of reading. That argument does not cover flags or placement, and it
+  // put a state-changing power behind the grant an operator issues to read, so a
+  // read-only token could re-file a whole mailbox. `organize` names that power on its
+  // own. An `imap` token carries it (see scopeSatisfies); a `read` token does not.
+  { id: "messages-seen", method: "POST", path: "/api/messages/seen", match: "exact", scope: "organize",
     auth: "bearer", body: ["ids", "seen", "for"],
     note: "`for` writes a per-recipient override; under a session it must be the session identity (#410)" },
-  { id: "messages-flags", method: "POST", path: "/api/messages/flags", match: "exact", scope: "read",
+  { id: "messages-flags", method: "POST", path: "/api/messages/flags", match: "exact", scope: "organize",
     auth: "bearer", body: ["ids", "set", "set.flagged", "set.answered"] },
-  { id: "messages-move", method: "POST", path: "/api/messages/move", match: "exact", scope: "read",
+  { id: "messages-move", method: "POST", path: "/api/messages/move", match: "exact", scope: "organize",
     auth: "bearer", body: ["ids", "mailbox"],
     note: "mailbox archive|trash|junk, or null to restore the direction-default view" },
 
@@ -238,6 +243,14 @@ export function requiredScope(method: string, path: string): RouteScope | null {
  * A `both` token satisfies every route; a scoped token satisfies only its own kind.
  * `admin` is satisfied solely by `both`: read/send tokens cannot reach the
  * credential-provisioning routes.
+ *
+ * `organize` (#685) is the one scope satisfied by a DIFFERENT kind: an `imap` token
+ * carries it, because the IMAP door is the machine client the organize routes exist for
+ * and it already has its own token slot. A `read` token does NOT carry it. Reading mail
+ * and filing mail are separate grants, so a token issued to read cannot change what the
+ * mailbox looks like. `send` and `delete` are deliberately not accepted either: reusing
+ * one of them would put two unrelated powers behind one name, which is the shape that
+ * made the organize routes sit under `read` in the first place.
  */
 export function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (have === "both") return true;
@@ -245,5 +258,6 @@ export function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (need === "send") return have === "send";
   if (need === "delete") return have === "delete";
   if (need === "imap") return have === "imap";
+  if (need === "organize") return have === "imap";
   return false; // admin: only `both`
 }

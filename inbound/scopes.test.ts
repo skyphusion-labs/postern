@@ -66,21 +66,24 @@ describe("per-function token scopes (#85)", () => {
       expect(sent).toHaveLength(0);
     });
 
-    it("can mark messages (un)read (POST /api/messages/seen is read-scoped, #seen)", async () => {
+    // #685 moved seen/flags/move to the `organize` scope, so a read token no longer
+    // reaches them. The full matrix lives in organize-scope.test.ts; this arm keeps the
+    // per-function suite honest about what a read token can still do.
+    it("cannot mark read, flag or move (POST seen / flags / move -> 403, #685)", async () => {
       const { env, ctx } = scopedEnv();
-      const res = await handleApi(req("POST", "/api/messages/seen", { token: "read-token", body: { ids: [], seen: true } }), env, ctx);
-      expect(res.status).toBe(200);
-      expect((await res.json()) as { ok: boolean }).toMatchObject({ ok: true });
-    });
-
-    it("can organize (flags / move / folders are read-scoped, #352)", async () => {
-      const { env, ctx } = scopedEnv();
+      expect((await handleApi(req("POST", "/api/messages/seen", {
+        token: "read-token", body: { ids: [], seen: true },
+      }), env, ctx)).status).toBe(403);
       expect((await handleApi(req("POST", "/api/messages/flags", {
         token: "read-token", body: { ids: [], set: { flagged: true } },
-      }), env, ctx)).status).toBe(200);
+      }), env, ctx)).status).toBe(403);
       expect((await handleApi(req("POST", "/api/messages/move", {
         token: "read-token", body: { ids: [], mailbox: "trash" },
-      }), env, ctx)).status).toBe(200);
+      }), env, ctx)).status).toBe(403);
+    });
+
+    it("still reads the folder list (GET /api/folders stays read-scoped)", async () => {
+      const { env, ctx } = scopedEnv();
       expect((await handleApi(req("GET", "/api/folders", { token: "read-token" }), env, ctx)).status).toBe(200);
     });
 

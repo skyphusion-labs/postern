@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { URL } from "node:url";
 import { handleApi } from "./src/api";
 import { makeFakeEnv } from "./fakes";
+import { scopeSatisfies, type RouteScope } from "./src/routes";
 
 // Cross-seam route contract (#417).
 //
@@ -30,7 +31,7 @@ type Row = {
   method: string;
   path: string;
   match: "exact" | "prefix";
-  scope: "read" | "send" | "delete" | "imap" | "admin" | null;
+  scope: "read" | "send" | "delete" | "imap" | "organize" | "admin" | null;
   auth: string;
   note?: string;
 };
@@ -132,8 +133,17 @@ describe("route contract: the manifest matches the real worker", () => {
   // with EVERY other scope, so a mis-declared row cannot pass.
   for (const row of SCOPED) {
     describe(`${row.method} ${row.path} (${row.scope})`, () => {
-      it("refuses every token scope that is not its own", async () => {
-        const wrong = ALL_SCOPES.filter((s) => s !== row.scope);
+      // Which token scopes SHOULD reach this row is `scopeSatisfies`, not "the one whose
+      // name matches the row". Most rows are satisfied only by their namesake, but
+      // `organize` (#685) is satisfied by an `imap` token, so a name-equality assumption
+      // here would demand a 403 the policy does not call for. Deriving the expectation
+      // from the policy keeps this file answering its own question -- does the REAL gate
+      // agree with the declared policy -- instead of restating the policy a second time.
+      // The policy's own values are pinned independently, with literals, in
+      // organize-scope.test.ts, so this derivation is not the only statement of them.
+      it("refuses every token scope the policy does not grant", async () => {
+        const wrong = ALL_SCOPES.filter((s) => !scopeSatisfies(s, row.scope as RouteScope));
+        expect(wrong.length, `${row.id}: nothing to refuse, so this arm proves nothing`).toBeGreaterThan(0);
         for (const scope of wrong) {
           const res = await call(row, scope);
           expect(res.status, `${scope} token on ${row.id} should be 403`).toBe(403);
@@ -147,9 +157,16 @@ describe("route contract: the manifest matches the real worker", () => {
         await expectScopeGatePassed(row, "both");
       });
 
+      const granted = ALL_SCOPES.filter((s) => scopeSatisfies(s, row.scope as RouteScope));
+      for (const scope of granted) {
+        it(`admits a ${scope} token, which the policy grants`, async () => {
+          await expectScopeGatePassed(row, scope);
+        });
+      }
+
       if (row.scope !== "admin") {
-        it("admits its own scope", async () => {
-          await expectScopeGatePassed(row, row.scope as string);
+        it("is granted to at least one scoped token, so it is reachable without `both`", () => {
+          expect(granted.length, `${row.id} is reachable only with a both token`).toBeGreaterThan(0);
         });
       } else {
         it("refuses a read token even though the route reads (admin is both-only)", async () => {

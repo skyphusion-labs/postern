@@ -133,7 +133,7 @@
       "method": "POST",
       "path": "/api/messages/seen",
       "match": "exact",
-      "scope": "read",
+      "scope": "organize",
       "auth": "bearer",
       "note": "`for` writes a per-recipient override; under a session it must be the session identity (#410)"
     },
@@ -142,7 +142,7 @@
       "method": "POST",
       "path": "/api/messages/flags",
       "match": "exact",
-      "scope": "read",
+      "scope": "organize",
       "auth": "bearer"
     },
     {
@@ -150,7 +150,7 @@
       "method": "POST",
       "path": "/api/messages/move",
       "match": "exact",
-      "scope": "read",
+      "scope": "organize",
       "auth": "bearer",
       "note": "mailbox archive|trash|junk, or null to restore the direction-default view"
     },
