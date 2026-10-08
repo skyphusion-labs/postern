@@ -325,6 +325,18 @@ Provisioning the scoped secrets is OPTIONAL and non-breaking: with only
 `POSTERN_API_TOKEN` set, every consumer keeps using that one `both` value
 exactly as before.
 
+**The `imap` scope is a second step, not the whole check (#619).** That token
+authenticates the DOOR and carries no bound identity, so each `/api/imap/*` call
+names the already-authenticated account it acts as, and that name is validated
+against `ALLOWED_FROM_DOMAIN` on all five routes (the four drafts methods plus the
+import APPEND). An identity off the domain is `403 E_IDENTITY_NOT_ALLOWED`, and a
+deploy with `ALLOWED_FROM_DOMAIN` unset REFUSES every one of them with
+`500 E_INTERNAL_SERVER_ERROR` ("ALLOWED_FROM_DOMAIN is not configured") rather than
+skipping the comparison; see CONTRACT.md for the refusal table. So a leaked door
+token is bounded to addresses on the operator's own domain, and an unconfigured
+deploy asserts no identity at all instead of accepting any. Scope and identity are
+independent: holding `imap` never implies the right to name an arbitrary account.
+
 **Per-identity registry (#28 + #544) -- many identities, optional read + send.**
 The scope split bounds a leaked token to a FUNCTION; the registry adds WHO (and,
 with `scopes`, which functions). The optional worker config var
