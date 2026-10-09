@@ -238,10 +238,14 @@ under the hardened `DynamicUser` unit (already set in `systemd/`).
 
 ## Build, test
 
-Go 1.25+ (`go.mod` requires 1.25.0; built and tested on its `toolchain` line,
+Go 1.26+ (`go.mod` requires 1.26.0; built and tested on its `toolchain` line,
 currently 1.26.9; the door image is `FROM golang:1.26.9-bookworm` in lockstep,
-#541). The `go` directive sets the language version and stays at 1.25.0. The
-`toolchain` line is the security pin and moves on its own.
+#541). The `go` directive sets the language version. It held at 1.25.0 until
+#709, when a DEPENDENCY moved it: `golang.org/x/net v0.60.0` is the first release
+that clears GO-2026-6603 / 6610 / 6611 / 6612 / 6617, it declares `go 1.26.0` for
+itself, and so `go get` raised ours. A dependency can move the language version
+even when a stdlib fix does not. The `toolchain` line is the security pin and
+still moves on its own.
 Dependency-free: `go mod tidy` adds nothing.
 
 ### The toolchain pin is a security gate (audit #107)
@@ -300,6 +304,37 @@ If dependabot bumps the image tag alone, the assertion goes red and the PR tells
 you to move `relay/go.mod` with it. That is the intended workflow, and it is why
 the tag is not derived from `go.mod` by a build arg: deriving it would take the
 image out of dependabot's reach.
+
+### An uncalled affected module is not a non-problem (#709)
+
+`govulncheck` sorts its findings by reachability. A module we require but never
+call is reported under `vulnerabilities in modules you require, but your code
+doesn't appear to call these`, and it does NOT fail the gate. The tool is right:
+there is no reachable path.
+
+Read that as a statement about our code at one commit, not about the dependency.
+The day a change in `relay/` reaches one of those symbols, the finding becomes
+live, and NOTHING goes red at that moment, because the module was already present
+and already unreachable when the gate last looked. A true negative decays into a
+false one with no state change anywhere. So an uncalled affected module gets
+bumped on its own schedule rather than waited on.
+
+Measured either side of the #709 bump, with `govulncheck -show verbose`:
+
+| | `go` directive | x/net | uncalled findings |
+|---|---|---|---|
+| before | 1.25.0 | v0.57.0 | **10**: x/net 5, x/crypto 4, x/text 1 |
+| after | 1.26.0 | v0.60.0 | **1**: x/crypto 1 |
+
+Both scans exit 0 with zero CALLED vulnerabilities, so the gate never moved; what
+changed is how much unreachable-but-affected surface the module graph carries.
+
+**The single residual is structural and no bump clears it.** It is GO-2026-5932,
+`golang.org/x/crypto/openpgp is unmaintained, unsafe by design`, and its record
+reads `Fixed in: N/A`. There is no fixed version to move to. x/crypto arrives
+transitively, the relay does not call `openpgp`, and the advisory will sit in the
+uncalled list until it is retired upstream. Do not read a remaining count of 1 as
+a bump that failed to take; check the id and the `Fixed in` field first.
 
 ```bash
 cd relay
