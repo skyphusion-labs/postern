@@ -25,8 +25,12 @@ still returns a verdict.
 `Page<T>` is `{ items: T[]; cursor?: string | null }` (`inbound/src/store.ts`), so a
 Workers caller that iterated the result must now read `.items`. That RPC is one of
 the three documented ways to consume postern (README, `docs/CONTRACT.md`,
-`docs/INTEGRATION.md`), so this is a real break, not an internal detail. It is the
-only change here that fails to compile.
+`docs/INTEGRATION.md`), so this is a real break, not an internal detail, and it is the
+change most likely to fail your build. It is not quite the only one: `MailboxService.search()`
+returns `Promise<Page<SearchHit>>`, so the `snippet` removal noted under Fixed can also fail a
+TypeScript caller that referenced `hit.snippet` through the RPC. That field never had a producer
+and always evaluated to `undefined`, so such a caller was reading dead code, but it will still
+stop compiling.
 
 **2. A BEHAVIOUR change over HTTP, additive in shape.** `GET /api/threads/{id}`
 keeps `messages` with the same name, position and array type and adds `cursor`, so
