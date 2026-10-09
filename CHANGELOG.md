@@ -13,13 +13,25 @@ mismatched MCP tag fails before it publishes.
 
 ## v1.6.0
 
-MINOR: three additive endpoints plus the `organize` token slot, and the Go side of
-the relay moves onto a toolchain that still returns a verdict. **Nothing here is
-breaking.** No `PROJECTION_VERSION` or `POSTERN_IMAP_UIDVALIDITY` bump: the wire
-format and the door projection are unchanged, with one wire-field removal noted
-below that had no producer.
+MINOR: **one** new endpoint (`GET /api/whoami`), two new request parameters, the
+`organize` token slot, and the Go side of the relay moving onto a toolchain that
+still returns a verdict.
 
-### Operator action: none required
+**One breaking change, and it reaches service-binding callers only.**
+`MailboxService.thread()` now returns `Promise<Page<StoredMessage>>` where it
+returned `Promise<StoredMessage[]>` (#706). The RPC entrypoint is one of the three
+documented ways to consume postern (README, `contracts/CONTRACT.md`,
+`docs/INTEGRATION.md`), so if you call that method over a Workers service binding
+you must now read `.items` rather than iterating the result. **The HTTP API is
+unaffected**, and the Python client is unchanged for existing callers:
+`get_thread()` still returns a list, with `get_thread_page()` added alongside. No
+other interface in this release changes incompatibly.
+
+No `PROJECTION_VERSION` or `POSTERN_IMAP_UIDVALIDITY` bump: the wire format and the
+door projection are unchanged. One declared-but-producerless field is removed, noted
+below.
+
+### Operator action: none for a deployment; one for a service-binding caller
 
 - **`POSTERN_API_TOKEN_ORGANIZE` is a new, OPTIONAL worker secret slot (#692, #694).**
   It issues the `organize` scope on its own: `POST /api/messages/seen`, `/flags` and
@@ -48,6 +60,9 @@ below that had no producer.
 - **A thread read is bounded, and the truncation is visible (#706).** An unbounded
   thread fetch could return an arbitrarily large body; it is now capped and says when
   it dropped something, rather than silently returning less than was asked for.
+  **This is the breaking change named above:** the `MailboxService.thread()` RPC
+  returns a `Page<StoredMessage>` so the bound and the cursor are expressible at all.
+  Over HTTP the shape is unchanged.
 - **`snippet` removed from the wire type (#699).** It was declared and no producer
   ever set it, so every consumer reading it got `undefined`. A field that cannot be
   populated is worse than an absent one, because it reads as empty rather than missing.
