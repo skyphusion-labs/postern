@@ -268,6 +268,39 @@ while `ci.yml` pins `govulncheck v1.5.0`. That build cannot type-check a go1.27
 standard library, so it exits 1 on a load error and returns no verdict. Bump the
 tool pin first, then confirm the gate still goes red on an old toolchain.
 
+### The scanned Go and the shipped Go are asserted equal
+
+Two files name a Go version. `relay/go.mod` `toolchain` is what CI installs and
+therefore what `govulncheck` measures. `relay/Dockerfile` `FROM golang:` is what
+the published image builds with. They are different strings, maintained by
+different hands, and they drifted: the gate scanned `go1.25.13` for months while
+the image shipped a binary built with `1.26.6`. A green `relay` job said nothing
+true about the relay image for the whole of that time, in either direction.
+
+Two mechanisms now hold them together, and neither works alone.
+
+`.github/scripts/assert-relay-go-pin.sh` runs in the `relay` job of `ci.yml` and
+the `gate` job of `relay-image.yml`. It fails when the two versions differ, when
+the image tag is not a full patch pin, or when either pin cannot be read. An
+unreadable pin exits 2; it never reads as agreement. Its suite,
+`.github/scripts/tests/assert-relay-go-pin.test.sh`, runs in `release-gate` on
+every PR and asserts an exact exit code for both skew directions, the real
+historical skew, a patch-only skew, floating tags and missing pins.
+
+The builder stage sets `GOTOOLCHAIN=local`. This does NOT enforce the directive,
+and the intuitive reading is wrong, so it is worth stating plainly. With the
+default `auto`, Go picks the newer of the image and the `toolchain` directive and
+downloads it, so the binary can be built with a Go the `FROM` tag never names.
+With `local`, Go runs the image's own toolchain and ignores the directive. That
+makes the tag truthful about the artifact and the build hermetic. The assertion
+supplies the enforcement; `local` supplies the truthfulness. Together they give
+scanned == `FROM` == actually-built.
+
+If dependabot bumps the image tag alone, the assertion goes red and the PR tells
+you to move `relay/go.mod` with it. That is the intended workflow, and it is why
+the tag is not derived from `go.mod` by a build arg: deriving it would take the
+image out of dependabot's reach.
+
 ```bash
 cd relay
 go build -o skyphusion-email-relay .

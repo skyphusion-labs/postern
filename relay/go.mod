@@ -24,8 +24,11 @@ go 1.25.0
 // version, which this security bump does not need to move. A toolchain above the
 // language version is legal and is the normal shape for a security pin.
 //
-// relay/Dockerfile builds the shipped binary and MUST stay on this same line
-// (#539 / #541). Bump both in one commit.
+// relay/Dockerfile builds the shipped binary and MUST name this EXACT version
+// (#539 / #541 / #704). Bump both in one commit.
+// .github/scripts/assert-relay-go-pin.sh fails CI when the two disagree, so
+// this is enforced and not merely remembered. Its suite is
+// .github/scripts/tests/assert-relay-go-pin.test.sh.
 toolchain go1.26.9
 
 require (

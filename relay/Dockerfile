@@ -32,8 +32,27 @@
 # same commit.
 FROM golang:1.26.9-bookworm AS builder
 
+# GOTOOLCHAIN=local is the second half of the #704 fix, and it belongs in the
+# artifact rather than in CI. It makes THIS TAG the truth about the binary.
+#
+# MEASURED, because the intuitive reading is wrong. `local` does NOT fail on a
+# mismatched `toolchain` directive; it ignores the directive:
+#   GOTOOLCHAIN=auto (the default): Go picks the NEWER of this image and the
+#     go.mod `toolchain` line, and DOWNLOADS it if needed. The binary can then
+#     be built with a Go this FROM tag does not name.
+#   GOTOOLCHAIN=local: Go runs this image's bundled toolchain and ignores the
+#     `toolchain` line. No download, no third version, no network at build time.
+# (The `go` DIRECTIVE is still enforced either way: a `go` above this image
+# fails with `go.mod requires go >= X (GOTOOLCHAIN=local)`.)
+#
+# So `local` buys a truthful tag and a hermetic build, NOT enforcement. The CI
+# gate .github/scripts/assert-relay-go-pin.sh supplies the enforcement by
+# asserting this tag equals the scanned toolchain. Together they give
+# scanned == FROM == actually-built, which is the property #704 needed and
+# neither half delivers alone.
 ENV CGO_ENABLED=0 \
-    GOFLAGS=-trimpath
+    GOFLAGS=-trimpath \
+    GOTOOLCHAIN=local
 
 WORKDIR /src
 
