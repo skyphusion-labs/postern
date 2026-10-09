@@ -27,6 +27,7 @@ import type {
   SendInput,
   SendResult,
   ViewLens,
+  WhoAmI,
 } from "./types.js";
 
 export const USER_AGENT = "postern-mcp (+https://github.com/skyphusion-labs/postern)";
@@ -297,6 +298,22 @@ export class PosternClient {
     if (args.to) params.to = args.to;
     const body = await this.requestGet("/api/folders", params);
     return (body.folders as FolderSummary[]) ?? [];
+  }
+
+  // GET /api/whoami (worker #650). The worker is the authority on every field: the scope
+  // it reports is derived from the resolution its own gate used, so this method forwards
+  // nothing and interprets nothing. There is deliberately no client-side fallback for an
+  // older worker that answers 404 -- guessing a scope here is precisely the drift this
+  // route exists to remove, and a 404 is the honest signal to the caller.
+  async whoami(): Promise<WhoAmI> {
+    const body = await this.requestGet("/api/whoami", {});
+    return {
+      identity: (body.identity as string | null) ?? null,
+      identityScope: body.identityScope as WhoAmI["identityScope"],
+      roleQueues: (body.roleQueues as string[]) ?? [],
+      capabilities: (body.capabilities as string[]) ?? [],
+      via: body.via as WhoAmI["via"],
+    };
   }
 
   // --- write (send scope) ---

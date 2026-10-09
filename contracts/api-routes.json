@@ -260,6 +260,15 @@
       "note": "not the /attachments/ sub-path"
     },
     {
+      "id": "whoami",
+      "method": "GET",
+      "path": "/api/whoami",
+      "match": "exact",
+      "scope": "read",
+      "auth": "bearer",
+      "note": "the caller identity and the scope the SERVER imposes on its reads (#650): bound identity or null, the same identityScope projection /api/messages and /api/search emit, the role queues that identity may also read via to=, and the capability set the gate honours (derived by asking authorize() per scope, never a second list). Takes no parameters, so it reports the scope a BARE read would get"
+    },
+    {
       "id": "messages-list",
       "method": "GET",
       "path": "/api/messages",

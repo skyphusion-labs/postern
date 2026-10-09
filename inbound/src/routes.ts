@@ -33,6 +33,24 @@ import type { Scope } from "./sendidentity";
 /** The scope a route/method demands. `admin` is satisfied ONLY by a `both` token. */
 export type RouteScope = "read" | "send" | "delete" | "imap" | "organize" | "admin";
 
+/**
+ * Every value of `RouteScope`, as DATA.
+ *
+ * `GET /api/whoami` (#650) reports the capability set the gate will actually honour, and
+ * it computes that by asking `authorize()` about each scope below rather than keeping a
+ * second list of what a token can do. A separately-maintained list could drift from the
+ * gate, and a whoami answer that drifts is worse than no answer at all.
+ *
+ * The two assertions below make this tuple UNABLE to drift from the union, the same way
+ * SUMMARY_FIELDS cannot drift from StoredMessageSummary: a scope added to `RouteScope`
+ * and not here fails `npm run typecheck`, and so does a name here the union lacks.
+ */
+export const ROUTE_SCOPES = ["read", "send", "delete", "imap", "organize", "admin"] as const;
+
+type ExactlyNever<T extends never> = T;
+type _NoRouteScopeMissing = ExactlyNever<Exclude<RouteScope, (typeof ROUTE_SCOPES)[number]>>;
+type _NoRouteScopeInvented = ExactlyNever<Exclude<(typeof ROUTE_SCOPES)[number], RouteScope>>;
+
 export interface RouteSpec {
   /** Stable identifier, and the join key for the parameter manifest (#449). */
   id: string;
@@ -187,6 +205,17 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     note: "not the /attachments/ sub-path" },
 
   // --- read ---
+  // #650: the Bearer-reachable "who am I". `read`-scoped DELIBERATELY, not open to every
+  // valid token. What it answers is `readScopeReport`, i.e. WHOSE MAIL A READ IS BOUND
+  // TO, and for a credential that cannot read at all that projection has no truthful
+  // value: a send-only or organize-only token has no bound READ member, so the honest
+  // projection would compute `{kind:"estate"}` and tell a token that is 403 on every read
+  // route that it can read the whole estate. That is a worse answer than a 403. A caller
+  // that needs to interpret an empty read page is by definition read-capable, which is
+  // exactly the caller this serves. A send token's own open question is which From the
+  // server will force on it, which is a send-response concern (#632 F13), not this route.
+  { id: "whoami", method: "GET", path: "/api/whoami", match: "exact", scope: "read", auth: "bearer",
+    note: "the caller identity and the scope the SERVER imposes on its reads (#650): bound identity or null, the same identityScope projection /api/messages and /api/search emit, the role queues that identity may also read via to=, and the capability set the gate honours (derived by asking authorize() per scope, never a second list). Takes no parameters, so it reports the scope a BARE read would get" },
   { id: "messages-list", method: "GET", path: "/api/messages", match: "exact", scope: "read", auth: "bearer",
     query: [...VIEW, ...PROJECTION, ...DATE_RANGE, "thread", "q"],
     note: "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646); after=/before= are INCLUSIVE at BOTH ends, ISO-8601 date or timestamp, a bare date covering its whole named day, and a bogus value is refused not applied (#647)" },

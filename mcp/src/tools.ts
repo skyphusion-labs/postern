@@ -471,6 +471,24 @@ export const READ_TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "mailbox_whoami",
+    scope: "read",
+    description:
+      "Ask who you are and what slice of the mailbox your own credential can read. Call this " +
+      "FIRST, before spending a search or a list: every read is answered under a scope the " +
+      "SERVER imposes, and the same empty page means 'no such mail in the estate' under an " +
+      "estate credential and 'none in your own slice' under an identity-bound one. Those two " +
+      "answers call for opposite next actions, and until now you could only learn which one " +
+      "you got by reading the identityScope on a query you had already chosen. " +
+      "'identity' is your bound address, or null when the credential is a shared estate one. " +
+      "'identityScope' is the same projection mailbox_list and mailbox_search report. " +
+      "'roleQueues' are shared queues you may ALSO read by passing that address as 'to'; an " +
+      "empty list means none, never 'unknown'. 'capabilities' is what the gate will actually " +
+      "honour, so a capability absent from it WILL be refused.",
+    inputSchema: {},
+    handler: async (client) => client.whoami(),
+  },
+  {
     name: "mailbox_folders",
     scope: "read",
     description:

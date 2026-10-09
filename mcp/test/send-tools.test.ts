@@ -48,7 +48,7 @@ describe("scope gate (the default-OFF send seam)", () => {
   it("a read-scoped server still registers all read tools (read MCP unchanged)", () => {
     const { server } = fakeServer();
     const names = registerTools(server, {} as any, new Set<Scope>(["read"]), READ_TOOLS);
-    expect(names.sort()).toEqual(["mailbox_folders", "mailbox_get", "mailbox_get_attachment", "mailbox_list", "mailbox_search", "mailbox_thread"]);
+    expect(names.sort()).toEqual(["mailbox_folders", "mailbox_get", "mailbox_get_attachment", "mailbox_list", "mailbox_search", "mailbox_thread", "mailbox_whoami"]);
   });
 });
 

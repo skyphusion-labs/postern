@@ -188,6 +188,7 @@ async function emissions(): Promise<Emitted[]> {
   for (const [label, call] of [
     // `to` is passed, not omitted: the parity arm below measures which declared parameters
     // this client can REACH, and a call that never sends `to` reports it as unreachable.
+    ["whoami", () => client.whoami?.()],
     ["folders", () => client.folders?.({ to: "a@x.com" })],
     ["setSeen", () => client.setSeen?.(["m1"], true)],
     ["setFlags", () => client.setFlags?.(["m1"], { flagged: true })],

@@ -64,6 +64,8 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   if (method === "POST" && path === "/api/admin/reproject") return "admin";
   if (method === "POST" && path === "/api/admin/reconcile") return "admin";
   if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
+  // #650 adds GET /api/whoami at `read` scope (the Bearer-reachable self-identity call).
+  if (method === "GET" && path === "/api/whoami") return "read";
   if (method === "GET" && (path === "/api/messages" || path === "/api/messages/")) return "read";
   if (method === "GET" && path === "/api/search") return "read";
   if (method === "GET" && path === "/api/recipients/recent") return "read";
@@ -81,7 +83,7 @@ const CORPUS = [
   "/api/messages", "/api/messages/", "/api/messages/m1", "/api/messages/m%201",
   "/api/messages/m1/attachments/0", "/api/messages/seen", "/api/messages/flags", "/api/messages/move",
   "/api/threads/t1", "/api/search", "/api/folders", "/api/recipients/recent", "/api/mobileconfig",
-  "/api/roles", "/api/drafts", "/api/drafts/", "/api/drafts/d1", "/api/drafts/d1/send",
+  "/api/roles", "/api/whoami", "/api/drafts", "/api/drafts/", "/api/drafts/d1", "/api/drafts/d1/send",
   "/api/drafts/d1/attachments", "/api/drafts/d1/attachments/a1",
   "/api/imap/drafts", "/api/imap/drafts/d1", "/api/imap/import", "/api/imap/roles",
   "/api/admin/smtp-credentials", "/api/admin/smtp-credentials/", "/api/admin/smtp-credentials/bob",
@@ -92,6 +94,7 @@ const CORPUS = [
   // Adversarial: near-misses, and paths with no handler at all.
   "/api/message", "/api/messages2", "/api/messagesx/m1", "/api/drafts2", "/api/draftsx/d1",
   "/api/imap/draftsx", "/api/", "/api", "/api/threads", "/api/threadsx/t", "/api/sendx", "/sendx",
+  "/api/whoamix", "/api/whoami/",
   "/api/messages/../drafts",
 ];
 

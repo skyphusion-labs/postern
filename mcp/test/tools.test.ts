@@ -12,7 +12,7 @@ describe("READ_TOOLS surface", () => {
     expect(READ_TOOLS.map((t) => t.name).sort()).toEqual(
       [
         "mailbox_folders", "mailbox_get", "mailbox_get_attachment", "mailbox_list",
-        "mailbox_search", "mailbox_thread",
+        "mailbox_search", "mailbox_thread", "mailbox_whoami",
       ],
     );
     expect(READ_TOOLS.every((t) => t.scope === "read")).toBe(true);
