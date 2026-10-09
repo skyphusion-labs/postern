@@ -17,15 +17,30 @@ MINOR: **one** new endpoint (`GET /api/whoami`), two new request parameters, the
 `organize` token slot, and the Go side of the relay moving onto a toolchain that
 still returns a verdict.
 
-**One breaking change, and it reaches service-binding callers only.**
-`MailboxService.thread()` now returns `Promise<Page<StoredMessage>>` where it
-returned `Promise<StoredMessage[]>` (#706). The RPC entrypoint is one of the three
-documented ways to consume postern (README, `contracts/CONTRACT.md`,
-`docs/INTEGRATION.md`), so if you call that method over a Workers service binding
-you must now read `.items` rather than iterating the result. **The HTTP API is
-unaffected**, and the Python client is unchanged for existing callers:
-`get_thread()` still returns a list, with `get_thread_page()` added alongside. No
-other interface in this release changes incompatibly.
+**A thread read is now paginated, and that lands differently on the two interfaces
+(#706, #649).** Read both before upgrading.
+
+**1. A SIGNATURE break, service bindings only.** `MailboxService.thread()` returns
+`Promise<Page<StoredMessage>>` where it returned `Promise<StoredMessage[]>`.
+`Page<T>` is `{ items: T[]; cursor?: string | null }` (`inbound/src/store.ts`), so a
+Workers caller that iterated the result must now read `.items`. That RPC is one of
+the three documented ways to consume postern (README, `docs/CONTRACT.md`,
+`docs/INTEGRATION.md`), so this is a real break, not an internal detail. It is the
+only change here that fails to compile.
+
+**2. A BEHAVIOUR change over HTTP, additive in shape.** `GET /api/threads/{id}`
+keeps `messages` with the same name, position and array type and adds `cursor`, so
+nothing deserialises differently. **But the default is now bounded at 20 messages**
+(`THREAD_DEFAULT_LIMIT`), where the route previously returned the entire thread with
+no limit. An HTTP caller that ignores `cursor` therefore gets a silently truncated
+conversation on any thread longer than 20. To read a whole long thread, follow the
+cursor or pass an explicit `limit`. Our own webmail is such a caller and had to be
+taught this in the same release: it now prints "first page" beside the count rather
+than implying the page length is the thread length.
+
+The Python client is unchanged for existing callers: `get_thread()` still returns a
+list, with `get_thread_page()` added alongside. No other interface in this release
+changes incompatibly.
 
 No `PROJECTION_VERSION` or `POSTERN_IMAP_UIDVALIDITY` bump: the wire format and the
 door projection are unchanged. One declared-but-producerless field is removed, noted
@@ -60,9 +75,10 @@ below.
 - **A thread read is bounded, and the truncation is visible (#706).** An unbounded
   thread fetch could return an arbitrarily large body; it is now capped and says when
   it dropped something, rather than silently returning less than was asked for.
-  **This is the breaking change named above:** the `MailboxService.thread()` RPC
-  returns a `Page<StoredMessage>` so the bound and the cursor are expressible at all.
-  Over HTTP the shape is unchanged.
+  **This is the change described at the top of this section**, on both interfaces: the
+  RPC signature becomes `Page<StoredMessage>` so the bound and the cursor are
+  expressible at all, and over HTTP the shape is unchanged while the default becomes
+  bounded.
 - **`snippet` removed from the wire type (#699).** It was declared and no producer
   ever set it, so every consumer reading it got `undefined`. A field that cannot be
   populated is worse than an absent one, because it reads as empty rather than missing.
