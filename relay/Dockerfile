@@ -17,12 +17,20 @@
 
 # ---- stage 1: builder -- compile a static, cgo-free binary ------------------
 # #541: pin the builder image to the same Go line as relay/go.mod
-# (`go 1.25.0` + `toolchain go1.25.13`). CI already uses go-version-file:
-# go.mod; do not float the image to 1.26 while the module still declares
-# 1.25 -- that is the declared-vs-artifact skew #539/#541 closed.
-# When bumping the toolchain for a stdlib CVE (audit #107), bump this tag
-# in the same commit.
-FROM golang:1.26.6-bookworm AS builder
+# (`go 1.25.0` + `toolchain go1.26.9`). CI reads that same pin through
+# go-version-file, so the gate measures the toolchain this image ships.
+#
+# Never float this tag off the go.mod toolchain line. Go picks the NEWER of the
+# two, so a newer image builds the artifact with a Go the gate never scanned.
+# That is the declared-vs-artifact skew #539 / #541 closed.
+#
+# This tag did drift: it read 1.26.6 while go.mod declared 1.25.13 (postern#704).
+# The gate scanned 1.25.13, the image shipped 1.26.6, and the 2026-10-08
+# net/http batch affected BOTH. Keep the two equal.
+#
+# When bumping the toolchain for a stdlib CVE (audit #107), bump this tag in the
+# same commit.
+FROM golang:1.26.9-bookworm AS builder
 
 ENV CGO_ENABLED=0 \
     GOFLAGS=-trimpath
