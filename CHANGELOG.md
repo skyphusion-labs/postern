@@ -11,6 +11,74 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.6.0
+
+MINOR: three additive endpoints plus the `organize` token slot, and the Go side of
+the relay moves onto a toolchain that still returns a verdict. **Nothing here is
+breaking.** No `PROJECTION_VERSION` or `POSTERN_IMAP_UIDVALIDITY` bump: the wire
+format and the door projection are unchanged, with one wire-field removal noted
+below that had no producer.
+
+### Operator action: none required
+
+- **`POSTERN_API_TOKEN_ORGANIZE` is a new, OPTIONAL worker secret slot (#692, #694).**
+  It issues the `organize` scope on its own: `POST /api/messages/seen`, `/flags` and
+  `/move`, and nothing else. It cannot read, send, hard-delete, reach admin, or write
+  through the `imap` seam, and it does NOT cover `GET /api/folders`, which is a read.
+  **With the slot unset nothing changes**, which is the state every existing
+  deployment is in: an `imap` token still satisfies `organize`, and a `read` token is
+  still refused on those three routes. Set it only if you want a bearer that can
+  manage read state, flags and placement without holding `imap`. See `DEPLOY.md` and
+  `docs/AUTH-CONTRACT.md`.
+
+### Added
+
+- **`GET /api/whoami` (#701).** A Bearer caller can ask what its own scope is instead
+  of discovering it from a 403. Correctly `read`-scoped: a caller with no read
+  capability gets the estate-level answer rather than a member view.
+- **`countOnly` on `GET /api/messages` (#702).** Returns the match count under the
+  rows' own predicate, so a count and a page agree by construction rather than by a
+  caller reimplementing the filter.
+- **`seen`, `flags` and `move` as organize-scoped MCP tools (#645, #700).** They
+  register only when an organize-capable bearer is configured, and they are mutating
+  and opt-in. Shipped on the `postern-mcp-v*` train, which keeps its own ledger.
+
+### Fixed
+
+- **A thread read is bounded, and the truncation is visible (#706).** An unbounded
+  thread fetch could return an arbitrarily large body; it is now capped and says when
+  it dropped something, rather than silently returning less than was asked for.
+- **`snippet` removed from the wire type (#699).** It was declared and no producer
+  ever set it, so every consumer reading it got `undefined`. A field that cannot be
+  populated is worse than an absent one, because it reads as empty rather than missing.
+- **The IMAP seam presents the imap-scoped token on the organize routes (#686, #703).**
+  It was sending a token that those routes refuse, so door-side organize failed on
+  scope rather than on anything the caller did.
+- **`field` outside `substr` mode is refused instead of echoed (#651, #698).** The MCP
+  search accepted `field` in modes that ignore it and reflected it back in the
+  response, which read as "applied".
+- **The live smoke probe is pinned to one deployed version (#692, #695).** It could
+  otherwise probe a mixed state during a rollout and report a failure that belonged to
+  neither version.
+
+### Relay and CI
+
+- **Go toolchain pinned to `go1.26.9` and `golang.org/x/net` raised to v0.60.0
+  (#707, #713).** v0.60.0 is the only release that clears the outstanding advisories.
+  The `go` directive moved to 1.26.0 with it, which retired `GOTOOLCHAIN=go1.25.13` as
+  a negative control; `relay/README.md` records `go1.26.0` as the lowest toolchain that
+  still returns a verdict, and that a lower one exits 1 rather than going red.
+- **CI asserts the scanned Go equals the shipped Go (#704, #711).** The vulnerability
+  scan and the Dockerfile could previously disagree, so a clean scan said nothing about
+  the binary that ships.
+- **`mypy` now type-checks the server and threaded bodies, with
+  `check_untyped_defs` on for clients and imap (#680, #696, #697, #708).**
+- **`tag-preflight` asserts `inbound/src/version.ts` and counts its pins truthfully
+  (#693).** `/health` reports that constant, so a release could previously ship a
+  version string that disagreed with its own tag.
+- **The IMAP test waits for the server side to close before the reactor check (#715).**
+  Test-only; it was a race in the harness, not in the door.
+
 ## v1.5.0
 
 MINOR: `organize` becomes its own token scope. Breaking in two narrow
