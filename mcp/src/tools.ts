@@ -182,7 +182,8 @@ export const READ_TOOLS: ToolDef[] = [
     inputSchema: {
       query: z.string().min(1).describe("the search text"),
       mode: MODE.optional().describe("search mode; defaults to hybrid. substr is a literal substring match (use with field)"),
-      field: FIELD.optional().describe("for mode substr only: which column to match (subject/body/text); ignored by other modes"),
+      field: FIELD.optional().describe("for mode substr ONLY: which column to match (subject/body/text). "
+        + "REFUSED, not ignored, in any other mode: pass mode=substr or remove field"),
       limit: z.number().int().positive().max(200).optional().describe("max results (default server-side ~50)"),
       direction: DIRECTION.optional().describe("filter on the STORED direction: received (inbound) or sent (outbound)"),
       to: z.string().optional().describe("viewer address: scope the search to one address's mail"),
@@ -224,6 +225,27 @@ export const READ_TOOLS: ToolDef[] = [
     handler: async (client, a) => {
       const mode: SearchMode = a.mode ?? "hybrid";
       const field: SearchField | undefined = a.field;
+      // `field` picks the COLUMN the substring match runs against, and only the substr
+      // mode has such a column. Supplying it in any other mode is REFUSED here rather
+      // than forwarded and dropped (#651, from #632 F12).
+      //
+      // Refusal, not a quieter echo, because this is the accepted-and-ignored class that
+      // #632 F1 already closed for unknown keys, and registerTools states the rule: a
+      // supplied filter that is silently dropped is worse than one that is rejected,
+      // because the caller reasonably believes it applied. The old code forwarded nothing
+      // (client.search omits it for the other modes) and then echoed `field: field ?? null`
+      // regardless, so `mode: hybrid, field: subject` answered with `field: "subject"`,
+      // which reads as confirmation that the search WAS restricted to subjects.
+      //
+      // It is refused BEFORE the request, so no unrestricted search runs under a name the
+      // caller would misread. `mode` defaults to hybrid, so `{ query, field }` with no
+      // mode at all is the likeliest way in, and it is refused too.
+      if (field !== undefined && mode !== "substr") {
+        throw new PosternError(
+          `field selects the column for mode substr and mode is "${mode}": ` +
+            "pass mode=substr to match one column, or remove field",
+        );
+      }
       const page = await client.search({
         q: a.query,
         mode,
@@ -245,7 +267,12 @@ export const READ_TOOLS: ToolDef[] = [
       return {
         query: a.query,
         mode,
-        field: field ?? null,
+        // Present ONLY in the mode that honors it, so the key's PRESENCE carries
+        // information and a caller can tell three states apart: a named column
+        // (`field: "subject"`), substr with no column named (`field: null`), and a mode
+        // where the parameter does not exist (no key at all). A `null` in a non-substr
+        // answer would be a fourth, false reading: "understood, unrestricted".
+        ...(mode === "substr" ? { field: field ?? null } : {}),
         direction: a.direction ?? null,
         to: a.to ?? null,
         from: a.from ?? null,
