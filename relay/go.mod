@@ -1,6 +1,6 @@
 module github.com/skyphusion/skyphusion-email/relay
 
-go 1.25.0
+go 1.26.0
 
 // Build toolchain pinned to a PATCHED release (audit #107). govulncheck flags
 // standard-library CVEs against the toolchain version. CI reads this directive
@@ -20,9 +20,18 @@ go 1.25.0
 // returning a verdict, so the gate stops answering. Bump that tool pin first,
 // then prove the gate still goes red on an old toolchain.
 //
-// The `go` directive above stays at 1.25.0 on purpose. It sets the LANGUAGE
-// version, which this security bump does not need to move. A toolchain above the
-// language version is legal and is the normal shape for a security pin.
+// The `go` directive above is 1.26.0, and a DEPENDENCY moved it rather than a
+// preference. #707 deliberately held it at 1.25.0: a toolchain above the language
+// version is legal, and the stdlib fix did not need the language to move.
+//
+// #709 then had to raise `golang.org/x/net` to v0.60.0, the first release that
+// clears GO-2026-6603 / 6610 / 6611 / 6612 / 6617, and that module declares
+// `go 1.26.0` for itself. So the bump pulled ours up with it, reported verbatim as
+// `go: upgraded go 1.25.0 => 1.26.0`. v0.58.0 still declares 1.25.0 but sits BELOW
+// the fix, so no x/net release both clears the advisories and stays on the 1.25
+// language line. Building the relay now needs Go 1.26.0 or newer.
+//
+// The same `go get` raised x/crypto and x/text, which it chose, not us.
 //
 // relay/Dockerfile builds the shipped binary and MUST name this EXACT version
 // (#539 / #541 / #704). Bump both in one commit.
@@ -51,7 +60,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/ssor/bom v0.0.0-20170718123548-6386211fdfcf // indirect
-	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )

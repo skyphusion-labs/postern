@@ -238,10 +238,14 @@ under the hardened `DynamicUser` unit (already set in `systemd/`).
 
 ## Build, test
 
-Go 1.25+ (`go.mod` requires 1.25.0; built and tested on its `toolchain` line,
+Go 1.26+ (`go.mod` requires 1.26.0; built and tested on its `toolchain` line,
 currently 1.26.9; the door image is `FROM golang:1.26.9-bookworm` in lockstep,
-#541). The `go` directive sets the language version and stays at 1.25.0. The
-`toolchain` line is the security pin and moves on its own.
+#541). The `go` directive sets the language version. It held at 1.25.0 until
+#709, when a DEPENDENCY moved it: `golang.org/x/net v0.60.0` is the first release
+that clears GO-2026-6603 / 6610 / 6611 / 6612 / 6617, it declares `go 1.26.0` for
+itself, and so `go get` raised ours. A dependency can move the language version
+even when a stdlib fix does not. The `toolchain` line is the security pin and
+still moves on its own.
 Dependency-free: `go mod tidy` adds nothing.
 
 ### The toolchain pin is a security gate (audit #107)
@@ -251,22 +255,46 @@ CI reads that version from `go.mod` through `setup-go`. So the `toolchain` line
 is what the gate measures, and bumping it IS the remedy for a stdlib advisory.
 
 On 2026-10-08 a nine-advisory batch landed and turned the gate red repo-wide
-with no code change (postern#704). Measured with `govulncheck v1.5.0`, the CI
-pin, against the same module:
+with no code change (postern#704).
+
+**Read the exit code, not its sign.** `govulncheck` has three outcomes and two of
+them are non-zero, so "it came back non-zero, the gate fired" is wrong:
+
+| exit | meaning |
+|---|---|
+| 0 | clean. It ran and found no CALLED vulnerability |
+| 3 | a real red verdict. It ran and your code is affected |
+| 1 | **the tool failed to run.** No verdict was produced at all |
+
+An `exit 1` read as a red is the false pass this table exists to prevent.
+
+Measured with `govulncheck v1.5.0`, the CI pin, against this module as it stands
+after #709:
 
 | toolchain | exit | affecting | note |
 |---|---|---|---|
-| `go1.25.13` | 3 | 9 | the pin this replaced |
-| `go1.25.14` | 3 | 9 | newest 1.25 release; no backport exists |
-| `go1.26.9` | 0 | 0 | the landed pin |
-| `go1.27.0` | 1 | n/a | tool load error, not a verdict |
+| `go1.25.13` | 1 | n/a | load error: below the `go 1.26.0` directive since #709. NOT a verdict |
+| `go1.25.14` | 1 | n/a | same, and no 1.25 release can exercise this gate any more |
+| `go1.26.0` | 3 | 29 | the LOWEST toolchain that still returns a verdict. **Use this as the control** |
+| `go1.26.9` | 0 | 0 | the landed pin, resolved through the `toolchain` line |
+| `go1.27.0` | 1 | n/a | load error: `govulncheck v1.5.0` cannot type-check a go1.27 stdlib |
 
-Two rules come out of that table. First, a stdlib advisory can force a MINOR
-line move, because the Go team does not always backport. Read the `Fixed in`
-version the advisory names and go there. Second, do not jump to the 1.27 line
-while `ci.yml` pins `govulncheck v1.5.0`. That build cannot type-check a go1.27
-standard library, so it exits 1 on a load error and returns no verdict. Bump the
-tool pin first, then confirm the gate still goes red on an old toolchain.
+Three rules come out of it.
+
+First, a stdlib advisory can force a MINOR line move, because the Go team does
+not always backport. Read the `Fixed in` version the advisory names and go there.
+Before #709 the two 1.25 rows above read `exit 3, 9 affecting`, and they were the
+documented control; raising the `go` directive to 1.26.0 silently moved them to
+`exit 1`.
+
+Second, **a control has a validity RANGE, and raising a floor moves it.** To prove
+this gate still goes red, use `GOTOOLCHAIN=go1.26.0` and require `exit 3`. Any
+toolchain below the `go` directive now fails to load, which looks like a red and
+is not one.
+
+Third, do not jump to the 1.27 line while `ci.yml` pins `govulncheck v1.5.0`. That
+build cannot type-check a go1.27 standard library. Bump the tool pin first, then
+re-establish the control and watch it return `exit 3`.
 
 ### The scanned Go and the shipped Go are asserted equal
 
@@ -300,6 +328,48 @@ If dependabot bumps the image tag alone, the assertion goes red and the PR tells
 you to move `relay/go.mod` with it. That is the intended workflow, and it is why
 the tag is not derived from `go.mod` by a build arg: deriving it would take the
 image out of dependabot's reach.
+
+### An uncalled affected module is not a non-problem (#709)
+
+`govulncheck` sorts its findings by reachability. A module we require but never
+call is reported under `vulnerabilities in modules you require, but your code
+doesn't appear to call these`, and it does NOT fail the gate. The tool is right:
+there is no reachable path.
+
+Read that as a statement about our code at one commit, not about the dependency.
+
+**The gate is not blind to the change, though, and an earlier draft of this
+section said it was.** `govulncheck` recomputes reachability on every run, so a
+commit that makes an affected path reachable is flagged by the next run. Measured
+on this module: with GO-2026-5932 sitting in the uncalled bucket, adding one
+function that calls `golang.org/x/crypto/openpgp` moved it straight to a Symbol
+Result and the scan went from `exit 0, 0 called, 1 uncalled` to
+`exit 3, Your code is affected by 1 vulnerability from 1 module`. So the honest
+claim is narrower than "nothing will go red".
+
+What survives is the blind spot, not the silence. Reachability is STATIC analysis,
+so a path reached only through dynamic dispatch, reflection or a plugin seam can
+be live in production and still read as uncalled. That is the residual risk, and
+it is why an uncalled affected module gets bumped on its own schedule rather than
+left to the gate: the gate catches the ordinary case and cannot promise the
+awkward one.
+
+Measured either side of the #709 bump, with `govulncheck -show verbose`:
+
+| | `go` directive | x/net | uncalled findings |
+|---|---|---|---|
+| before | 1.25.0 | v0.57.0 | **10**: x/net 5, x/crypto 4, x/text 1 |
+| after | 1.26.0 | v0.60.0 | **1**: x/crypto 1 |
+
+Both scans exit 0 with zero CALLED vulnerabilities, so the gate never moved; what
+changed is how much unreachable-but-affected surface the module graph carries.
+
+**The single residual is structural and no bump clears it.** It is GO-2026-5932,
+`golang.org/x/crypto/openpgp is unmaintained, unsafe by design`, and its record
+reads `Fixed in: N/A`. There is no fixed version to move to. x/crypto arrives
+transitively, the relay does not call `openpgp`, and the advisory will sit in the
+uncalled list until it is retired upstream. Do not read a remaining count of 1 as
+a bump that failed to take; check the id and the `Fixed in` field first.
 
 ```bash
 cd relay
