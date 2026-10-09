@@ -128,7 +128,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `POSTERN_IMAP_AUTH_MODE` | no | `token` | `token`, `fixed`, `native`, `ldap`, or `system` (`pam` aliases `system`) |
 | `POSTERN_API_TOKEN` | in `fixed`/`native`/`ldap`/`system` | -- | the token the proxy presents: the login token in `fixed`, the per-function **service** token in `native`/`ldap`/`system` |
 | `POSTERN_API_TOKEN_DELETE` | no | -- | optional `both`-scoped member for EXPUNGE only (#278); separate from the read token |
-| `POSTERN_API_TOKEN_IMAP` | in `per_account` with role queues; and for `\Seen` / soft-move (#685) | -- | `imap`-scoped service token (#352) for durable Drafts / APPEND import, the role-membership read (#438), AND the `organize` routes (#685: seen / flags / move); own worker slot, unset = those writes refuse and NO role queue is served |
+| `POSTERN_API_TOKEN_IMAP` | in `per_account` with role queues; and for `\Seen` / flags / soft-move (#685, #686) | -- | `imap`-scoped service token (#352) for durable Drafts / APPEND import, the role-membership read (#438), AND the `organize` routes (#685: seen / flags / move). The door PRESENTS this token on those three routes rather than its primary read token (#686). Own worker slot. Unset: NO role queue is served, and the organize writes refuse in `native` / `ldap` / `system` (where the primary token is the door-held read-scoped service token) but fall back to the primary token in `token` / `fixed` (where it is the end user's own credential, which may carry `organize` itself) |
 | `POSTERN_IMAP_USERNAME` | in `fixed` | -- | the login username in `fixed` mode |
 | `POSTERN_TRANSPORT_TOKEN` | in `native` | -- | transport-seam bearer for `POST /api/smtp-auth` (mirrors the relay) |
 | `POSTERN_SMTP_AUTH_URL` | no | `${POSTERN_API_URL}/api/smtp-auth` | the `native` auth endpoint |
@@ -554,12 +554,26 @@ injectable transport, so no network is touched.
 
 ## Known limitations (v1, by design)
 
-- **Read-only, except the `\Seen` flag.** Read/unread state is persisted (a `STORE`
-  of `\Seen` round-trips to `POST /api/messages/seen`); every other write is refused.
-  **Since #685 that round-trip needs the `organize` scope**, which a `read` token does
-  not carry. Set `POSTERN_API_TOKEN_IMAP` (an `imap`-scoped worker token) or the worker
-  answers `403 requires organize scope` and `\Seen` stops sticking.
-  Sending is the structured API's job.
+- **Read-only, except read state, flags and placement.** `\Seen`, `\Flagged` /
+  `\Answered`, and soft-move to Trash / Junk / Archive are persisted (`POST
+  /api/messages/seen` / `/flags` / `/move`); every other write is refused. Sending is
+  the structured API's job.
+  **Since #685 those three need the `organize` scope**, which a `read` token does not
+  carry. Since #686 the door PRESENTS its `imap`-scoped token for them, so
+  `POSTERN_API_TOKEN_IMAP` is the one thing to set and the door's primary read token
+  does NOT have to be widened.
+  With it unset, what happens depends on whose token the primary is, and the door only
+  refuses where it KNOWS the answer:
+  - `native` / `ldap` / `system`: the primary is the door-held service token, documented
+    as read-scoped, so the three writes **refuse at the point of use** with a tagged NO
+    naming `POSTERN_API_TOKEN_IMAP`. Nothing is sent. That is deliberate: a request with
+    a token that cannot carry the scope can only earn a worker `403`, which reaches a
+    mail client as an opaque failure, and falling back silently would turn a loud
+    failure into a quiet one.
+  - `token` / `fixed`: the primary IS the end user's own credential (in `token` mode the
+    IMAP password is the Postern token), so it may legitimately be a `both` or `imap`
+    token. The door falls back to it and lets the worker judge its scope, which keeps a
+    working door working.
 - **APPEND is persist-or-refuse, per folder** (#352 section 3.2; `account.
   appendability()` is the classifier). `Sent` matches the APPEND against the
   already-stored outbound copy and persists it through the import seam on a miss.

@@ -89,7 +89,6 @@ export interface Message extends Omit<MessageSummary, "attachmentCount" | "folde
 export interface SearchHit {
   message: MessageSummary;
   score?: number;
-  snippet?: string;
 }
 
 /** A hit whose `message` may be a PROJECTION (worker #646, `fields=`).
@@ -204,6 +203,15 @@ export interface DraftInput {
   threadId?: string;
   composeMode?: DraftComposeMode;
   sourceMessageId?: string;
+}
+
+/** The flag pair `POST /api/messages/flags` accepts (worker body `set`).
+ *
+ *  Both are optional, and the worker REFUSES a `set` carrying neither, so "change
+ *  nothing" is a caller error rather than a silent no-op. */
+export interface FlagSet {
+  flagged?: boolean;
+  answered?: boolean;
 }
 
 export interface SendResult {
