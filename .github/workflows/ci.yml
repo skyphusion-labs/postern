@@ -50,6 +50,14 @@ jobs:
         working-directory: relay
     steps:
       - uses: actions/checkout@v7
+      # The relay govulncheck gate below measures the toolchain it runs under, and
+      # setup-go resolves that from relay/go.mod. relay/Dockerfile names a Go
+      # version too, and for months it named a DIFFERENT one, so a green relay job
+      # said nothing true about the shipped image (#704). Assert they agree before
+      # spending a runner on the rest, and fail loudly when they do not.
+      - name: scanned Go == shipped Go (#704)
+        working-directory: ${{ github.workspace }}
+        run: bash .github/scripts/assert-relay-go-pin.sh
       - uses: actions/setup-go@v7
         with:
           # Track the relay go.mod toolchain so CI never drifts from the code.
@@ -211,6 +219,8 @@ jobs:
         run: bash .github/scripts/tests/check-topology-scrub.test.sh
       - name: forwarding preflight verdict logic (#611)
         run: bash .github/scripts/tests/forwarding-preflight.test.sh
+      - name: relay Go pin skew detection (#704)
+        run: bash .github/scripts/tests/assert-relay-go-pin.test.sh
 
   ci:
     name: ci
