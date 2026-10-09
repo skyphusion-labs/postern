@@ -238,9 +238,35 @@ under the hardened `DynamicUser` unit (already set in `systemd/`).
 
 ## Build, test
 
-Go 1.25+ (`go.mod` requires 1.25.0; built/tested on its `toolchain` line, currently
-1.25.13; the door image is `FROM golang:1.25.13-bookworm` in lockstep -- #541).
+Go 1.25+ (`go.mod` requires 1.25.0; built and tested on its `toolchain` line,
+currently 1.26.9; the door image is `FROM golang:1.26.9-bookworm` in lockstep,
+#541). The `go` directive sets the language version and stays at 1.25.0. The
+`toolchain` line is the security pin and moves on its own.
 Dependency-free: `go mod tidy` adds nothing.
+
+### The toolchain pin is a security gate (audit #107)
+
+`govulncheck` reports standard-library CVEs against the toolchain version, and
+CI reads that version from `go.mod` through `setup-go`. So the `toolchain` line
+is what the gate measures, and bumping it IS the remedy for a stdlib advisory.
+
+On 2026-10-08 a nine-advisory batch landed and turned the gate red repo-wide
+with no code change (postern#704). Measured with `govulncheck v1.5.0`, the CI
+pin, against the same module:
+
+| toolchain | exit | affecting | note |
+|---|---|---|---|
+| `go1.25.13` | 3 | 9 | the pin this replaced |
+| `go1.25.14` | 3 | 9 | newest 1.25 release; no backport exists |
+| `go1.26.9` | 0 | 0 | the landed pin |
+| `go1.27.0` | 1 | n/a | tool load error, not a verdict |
+
+Two rules come out of that table. First, a stdlib advisory can force a MINOR
+line move, because the Go team does not always backport. Read the `Fixed in`
+version the advisory names and go there. Second, do not jump to the 1.27 line
+while `ci.yml` pins `govulncheck v1.5.0`. That build cannot type-check a go1.27
+standard library, so it exits 1 on a load error and returns no verdict. Bump the
+tool pin first, then confirm the gate still goes red on an old toolchain.
 
 ```bash
 cd relay

@@ -66,6 +66,18 @@ class AppendRejectedError(imap4.MailboxException):
     """APPEND refused: no honest persist path (RFC 3501 tagged NO, never silent drop)."""
 
 
+class OrganizeRejectedError(imap4.MailboxException):
+    """An organize write had no honest credential to present (#686).
+
+    POST /api/messages/{seen,flags,move} are `organize`-scoped (#685). When this door
+    holds no token that carries that scope, the write is refused HERE with a message
+    naming what to configure, rather than sent with a token the worker will reject.
+    Loud by construction: a tagged NO the operator can read, never a silent no-op and
+    never a fallback to the read token (a silent fallback turns a loud failure into a
+    quiet one, and the read token would 403 anyway).
+    """
+
+
 class MailboxLoadError(imap4.MailboxException):
     """The mailbox snapshot could not be loaded from the Postern read API (#144)."""
 
@@ -188,6 +200,8 @@ class PosternMailbox:
         mailbox_filter: Optional[str] = None,
         role_queue: bool = False,
         imap_client: Optional[PosternClient] = None,
+        organize_client: Optional[PosternClient] = None,
+        organize_refusal: Optional[str] = None,
         identity: Optional[str] = None,
         draft_revisions: Optional[set] = None,
     ) -> None:
@@ -198,6 +212,26 @@ class PosternMailbox:
         # configured POSTERN_API_TOKEN_IMAP or no identity could be derived --
         # Drafts/import then fail closed (AppendRejectedError) rather than guess.
         self._imap_client = imap_client
+        # #686: the client the three `organize`-scoped writes present (seen, flags,
+        # move). The read client is NOT it in the common native/ldap/system setup,
+        # where the primary token is a read-scoped service token, so these writes
+        # needed a credential of their own rather than an operator having to widen the
+        # door's read token.
+        #
+        # Exactly one of these two is ever set by PosternAccount, and each answers a
+        # different question:
+        #   organize_client  -- WHO to present. None falls back to the primary read
+        #                       client, which keeps a `both`-token door (and every
+        #                       direct construction of this class) working unchanged.
+        #   organize_refusal -- WHY there is nobody to present. Set only when the
+        #                       account KNOWS the primary token cannot carry organize,
+        #                       and the three writes then refuse at the point of USE.
+        #
+        # Refusal is at the point of use and not at construction, deliberately: this
+        # same mailbox serves reads, and refusing early would break SELECT for a door
+        # that reads perfectly well.
+        self._organize_client = organize_client
+        self._organize_refusal = organize_refusal
         self._identity = identity
         # Shared across every Drafts mailbox instance the account constructs (see
         # PosternAccount._draft_revisions); a fresh local set when unset (e.g. a
@@ -701,9 +735,9 @@ class PosternMailbox:
             if not t and self._summaries[s - 1].seen
         ]
         if to_read:
-            self._client.set_seen(to_read, True, for_addr=self._viewer)
+            self._organize().set_seen(to_read, True, for_addr=self._viewer)
         if to_unread:
-            self._client.set_seen(to_unread, False, for_addr=self._viewer)
+            self._organize().set_seen(to_unread, False, for_addr=self._viewer)
         for seq, target in seen_targets.items():
             self._summaries[seq - 1].seen = target
         for seq, target in deleted_targets.items():
@@ -717,7 +751,7 @@ class PosternMailbox:
                 if t is want_flagged and self._summaries[s - 1].flagged is not want_flagged
             ]
             if ids:
-                self._client.set_flags(ids, flagged=want_flagged)
+                self._organize().set_flags(ids, flagged=want_flagged)
                 for s, t in flagged_targets.items():
                     if t is want_flagged:
                         self._summaries[s - 1].flagged = want_flagged
@@ -728,12 +762,23 @@ class PosternMailbox:
                 if t is want_answered and self._summaries[s - 1].answered is not want_answered
             ]
             if ids:
-                self._client.set_flags(ids, answered=want_answered)
+                self._organize().set_flags(ids, answered=want_answered)
                 for s, t in answered_targets.items():
                     if t is want_answered:
                         self._summaries[s - 1].answered = want_answered
 
         return {seq: list(self._wrap(seq)[1].getFlags()) for seq in seqs}
+
+    def _organize(self) -> PosternClient:
+        """The client for the `organize`-scoped writes, or an honest refusal (#686).
+
+        Never falls back to the primary token on a 403, and never falls back silently:
+        a fallback would turn a loud, diagnosable failure into a quiet one, and the
+        read-scoped token it would fall back TO is exactly the token the worker refuses.
+        """
+        if self._organize_refusal is not None:
+            raise OrganizeRejectedError(self._organize_refusal)
+        return self._organize_client or self._client
 
     def addMessage(self, message, flags=(), date=None):
         """APPEND persist-or-refuse (#352 section 3.2). Never silent OK+drop."""
@@ -869,7 +914,13 @@ class PosternMailbox:
                 and _same_stored_message(existing, parsed)
                 and self._placement_direction_matches(existing, parsed)
             ):
-                self._client.move_messages([mid], mailbox)
+                # APPEND's contract is persist-or-refuse with AppendRejectedError
+                # (#352 3.2), so an organize refusal is converted rather than raised
+                # as itself; the reason text is carried through unchanged.
+                try:
+                    self._organize().move_messages([mid], mailbox)
+                except OrganizeRejectedError as exc:
+                    raise AppendRejectedError(str(exc)) from exc
                 return
         # #352 core unblocker 3: a genuine new Trash/Junk/Archive APPEND (no
         # matching existing message) is now PERSISTED via the IMAP-service import
@@ -1076,7 +1127,7 @@ class PosternMailbox:
                 )
         ids = [s.message_id for _seq, s in items]
         try:
-            self._client.move_messages(ids, mailbox)
+            self._organize().move_messages(ids, mailbox)
         except PosternError as exc:
             raise ReadOnlyError(f"move failed: {exc}") from exc
         moved_ids = set(ids)

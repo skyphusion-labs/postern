@@ -111,9 +111,11 @@ export interface StoredMessageSummary {
  *
  * A projection may select only what the store already produces. Accepting a name that
  * is not a key of StoredMessageSummary would hand the caller a column nothing fills --
- * exactly the shape of #652 (`snippet` declared on the search hit with zero producers),
- * which is why `snippet` is absent here and `fields=snippet` is a 400 rather than an
- * empty string. Populating it is a decision #652 owns; a projection must not pre-empt it.
+ * which is exactly what #652 was: `snippet` declared on the search hit with zero
+ * producers. #652 resolved it by DELETING that declaration, because this projection was
+ * the one caller that could have forced a producer and it turned out not to need one.
+ * `fields=snippet` therefore stays a 400, now simply because no such key exists.
+ * searchhit-producers.test.ts is what keeps a producerless field from coming back.
  *
  * The two assertions below make this list UNABLE to drift from the type: adding a field
  * to StoredMessageSummary without adding it here fails `npm run typecheck`, and so does
@@ -277,7 +279,6 @@ export interface Page<T> {
 export interface SearchHit {
   message: StoredMessageSummary;
   score?: number;
-  snippet?: string;
 }
 
 const DEFAULT_LIMIT = 50;

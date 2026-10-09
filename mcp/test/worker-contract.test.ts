@@ -23,7 +23,7 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { PosternClient } from "../src/client.js";
 import { z } from "zod";
-import { READ_TOOLS, SEND_TOOLS, type ToolDef } from "../src/tools.js";
+import { ORGANIZE_TOOLS, READ_TOOLS, SEND_TOOLS, type ToolDef } from "../src/tools.js";
 
 interface RouteRow {
   id: string;
@@ -229,7 +229,7 @@ describe("#417 COVERAGE: no client method can skip this file", () => {
   // emission driver above is only as good as its list of calls, so reflect over the
   // client and require every public method to be exercised. A new method with a new
   // path or parameter cannot slip past by simply not being called here.
-  const NON_EMITTING = new Set(["request", "requestGet", "requestPost", "asSendResult"]);
+  const NON_EMITTING = new Set(["request", "requestGet", "requestPost", "asSendResult", "asUpdated"]);
 
   it("every public client method is either exercised or declared request-free", async () => {
     const methods = Object.getOwnPropertyNames(PosternClient.prototype).filter(
@@ -414,6 +414,11 @@ const SAMPLE: Record<string, unknown> = {
   // unknown one: a placeholder here would exercise the forwarding but describe a call no
   // caller can make.
   fields: ["uid", "date", "from", "subject"],
+  // The #645 organize surface. `ids` is a one-element list because the count semantics
+  // are not what this arm measures, only whether the key reaches the wire. `flagged`
+  // and `answered` are true, not false: false is a real value the worker honors, but a
+  // boolean sample that matched a default would make a forwarded key look dropped.
+  ids: ["m-1"], flagged: true, answered: true, for_recipient: "ada@example.com",
 };
 
 /** Keys a tool needs for its handler to reach the wire at all. */
@@ -435,6 +440,13 @@ const REQUIRED: Record<string, string[]> = {
   mailbox_draft_update: ["draft_id", "updated_at"],
   mailbox_draft_delete: ["draft_id"],
   mailbox_draft_send: ["draft_id"],
+  // #645. mark_seen needs the ids and the value; set_flags needs at least one flag, and
+  // the handler REFUSES a call with neither, so one of them is part of the baseline
+  // rather than an optional key; move needs its destination, which is a required
+  // parameter because `null` there means "restore the default view", not "unset".
+  mailbox_mark_seen: ["ids", "seen"],
+  mailbox_set_flags: ["ids", "flagged"],
+  mailbox_move: ["ids", "mailbox"],
 };
 
 /** Everything a request carries, VALUES included: a key whose presence changes only a value
@@ -469,7 +481,7 @@ function baselineArgs(tool: ToolDef): Record<string, unknown> {
   return out;
 }
 
-const ALL_TOOLS: ToolDef[] = [...READ_TOOLS, ...SEND_TOOLS];
+const ALL_TOOLS: ToolDef[] = [...READ_TOOLS, ...SEND_TOOLS, ...ORGANIZE_TOOLS];
 
 describe("#632 F1 FORWARDING: every inputSchema key demonstrably changes the request", () => {
   for (const tool of ALL_TOOLS) {

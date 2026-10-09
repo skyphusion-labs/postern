@@ -7,7 +7,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { PosternClient, PosternError } from "./client.js";
-import type { DraftInput, SearchField, SearchMode } from "./types.js";
+import type { DraftInput, FlagSet, MailboxPlacement, SearchField, SearchMode } from "./types.js";
 
 // Repeated verbatim in every draft tool description on purpose. An agent reads ONE
 // tool description, never the set, so the identity requirement has to be in each of
@@ -18,7 +18,7 @@ const DRAFT_NOTE =
   "argument, so a static operator token is refused with E_IDENTITY_REQUIRED and the tool " +
   "says so rather than returning an empty result. ";
 
-export type Scope = "read" | "send";
+export type Scope = "read" | "send" | "organize";
 
 type TextResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -182,7 +182,8 @@ export const READ_TOOLS: ToolDef[] = [
     inputSchema: {
       query: z.string().min(1).describe("the search text"),
       mode: MODE.optional().describe("search mode; defaults to hybrid. substr is a literal substring match (use with field)"),
-      field: FIELD.optional().describe("for mode substr only: which column to match (subject/body/text); ignored by other modes"),
+      field: FIELD.optional().describe("for mode substr ONLY: which column to match (subject/body/text). "
+        + "REFUSED, not ignored, in any other mode: pass mode=substr or remove field"),
       limit: z.number().int().positive().max(200).optional().describe("max results (default server-side ~50)"),
       direction: DIRECTION.optional().describe("filter on the STORED direction: received (inbound) or sent (outbound)"),
       to: z.string().optional().describe("viewer address: scope the search to one address's mail"),
@@ -224,6 +225,27 @@ export const READ_TOOLS: ToolDef[] = [
     handler: async (client, a) => {
       const mode: SearchMode = a.mode ?? "hybrid";
       const field: SearchField | undefined = a.field;
+      // `field` picks the COLUMN the substring match runs against, and only the substr
+      // mode has such a column. Supplying it in any other mode is REFUSED here rather
+      // than forwarded and dropped (#651, from #632 F12).
+      //
+      // Refusal, not a quieter echo, because this is the accepted-and-ignored class that
+      // #632 F1 already closed for unknown keys, and registerTools states the rule: a
+      // supplied filter that is silently dropped is worse than one that is rejected,
+      // because the caller reasonably believes it applied. The old code forwarded nothing
+      // (client.search omits it for the other modes) and then echoed `field: field ?? null`
+      // regardless, so `mode: hybrid, field: subject` answered with `field: "subject"`,
+      // which reads as confirmation that the search WAS restricted to subjects.
+      //
+      // It is refused BEFORE the request, so no unrestricted search runs under a name the
+      // caller would misread. `mode` defaults to hybrid, so `{ query, field }` with no
+      // mode at all is the likeliest way in, and it is refused too.
+      if (field !== undefined && mode !== "substr") {
+        throw new PosternError(
+          `field selects the column for mode substr and mode is "${mode}": ` +
+            "pass mode=substr to match one column, or remove field",
+        );
+      }
       const page = await client.search({
         q: a.query,
         mode,
@@ -245,7 +267,12 @@ export const READ_TOOLS: ToolDef[] = [
       return {
         query: a.query,
         mode,
-        field: field ?? null,
+        // Present ONLY in the mode that honors it, so the key's PRESENCE carries
+        // information and a caller can tell three states apart: a named column
+        // (`field: "subject"`), substr with no column named (`field: null`), and a mode
+        // where the parameter does not exist (no key at all). A `null` in a non-substr
+        // answer would be a fourth, false reading: "understood, unrestricted".
+        ...(mode === "substr" ? { field: field ?? null } : {}),
         direction: a.direction ?? null,
         to: a.to ?? null,
         from: a.from ?? null,
@@ -687,6 +714,161 @@ export const SEND_TOOLS: ToolDef[] = [
         threadId: result.threadId,
         providerMessageId: result.providerMessageId ?? null,
       };
+    },
+  },
+];
+
+// v1.2 organize tools (scope "organize"). MUTATING, but only over the mailbox's OWN
+// view of its mail: read state, flags, and which folder a message sits in. Nothing here
+// sends or deletes anything.
+//
+// They register ONLY when an organize-capable credential is configured (see index.ts),
+// for the reason the send tools do: a tool that is advertised and always 403s is worse
+// than an absent tool, because an agent cannot tell a missing grant from a broken route.
+//
+// ONE THING EVERY DESCRIPTION HERE MUST SAY, and it is the whole of #645's warning. The
+// routes answer `{ updated }`, a COUNT. An agent that names five ids and reads
+// `updated: 3` cannot tell WHICH two were skipped, and no amount of wording in a result
+// can recover that. So each tool reports the count verbatim beside the `requested` size
+// and the `unchanged` difference, and says in its description what a short count means
+// and how to find out which ids it was. None of them echoes the id list back, because an
+// echoed list sitting next to a short count reads as the list that landed.
+const COUNT_NOTE =
+  "COUNTS, NOT PER-ID RESULTS: the answer is `updated` (how many stored messages the " +
+  "server matched), `requested` (how many ids you sent), and `unchanged` (the " +
+  "difference). The server counts every message row it reached, so re-applying a value " +
+  "a message already had still counts. `unchanged` above 0 therefore means some ids are " +
+  "unknown to the store or outside what your token may reach, and THIS ANSWER CANNOT " +
+  "SAY WHICH ONES, so do not treat your id list as the list that landed; re-read those " +
+  "ids with mailbox_list or mailbox_get to see their real state. Duplicate ids in one " +
+  "call also count toward `unchanged`. ";
+
+/**
+ * The organize credential, or "" when the operator granted none.
+ *
+ * Pure, exported, and given its own function for one reason: the registration decision
+ * IS the #645 requirement ("do not advertise a tool that always 403s"), and in index.ts
+ * it would sit inside `main()`, which cannot be imported without starting a server. A
+ * guard that no test can watch fail is decoration, so the decision lives here where a
+ * test drives it directly and index.ts only obeys it.
+ *
+ * Two slots, the same shape the send tools use:
+ *   POSTERN_ORGANIZE_TOKEN  -- a credential of its own (preferred: per-function keys).
+ *   POSTERN_MCP_ORGANIZE=1  -- reuse POSTERN_API_TOKEN, for the single registry token
+ *                              that already carries organize alongside read.
+ *
+ * Whitespace-only is UNSET, not a token: a blank env var is how a half-finished config
+ * reaches production, and a blank Bearer would 401 at the worker with nothing to read.
+ * The literal "1" is required for the reuse flag rather than any truthy string, so a
+ * POSTERN_MCP_ORGANIZE=0 meant as "off" is not read as "on".
+ */
+export function organizeTokenFrom(
+  env: Record<string, string | undefined>,
+  primaryToken: string,
+): string {
+  const own = (env.POSTERN_ORGANIZE_TOKEN ?? "").trim();
+  if (own) return own;
+  if ((env.POSTERN_MCP_ORGANIZE ?? "").trim() === "1") return primaryToken.trim();
+  return "";
+}
+
+export const ORGANIZE_TOOLS: ToolDef[] = [
+  {
+    name: "mailbox_mark_seen",
+    scope: "organize",
+    description:
+      "Mark stored messages read or unread. MUTATING: this changes what the mailbox " +
+      "looks like to its readers (it is the same write the IMAP \\Seen flag and a " +
+      "webmail 'mark read' perform), but it neither sends nor deletes anything. " +
+      "Pass the message ids and seen=true (read) or seen=false (unread). " +
+      COUNT_NOTE +
+      "By default this sets the mailbox-wide read state. Pass for_recipient to record " +
+      "the state for ONE person instead, which is what a shared or role address needs " +
+      "so two readers do not inherit each other's unread counts. A token bound to an " +
+      "identity may only write its OWN state: the server REFUSES a for_recipient that " +
+      "disagrees with the token rather than quietly rewriting it, and it binds the write " +
+      "to that identity even when for_recipient is omitted. That is why the result does " +
+      "not echo for_recipient back: under a bound token the server, not your argument, " +
+      "decides whose state was written.",
+    inputSchema: {
+      ids: z.array(z.string().min(1)).min(1).describe("the message ids to mark (as returned by search/list/get)"),
+      seen: z.boolean().describe("true = mark read, false = mark unread"),
+      for_recipient: z
+        .string()
+        .optional()
+        .describe(
+          "record the read state for this ONE address (the route's `for`), instead of " +
+            "the mailbox-wide flag. Use it for a shared/role address, e.g. " +
+            "for_recipient=ada@example.com. REFUSED when it disagrees with an " +
+            "identity-bound token",
+        ),
+    },
+    handler: async (client, a) => {
+      const requested: number = a.ids.length;
+      const updated = await client.setSeen(a.ids, a.seen, a.for_recipient);
+      return { updated, requested, unchanged: requested - updated, seen: a.seen };
+    },
+  },
+  {
+    name: "mailbox_set_flags",
+    scope: "organize",
+    description:
+      "Set the flagged (starred) and/or answered flags on stored messages. MUTATING, " +
+      "but it only changes flags; it neither sends nor deletes anything. Supply at " +
+      "least one of flagged or answered: a call that sets neither is REFUSED rather " +
+      "than treated as doing nothing. A flag you omit is LEFT ALONE, not cleared. " +
+      COUNT_NOTE,
+    inputSchema: {
+      ids: z.array(z.string().min(1)).min(1).describe("the message ids to flag (as returned by search/list/get)"),
+      flagged: z.boolean().optional().describe("true = star, false = unstar; omit to leave the flag unchanged"),
+      answered: z
+        .boolean()
+        .optional()
+        .describe("true = mark answered, false = clear it; omit to leave the flag unchanged"),
+    },
+    handler: async (client, a) => {
+      // Refused here, not forwarded, so the caller gets the reason instead of a 400 it
+      // has to interpret. The worker refuses the same shape, so this agrees with it
+      // rather than inventing a rule.
+      if (a.flagged === undefined && a.answered === undefined) {
+        throw new PosternError("provide at least one of 'flagged' or 'answered'");
+      }
+      // Only the keys the caller actually set, because an omitted flag must be left
+      // alone: sending `answered: undefined` would serialize to nothing, but building
+      // the object this way makes that explicit rather than incidental.
+      const set: FlagSet = {};
+      if (a.flagged !== undefined) set.flagged = a.flagged;
+      if (a.answered !== undefined) set.answered = a.answered;
+      const requested: number = a.ids.length;
+      const updated = await client.setFlags(a.ids, set);
+      return { updated, requested, unchanged: requested - updated, set };
+    },
+  },
+  {
+    name: "mailbox_move",
+    scope: "organize",
+    description:
+      "File stored messages into a durable folder, or restore them to the default view. " +
+      "MUTATING: it changes where the messages appear for every reader of this mailbox. " +
+      "This is a SOFT move and never deletes anything: mailbox='trash' files a message " +
+      "in Trash, it does not erase it, and mailbox=null moves it back out of whatever " +
+      "folder it was in. Use mailbox_folders first to see what is where. " +
+      COUNT_NOTE,
+    inputSchema: {
+      ids: z.array(z.string().min(1)).min(1).describe("the message ids to move (as returned by search/list/get)"),
+      mailbox: z
+        .enum(["archive", "trash", "junk"])
+        .nullable()
+        .describe(
+          "the destination folder: archive, trash or junk, or null to restore the " +
+            "default unfoldered view. null is a real destination here, not a missing value",
+        ),
+    },
+    handler: async (client, a) => {
+      const mailbox: MailboxPlacement = a.mailbox ?? null;
+      const requested: number = a.ids.length;
+      const updated = await client.move(a.ids, mailbox);
+      return { updated, requested, unchanged: requested - updated, mailbox };
     },
   },
 ];

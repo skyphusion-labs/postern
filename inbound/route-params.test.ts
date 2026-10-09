@@ -184,10 +184,11 @@ async function dateProbe(
 
 /** Both refusal arms and the applied arm, shared by the two read surfaces.
  *
- *  `snippet` is REFUSED on purpose. It is declared on the search hit and on
- *  mcp/src/types.ts with zero producers (#652, populate-or-delete, undecided); a
- *  projection that accepted it would answer a key nothing fills, which is the very
- *  defect #652 exists to settle. The projection must not pre-empt that decision. */
+ *  `snippet` is REFUSED, and the case is kept by name after #652 deleted the field. It
+ *  was declared on the search hit and on mcp/src/types.ts with zero producers, and this
+ *  projection is what settled the populate-or-delete question by not needing it. Keeping
+ *  the probe means a re-added unproduced field cannot arrive projectable; the declaration
+ *  itself is guarded by searchhit-producers.test.ts. */
 async function fieldsProbe(
   env: Env,
   ctx: ExecutionContext,

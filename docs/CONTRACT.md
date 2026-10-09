@@ -273,7 +273,7 @@ interface Page<T> {
   retrievalCap?: number;    // the retrieval ceiling that applied; only with complete:false
   degraded?: string;        // why it is incomplete, when the reason is not just the ceiling
 }
-interface SearchHit { message: StoredMessageSummary; score?: number; snippet?: string }
+interface SearchHit { message: StoredMessageSummary; score?: number }
 ```
 
 The `cursor` is opaque: keyset pagination on `(date DESC, id DESC)` (the encoded last tuple),
@@ -1503,12 +1503,14 @@ Three refusals, all `E_VALIDATION_ERROR`, and each one is the point:
   the #632/#637 accepted-and-ignored defect in a new hat. The error lists every accepted name.
 - An **empty** `fields=` is refused, including when a client built it from an empty list, so
   "I asked for a projection" can never be read as "I asked for none".
-- `fields=snippet` is refused. `snippet` is declared on the search hit (and in
-  `mcp/src/types.ts`) with ZERO producers; #652 owns the populate-or-delete decision, and a
-  projection that accepted it would answer a key nothing fills and pre-empt that ruling.
+- `fields=snippet` is refused, because there is no such key. `snippet` was declared on the
+  search hit (and in `mcp/src/types.ts`) with ZERO producers; #652 settled it by DELETING
+  the declaration, since this projection was the one caller that could have required a
+  producer and it did not. The refusal is kept as a named case so re-adding an unproduced
+  field cannot quietly become projectable.
 
-On `/api/search` the projection narrows `hit.message` only; `score` and `snippet` are
-untouched. **`fields` is NOT a filter, and is deliberately not declared alongside the view
+On `/api/search` the projection narrows `hit.message` only; `score` and the page envelope
+are untouched. **`fields` is NOT a filter, and is deliberately not declared alongside the view
 filters** in `inbound/src/routes.ts`: filters change which messages come back, a projection
 changes the shape of each one.
 
@@ -1519,7 +1521,7 @@ A SQL-level projection is a separate, separately-measurable change and is not cl
 `hasAttachment` is worth calling out because #646 lists it as an envelope column: it is a
 search FILTER, not a summary key. The projectable name for the same fact is
 `attachmentCount`. Inventing a `hasAttachment` output field would have created exactly the
-producerless field that `fields=snippet` is refused for.
+producerless field that #652 deleted.
 
 **A THREAD READ IS BOUNDED: `limit` / `cursor` (#649).** `GET /api/threads/{id}` used to
 select EVERY message in the thread, bodies included, with no LIMIT and no cursor, so the size

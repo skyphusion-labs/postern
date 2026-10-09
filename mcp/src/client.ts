@@ -12,7 +12,9 @@ import type {
   Direction,
   Draft,
   DraftInput,
+  FlagSet,
   FolderSummary,
+  MailboxPlacement,
   MailboxFilter,
   Message,
   MessageSummary,
@@ -374,6 +376,63 @@ export class PosternClient {
   async sendDraft(id: string): Promise<SendResult> {
     const body = await this.requestPost(`/api/drafts/${encodeURIComponent(id)}/send`, {});
     return this.asSendResult(body);
+  }
+
+  // --- read state + placement (organize scope) ---
+  //
+  // Three routes that CHANGE stored state: read state, flags, and which folder a
+  // message sits in. They moved to the `organize` scope in #685, which an `organize`
+  // token carries and a `read` token deliberately does not, so these need a credential
+  // the read client does not hold.
+  //
+  // Every one answers `{ updated }`: a COUNT of the message rows the worker matched,
+  // never a per-id result. The count is rows that EXIST and that the token may reach
+  // (store.ts setSeen/setFlags/moveMessages share one access predicate), so re-marking
+  // a message that already had the value still counts it. A short count therefore means
+  // some ids are unknown to the store or outside the token's reach, and nothing in the
+  // answer says WHICH. This client passes the count through verbatim rather than
+  // inventing a per-id answer the worker did not give.
+
+  // POST /api/messages/seen. `forRecipient` writes a per-recipient override
+  // (message_seen_by) instead of the row-level flag. Under a bound identity the worker
+  // REFUSES a `for` that disagrees with the token's identity (403), and that refusal
+  // surfaces as itself through request() rather than as a zero count.
+  async setSeen(ids: string[], seen: boolean, forRecipient?: string): Promise<number> {
+    const payload: Record<string, unknown> = { ids, seen };
+    // Only when supplied: the worker reads an absent `for` as the estate/row-level
+    // write, which is a DIFFERENT operation, so defaulting it here would silently
+    // change which one runs.
+    if (forRecipient !== undefined) payload.for = forRecipient;
+    const body = await this.requestPost("/api/messages/seen", payload);
+    return this.asUpdated(body, "/api/messages/seen");
+  }
+
+  // POST /api/messages/flags. `set` carries flagged and/or answered; the worker refuses
+  // a set with neither rather than treating it as a no-op.
+  async setFlags(ids: string[], set: FlagSet): Promise<number> {
+    const body = await this.requestPost("/api/messages/flags", { ids, set });
+    return this.asUpdated(body, "/api/messages/flags");
+  }
+
+  // POST /api/messages/move. `null` is not "no placement given", it is the request to
+  // RESTORE the default unfoldered view, so it is sent as a literal null.
+  async move(ids: string[], mailbox: MailboxPlacement): Promise<number> {
+    const body = await this.requestPost("/api/messages/move", { ids, mailbox });
+    return this.asUpdated(body, "/api/messages/move");
+  }
+
+  /** The `updated` count, or a thrown error when the worker did not send one.
+   *
+   *  Deliberately NOT `Number(body.updated ?? 0)`. Zero is a real, meaningful answer
+   *  here ("nothing you named was reachable"), so coercing a MISSING count into zero
+   *  would manufacture that answer out of a malformed response. This is the same defect
+   *  the `cursor ?? null` flattening was: a door that normalises an absent fact into a
+   *  definite one makes the lie look like the worker told it. */
+  private asUpdated(body: Record<string, any>, path: string): number {
+    if (typeof body.updated !== "number" || !Number.isFinite(body.updated)) {
+      throw new PosternError(`Postern API did not return an updated count on ${path}`);
+    }
+    return body.updated;
   }
 
   private asSendResult(body: Record<string, any>): SendResult {
