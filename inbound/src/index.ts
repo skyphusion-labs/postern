@@ -132,8 +132,16 @@ export class MailboxService extends WorkerEntrypoint<Env> {
   get(messageId: string): Promise<StoredMessage | null> {
     return store.getUnscoped(this.env, messageId);
   }
-  thread(threadId: string): Promise<StoredMessage[]> {
-    return store.thread(this.env, threadId);
+  // Returns a PAGE since #649, matching `list` and `search` on this same entrypoint.
+  // `thread` was the one read here that returned an unbounded array, and that is exactly
+  // why it was the one that could return a whole conversation of full bodies in a single
+  // call. Truncating it silently behind the old array signature would have been the
+  // completeness lie rather than a fix, so the shape changes with the bound.
+  thread(
+    threadId: string,
+    opts?: { limit?: number; cursor?: string },
+  ): Promise<Page<StoredMessage>> {
+    return store.thread(this.env, threadId, undefined, opts);
   }
   list(query: ListQuery): Promise<Page<StoredMessageSummary>> {
     return store.list(this.env, query);

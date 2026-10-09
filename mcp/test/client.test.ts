@@ -125,11 +125,27 @@ describe("get", () => {
 });
 
 describe("thread", () => {
-  it("maps to /api/threads/{id} and returns messages", async () => {
-    const calls = mockFetch(200, { ok: true, threadId: "t1", messages: [{ messageId: "m1" }, { messageId: "m2" }] });
-    const msgs = await client().thread("t1");
+  it("maps to /api/threads/{id} and returns a PAGE of messages (#649)", async () => {
+    const calls = mockFetch(200, {
+      ok: true, threadId: "t1", messages: [{ messageId: "m1" }, { messageId: "m2" }], cursor: null,
+    });
+    const page = await client().thread("t1");
     expect(calls[0].url).toContain("/api/threads/t1");
-    expect(msgs).toHaveLength(2);
+    expect(page.items).toHaveLength(2);
+    // A null cursor is the worker's positive claim that this IS the whole thread.
+    expect(page.cursor).toBeNull();
+  });
+
+  it("forwards limit and cursor, and reports a non-null cursor as truncation (#649)", async () => {
+    const calls = mockFetch(200, {
+      ok: true, threadId: "t1", messages: [{ messageId: "m1" }], cursor: "cur-2",
+    });
+    const page = await client().thread("t1", { limit: 1, cursor: "cur-1" });
+    expect(calls[0].url).toContain("limit=1");
+    expect(calls[0].url).toContain("cursor=cur-1");
+    // Passed through, never swallowed: a dropped cursor would turn a first page into what
+    // reads like a whole thread.
+    expect(page.cursor).toBe("cur-2");
   });
 });
 

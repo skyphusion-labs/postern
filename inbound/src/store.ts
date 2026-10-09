@@ -1803,7 +1803,43 @@ export async function getUnscoped(env: Env, messageId: string): Promise<StoredMe
   return rowToMessage(row, await attachmentsFor(env.DB, messageId));
 }
 
-/** All messages in a thread, oldest first.
+/** The default bound on a thread read (#649).
+ *
+ *  Deliberately SMALLER than DEFAULT_LIMIT, which is the SUMMARY default. A thread row is a
+ *  full StoredMessage, `body_text` and `body_html` included, plus its attachment metadata,
+ *  so it is an order of magnitude heavier than a summary row: fifty of them is the payload
+ *  problem rather than a bound on it.
+ *
+ *  Twenty is a REAL ceiling and not a large number standing in for one. It covers the
+ *  overwhelming majority of real threads in a single call, so the common case still reads
+ *  whole, and the worst case is bounded at twenty bodies instead of at however long the
+ *  conversation happened to get. A caller that genuinely needs more asks for it, up to
+ *  MAX_LIMIT, which is itself a bound.
+ */
+const THREAD_DEFAULT_LIMIT = 20;
+
+function clampThreadLimit(limit: number | undefined): number {
+  if (!limit || !Number.isFinite(limit) || limit < 1) return THREAD_DEFAULT_LIMIT;
+  return Math.min(Math.floor(limit), MAX_LIMIT);
+}
+
+/** One page of a thread, oldest first, keyset-paginated (#649).
+ *
+ *  This used to select EVERY message in the thread with no LIMIT and no cursor, each row a
+ *  full StoredMessage. So the size of the answer was the size of the conversation, and one
+ *  long thread returned whole into a single response. That is the same failure #631 hit on
+ *  the list route, on a surface nobody had looked at.
+ *
+ *  TRUNCATION IS VISIBLE AS THE CURSOR, and deliberately not as a second field. `Page`
+ *  already defines `cursor === null` as a POSITIVE claim of exhaustion, so a non-null cursor
+ *  is the statement "this is a first page, not a thread". Adding a separate truncation flag
+ *  would be two names for one fact, which is how two names drift apart. `complete` stays
+ *  absent, meaning true, exactly as `list` leaves it: items plus the cursor chain IS the
+ *  whole thread, because this is a keyset ordering and not a score-ranked retrieval.
+ *
+ *  The keyset is the SAME tuple the other read routes use, read FORWARD rather than
+ *  backward: a thread reads oldest first, so the seek takes rows strictly AFTER the cursor
+ *  in the (date, id) ordering this query already imposed.
  *
  *  `viewer` may be ONE address or a SET (#425), matching messageAccessible: a thread
  *  reached from a role view is scoped to the member PLUS its role queues. Absent =
@@ -1812,25 +1848,45 @@ export async function thread(
   env: Env,
   threadId: string,
   viewer?: string | readonly string[],
-): Promise<StoredMessage[]> {
+  opts: { limit?: number; cursor?: string } = {},
+): Promise<Page<StoredMessage>> {
+  const limit = clampThreadLimit(opts.limit);
   const clause = accessClause(readScopeOf(viewer));
+  const where: string[] = ["thread_id = ?"];
+  const binds: unknown[] = [threadId];
+  if (clause.sql) {
+    where.push(clause.sql);
+    binds.push(...clause.binds);
+  }
+  const cur = decodeCursor(opts.cursor);
+  if (cur) {
+    where.push("(date > ? OR (date = ? AND id > ?))");
+    binds.push(cur.date, cur.date, cur.id);
+  }
+  // `id` joins the projection because the cursor tuple needs it; it is not part of
+  // MessageRow, which the unpaged single-message reads still use unchanged.
   const res = await env.DB.prepare(
-    `SELECT message_id, direction, thread_id, from_addr, to_addr, subject, date,
+    `SELECT id, message_id, direction, thread_id, from_addr, to_addr, subject, date,
             in_reply_to, body_text, body_html, spf, dkim, dmarc, trusted, received_at, seen,
             delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
             projected_size, projection_version,
             flagged, answered, mailbox, trashed_at
-       FROM messages WHERE thread_id = ? ${clause.sql ? `AND ${clause.sql}` : ""} ORDER BY date, id`,
+       FROM messages WHERE ${where.join(" AND ")} ORDER BY date, id LIMIT ?`,
   )
-    .bind(threadId, ...clause.binds)
-    .all<MessageRow>();
+    .bind(...binds, limit + 1)
+    .all<MessageRow & { id: number }>();
   const rows = res.results ?? [];
-  const out: StoredMessage[] = [];
-  for (const row of rows) {
-    out.push(rowToMessage(row, await attachmentsFor(env.DB, row.message_id)));
+  // One extra row fetched, so "is there another page" is observed rather than guessed.
+  const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
+  const items: StoredMessage[] = [];
+  for (const row of pageRows) {
+    items.push(rowToMessage(row, await attachmentsFor(env.DB, row.message_id)));
   }
-  return out;
+  const last = pageRows[pageRows.length - 1];
+  return { items, cursor: hasMore && last ? encodeCursor(last.date, last.id) : null };
 }
+
 
 // --- Recipient-relative views (#350) --------------------------------------
 //

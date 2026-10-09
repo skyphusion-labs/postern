@@ -106,7 +106,7 @@ describe("mailbox.reply (close the loop)", () => {
     expect(res.threadId).toBe(inbound.threadId);
 
     // The thread now holds both sides.
-    const convo = await store.thread(env, inbound.threadId);
+    const convo = (await store.thread(env, inbound.threadId)).items;
     expect(convo).toHaveLength(2);
     expect(convo.map((m) => m.direction)).toEqual(["inbound", "outbound"]);
     expect(convo[0].messageId).toBe("orig@example.com");

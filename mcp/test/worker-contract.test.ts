@@ -154,7 +154,9 @@ async function emissions(): Promise<Emitted[]> {
     }),
   );
   await run("get", () => client.get("m1"));
-  await run("thread", () => client.thread("t1"));
+  // #649: driven WITH its paging parameters, because PARITY measures which declared
+  // parameters this client can reach and a bare call reports them unreachable.
+  await run("thread", () => client.thread("t1", { limit: 5, cursor: "cur-1" }));
   await run("getAttachmentBytes", () => client.getAttachmentBytes("m1", 0));
   await run("send", () =>
     client.send({
@@ -306,13 +308,24 @@ const KNOWN_PARITY_GAPS: Record<string, string[]> = {
   // from birth. It is listed anyway, because a key with an empty list is what makes a
   // FUTURE declared parameter on this route fail here instead of going unnoticed.
   "/api/folders": [],
+  // #649: the thread route declares limit and cursor now, and the client sends both. Listed
+  // for the same reason as /api/folders, and it is the first PREFIX row in this ledger,
+  // which is why `reachable` below matches a concrete path under the prefix as well as the
+  // prefix itself. Matching only the literal would have reported both as unreachable and
+  // made this entry a false gap.
+  "/api/threads/": [],
 };
 
 describe("#417 PARITY: what the worker honors, the client can reach", () => {
   async function reachable(path: string): Promise<Set<string>> {
     const calls = await emissions();
     const names = new Set<string>();
-    for (const c of calls) if (c.path === path) c.query.forEach((n) => names.add(n));
+    for (const c of calls) {
+      // A prefix row is reached at a CONCRETE path (/api/threads/t1), so an exact-match
+      // comparison would read every parameter on it as unreachable.
+      const hit = path.endsWith("/") ? c.path === path || c.path.startsWith(path) : c.path === path;
+      if (hit) c.query.forEach((n) => names.add(n));
+    }
     return names;
   }
 

@@ -485,7 +485,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&after=&before=&fields=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views; `fields=` = RESPONSE projection, see 10.9; `after=` / `before=` = INCLUSIVE date bounds, see 10.9) | M1 / webmail v2 (#352) / #403 / #404 / #646 / #647 |
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
-| GET | `/api/threads/{threadId}` | ordered thread | M1 (done) |
+| GET | `/api/threads/{threadId}?limit=&cursor=` | one BOUNDED page of a thread, oldest first: `{ok, threadId, messages, cursor}`. Default 20, max 200. `cursor: null` is the POSITIVE claim that this is the whole thread, so a non-null cursor means first page, not thread | M1 (done) / #649 |
 | GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&fields=&to=&from=&direction=&lens=&seenFor=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` / `seenFor` / `fields` mean exactly what they do on `/api/messages` (#403/#404/#646). Mind the pair: `field` (singular) = the substr COLUMN matched, `fields` (plural) = the summary keys RETURNED | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 / #404 / #646 |
 | GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
@@ -1522,6 +1522,30 @@ A SQL-level projection is a separate, separately-measurable change and is not cl
 search FILTER, not a summary key. The projectable name for the same fact is
 `attachmentCount`. Inventing a `hasAttachment` output field would have created exactly the
 producerless field that #652 deleted.
+
+**A THREAD READ IS BOUNDED: `limit` / `cursor` (#649).** `GET /api/threads/{id}` used to
+select EVERY message in the thread, bodies included, with no LIMIT and no cursor, so the size
+of the answer was the size of the conversation. One long thread returned whole into a single
+response. That is the same failure the list route had, on a surface nobody had looked at, and
+it was worse here: there was not even a `limit` to lower.
+
+It is now keyset-paginated on the SAME `(date, id)` tuple the other read routes use, read
+FORWARD because a thread reads oldest first. The default is **20**, deliberately lower than
+the 50 summary default: a thread row is a full message with `bodyText` and `bodyHtml`, so it
+is an order of magnitude heavier than a summary row and fifty of them is the payload problem
+rather than a bound on it. Max is 200.
+
+`cursor` is the ONLY truncation signal, and that is deliberate. Per the `Page` contract,
+`cursor: null` is a positive claim of exhaustion, so a non-null cursor states "this is a first
+page, not a thread". A second flag meaning the same thing is how two names for one fact drift
+apart. `complete` stays absent, meaning true, exactly as the list route leaves it: items plus
+the cursor chain IS the whole thread, because this is a keyset ordering and not a score-ranked
+retrieval.
+
+The bound lives in `store.thread`, not in the HTTP handler, so every seam gets it: the
+`MailboxService` RPC `thread()` returns a `Page` too, matching its `list` and `search`
+siblings. `thread` was the one read on that entrypoint that returned an unbounded array,
+which is exactly why it was the one that could return a whole conversation in a single call.
 
 **WHICH ROWS a date window RETURNS: `after` / `before` (#354, #647).** The fourth axis, and
 the last of the four a read can vary independently: `to=` / the session identity select whose

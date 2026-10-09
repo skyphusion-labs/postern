@@ -350,11 +350,53 @@ class PosternClient:
         msg = body.get("message")
         return msg if isinstance(msg, dict) else None
 
-    def get_thread(self, thread_id: str) -> list[dict[str, Any]]:
-        """GET /api/threads/{id}. Returns the list of message dicts in the thread."""
-        body = self._json("GET", f"/api/threads/{_quote(thread_id)}")
+    def get_thread(
+        self,
+        thread_id: str,
+        *,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """GET /api/threads/{id}. ONE PAGE of message dicts, oldest first.
+
+        The worker bounds this read (#649): it used to return every message in
+        the thread, bodies included, and now returns at most `limit` (default
+        20). So this is a PAGE, not necessarily the thread, and the return type
+        cannot say which one you got.
+
+        Use `get_thread_page` when that matters. It returns the cursor as well,
+        and a cursor of None is the worker's positive claim that you have the
+        whole thread. This method is kept returning a list for the callers that
+        already depend on that shape.
+        """
+        return self.get_thread_page(thread_id, limit=limit, cursor=cursor)["messages"]
+
+    def get_thread_page(
+        self,
+        thread_id: str,
+        *,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """GET /api/threads/{id} as ``{"messages": [...], "cursor": str|None}``.
+
+        `cursor` is the ONLY signal that distinguishes a complete thread from a
+        first page: None means there are genuinely no more messages, and a
+        string means there are, and must be passed back to continue. A caller
+        that reads `messages` and ignores `cursor` can silently present a
+        truncated conversation as a whole one.
+        """
+        params: dict[str, str] = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor:
+            params["cursor"] = cursor
+        body = self._json("GET", f"/api/threads/{_quote(thread_id)}", params=params)
         msgs = body.get("messages", [])
-        return list(msgs) if isinstance(msgs, list) else []
+        return {
+            "messages": list(msgs) if isinstance(msgs, list) else [],
+            "cursor": body.get("cursor"),
+        }
 
     def search(
         self,
