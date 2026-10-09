@@ -25,10 +25,17 @@ MAX_IMPORT_MIME_BYTES = 22 * 1024 * 1024
 # core unblocker 6): scope-faithful fakes so a test using the WRONG token for a
 # route gets the same 403 the real worker would give, instead of silently working.
 def _required_scope(method: str, path: str) -> Optional[str]:
+    # `organize` since #685, NOT `read`. These three CHANGE stored state, so filing
+    # mail is a separate grant from reading it. This fake said `read` until #686 found
+    # it: the fake is a hand-written copy of the worker's table, and #685 moved the
+    # table without moving the copy, so every door test asserting a seen/flags/move
+    # write passed under a read token that the real worker refuses. See
+    # OrganizeScopeContractTest in test_organize_token.py, which now pins this
+    # function to contracts/api-routes.json so the copy cannot fork again silently.
     if method == "POST" and path == "/api/messages/seen":
-        return "read"
+        return "organize"
     if method == "POST" and path in ("/api/messages/flags", "/api/messages/move"):
-        return "read"
+        return "organize"
     if path == "/api/imap/drafts" or path.startswith("/api/imap/drafts/"):
         return "imap"
     if method == "POST" and path == "/api/imap/import":
@@ -51,7 +58,21 @@ def _required_scope(method: str, path: str) -> Optional[str]:
 
 
 def _scope_satisfies(have: str, need: str) -> bool:
-    return have == "both" or have == need
+    """Mirror of the worker's scopeSatisfies (inbound/src/routes.ts).
+
+    `organize` is the one scope TWO kinds satisfy: its own token and an `imap` token.
+    The imap arm is deliberate and load-bearing for this door (#685): the IMAP door is
+    the machine client the organize routes exist for, and it already had a token slot,
+    so it keeps the grant and no deployed door has to re-provision. A `read` token does
+    NOT carry organize. `admin` is satisfied only by `both`.
+    """
+    if have == "both":
+        return True
+    if need == "organize":
+        return have in ("organize", "imap")
+    if need == "admin":
+        return False
+    return have == need
 
 
 _HEADER_RE = re.compile(rb"^([A-Za-z-]+):[ \t]*(.*)$")
@@ -167,6 +188,11 @@ class FakeTransport:
         if expected_token is not None and expected_token not in self.token_scopes:
             self.token_scopes[expected_token] = "both"
         self.calls: List[str] = []
+        # #686: (method, path, token) for EVERY request, appended before the auth
+        # check so a REFUSED attempt is recorded too. That is what lets a test prove
+        # a negative: that the door did not retry an organize write with its read
+        # token after a 403. A log of successful calls only could not see that.
+        self.auth_log: List[tuple] = []
         # count of per-message body fetches (GET /api/messages/{id}); the #102 proof
         # is that an ENVELOPE/header scan never increments this.
         self.body_fetches = 0
@@ -211,6 +237,9 @@ class FakeTransport:
         self.calls.append(req.full_url)
         auth = req.get_header("Authorization") or ""
         token = auth[len("Bearer "):] if auth.startswith("Bearer ") else None
+        self.auth_log.append(
+            (req.get_method(), urllib.parse.urlparse(req.full_url).path, token)
+        )
         scope = self.token_scopes.get(token) if token is not None else None
         if scope is None:
             return 401, json.dumps({"ok": False, "error": "unauthorized"}).encode()
