@@ -2,12 +2,31 @@ module github.com/skyphusion/skyphusion-email/relay
 
 go 1.25.0
 
-// Build toolchain pinned to a PATCHED release (audit #107): govulncheck flags
-// standard-library CVEs against the toolchain version, so CI (setup-go reads this
-// directive) must build with a patched Go. 1.25.13 carries every current 1.25-line
-// stdlib security backport (GO-2026-6090 / 6089 / 5972 / 5026); bump when the
-// dep-scan gate flags a newer stdlib CVE.
-toolchain go1.25.13
+// Build toolchain pinned to a PATCHED release (audit #107). govulncheck flags
+// standard-library CVEs against the toolchain version. CI reads this directive
+// through setup-go (go-version-file), so this pin is what the gate measures.
+//
+// go1.26.9 is the LOWEST release that clears the 2026-10-08 advisory batch.
+// That batch is GO-2026-6603 / 6605 / 6607 / 6608 / 6610 / 6611 / 6612 / 6613 /
+// 6617. It produced nine affecting findings in net/http, net/textproto and
+// crypto/tls. Those advisories publish no 1.25-line fix. go1.25.14, the newest
+// 1.25 release, still scans red. So this batch forced a MINOR-line move, not the
+// patch bump the previous note here assumed. A later stdlib CVE may force the
+// same. Bump to whatever release the advisory names as fixed, minor line
+// included. relay/README.md carries the measurements.
+//
+// Do NOT jump to the 1.27 line yet. govulncheck v1.5.0, the pin in ci.yml,
+// cannot type-check a go1.27 stdlib. It exits 1 on a load error instead of
+// returning a verdict, so the gate stops answering. Bump that tool pin first,
+// then prove the gate still goes red on an old toolchain.
+//
+// The `go` directive above stays at 1.25.0 on purpose. It sets the LANGUAGE
+// version, which this security bump does not need to move. A toolchain above the
+// language version is legal and is the normal shape for a security pin.
+//
+// relay/Dockerfile builds the shipped binary and MUST stay on this same line
+// (#539 / #541). Bump both in one commit.
+toolchain go1.26.9
 
 require (
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
