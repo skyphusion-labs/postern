@@ -1995,7 +1995,9 @@ class ServerMoveRFC6851E2ETest(twisted_unittest.TestCase):
 
     def tearDown(self):
         _restore_account(self._restore)
-        return self.port.stopListening()
+        d = self.port.stopListening()
+        d.addCallback(lambda _r: wait_for_server_connections_to_close())
+        return d
 
     @defer.inlineCallbacks
     def _client(self):
