@@ -18,8 +18,10 @@ script="${repo_root}/.github/scripts/assert-relay-go-pin.sh"
 
 pass_count=0
 fail_count=0
-ok()  { printf "  ok    %s\n" "$1"; pass_count=$((pass_count + 1)); }
-bad() { printf "  FAIL  %s\n" "$1"; fail_count=$((fail_count + 1)); }
+skip_count=0
+ok()   { printf "  ok    %s\n" "$1"; pass_count=$((pass_count + 1)); }
+bad()  { printf "  FAIL  %s\n" "$1"; fail_count=$((fail_count + 1)); }
+skip() { printf "  SKIP  %s\n" "$1"; skip_count=$((skip_count + 1)); }
 
 echo "assert-relay-go-pin suite"
 
@@ -119,20 +121,53 @@ expect "missing relay/ files exit 2, not 0" 2 "$work/does-not-exist"
 expect "catches a go directive above the toolchain" 1 \
   "$(mkfix inverted 1.27.0 go1.26.9 'FROM golang:1.26.9-bookworm AS builder')"
 
-# --- the gate must run on bash 3.2 as well as the runner's bash 5 --------
-# `#!/usr/bin/env bash` is 3.2 on macOS. A bash-4-only builtin would pass in CI
-# and break locally (fleet-chezmoi#2241), so assert the real interpreter range.
+# --- the gate must carry no bash-4-only construct, checked STATICALLY ----
+#
+# This case replaces an exit-status-only check that could not fail. The old one
+# ran the gate under /bin/bash and asserted a non-zero exit with stderr thrown
+# away. A bash-4 builtin is NON-FATAL under bash 3.2: `mapfile` prints
+# `mapfile: command not found`, the script carries on, the skew is still detected,
+# and the exit stays 1. So the case reported ok while the gate was broken.
+# Demonstrated by mutation on #711; this is the guard that catches it instead.
+#
+# The static scan is what pins the floor IN CI, because /bin/bash on the ubuntu
+# runner is bash 5 and the dynamic case below can only SKIP there.
+b4_src="$work/gate-nocomments.sh"
+sed -E 's/#.*$//' "$script" > "$b4_src"
+b4_re='(^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)|(declare|local|typeset)[[:space:]]+-[A-Za-z]*A([[:space:]]|$)|\$\{[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?(\^\^|,,)'
+b4_hits="$(grep -nE "$b4_re" "$b4_src")"
+if [[ -n "$b4_hits" ]]; then
+  bad "gate uses a bash-4-only construct (breaks under /bin/bash 3.2): $(echo "$b4_hits" | tr '\n' ' ')"
+else
+  ok "gate carries no bash-4-only construct (mapfile, readarray, declare -A, case modification)"
+fi
+
+# --- and the gate must actually RUN CLEAN under bash 3.x when one exists --
+# Asserted on STDERR, not only on the exit code, for the reason above. A
+# /bin/bash that is not 3.x cannot pin the floor, so it SKIPs loudly rather than
+# reporting a pass it did not earn (fleet-chezmoi#2241).
 if [[ -x /bin/bash ]]; then
-  if RELAY_PIN_ROOT="$(mkfix b32 1.25.0 go1.26.9 'FROM golang:1.26.6-bookworm AS builder')" \
-      /bin/bash "$script" >/dev/null 2>&1; then
-    bad "gate still detects skew under /bin/bash (expected fail, got pass)"
+  b32_ver="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"' 2>/dev/null)"
+  b32_err="$work/b32.stderr"
+  RELAY_PIN_ROOT="$(mkfix b32 1.25.0 go1.26.9 'FROM golang:1.26.6-bookworm AS builder')" \
+    /bin/bash "$script" >/dev/null 2>"$b32_err"
+  b32_code=$?
+  b32_interp_re='command not found|syntax error|unrecognized|bad substitution|not supported'
+  # Only the INTERPRETER lines. The gate's own skew report is on stderr too and is
+  # the expected output here, so printing all of stderr would bury the finding.
+  if grep -qiE "$b32_interp_re" "$b32_err"; then
+    bad "/bin/bash $b32_ver run is free of interpreter errors: $(grep -iE "$b32_interp_re" "$b32_err" | tr '\n' ' ')"
+  elif [[ "$b32_code" -ne 1 ]]; then
+    bad "/bin/bash $b32_ver still detects skew: expected exit 1, got $b32_code"
+  elif [[ "${b32_ver%%.*}" == "3" ]]; then
+    ok "gate runs clean and detects skew under /bin/bash $b32_ver (bash 3.x floor pinned)"
   else
-    ok "gate still detects skew under /bin/bash"
+    skip "/bin/bash is $b32_ver, not 3.x: this run does NOT pin the bash-3.2 floor (the static scan above does)"
   fi
 fi
 
 echo
-echo "${pass_count} passed, ${fail_count} failed"
+echo "${pass_count} passed, ${fail_count} failed, ${skip_count} skipped"
 if [[ "$fail_count" -ne 0 ]]; then
   exit 1
 fi
