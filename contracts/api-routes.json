@@ -275,7 +275,7 @@
       "match": "exact",
       "scope": "read",
       "auth": "bearer",
-      "note": "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646); after=/before= are INCLUSIVE at BOTH ends, ISO-8601 date or timestamp, a bare date covering its whole named day, and a bogus value is refused not applied (#647)"
+      "note": "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646); after=/before= are INCLUSIVE at BOTH ends, ISO-8601 date or timestamp, a bare date covering its whole named day, and a bogus value is refused not applied (#647); countOnly=1 answers { total } for the SAME filters and the SAME access scope with no items and no cursor, and is REFUSED alongside limit/cursor/fields because all three describe rows a count does not return (#648, mirroring admin-reproject's countOnly from #520)"
     },
     {
       "id": "search",

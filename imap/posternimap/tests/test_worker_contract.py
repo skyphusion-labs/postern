@@ -283,6 +283,19 @@ class ParityTest(unittest.TestCase):
     # statement into a vague one. Two reasons, two lists, each with its own pin.
     NOT_A_FILTER = {"messages-list": {"fields"}, "search": {"fields"}}
 
+    # A THIRD set, separate for the same reason the second one is. NOT_PUSHED_DOWN names
+    # FILTERS Twisted evaluates locally; NOT_A_FILTER names a RESPONSE PROJECTION. This
+    # names a MODE that returns no rows at all: `countOnly` (#648) answers a total with no
+    # items and no cursor, and the door has nothing to do with a bare number. It renders
+    # RFC822 from the summaries themselves (rfc822.py reads from/to/cc/subject/date/
+    # messageId, and FETCH RFC822.SIZE reads projectedSize), so a row-free answer cannot
+    # serve any IMAP command. Where the door genuinely needs counts, for STATUS and for the
+    # unread tally, it already has GET /api/folders, which returns server-authoritative
+    # count and unread PER FOLDER rather than one total for a filter the door did not send.
+    # Folding this into NOT_A_FILTER would have widened a set whose pin says it is EXACTLY
+    # the response projection, turning a precise statement into a vague one.
+    NOT_A_ROW_READ = {"messages-list": {"countOnly"}}
+
     def setUp(self) -> None:
         self.calls = _emitted()
 
@@ -299,8 +312,10 @@ class ParityTest(unittest.TestCase):
             if row["id"] not in self.OWNED:
                 continue
             declared = set(PARAMS.get(row["id"], {}).get("query") or [])
-            excluded = self.NOT_PUSHED_DOWN.get(row["id"], set()) | self.NOT_A_FILTER.get(
-                row["id"], set()
+            excluded = (
+                self.NOT_PUSHED_DOWN.get(row["id"], set())
+                | self.NOT_A_FILTER.get(row["id"], set())
+                | self.NOT_A_ROW_READ.get(row["id"], set())
             )
             gap = sorted(declared - self._reachable(row["path"]) - excluded)
             if gap:
@@ -313,7 +328,7 @@ class ParityTest(unittest.TestCase):
         # checked, or the newer one would be the unwatched half.
         stale = {}
         merged: dict[str, set[str]] = {}
-        for source in (self.NOT_PUSHED_DOWN, self.NOT_A_FILTER):
+        for source in (self.NOT_PUSHED_DOWN, self.NOT_A_FILTER, self.NOT_A_ROW_READ):
             for route_id, names in source.items():
                 merged.setdefault(route_id, set()).update(names)
         for route_id, names in merged.items():
@@ -340,6 +355,12 @@ class ParityTest(unittest.TestCase):
         self.assertEqual(
             {"messages-list": {"fields"}, "search": {"fields"}}, self.NOT_A_FILTER
         )
+
+    def test_the_non_row_read_exclusion_is_exactly_the_count_mode(self):
+        # The third set gets its own pin, or it becomes the unwatched place to drop any
+        # parameter the door has not wired. That is the failure mode every one of these
+        # ledgers exists to prevent.
+        self.assertEqual({"messages-list": {"countOnly"}}, self.NOT_A_ROW_READ)
 
     def test_control_the_parity_check_can_fail(self):
         self.assertNotIn("nOtApArAm", self._reachable("/api/messages"))

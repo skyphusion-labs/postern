@@ -263,6 +263,34 @@ const LIST_PROBES: Record<string, Probe> = {
   // it under both names is deliberate: the coverage gate demands a probe per declared name,
   // and a bound that only works when its partner is absent is a real failure mode.
   before: async (e, c) => dateProbe(e, c, "/api/messages", "?"),
+  countOnly: async (e, c) => {
+    // Neither a refusal-only nor an id-set probe fits: countOnly changes the response
+    // SHAPE, so `changes()` is structurally blind to it in the same way it is blind to
+    // `fields`. Both arms, then.
+    await refuses(e, c, "/api/messages?countOnly=maybe");
+    // Refused ALONGSIDE the three parameters that describe rows a count does not return.
+    // Accepting and ignoring one of these is the accepted-and-dropped defect itself.
+    await refuses(e, c, "/api/messages?countOnly=1&limit=10");
+    await refuses(e, c, "/api/messages?countOnly=1&cursor=abc");
+    await refuses(e, c, "/api/messages?countOnly=1&fields=uid");
+
+    const rows = await ids(await handleApi(get("/api/messages"), e, c));
+    const res = await handleApi(get("/api/messages?countOnly=1"), e, c);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    // The count AGREES with the rows the same query returns, which is the whole claim.
+    expect(rows.length, "no rows: the agreement assertion would be vacuous").toBeGreaterThan(0);
+    expect(body.total).toBe(rows.length);
+    // No items and no cursor: both describe a page, and this describes the match set.
+    expect(body).not.toHaveProperty("items");
+    expect(body).not.toHaveProperty("cursor");
+    // CONTROL: the count tracks the FILTERS, so it is not a constant table total.
+    const filtered = (await (
+      await handleApi(get(`/api/messages?countOnly=1&from=${ALICE}`), e, c)
+    ).json()) as Record<string, unknown>;
+    expect(filtered.total).toBe(1);
+    expect(filtered.total).not.toBe(body.total);
+  },
   limit: async (e, c) => {
     expect(await ids(await handleApi(get("/api/messages?limit=1"), e, c))).toHaveLength(1);
   },

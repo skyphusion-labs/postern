@@ -217,8 +217,14 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "whoami", method: "GET", path: "/api/whoami", match: "exact", scope: "read", auth: "bearer",
     note: "the caller identity and the scope the SERVER imposes on its reads (#650): bound identity or null, the same identityScope projection /api/messages and /api/search emit, the role queues that identity may also read via to=, and the capability set the gate honours (derived by asking authorize() per scope, never a second list). Takes no parameters, so it reports the scope a BARE read would get" },
   { id: "messages-list", method: "GET", path: "/api/messages", match: "exact", scope: "read", auth: "bearer",
-    query: [...VIEW, ...PROJECTION, ...DATE_RANGE, "thread", "q"],
-    note: "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646); after=/before= are INCLUSIVE at BOTH ends, ISO-8601 date or timestamp, a bare date covering its whole named day, and a bogus value is refused not applied (#647)" },
+    // `countOnly` (#648) is neither a VIEW filter nor a PROJECTION, so it joins neither
+    // shared list: it is a MODE. It changes what the response IS (a total, with no items
+    // and no cursor) rather than which rows match or which keys each one carries, and it
+    // exists only on this route. Keeping it inline is the same reason PROJECTION and
+    // DATE_RANGE are separate lists: one list per reason, so a later reader cannot read a
+    // mode as a filter.
+    query: [...VIEW, ...PROJECTION, ...DATE_RANGE, "thread", "q", "countOnly"],
+    note: "lens needs a viewer and refuses direction (#403); under a session to= filters INSIDE the account boundary (#422); seenFor moves only the read-state projection key (#404); fields= projects the response to named summary keys and REFUSES an unknown one (#646); after=/before= are INCLUSIVE at BOTH ends, ISO-8601 date or timestamp, a bare date covering its whole named day, and a bogus value is refused not applied (#647); countOnly=1 answers { total } for the SAME filters and the SAME access scope with no items and no cursor, and is REFUSED alongside limit/cursor/fields because all three describe rows a count does not return (#648, mirroring admin-reproject's countOnly from #520)" },
   { id: "search", method: "GET", path: "/api/search", match: "exact", scope: "read", auth: "bearer",
     query: [...VIEW, ...PROJECTION, ...DATE_RANGE, "q", "mode", "field", "hasAttachment", "seen"],
     note: "mode fts|substr|semantic|hybrid; field pairs with substr; the view filters mirror messages-list exactly because they share one builder. Mind the pair: field (SINGULAR) selects the substr COLUMN MATCHED, fields (PLURAL, #646) selects the summary keys RETURNED on hit.message; both are validated strictly. after=/before= are the SAME inclusive, canonicalized, strictly-refused bounds messages-list uses (#647); they were unvalidated here until then" },

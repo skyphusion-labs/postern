@@ -25,6 +25,7 @@ import type {
   SearchHit,
   SearchMode,
   SendInput,
+  ReadScopeReport,
   SendResult,
   ViewLens,
   WhoAmI,
@@ -191,6 +192,57 @@ export class PosternClient {
     if (args.before) params.before = args.before;
     const body = await this.requestGet("/api/messages", params);
     return page<Partial<MessageSummary>>(body, (body.items as Partial<MessageSummary>[]) ?? []);
+  }
+
+  /**
+   * How many messages match these filters (worker #648), with no rows and no paging.
+   *
+   * A separate method rather than a flag on `list`, because the RESPONSE is a different
+   * shape: a total, with no items and no cursor. Folding both into one return type would
+   * hand every caller a `Page` whose `items` may or may not exist.
+   *
+   * `limit`, `cursor` and `fields` are accepted here and FORWARDED when present, even
+   * though a count returns no rows for them to shape. That is deliberate: the worker
+   * refuses the combination with a message naming the clash, and forwarding keeps that
+   * rule in ONE place. Dropping them here instead would make this client silently ignore
+   * a parameter the caller supplied, which is the accepted-and-dropped defect the whole
+   * #632 cluster is about, just moved to the client side of the wire.
+   */
+  async countList(args: {
+    to?: string;
+    from?: string;
+    thread?: string;
+    direction?: Direction;
+    lens?: ViewLens;
+    mailbox?: MailboxFilter;
+    q?: string;
+    seenFor?: string;
+    after?: string;
+    before?: string;
+    limit?: number;
+    cursor?: string;
+    fields?: string[];
+  }): Promise<{ total: number; identityScope?: ReadScopeReport }> {
+    const params: Record<string, string> = { countOnly: "1" };
+    if (args.to) params.to = args.to;
+    if (args.from) params.from = args.from;
+    if (args.thread) params.thread = args.thread;
+    if (args.direction) params.direction = args.direction;
+    if (args.lens) params.lens = args.lens;
+    if (args.mailbox) params.mailbox = args.mailbox;
+    if (args.q) params.q = args.q;
+    if (args.seenFor) params.seenFor = args.seenFor;
+    if (args.after) params.after = args.after;
+    if (args.before) params.before = args.before;
+    // Forwarded so the WORKER refuses them; see the note above.
+    if (args.limit !== undefined) params.limit = String(args.limit);
+    if (args.cursor) params.cursor = args.cursor;
+    if (args.fields !== undefined) params.fields = args.fields.join(",");
+    const body = await this.requestGet("/api/messages", params);
+    return {
+      total: body.total as number,
+      identityScope: body.identityScope as ReadScopeReport | undefined,
+    };
   }
 
   async get(messageId: string): Promise<Message | null> {
