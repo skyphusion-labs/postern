@@ -37,6 +37,7 @@ from posternimap import breaker as breaker_mod
 from posternimap.breaker import CLOSED, HALF_OPEN, OPEN, CircuitBreaker, breaker_for
 from posternimap.client import PosternClient, PosternError
 from posternimap.tests.fakes import ErrorTransport, FakeTransport, make_message
+from posternimap.tests.settle import wait_for_server_connections_to_close
 
 
 class _Clock:
@@ -422,7 +423,9 @@ class BreakerOverTheWireTest(twisted_unittest.TestCase):
     def tearDown(self):
         cls, attr, orig = self._restore
         setattr(cls, attr, orig)
-        return self.port.stopListening()
+        d = self.port.stopListening()
+        d.addCallback(lambda _r: wait_for_server_connections_to_close())
+        return d
 
     @defer.inlineCallbacks
     def _client(self):

@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover
 from posternimap.config import Config
 from posternimap.proxyproto import ProxyProtocolConfig, parse_trusted
 from posternimap.tests.fakes import ErrorTransport, FakeTransport, make_message
+from posternimap.tests.settle import wait_for_server_connections_to_close
 
 
 def _patched_factory(cfg, transport):
@@ -917,7 +918,9 @@ class ServerErrorPathE2ETest(twisted_unittest.TestCase):
 
     def tearDown(self):
         _restore_account(self._restore)
-        return self._port.stopListening()
+        d = self._port.stopListening()
+        d.addCallback(lambda _r: wait_for_server_connections_to_close())
+        return d
 
     @defer.inlineCallbacks
     def _client(self, addr):
