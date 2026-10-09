@@ -141,8 +141,8 @@ describe("an undeclared tool parameter is refused end to end", () => {
     expect(list.inputSchema.additionalProperties).toBe(false);
     // And the declared properties are still all there: strictness must not have cost the schema.
     expect(Object.keys(list.inputSchema.properties ?? {}).sort()).toEqual(
-      ["after", "before", "cursor", "direction", "fields", "from", "lens", "limit", "mailbox",
-        "q", "seenFor", "thread", "to"],
+      ["after", "before", "countOnly", "cursor", "direction", "fields", "from", "lens", "limit",
+        "mailbox", "q", "seenFor", "thread", "to"],
     );
   });
 

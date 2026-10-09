@@ -354,8 +354,39 @@ export const READ_TOOLS: ToolDef[] = [
           + "folderUid, cc, bcc, sender, replyTo, deliveredTo, wireSize, projectedSize, "
           + "projectionVersion, attachmentCount, hasHtml.",
       ),
+      countOnly: z.boolean().optional().describe(
+        "COUNT ONLY: answer 'how many match this' as a single total, with NO messages and "
+          + "no cursor. Use it to decide whether a real query is worth spending, and to tell "
+          + "'nothing matches' apart from 'the page was truncated', which `count` on a normal "
+          + "page cannot do because it is the size of THAT page. The total honours every "
+          + "filter here and the same access scope your own credential gets, so it is always "
+          + "a number you could reach by paging. It CANNOT be combined with limit, cursor or "
+          + "fields: all three describe the rows a count does not return, so the server "
+          + "REFUSES the combination rather than ignoring one of them.",
+      ),
     },
     handler: async (client, a) => {
+      if (a.countOnly) {
+        // limit/cursor/fields are passed STRAIGHT THROUGH when the caller supplied them, so
+        // the worker issues the refusal naming the clash. Dropping them here would make the
+        // tool silently answer a different question than the one it was asked.
+        const counted = await client.countList({
+          to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox,
+          thread: a.thread, q: a.q, seenFor: a.seenFor, after: a.after, before: a.before,
+          limit: a.limit, cursor: a.cursor, fields: a.fields,
+        });
+        return {
+          // Named `total`, never `count`: `count` on this tool is the size of ONE page, and
+          // reusing it for a match-set total is how "count: 2, cursor: null" came to read as
+          // "two exist" in the first place (#632 F7).
+          total: counted.total,
+          identityScope: counted.identityScope,
+          countOnly: true,
+          seenFor: a.seenFor ?? null,
+          after: a.after ?? null,
+          before: a.before ?? null,
+        };
+      }
       const page = await client.list({ to: a.to, from: a.from, direction: a.direction, lens: a.lens, mailbox: a.mailbox, thread: a.thread, q: a.q, limit: a.limit, cursor: a.cursor, seenFor: a.seenFor, fields: a.fields, after: a.after, before: a.before });
       return {
         count: page.items.length,

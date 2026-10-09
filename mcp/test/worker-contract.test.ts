@@ -189,6 +189,11 @@ async function emissions(): Promise<Emitted[]> {
     // `to` is passed, not omitted: the parity arm below measures which declared parameters
     // this client can REACH, and a call that never sends `to` reports it as unreachable.
     ["whoami", () => client.whoami?.()],
+    // Driven with a filter, because PARITY measures which declared parameters this client
+    // can REACH and a bare call would report them all unreachable.
+    ["countList", () => client.countList?.({ to: "a@x.com", from: "b@x.com", q: "x", thread: "t",
+      direction: "inbound", lens: "inbox", mailbox: "all", seenFor: "c@x.com",
+      after: "2026-01-01", before: "2026-01-31" })],
     ["folders", () => client.folders?.({ to: "a@x.com" })],
     ["setSeen", () => client.setSeen?.(["m1"], true)],
     ["setFlags", () => client.setFlags?.(["m1"], { flagged: true })],
@@ -420,6 +425,10 @@ const SAMPLE: Record<string, unknown> = {
   // and `answered` are true, not false: false is a real value the worker honors, but a
   // boolean sample that matched a default would make a forwarded key look dropped.
   ids: ["m-1"], flagged: true, answered: true, for_recipient: "ada@example.com",
+  // #648. `true`, not `false`: the worker reads 0/false as OFF, so a `false` sample would
+  // emit countOnly=false and change the request while exercising nothing, which is the
+  // same trap compose_mode avoids above.
+  countOnly: true,
 };
 
 /** Keys a tool needs for its handler to reach the wire at all. */

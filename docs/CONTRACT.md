@@ -482,7 +482,7 @@ none touches D1 directly (#25, #26).
 
 | Method | Route | Purpose | Milestone |
 |---|---|---|---|
-| GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&after=&before=&fields=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views; `fields=` = RESPONSE projection, see 10.9; `after=` / `before=` = INCLUSIVE date bounds, see 10.9) | M1 / webmail v2 (#352) / #403 / #404 / #646 / #647 |
+| GET | `/api/messages?to=&from=&thread=&direction=&lens=&seenFor=&mailbox=&q=&after=&before=&fields=&countOnly=&limit=&cursor=` | list / filter (`q` = FTS; `direction` = the stored fact; `lens=inbox\|sent` = viewer view, needs a viewer, not combinable with `direction`; `seenFor=` = whose seen state to RENDER; `mailbox=archive\|trash\|junk\|all`, unset = arrival views; `fields=` = RESPONSE projection, see 10.9; `after=` / `before=` = INCLUSIVE date bounds, see 10.9; `countOnly=1` = a TOTAL for the same filters and scope, no items and no cursor, see 10.9) | M1 / webmail v2 (#352) / #403 / #404 / #646 / #647 / #648 |
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}?limit=&cursor=` | one BOUNDED page of a thread, oldest first: `{ok, threadId, messages, cursor}`. Default 20, max 200. `cursor: null` is the POSITIVE claim that this is the whole thread, so a non-null cursor means first page, not thread | M1 (done) / #649 |
@@ -1548,6 +1548,39 @@ The bound lives in `store.thread`, not in the HTTP handler, so every seam gets i
 `MailboxService` RPC `thread()` returns a `Page` too, matching its `list` and `search`
 siblings. `thread` was the one read on that entrypoint that returned an unbounded array,
 which is exactly why it was the one that could return a whole conversation in a single call.
+
+**HOW MANY ROWS MATCH: `countOnly` (#648).** The fifth axis, and the only one that changes
+what the response IS rather than what it contains. `countOnly=1` on `/api/messages` answers
+`{ok, identityScope, total}`: no `items`, no `cursor`.
+
+Why it exists: "how many messages match this" was otherwise answerable only by paging the
+whole result and counting, which for any window worth asking about is the payload problem
+that made #631 unanswerable. It is also the cheapest way for a caller to decide whether to
+spend a real query, and the only way to tell "nothing matches" apart from "the page was
+truncated".
+
+Three properties are load-bearing.
+
+1. The total is computed from the SAME predicate the rows are, so it is always a number the
+   caller could reach by paging the same query. `store.listPredicate` is shared by
+   `store.list` and `store.countList`; there is no second set of filters that could disagree.
+   This is the discipline `store.folders` already uses for its counts.
+2. It runs under the SAME access scope. A count that ignored scope would be a disclosure
+   channel: it would tell an identity-scoped caller how much mail exists OUTSIDE its slice,
+   which is a fact no read of that slice can reveal. The count is taken after the viewer and
+   role scoping are applied to the query object, not before.
+3. It is REFUSED alongside `limit`, `cursor` and `fields`, with a message naming the clash.
+   All three describe rows a count does not return, so accepting one and ignoring it is the
+   accepted-and-ignored defect this cluster is about: `countOnly=1&limit=10` could
+   reasonably be read as a count capped at ten. `countOnly=0` and `countOnly=false` are an
+   ordinary read, byte for byte, and a value outside `0|1|true|false` is a 400.
+
+`identityScope` is reported on a count for the same reason it is reported on a page: a bare
+`0` means a different thing under a member scope than under an estate one.
+
+The name and the shape mirror `POST /api/admin/reproject`'s own `countOnly` (#520), which
+returns `{total, atCurrent, notCurrent}` with no paging, rather than introducing a second
+vocabulary for the same idea.
 
 **WHICH ROWS a date window RETURNS: `after` / `before` (#354, #647).** The fourth axis, and
 the last of the four a read can vary independently: `to=` / the session identity select whose
