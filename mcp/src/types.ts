@@ -205,6 +205,15 @@ export interface DraftInput {
   sourceMessageId?: string;
 }
 
+/** The flag pair `POST /api/messages/flags` accepts (worker body `set`).
+ *
+ *  Both are optional, and the worker REFUSES a `set` carrying neither, so "change
+ *  nothing" is a caller error rather than a silent no-op. */
+export interface FlagSet {
+  flagged?: boolean;
+  answered?: boolean;
+}
+
 export interface SendResult {
   messageId: string;
   threadId: string;
