@@ -51,9 +51,9 @@ ignore_missing_imports = true
 files = ["posternimap"]
 # postern#680: check the BODY of untyped functions too (most test methods have no
 # annotations, so mypy skipped them). The modules below still fail with it on and are
-# DEFERRED, not fixed: 289 errors in 27 modules (python -m mypy --check-untyped-defs,
-# mypy 2.4.0, Python 3.14). Each override is one module and is meant to be deleted
-# as that module is fixed. Do not add a module here; new code is checked.
+# DEFERRED, not fixed: 272 errors in 25 test modules (python -m mypy --check-untyped-defs,
+# mypy 2.4.0, Python 3.14; the two production modules were fixed in #696). Each override
+# is one module and is meant to be deleted as that module is fixed. Do not add a module here; new code is checked.
 check_untyped_defs = true
 
 # postern#680 deferred modules (error count each, at the time of enabling).
@@ -64,7 +64,6 @@ module = [
     "posternimap.tests.test_auth_backends",  # 25
     "posternimap.tests.test_serialization",  # 23
     "posternimap.tests.test_mailbox",  # 21
-    "posternimap.server",  # 15
     "posternimap.tests.test_header_one_string_e2e",  # 11
     "posternimap.tests.test_auth",  # 10
     "posternimap.tests.test_utf8_accept_e2e",  # 10
@@ -84,7 +83,6 @@ module = [
     "posternimap.tests.test_proxywrap",  # 2
     "posternimap.tests.test_snapshot_stability",  # 2
     "posternimap.tests.test_tls",  # 2
-    "posternimap.threaded",  # 2
     "posternimap.tests.test_role_folders",  # 1
 ]
 check_untyped_defs = false

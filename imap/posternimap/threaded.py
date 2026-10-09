@@ -112,7 +112,7 @@ def _flattened(fn, *args, **kwargs):
     out = fn(*args, **kwargs)
     if not isinstance(out, defer.Deferred):
         return out
-    box = []
+    box: list[Any] = []
     out.addBoth(box.append)
     if not box:
         raise RuntimeError(
