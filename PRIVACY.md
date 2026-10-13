@@ -3,7 +3,7 @@
 > Grounded in what the software actually does. Written by Ernst (Conrad's legal-affairs helper, not a
 > lawyer); this is not legal advice.
 
-**Last updated:** 2026-07-10
+**Last updated:** 2026-10-13
 
 > The product-wide commitment this policy is written against is
 > [`PRIVACY-COMMITMENT.md`](PRIVACY-COMMITMENT.md), a pointer to the canonical copy at the
@@ -13,8 +13,10 @@
 
 ## BLUF (bottom line up front)
 
-We do not want your data. With Postern that is not a slogan, it is a literal fact: **there is no
-Postern service that Skyphusion Labs operates for you, so there is nothing for us to collect.**
+We do not want your data. With Postern that is close to a literal fact: **Skyphusion Labs operates no
+mail service for anyone, so there is nothing of yours for us to collect.** The one Postern instance
+Skyphusion Labs does run is a public, shared demo mailbox, described in its own section below; it has
+no users and no accounts, and anything mailed to it is public.
 
 - **Postern is free software (AGPL-3.0-only) that you run yourself.** You deploy it on your own
   infrastructure (your own Cloudflare account, your own domain), and your mail lives entirely on
@@ -22,7 +24,7 @@ Postern service that Skyphusion Labs operates for you, so there is nothing for u
   talks to us.
 - **Skyphusion Labs does not run a hosted, multi-tenant mailbox service.** There is no Postern
   account you create with us, no platform we host your mail on, and no pool of user data we hold.
-  We maintain the software; we do not operate it for the public.
+  We maintain the software; we do not operate it for the public, except for the demo mailbox below.
 
 ## Where your data actually lives (when you self-host)
 
@@ -57,6 +59,27 @@ recall; your LDAP/PAM source if you wire the relay to one). Those providers proc
 **your** agreements with them, not under any agreement with Skyphusion Labs. Review their terms;
 self-hosting means those choices, and their privacy consequences, are yours.
 
+## The public demo mailbox (demo.posternonline.com)
+
+Skyphusion Labs runs one Postern instance of its own: a read-only public demo at
+`demo.posternonline.com`, on a Cloudflare account Skyphusion Labs controls. It exists so you can see
+the product work before you deploy it. It is not a service for you to keep mail in, and it is not
+private.
+
+- **Anything mailed to any address at `posternonline.com` lands in one shared mailbox** and is stored
+  there: the sender address, the headers, the subject, the body and any attachments, in that account's
+  D1 database and R2 bucket.
+- **Anyone can read it.** The demo access token is published in the README and is read-scoped: it
+  lists, reads, searches and downloads, and it cannot send, delete or change stored state.
+- **Nothing in the software deletes demo mail automatically.** There is no scheduled purge; the
+  operator clears the mailbox by hand, at his discretion. Treat anything you send there as retained
+  for an unknown time and readable by anyone.
+- Visiting the demo site produces ordinary Cloudflare request logs (time, route, status, IP as seen at
+  the edge) under Skyphusion Labs' account.
+
+Do not mail the demo anything private. If you did and want it removed, open an issue (see Contact
+below); removal is a manual operator action.
+
 ## Children
 
 Postern is general-purpose mail-server software, not a service directed at children, and Skyphusion
@@ -79,9 +102,11 @@ cannot act on data held in an instance it does not run.
 ## Scope: software, not a service
 
 Skyphusion Labs writes and distributes Postern as software. It does not operate Postern for anyone,
-and it will not host mail for anyone; Skyphusion Labs is not an email hosting company. Because
-Skyphusion Labs runs no Postern instance, it has no access to any mail or user data, and no
-data-controller or data-processor role attaches to the project for a service it does not run.
+and it will not host mail for anyone; Skyphusion Labs is not an email hosting company. Apart from the
+public demo mailbox described above, Skyphusion Labs runs no Postern instance, has no access to any mail
+or user data, and no data-controller or data-processor role attaches to the project for a service it
+does not run. What role, if any, attaches to the demo mailbox is a question for a lawyer, not for this
+document; the demo holds only what the public chooses to send to an address it is told is public.
 
 Running a Postern instance in compliance with the law is the operator's responsibility. Each
 operator operates the software in accordance with the laws and regulations of their own jurisdiction

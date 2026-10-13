@@ -25,13 +25,16 @@ said so in as many words. It is not a gap waiting to be filled by a managed tier
 worth stating as a settled fact rather than a current state, because "we do not offer that yet"
 invites someone to close the gap.
 
-So the cleanest case in the whole inventory: **we operate nothing and we hold nothing.** Postern is
-free software you deploy into your own Cloudflare account on your own domain, and your mail lives
-entirely on infrastructure you control. Your instance never talks to us, so there is nothing for us
-to collect, disclose, or be compelled to hand over.
+So very nearly the cleanest case in the whole inventory: **we operate no mail service and we hold
+none of your mail.** The one instance we do run is the public demo mailbox at `demo.posternonline.com`,
+which has no users and no accounts and holds only what the public chooses to send to an address it is
+told is public ([`PRIVACY.md`](PRIVACY.md) describes it). Postern is free software you deploy into your
+own Cloudflare account on your own domain, and your mail lives entirely on infrastructure you control.
+Your instance never talks to us, so there is nothing for us to collect, disclose, or be compelled to
+hand over.
 
-**That last clause is the point, and it is stronger than a promise.** There is no hosted Postern,
-therefore there is no Postern user data at Skyphusion Labs, therefore there is nothing for us to
+**That last clause is the point, and it is stronger than a promise.** There is no hosted Postern
+service, therefore there is no Postern user data at Skyphusion Labs, therefore there is nothing for us to
 disclose about it, and nothing anyone could compel us to produce. Not "we choose not to look at your
 mail": we are **structurally not in the path.**
 
@@ -50,6 +53,8 @@ and the commitment is why it stays that way when a hosted version would be easie
 ## The tripwire
 
 **If Postern ever grows a component that sends anything from a self-hosted instance back to us, or
-if Skyphusion Labs ever operates a Postern instance for other people, the commitment stops being
-true, and whoever ships it owns updating the canonical document in the same PR.** See the canonical
-copy for the full set of drift tripwires.
+if Skyphusion Labs ever operates a Postern instance that keeps mail for other people, the commitment
+stops being true, and whoever ships it owns updating the canonical document in the same PR.** See the
+canonical copy for the full set of drift tripwires. The public demo mailbox is disclosed in
+[`PRIVACY.md`](PRIVACY.md); whether the canonical document's Postern row should also name it is an
+open question for the hub (fleet-chezmoi#2182), not something this pointer decides.

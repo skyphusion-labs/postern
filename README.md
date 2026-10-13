@@ -269,4 +269,5 @@ the MCP server [`@skyphusion/postern-mcp`](mcp/LICENSE), the Python client
 (`imap/`). Each ships its own `LICENSE` and metadata, which govern that component.
 
 See [NOTICE](NOTICE) for the short version and [PRIVACY.md](PRIVACY.md) for what self-hosting means for
-data (short version: Skyphusion Labs operates nothing, so we hold none of your mail).
+data (short version: Skyphusion Labs operates no mail service, so we hold none of your mail; the one
+instance it runs is the public demo mailbox, and PRIVACY.md says what that holds).

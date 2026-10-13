@@ -1,9 +1,11 @@
 # Security Policy
 
-Postern is self-hosted software: Skyphusion Labs operates no instance and holds
-no user mail (see [PRIVACY.md](PRIVACY.md)). This policy covers vulnerabilities
-in the Postern **software**, not incidents on any particular operator instance,
-which are the operator to handle.
+Postern is self-hosted software: Skyphusion Labs operates no mail service and
+holds no user mail; the only instance it runs is the public demo mailbox (see
+[PRIVACY.md](PRIVACY.md)). This policy covers vulnerabilities in the Postern
+**software**, not incidents on any particular operator instance, which are the
+operator to handle. A vulnerability you find through the demo is a software
+vulnerability and belongs here.
 
 ## Supported
 
