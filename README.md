@@ -263,10 +263,10 @@ The server core in this repository is [AGPL-3.0-only](LICENSE): Postern is softw
 if you run it as a network service for others, you must offer them the complete corresponding source
 under the same license.
 
-The two published client integrations are MIT-licensed so they are trivial to embed in any codebase:
-the MCP server [`@skyphusion/postern-mcp`](mcp/LICENSE) and the Python client
-[`postern-client`](clients/python/LICENSE). Each package ships its own `LICENSE` and metadata, which
-govern that package.
+Three client-side components are MIT-licensed so they are trivial to embed in any codebase:
+the MCP server [`@skyphusion/postern-mcp`](mcp/LICENSE), the Python client
+[`postern-client`](clients/python/LICENSE), and the IMAP proxy [`posternimap`](imap/LICENSE)
+(`imap/`). Each ships its own `LICENSE` and metadata, which govern that component.
 
 See [NOTICE](NOTICE) for the short version and [PRIVACY.md](PRIVACY.md) for what self-hosting means for
 data (short version: Skyphusion Labs operates nothing, so we hold none of your mail).
