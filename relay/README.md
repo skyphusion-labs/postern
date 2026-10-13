@@ -409,14 +409,14 @@ expanded only so the retired-var guard refuses startup, #612); the TLS cert/key
 are read as PATHs directly (`SUBMISSION_TLS_CERT` / `_KEY`).
 
 Container deploys use **`AUTH_BACKEND=ldap` (direct-bind + self-read, #182)** -- the cgo-free image
-has no `system`/PAM backend (see the auth-backend note above). The operator Swarm
-stack + secret wiring live out-of-tree in the operator private infrastructure
-repository; the door binds its private VLAN address only (e.g. `192.0.2.10:587`),
-never `0.0.0.0`. The PROXY-protocol edge contract (the L4 LB in front) is
+has no `system`/PAM backend (see the auth-backend note above). Run the image under
+whatever orchestrator you use (Compose, Swarm, Kubernetes); bind the door to a
+private address that only your own edge can reach (e.g. `192.0.2.10:587`), never
+`0.0.0.0`. The PROXY-protocol edge contract (the L4 LB in front) is
 `docs/PROXY-PROTOCOL.md`.
 
-Internal/production deploy runbooks are maintained out-of-tree in the operator
-private infrastructure repository; this README covers the generic self-host path.
+This README covers the generic self-host path and names no particular operator
+topology. Skyphusion Labs runs no relay for anyone else.
 
 ## Dependency upgrades (go-smtp / go-sasl)
 
@@ -425,10 +425,6 @@ is preferred). Submission still advertises AUTH LOGIN for legacy MUAs (Windows
 Send-MailMessage, some Apple clients). The LOGIN server implementation lives in
 `sasl_login.go` (vendored from pre-removal go-sasl). Do not delete without
 confirming clients tolerate PLAIN-only.
-
-Fleet LDAP pin + IMAP incident runbook:
-`fleet-chezmoi/docs/runlog/2026-07-15-laptop-dependabot-postern.md` and
-`fleet-chezmoi/system/swarm/RUNBOOK-ldap-outpost-stable-cert.md`.
 
 ## Files
 
