@@ -11,12 +11,10 @@ Issue: #155. Companion code: `relay/proxyproto.go` (Go 587), the equivalent in
 
 ## 1. Why this exists
 
-The postern mail edge moved to a single L4 load balancer that targets
-the directory host DIRECTLY (no bastion, no HAProxy middle layer). An L4 load balancer
-forwards the TCP stream but rewrites the source address, so without help every
-connection would appear to originate from the load balancer's own private
-address. The throttle (#105) and the logs would then see one IP for the whole
-world.
+A mail edge that terminates on an L4 load balancer forwards the TCP stream but
+rewrites the source address, so without help every connection appears to
+originate from the load balancer's own address. The throttle (#105) and the logs
+would then see one IP for the whole world.
 
 The load balancer is configured to PROXY-protocol the connections: it prepends a
 small header carrying the ORIGINAL client address (and the original destination)
@@ -130,16 +128,17 @@ fails). Therefore:
 > service down. `optional` is the bridge; never flip the LB against an off/require
 > door that is not yet receiving the headers it expects.
 
-The same sequence governs both doors (587 Go submission, 993 Python IMAP), the
-fleet-chezmoi LB IaC, and the GO-LIVE runbook; they all reference THIS section.
+The same sequence governs both doors (587 Go submission, 993 Python IMAP) plus
+whatever load-balancer IaC and go-live runbook an operator keeps; they reference
+THIS section rather than restating it.
 
 ### 5.2 Bind surface
 
-Each door binds the PRIVATE VLAN address only (e.g. the 587 door on
-`192.0.2.10:587`), never `0.0.0.0` and never a public bind. The directory host stays
-dark; the load balancer is the only public surface, and the host firewall admits
-the door's port only FROM the LB's private source (the estate `192.0.2.0/24`). The trusted set
-in `PROXY_PROTOCOL_TRUSTED` is that same LB private source.
+Each door binds a PRIVATE address only (e.g. the 587 door on
+`192.0.2.10:587`), never `0.0.0.0` and never a public bind. The host stays dark;
+the load balancer is the only public surface, and the host firewall admits the
+door's port only FROM the load balancer's own source range. The trusted set in
+`PROXY_PROTOCOL_TRUSTED` is that same source range.
 
 ### 5.3 Health checks
 
