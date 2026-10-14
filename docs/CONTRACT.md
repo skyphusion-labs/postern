@@ -381,6 +381,15 @@ is no scope to declare. A test derived from `ROUTE_TABLE` enforces this split
 (`inbound/read-scope-announced.test.ts`): a new `read` route must be probed or exempted with a
 reason, so the next read surface cannot ship silent by omission.
 
+**#718 changed which callers are narrowed, not what the field means.** A read-capable
+registry token (an agent credential) now reads the estate and reports `{kind: "estate"}`;
+a webmail session is still bound and still reports `{kind: "member", ...}`. The two were
+one case here before, and are told apart by `viaSession`. One read route is deliberately
+NOT widened: `GET /api/recipients/recent` stays keyed to the bound identity, because it
+answers "who have I corresponded with" for composing rather than reading a mailbox, and it
+reports `{kind: "member", ...}` for an agent accordingly. That is the field doing its job:
+two read routes under one credential can honestly report different scopes.
+
 **On the single-object routes the report names the WHOLE scope the read used**, which is the bound
 member plus every role queue it belongs to (`sessionReadScope`), not the member alone. Those routes
 genuinely read under the wider set, and naming only the member would understate their reach, which

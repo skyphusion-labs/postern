@@ -75,11 +75,25 @@ identity (and which functions that token may use):
 
 (The hashes shown above are illustrative, not real tokens.)
 
-**MCP / multi-person use (#544).** Give each person a registry token with at least
-`"scopes": ["read"]` (or `["read","send"]`). Put that token in the MCP client's
-`POSTERN_API_TOKEN`. The worker forces list/search/get to that identity; optional
-`to=` filters cannot widen past it. An estate `POSTERN_API_TOKEN` / `_READ` remains
-estate-wide on purpose -- do not share it for multi-person MCP.
+**MCP / multi-person use (#544, read reach changed by #718).** Give each person a
+registry token with at least `"scopes": ["read"]` (or `["read","send"]`). Put that token
+in the MCP client's `POSTERN_API_TOKEN`.
+
+**Since #718 a read-capable registry token reads the WHOLE deployment**, not just its
+bound address: Conrad ruled estate-wide agent read on by default, with no opt-in key,
+because the product is email for agents and humans and an agent that cannot read the
+humans' mail does not deliver it. So `to=` is now an ordinary filter on these tokens
+rather than a clamp.
+
+What the bound identity still does, and it is most of why the registry exists: it fixes
+the **From** on every send, and it bounds every **write** (mark read, flags, move, and the
+message a reply or forward may quote). So per-person registry tokens remain the right
+shape for multi-person MCP -- each person still sends as themselves and still cannot
+touch anyone else's mail -- but do not hand one out expecting it to HIDE mail. If you need
+a credential that cannot read the mailbox at all, omit `read` from its `scopes`.
+
+A static `POSTERN_API_TOKEN` / `_READ` is estate-wide too, and differs in carrying no
+bound identity at all: it has no forced From and its writes are estate-wide.
 
 ## 4. Resolution and identity-binding (the runtime contract)
 
@@ -202,7 +216,8 @@ wrangler deploy
 
 Each member then presents their own raw token as `Authorization: Bearer <token>` from
 their own MCP / client config. With the `send` cap the worker binds From; with the
-`read` cap it forces every list/search/get to that identity.
+`read` cap it reads the whole deployment (#718), while the bound identity still fixes
+the send From and bounds every write.
 
 To rotate: mint a new token, add its hash, deploy, hand out the new raw token, then
 remove the old hash on the next deploy. To revoke: remove the hash and redeploy.
@@ -213,10 +228,16 @@ remove the old hash on the next deploy. To revoke: remove the hash and redeploy.
   They **never** grant delete or admin: credential-admin / reindex / reconcile /
   hard-delete stay on static `POSTERN_API_TOKEN` (`both`) or the dedicated delete
   slot.
-- **`scopes: ["read"]` or `["read","send"]` (#544):** the token may hit the read
-  doors, but the worker forces the viewer to the bound identity (+ that identity's
-  role queues). Callers cannot widen via `to=` / `lens` / `mailbox` the way an
-  estate read token can.
+- **`scopes: ["read"]` or `["read","send"]` (#544, reach widened by #718):** the token
+  may hit the read doors and reads **every address in the deployment**, so `to=` /
+  `lens` / `mailbox` are ordinary filters rather than clamps. This is the ruled default
+  and there is no key to narrow it; omit `read` to deny the read doors entirely.
+  **The widening is READ only.** The bound identity still forces the send From, and
+  every state-changing path (mark read, flags, move) plus the reply/forward quote
+  source stay bound to that one address, so an agent can read a message it cannot act
+  on. A **webmail session** is NOT affected and still reads only its own address plus
+  its role queues: the two used to share one predicate and are now told apart by
+  `viaSession`.
 - **`scopes: ["send"]` or omitted:** send/reply + own-draft CRUD as that identity;
   read doors return `403` (historical send-only posture).
 - The registry is purely ADDITIVE. The static `POSTERN_API_TOKEN_SEND` keeps working
