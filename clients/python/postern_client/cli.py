@@ -202,6 +202,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("get", help="get one message by id")
     g.add_argument("message_id")
+    # OPT-IN, not the default (#730). `postern-client` is 1.6.0 on PyPI, so SemVer binds
+    # and stdout is a published contract: changing it would break `postern get X | jq
+    # .subject` QUIETLY, returning null rather than erroring, which is a silent wrong
+    # answer in the tool least entitled to produce one. The precedent this follows keeps
+    # the lossy output AND adds the honest one beside it; only the second half is new.
+    g.add_argument("--envelope", action="store_true", help='emit the full envelope, {message, identity_scope}, instead of the bare message. identity_scope is the scope the read was answered under (#717): without it a result cannot be told from a narrowed one')
 
     t = sub.add_parser("thread", help="get one page of a thread, oldest first")
     t.add_argument("thread_id")
@@ -270,6 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     f = sub.add_parser("folders", help="list folders with server-authoritative unread counts")
     f.add_argument("--to", help="scope the unread counts to one viewer")
+    f.add_argument("--envelope", action="store_true", help='emit the full envelope, {folders, identity_scope}, instead of the bare folder list. A zero unread count means a different thing under a member scope than an estate one')
 
     sn = sub.add_parser("seen", help="mark messages read (or unread with --unread)")
     sn.add_argument("message_ids", nargs="+", metavar="MESSAGE_ID")
@@ -465,12 +472,10 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
         return 0
 
     if cmd == "get":
-        # The ENVELOPE, not the bare message, for the reason the `thread` command below
-        # already emits its page rather than its messages (#730): `identity_scope` is what
-        # makes the answer interpretable, so it rides in the OUTPUT where a caller and a
-        # human can both see it, not on stderr where a pipe drops it. That is the
-        # discriminator against the attachment command's stderr metadata: "wrote N bytes"
-        # is incidental, the scope is needed to READ the data.
+        # Always read the ENVELOPE; emit it only when asked (#730). The scope is not
+        # incidental metadata, so it has to be available on STDOUT where a pipe keeps it,
+        # which is what `--envelope` is for. But stdout is a published contract at 1.6.0,
+        # so the default output is unchanged and a caller opts in.
         env = client.get_message_envelope(args.message_id)
         if env["message"] is None:
             # NOT a bare "message not found" any more. That line was this issue at the
@@ -498,7 +503,7 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             return 1
-        _emit(env)
+        _emit(env if args.envelope else env["message"])
         return 0
 
     if cmd == "thread":
@@ -541,9 +546,9 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
         return 0
 
     if cmd == "folders":
-        # The envelope, same reasoning as `get`: a zero unread count means a different
-        # thing under a member scope than under an estate one (#730).
-        _emit(client.get_folders_envelope(to=args.to))
+        # Same shape as `get`: the envelope on request, the published list by default.
+        env = client.get_folders_envelope(to=args.to)
+        _emit(env if args.envelope else env["folders"])
         return 0
 
     if cmd == "seen":
