@@ -3,7 +3,7 @@
 > Grounded in what the software actually does. Written by Ernst (Conrad's legal-affairs helper, not a
 > lawyer); this is not legal advice.
 
-**Last updated:** 2026-10-13
+**Last updated:** 2026-10-14
 
 > The product-wide commitment this policy is written against is
 > [`PRIVACY-COMMITMENT.md`](PRIVACY-COMMITMENT.md), a pointer to the canonical copy at the
@@ -43,6 +43,15 @@ laws that apply to you and your users (for example data-protection, retention, a
 obligations in your jurisdiction). The AGPL gives you the software; it does not give you a pass on
 the law.
 
+One default to know before you issue credentials on your instance. A per-identity agent
+credential whose `scopes` include `read` reads the mail addressed to every address on the
+instance, not only its own. That is on by default, there is no key that turns it off, and it
+follows the credential rather than the person holding it: the same token pasted into the
+default BYO-token webmail reads the same mail. The README section "What an agent credential
+can read" states it in full, and DEPLOY.md names the supported way to keep an agent
+send-only. Who holds such a credential is a decision this policy leaves entirely with you,
+because only you can make it.
+
 ## What Postern is built to minimize
 
 The software is designed so that the only data it holds is the mail and the mechanically necessary
@@ -70,7 +79,10 @@ private.
   there: the sender address, the headers, the subject, the body and any attachments, in that account's
   D1 database and R2 bucket.
 - **Anyone can read it.** The demo access token is published in the README and is read-scoped: it
-  lists, reads, searches and downloads, and it cannot send, delete or change stored state.
+  lists, reads, searches and downloads, and it cannot send, delete or change stored state. It
+  is the static read token, which reads the whole mailbox on every release; that is not the
+  per-identity agent-read default described in the README, and the demo issues no per-identity
+  credentials.
 - **Nothing in the software deletes demo mail automatically.** There is no scheduled purge; the
   operator clears the mailbox by hand, at his discretion. Treat anything you send there as retained
   for an unknown time and readable by anyone.
