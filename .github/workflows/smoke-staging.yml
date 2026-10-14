@@ -11,7 +11,9 @@ name: smoke-staging
 #   POSTERN_SMOKE_ORGANIZE_TOKEN -- organize-scoped bearer (optional, #685; unlocks the
 #     seen / flags / move round-trip. Unset, leg 6 asserts the 403 refusal instead)
 #   POSTERN_SMOKE_NO_ORGANIZE_TOKEN -- a bearer that MUST be refused on the organize
-#     routes (optional, #685; unlocks leg 6's regression guard)
+#     routes (optional, #685; unlocks leg 6's regression guard). This is the DEFAULT
+#     source for the guard token and the one a self-hoster should set. Unset, leg 6
+#     reports its declared GAP rather than asserting anything.
 #   POSTERN_SMOKE_DELETE_TOKEN -- delete-scoped bearer (optional; unlocks the smoke's
 #                               own leg-10 cleanup so runs leave no debris, #496)
 #   POSTERN_SMOKE_IDENTITY_TOKEN -- per-identity send bearer (optional; unlocks the
@@ -19,6 +21,15 @@ name: smoke-staging
 #                               leg deletes the draft it creates, so no debris)
 #   POSTERN_SMOKE_FROM       -- allowed From address for POST /api/send
 #   POSTERN_SMOKE_TO         -- recipient the smoke can address (need not be readable)
+#
+# Required repo VARIABLE (optional; Settings -> Secrets and variables -> Actions -> Variables):
+#   POSTERN_SMOKE_API_TOKEN_IS_READ_ONLY -- set to the string "true" ONLY if this
+#     deployment's POSTERN_SMOKE_API_TOKEN is a member of the read set and never the
+#     `both` set. It then doubles as the guard token. Leave it unset if your API token
+#     is the both-scoped single key this file documents as valid, because a `both` key
+#     legitimately organizes and asserting a refusal against it would go red on every
+#     run. On THIS deployment it is set, because the dedicated secret's intended value
+#     is unrecoverable.
 #
 # This run is deliberately NOT pinned to an expected version: there is no tag on a
 # nightly, and POSTERN_EXPECT_VERSION must be an explicit input rather than something
@@ -85,7 +96,31 @@ jobs:
           POSTERN_IDENTITY_TOKEN: ${{ secrets.POSTERN_SMOKE_IDENTITY_TOKEN }}
           POSTERN_DELETE_TOKEN: ${{ secrets.POSTERN_SMOKE_DELETE_TOKEN }}
           POSTERN_ORGANIZE_TOKEN: ${{ secrets.POSTERN_SMOKE_ORGANIZE_TOKEN }}
-          POSTERN_NO_ORGANIZE_TOKEN: ${{ secrets.POSTERN_SMOKE_NO_ORGANIZE_TOKEN }}
+          # The guard token must AUTHENTICATE and be REFUSED on organize. Which secret
+          # satisfies that is a per-deployment fact only the operator knows, so it is an
+          # explicit operator ASSERTION here, never an inference.
+          #
+          # vars.POSTERN_SMOKE_API_TOKEN_IS_READ_ONLY=true declares that THIS deployment's
+          # POSTERN_SMOKE_API_TOKEN is a member of the read set and never the `both` set.
+          # Unset or anything else falls back to the dedicated secret, and if that is also
+          # unset leg 6 reports its declared GAP rather than asserting anything.
+          #
+          # Why not map the API token directly: this file documents
+          # POSTERN_SMOKE_API_TOKEN as "read-scoped bearer (or a both-scoped single key)",
+          # so a both-scoped key is a VALID configuration. A direct mapping would assert a
+          # refusal that a valid deployment cannot satisfy, going red on every nightly and
+          # every tag deploy. That is the cry-wolf gate smoke.mjs warns about, and the
+          # reason it refuses to infer the guard token for itself.
+          #
+          # Proven in CI against production 2026-10-14, both directions:
+          #   run 38581937323  guard fed an organize-CAPABLE token -> RED at the assert,
+          #                    status 200 {"ok":true,"updated":0}, exit 1, after legs 1-5 passed
+          #   run 38582074641  guard fed the read token -> PASS (403 naming organize),
+          #                    56 checks green
+          #   run 38594131505  the SHIPPED variable-driven mapping -> PASS, 56 green
+          # Both exercised THIS file. deploy.yml carries the identical mapping and is
+          # tag-triggered, so it is unexercised until the next release.
+          POSTERN_NO_ORGANIZE_TOKEN: ${{ vars.POSTERN_SMOKE_API_TOKEN_IS_READ_ONLY == 'true' && secrets.POSTERN_SMOKE_API_TOKEN || secrets.POSTERN_SMOKE_NO_ORGANIZE_TOKEN }}
           POSTERN_FROM: ${{ secrets.POSTERN_SMOKE_FROM }}
           POSTERN_TO: ${{ secrets.POSTERN_SMOKE_TO }}
         run: |
