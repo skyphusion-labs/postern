@@ -81,10 +81,18 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   const url = new URL(request.url);
   const path = url.pathname;
 
-  // Demo SEO host: apex/www.posternonline.com always 301 to demo. The demo runs on
-  // the REGULAR Skyphusion Labs Cloudflare account, not a separate one (CLAUDE.md);
-  // its account plus D1/R2/Vectorize ids live in inbound/wrangler.demo.jsonc, which is
-  // gitignored operator config and so is absent from a fresh clone by design.
+  // Demo SEO host: apex/www.posternonline.com always 301 to demo.
+  //
+  // There is NO account separation here, and an earlier version of this comment
+  // claimed one ("separate CF account from production"). posternonline.com and
+  // skyphusion.org are the same Cloudflare account, and the demo Worker `postern`
+  // and `skyphusion-email-inbound` both live in it. Treat them as ONE blast radius:
+  // a comment that invents a boundary is worse than one that says nothing, because
+  // the next reader sizes the damage from it.
+  //
+  // The demo's account and D1/R2/Vectorize ids live in inbound/wrangler.demo.jsonc,
+  // which is gitignored operator config, so it is absent from a fresh clone by
+  // design and no id belongs in this file either.
   if (request.method === "GET" || request.method === "HEAD") {
     const apexRedirect = redirectApexToDemo(url);
     if (apexRedirect) return apexRedirect;
