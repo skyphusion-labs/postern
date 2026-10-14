@@ -1592,6 +1592,31 @@ The bound lives in `store.thread`, not in the HTTP handler, so every seam gets i
 siblings. `thread` was the one read on that entrypoint that returned an unbounded array,
 which is exactly why it was the one that could return a whole conversation in a single call.
 
+**SURVEYING A THREAD WITHOUT BODIES: there is no `fields=` on `GET /api/threads/{id}` (#705).**
+`fields` (#646) is a projection over the SUMMARY row, and a thread read returns the full
+message, so declaring it there would make one parameter mean two things. It was declined
+rather than built, because no caller has asked. The nearest substitute is
+`GET /api/messages?thread=<id>&mailbox=all&fields=...`, and it is NOT the same read. A caller
+that swaps one for the other must know four differences:
+
+1. **Mailbox.** The list route defaults to `mailbox` unset, which keeps only rows with no
+   mailbox placement, so archived, trashed and junked members of the thread are dropped.
+   `mailbox=all` removes that filter. `GET /api/threads/{id}` has no mailbox filter at all.
+   This difference is NOT announced in the response.
+2. **Order.** The list route is newest first; the thread route is oldest first. Also not
+   announced, and cursors are not interchangeable between the two.
+3. **Scope.** The list route reads under the single bound member. The thread route reads under
+   the member PLUS every role queue it belongs to (#425). So for the same caller, the list
+   survey can return FEWER rows than the thread. Each route carries `identityScope` (#717), which
+   states the scope THAT route was answered under. Nothing in either response says the two
+   routes would disagree with each other about this thread, so a caller will not notice the
+   shortfall from the field alone; the non-equivalence is documented here and nowhere else.
+4. **Payload.** List rows are summary rows: no `bodyText` or `bodyHtml`, with `hasHtml` and
+   `attachmentCount` in their place. That is why it serves a survey at all.
+
+If a caller needs the thread route's reach with summary rows, that is option 1 or 2 of #705
+and is a contract change, not a documentation one.
+
 **HOW MANY ROWS MATCH: `countOnly` (#648).** The fifth axis, and the only one that changes
 what the response IS rather than what it contains. `countOnly=1` on `/api/messages` answers
 `{ok, identityScope, total}`: no `items`, no `cursor`.
