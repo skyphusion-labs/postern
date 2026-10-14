@@ -289,10 +289,19 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // mark queue mail read; the override written is still keyed to the ONE person
         // above. Widening what you may touch is not widening whose state you write.
         //
+        // DELIBERATELY `sessionReadScope` and NOT `readAccessScope` (#718). This is a
+        // WRITE path, and the ruling widened READ. An agent credential may now read mail
+        // addressed to a human and still may not mark it read, which is the #404 ruling
+        // holding: whose state you may write did not change.
+        //
         // The `?? []` is the fail-closed half and it is deliberate: sessionReadScope cannot
         // be empty for a caller that HAS a bound member, so this branch is unreachable
         // today, but an empty member set is the honest answer to "bound, yet no addresses
         // resolved" and the store matches it to nothing. It must never fall back to estate.
+        // Had this line been switched to `readAccessScope`, that unreachable branch would
+        // have become the agent's ONLY branch: estate reads undefined, `?? []` makes it the
+        // empty set, `accessClause` turns the empty set into `1=0`, and every agent
+        // mark-as-read would have silently updated zero rows. Fail-closed, and invisible.
         scope = sessionReadScope(env, resolution) ?? [];
       }
       const updated = await store.setSeen(env, body.ids as string[], body.seen, scope, forRecipient);
@@ -414,6 +423,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // to find out it was lied to.
     if (request.method === "GET" && path === "/api/whoami") {
       const member = boundReadMember(resolution);
+      const estateReader = agentEstateRead(resolution);
       return json({
         ok: true,
         // The bound address, or null for a static estate token. `null` is the ANSWER --
@@ -423,12 +433,20 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // `role` is null BY CONSTRUCTION: a role view exists only when a read NAMES a
         // queue with to=, and this route takes no parameters. So this is the scope a BARE
         // read gets, which is the one a caller cannot work out for itself.
-        identityScope: readScopeReport(member, null),
+        // #718: an agent credential reads the estate, so it says so here too. `identity`
+        // above stays the bound address, because that is still true and is still the From
+        // the send routes force; what widened is the READ, and only the read field moves.
+        // A whoami that kept claiming `member` while list returned the estate would be the
+        // #717 defect inverted: a caller lied to about its own scope, with no second source
+        // to check it against.
+        identityScope: estateReader ? { kind: "estate" } : readScopeReport(member, null),
         // The queues this identity may ALSO read by naming to=<queue>, from the same
         // membership map `sessionReadScope` composes the read predicate from. Reporting
         // identityScope alone would assert a NARROWER reach than the route actually
         // grants, which is the same completeness defect in the opposite direction.
-        roleQueues: member ? rolesForViewer(env, member) : [],
+        // EMPTY for an estate reader: the queues add no reach to a caller that already
+        // reads every address, and listing them would imply they were special.
+        roleQueues: estateReader ? [] : member ? rolesForViewer(env, member) : [],
         // What the gate will honour, asked of the gate. An `imap` token reports
         // ["imap","organize"] here because scopeSatisfies grants organize to imap (#685),
         // which a naive echo of the token's own name would get wrong.
@@ -439,7 +457,9 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
 
     // --- read: list / filter ---
     if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
-      const sessionIdentity = sessionViewer(resolution);
+      // `readViewer`, not `sessionViewer` (#718): an agent credential resolves to no forced
+      // viewer and so reads the estate, down the same path the static operator token uses.
+      const sessionIdentity = readViewer(resolution);
       const role = roleReadScope(env, sessionIdentity, url.searchParams);
       const query = parseListQuery(url, sessionIdentity);
       // Validated BEFORE the query runs, so a bogus projection costs no D1 read.
@@ -496,7 +516,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // per-identity send token), and an unbound BYO read token (IMAP / operator) may
       // pass ?to= the same way list/search do (#350/#352). The per-identity-token case
       // is what makes this boundViewer and not sessionViewer; see both helpers.
-      const bound = boundViewer(resolution);
+      // An agent credential takes no bound viewer here either (#718). The rail MUST agree
+      // with what a list would return -- that equivalence is the reason these counts are
+      // server-side at all -- so an estate reader whose folder counts were still pinned to
+      // its own address would report unread totals its own list route contradicts.
+      const bound = agentEstateRead(resolution) ? undefined : boundViewer(resolution);
       const viewer = bound ?? url.searchParams.get("to") ?? undefined;
       // Role queues are enumerated ONLY for a bound session (#425). A static token is
       // estate-scoped already and reads role mail through its own door, so handing it a
@@ -744,7 +768,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const fields = parseFields(url.searchParams);
       // Viewer-relative view (#403), same rules as /api/messages: refuses an
       // unknown value, refuses lens+direction, refuses a lens with no viewer.
-      const sessionIdentity = sessionViewer(resolution);
+      // `readViewer` for the #718 reason given on the list route.
+      const sessionIdentity = readViewer(resolution);
       // Role queue (#425): searching INSIDE a role view stays scoped to the queue, with
       // read state still keyed on the member -- the same swap the list route makes, so
       // the two edges cannot drift apart on what a role view is.
@@ -840,7 +865,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (attMatch) {
       const id = decodeURIComponent(attMatch[1]);
       const index = Number(attMatch[2]);
-      const attScope = sessionReadScope(env, resolution);
+      const attScope = readAccessScope(env, resolution);
       // Both refusals below carry the SAME body, scope statement included (#717). The
       // caller learns the scope its 404 was produced under; it never learns which of the
       // two refusals it got, because "withheld" and "no such index" must stay one answer.
@@ -896,7 +921,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // separate pre-check, so the gate cannot be present here and missing elsewhere; a
       // static estate token has no member and names the unscoped reader. Same responses,
       // and one D1 round trip fewer. Refs GHSA-49mc-vh6w-95h4.
-      const readScope = sessionReadScope(env, resolution);
+      const readScope = readAccessScope(env, resolution);
       const msg = readScope
         ? await store.get(env, id, readScope)
         : await store.getUnscoped(env, id);
@@ -926,7 +951,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && path.startsWith("/api/threads/")) {
       const id = decodeURIComponent(path.slice("/api/threads/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "thread id required" }, 400);
-      const threadScope = sessionReadScope(env, resolution);
+      const threadScope = readAccessScope(env, resolution);
       const page = await store.thread(env, id, threadScope, {
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
@@ -1002,6 +1027,65 @@ function boundReadMember(resolution: AuthResolution): string | undefined {
   if (resolution.viaSession) return resolution.identity.from;
   if (resolution.caps?.includes("read")) return resolution.identity.from;
   return undefined;
+}
+
+/** Whether this resolution READS the whole estate rather than its own slice (#718).
+ *
+ * Conrad's ruling, 2026-10-14: **estate-wide agent read, ON by default, no opt-in key.**
+ * His reasoning is a product argument: the tagline is email for agents AND humans, so an
+ * agent credential that cannot read the humans' mail does not deliver the product. An
+ * earlier proposal to ship it behind an operator key was put to him and overridden.
+ *
+ * THIS IS A PREDICATE AND NOT A CHANGE TO `boundReadMember`, and that is the whole point.
+ * `boundReadMember` is shared with the WRITE paths (`memberWriteScope`, and the `for`
+ * binding on POST /api/messages/seen), and it is also what binds a webmail SESSION. Making
+ * it return undefined for a bound reader would have:
+ *   - turned every human who logs into webmail into an estate reader, which Conrad was
+ *     never asked about and which self-hosters would inherit on first run, and
+ *   - widened what a write path may touch, which the #404 ruling and GHSA-49mc-vh6w-95h4
+ *     both forbid.
+ * The discriminator is `viaSession`, set in exactly one place (`resolveCookieAuth`) and
+ * never on a Bearer, so the two callers that look identical at the scope line are told
+ * apart here and nowhere else.
+ *
+ * A static operator token (`POSTERN_API_TOKEN` / `_READ`, the IMAP door) has no identity
+ * and already read the estate before this change; it returns false here and reaches estate
+ * by the same route it always did, so there is exactly one estate-read code path.
+ */
+function agentEstateRead(resolution: AuthResolution): boolean {
+  // A human in a browser keeps today's scope: itself plus its role queues (#425 / #404).
+  if (resolution.viaSession) return false;
+  // No bound identity is a static token, already estate by construction.
+  if (!resolution.identity) return false;
+  // A registry Bearer carrying the `read` cap IS the agent credential this ruling is
+  // about. A send-only entry has no read cap and is still 403 at the gate, so widening
+  // read reach can never hand a send-only identity a mailbox.
+  return Boolean(resolution.caps?.includes("read"));
+}
+
+/** The access scope a READ path runs under (#718).
+ *
+ *  An agent credential reads the estate; everything else keeps `sessionReadScope`
+ *  exactly. Read paths ONLY: `sessionReadScope` itself is deliberately left alone because
+ *  POST /api/messages/seen depends on its narrow meaning (see the note at that call site).
+ */
+function readAccessScope(env: Env, resolution: AuthResolution): string[] | undefined {
+  if (agentEstateRead(resolution)) return undefined;
+  return sessionReadScope(env, resolution);
+}
+
+/** WHOSE mail list/search bind to, after #718.
+ *
+ *  `undefined` for an agent credential, which makes list and search treat it EXACTLY as
+ *  they treat the static operator read token: no forced viewer, `to=` honoured as a plain
+ *  filter, `seenFor` required to render someone's read state, and `identityScope` reporting
+ *  `{kind:"estate"}`. Reusing that existing path rather than adding an agent-shaped branch
+ *  is what keeps this change small: there is no new combination of lens, seen state and
+ *  role scoping to reason about, because an agent now walks a path that already existed.
+ */
+function readViewer(resolution: AuthResolution): string | undefined {
+  if (agentEstateRead(resolution)) return undefined;
+  return sessionViewer(resolution);
 }
 
 /** WHOSE mail a state-changing mailbox write may touch (flags, move).
@@ -1909,8 +1993,12 @@ function transportAuthorized(request: Request, env: Env): boolean {
 
 // An authenticated resolution: a Bearer token (scope, optional bound identity) OR an
 // ambient webmail session (an explicit capability SET + bound identity + csrf binding).
-// `caps`, when present, is the authoritative grant and the gate checks membership; a
-// Bearer resolution has no `caps` and is checked via scopeSatisfies on `scope`.
+// `caps`, when present, is the authoritative grant and the gate checks membership.
+// A STATIC Bearer has no `caps` and is checked via scopeSatisfies on `scope`; a REGISTRY
+// Bearer does carry them (`resolveBearer` sets `caps: [...hit.caps]` from the entry), which
+// is what `boundReadMember` and `agentEstateRead` both read. The earlier wording here said
+// no Bearer carries caps, which was wrong for the registry case and is the discriminator
+// #718 turns on, so it is corrected rather than left to mislead the next reader.
 interface AuthResolution extends TokenResolution {
   caps?: string[];
   viaSession?: boolean;

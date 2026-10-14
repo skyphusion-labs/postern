@@ -381,6 +381,15 @@ is no scope to declare. A test derived from `ROUTE_TABLE` enforces this split
 (`inbound/read-scope-announced.test.ts`): a new `read` route must be probed or exempted with a
 reason, so the next read surface cannot ship silent by omission.
 
+**#718 changed which callers are narrowed, not what the field means.** A read-capable
+registry token (an agent credential) now reads the estate and reports `{kind: "estate"}`;
+a webmail session is still bound and still reports `{kind: "member", ...}`. The two were
+one case here before, and are told apart by `viaSession`. One read route is deliberately
+NOT widened: `GET /api/recipients/recent` stays keyed to the bound identity, because it
+answers "who have I corresponded with" for composing rather than reading a mailbox, and it
+reports `{kind: "member", ...}` for an agent accordingly. That is the field doing its job:
+two read routes under one credential can honestly report different scopes.
+
 **On the single-object routes the report names the WHOLE scope the read used**, which is the bound
 member plus every role queue it belongs to (`sessionReadScope`), not the member alone. Those routes
 genuinely read under the wider set, and naming only the member would understate their reach, which
@@ -1591,6 +1600,44 @@ The bound lives in `store.thread`, not in the HTTP handler, so every seam gets i
 `MailboxService` RPC `thread()` returns a `Page` too, matching its `list` and `search`
 siblings. `thread` was the one read on that entrypoint that returned an unbounded array,
 which is exactly why it was the one that could return a whole conversation in a single call.
+
+**SURVEYING A THREAD WITHOUT BODIES: there is no `fields=` on `GET /api/threads/{id}` (#705).**
+`fields` (#646) is a projection over the SUMMARY row, and a thread read returns the full
+message, so declaring it there would make one parameter mean two things. It was declined
+rather than built, because no caller has asked. The nearest substitute is
+`GET /api/messages?thread=<id>&mailbox=all&fields=...`, and it is NOT the same read. A caller
+that swaps one for the other must know four differences:
+
+1. **Mailbox.** The list route defaults to `mailbox` unset, which keeps only rows with no
+   mailbox placement, so archived, trashed and junked members of the thread are dropped.
+   `mailbox=all` removes that filter. `GET /api/threads/{id}` has no mailbox filter at all.
+   This difference is NOT announced in the response.
+2. **Order.** The list route is newest first; the thread route is oldest first. Also not
+   announced, and cursors are not interchangeable between the two.
+3. **Scope.** The list route reads under the single bound member. The thread route reads under
+   the member PLUS every role queue it belongs to (#425). So for the same caller, the list
+   survey can return FEWER rows than the thread. Each route carries `identityScope` (#717), which
+   states the scope THAT route was answered under. Nothing in either response says the two
+   routes would disagree with each other about this thread, so a caller will not notice the
+   shortfall from the field alone; the non-equivalence is documented here and nowhere else.
+   The shortfall is only PARTLY closable, and never completely. A bound member reaches a role
+   queue on the list route with `to=<role address>`, accepted only when that address is a queue
+   the member belongs to (#425). It is bounded three ways, and a caller who learns only the
+   first half will wrongly think it reproduces the thread route's reach. (a) ONE role per call,
+   so rebuilding the thread row set is one member call plus one call per role plus a union,
+   against the thread route's single read. (b) The inbox lens only: a role view is refused with
+   `E_VALIDATION_ERROR` if it names `direction=` or a non-inbox `lens`. (c) No `mailbox=` at
+   all, `mailbox=all` included: a role queue has no durable folders. Because the member path
+   needs `mailbox=all` to see archived, trashed and junked members and the role path refuses it,
+   those rows are not reachable through a role view in any number of calls. For a caller with
+   role queues and any such mail in the thread, the list route cannot reproduce the thread row
+   set at all. On the role-queue path the substitute is strictly less capable than on the
+   member path.
+4. **Payload.** List rows are summary rows: no `bodyText` or `bodyHtml`, with `hasHtml` and
+   `attachmentCount` in their place. That is why it serves a survey at all.
+
+If a caller needs the thread route's reach with summary rows, that is option 1 or 2 of #705
+and is a contract change, not a documentation one.
 
 **HOW MANY ROWS MATCH: `countOnly` (#648).** The fifth axis, and the only one that changes
 what the response IS rather than what it contains. `countOnly=1` on `/api/messages` answers
