@@ -371,6 +371,7 @@ them. The field is now on every route whose row set an access predicate can narr
 | `GET /api/search` | the page |
 | `GET /api/messages/{id}` | the hit **and the 404** |
 | `GET /api/messages/{id}/attachments/{i}` | the **404** only (a hit is raw bytes, not JSON) |
+| `DELETE /api/messages/{id}` | the **404** only (a hit stays `{ok, deleted}`; see below) |
 | `GET /api/threads/{id}` | the page |
 | `GET /api/folders` | the rail |
 | `GET /api/recipients/recent` | the list |
@@ -380,6 +381,19 @@ Apple `.mobileconfig` plist built from env rather than a row set: no predicate n
 is no scope to declare. A test derived from `ROUTE_TABLE` enforces this split
 (`inbound/read-scope-announced.test.ts`): a new `read` route must be probed or exempted with a
 reason, so the next read surface cannot ship silent by omission.
+
+**The delete refusal states its scope too, and it is a NARROWER one (#731).** `DELETE
+/api/messages/{id}` is `delete`-scoped, not a read, so the read-scope test above does not cover
+it. Its 404 reports the scope the check actually ran under: a webmail session is held to its
+SINGLE bound identity (the #404 ruling: a role view is read plus `\Seen` only, so a member must
+not delete on behalf of a queue), while a static delete or both token reports `estate`. So the
+SAME session reads an id under `{kind: "member", addresses: [self, ...queues]}` and has the same
+id's delete refused under `{kind: "member", addresses: [self]}`. That difference is correct.
+It is not an existence oracle: an id the caller may not read produces, on BOTH routes, exactly the
+pair an absent id produces (`inbound/delete-404-oracle.test.ts` makes both calls in one test).
+One thing the 404 does not separate, stated rather than hidden: for a session the delete also
+requires the message to be in the trash, so a readable message that is not trashed is refused
+with the same 404 as an absent one.
 
 **#718 changed which callers are narrowed, not what the field means.** A read-capable
 registry token (an agent credential) now reads the estate and reports `{kind: "estate"}`;

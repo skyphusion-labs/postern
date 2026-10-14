@@ -902,12 +902,27 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) {
       const id = decodeURIComponent(path.slice("/api/messages/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "message id required" }, 400);
-      if (resolution.viaSession && resolution.identity &&
-          !(await store.messageAccessible(env, id, resolution.identity.from, true))) {
-        return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
+      // The scope this delete is answered under, derived ONCE and handed to both the check
+      // and the report so the two cannot drift (#731, same discipline as #717). A session is
+      // held to its SINGLE identity, never member plus role queues: the #404 ruling makes a
+      // role view read plus \Seen only, so a member must not delete on behalf of a queue.
+      // That is NARROWER than the read scope the same session's GET is answered under, and
+      // the difference is correct, which is why it is stated here and not inherited. A static
+      // delete or both token has no bound identity and is estate by construction.
+      const deleteScope =
+        resolution.viaSession && resolution.identity ? [resolution.identity.from] : undefined;
+      // Both refusals below share ONE body, scope statement included, so "withheld", "absent"
+      // and "not in the trash" stay a single answer and nothing says a message exists.
+      const notFound = () =>
+        json(
+          { ok: false, error: "E_NOT_FOUND", message: "not found", identityScope: scopeReportOf(deleteScope) },
+          404,
+        );
+      if (deleteScope && !(await store.messageAccessible(env, id, deleteScope, true))) {
+        return notFound();
       }
       const deleted = await store.deleteMessage(env, id, ctx);
-      if (!deleted) return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
+      if (!deleted) return notFound();
       return json({ ok: true, deleted: id });
     }
 
