@@ -250,8 +250,14 @@ family, a team or anyone whose mail is not yours to read, decide it on purpose:
   supported way to run an agent that can send and cannot read.
 - The widening is READ only. Marking read, flagging, filing, and what a reply or forward
   may quote all stay bound to the agent's own address.
-- **Humans are unaffected.** A webmail sign-in reads only that person's own mail plus any
-  role queue they are on, exactly as before.
+- **The widening follows the CREDENTIAL, not the person.** This is the part most likely to
+  surprise you. A cookie SESSION is scoped exactly as before, to that person plus any role
+  queue they are on, but sessions exist only when you set `WEBMAIL_AUTH_BACKEND = "native"`.
+  **Unset is the default, and the default webmail is BYO-token**, which sends an
+  `Authorization: Bearer` header. So a human who pastes a read-capable registry token into
+  webmail is a registry Bearer as far as the worker is concerned, and reads the estate. If
+  you want a person scoped to their own mail, give them a session or give them a token whose
+  `scopes` omit `read`; do not assume the browser makes them a human.
 - Every read response carries `identityScope`, so you can confirm what a credential
   actually reaches: `curl -sH "authorization: Bearer <token>" "$BASE/api/whoami"` reports
   it directly.
