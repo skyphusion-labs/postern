@@ -35,10 +35,20 @@ export const USER_AGENT = "postern-mcp (+https://github.com/skyphusion-labs/post
 
 export class PosternError extends Error {
   readonly status?: number;
-  constructor(message: string, status?: number) {
+  /**
+   * The worker's parsed refusal body, when it sent one (#717).
+   *
+   * A 404 on a read is not only a status: it carries `identityScope`, the scope the
+   * refusal was produced under. Throwing that away is what left `mailbox_get` answering
+   * a bare `found: false`, which is the #717 defect reproduced one layer out from the
+   * worker that had just been fixed.
+   */
+  readonly body?: Record<string, any>;
+  constructor(message: string, status?: number, body?: Record<string, any>) {
     super(message);
     this.name = "PosternError";
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -245,12 +255,23 @@ export class PosternClient {
     };
   }
 
-  async get(messageId: string): Promise<Message | null> {
+  async get(messageId: string): Promise<{ message: Message | null; identityScope?: ReadScopeReport }> {
     try {
       const body = await this.requestGet(`/api/messages/${encodeURIComponent(messageId)}`, {});
-      return (body.message as Message) ?? null;
+      return {
+        message: (body.message as Message) ?? null,
+        identityScope: body.identityScope as ReadScopeReport | undefined,
+      };
     } catch (err) {
-      if (err instanceof PosternError && err.status === 404) return null;
+      // A 404 is an ANSWER on this route, not a transport failure, and since #717 it is an
+      // answer with a scope attached. `message: null` is still the miss; what rides with it
+      // now is whether the miss was produced inside a narrowed read.
+      if (err instanceof PosternError && err.status === 404) {
+        return {
+          message: null,
+          identityScope: err.body?.identityScope as ReadScopeReport | undefined,
+        };
+      }
       throw err;
     }
   }
@@ -345,11 +366,16 @@ export class PosternClient {
   // access predicates the list and read paths use, so the rail cannot disagree with what
   // a read would return. `to` scopes the unread counts; under a bound identity the worker
   // overrides it server-side, which is why this client sends it and never assumes it won.
-  async folders(args: { to?: string } = {}): Promise<FolderSummary[]> {
+  async folders(
+    args: { to?: string } = {},
+  ): Promise<{ folders: FolderSummary[]; identityScope?: ReadScopeReport }> {
     const params: Record<string, string> = {};
     if (args.to) params.to = args.to;
     const body = await this.requestGet("/api/folders", params);
-    return (body.folders as FolderSummary[]) ?? [];
+    return {
+      folders: (body.folders as FolderSummary[]) ?? [],
+      identityScope: body.identityScope as ReadScopeReport | undefined,
+    };
   }
 
   // GET /api/whoami (worker #650). The worker is the authority on every field: the scope
@@ -574,7 +600,15 @@ export class PosternClient {
       throw new PosternError(`Postern API rejected the request (HTTP ${resp.status})${detail ? `: ${detail}` : ""}`, resp.status);
     }
     if (!resp.ok) {
-      throw new PosternError(`Postern API error (HTTP ${resp.status}) on ${pathAndQuery}`, resp.status);
+      // The body travels with the error (#717). This is the branch a 404 lands in, and a
+      // read 404's body is the only place the caller learns whether the refusal came out
+      // of a narrowed read. Read here and nowhere else: the stream can be consumed once.
+      const errBody = await safeErrorBody(resp);
+      throw new PosternError(
+        `Postern API error (HTTP ${resp.status}) on ${pathAndQuery}`,
+        resp.status,
+        errBody,
+      );
     }
     const text = await resp.text();
     if (!text) return {};
@@ -583,6 +617,20 @@ export class PosternClient {
     } catch {
       throw new PosternError(`invalid JSON from Postern API on ${pathAndQuery}`);
     }
+  }
+}
+
+// Best-effort parse of the worker's refusal body, for the fields a caller needs to
+// INTERPRET the refusal rather than only report it (#717). Never throws, and returns
+// undefined rather than `{}` so "no body" stays distinguishable from "an empty one".
+async function safeErrorBody(resp: Response): Promise<Record<string, any> | undefined> {
+  try {
+    const text = await resp.text();
+    if (!text) return undefined;
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, any>) : undefined;
+  } catch {
+    return undefined;
   }
 }
 

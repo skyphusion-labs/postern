@@ -486,14 +486,24 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // per-identity send token), and an unbound BYO read token (IMAP / operator) may
       // pass ?to= the same way list/search do (#350/#352). The per-identity-token case
       // is what makes this boundViewer and not sessionViewer; see both helpers.
-      const viewer = boundViewer(resolution) ?? url.searchParams.get("to") ?? undefined;
+      const bound = boundViewer(resolution);
+      const viewer = bound ?? url.searchParams.get("to") ?? undefined;
       // Role queues are enumerated ONLY for a bound session (#425). A static token is
       // estate-scoped already and reads role mail through its own door, so handing it a
       // role rail would add a concept without adding reach. This response is a
       // convenience projection, never the authorization: every role read is checked
       // again at its own route against the same membership map.
       const roles = resolution.viaSession ? rolesForViewer(env, viewer) : [];
-      return json({ ok: true, folders: await store.folders(env, viewer, roles) });
+      // The unread counts are narrowed by the SAME bound identity the mail routes use, so
+      // they carry the same scope statement (#717). `boundViewer`, never the caller's own
+      // `to=`: this field reports what the SERVER imposed, and a caller's filter is a fact
+      // the caller already holds.
+      const foldersScope = bound ? [bound, ...roles] : undefined;
+      return json({
+        ok: true,
+        identityScope: scopeReportOf(foldersScope),
+        folders: await store.folders(env, viewer, roles),
+      });
     }
 
     // Dedicated IMAP-service write seam. The `imap` token authenticates the door;
@@ -801,7 +811,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         );
       }
       const recipients = await store.recentRecipients(env, identity, parseLimit(url) ?? 25);
-      return json({ ok: true, recipients });
+      // Scoped on `bound` only, for the reason in scopeReportOf: an `explicit` viewer is
+      // the CALLER's narrowing, and echoing it back as an imposed scope would turn this
+      // field into a mirror of the request instead of a statement about authority (#717).
+      return json({
+        ok: true,
+        identityScope: readScopeReport(bound || undefined, null),
+        recipients,
+      });
     }
 
     // --- read: attachment bytes ---
@@ -814,11 +831,22 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const id = decodeURIComponent(attMatch[1]);
       const index = Number(attMatch[2]);
       const attScope = sessionReadScope(env, resolution);
-      if (attScope && !(await store.messageAccessible(env, id, attScope))) {
-        return json({ ok: false, error: "E_NOT_FOUND", message: "attachment not found" }, 404);
-      }
+      // Both refusals below carry the SAME body, scope statement included (#717). The
+      // caller learns the scope its 404 was produced under; it never learns which of the
+      // two refusals it got, because "withheld" and "no such index" must stay one answer.
+      const attNotFound = () =>
+        json(
+          {
+            ok: false,
+            error: "E_NOT_FOUND",
+            message: "attachment not found",
+            identityScope: scopeReportOf(attScope),
+          },
+          404,
+        );
+      if (attScope && !(await store.messageAccessible(env, id, attScope))) return attNotFound();
       const att = await store.getAttachment(env, id, index);
-      if (!att) return json({ ok: false, error: "E_NOT_FOUND", message: "attachment not found" }, 404);
+      if (!att) return attNotFound();
       // Force a download with a sanitized filename; never echo the raw filename
       // into the header unescaped (header-injection / quote-break safe).
       const safeName = (att.filename || `attachment-${index}`).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100);
@@ -862,8 +890,19 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const msg = readScope
         ? await store.get(env, id, readScope)
         : await store.getUnscoped(env, id);
-      if (!msg) return json({ ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
-      return json({ ok: true, message: msg });
+      // On the 404 as much as on the hit (#717). This route is where "not your mail" and
+      // "no such mail" collapse into one answer, and they must STAY one answer: the body
+      // is identical either way, so nothing here discloses that a withheld message exists.
+      // What the scope statement adds is the fact a caller cannot otherwise get -- that the
+      // 404 was produced under a narrowed read, so it is not evidence about the estate.
+      const scope = scopeReportOf(readScope);
+      if (!msg) {
+        return json(
+          { ok: false, error: "E_NOT_FOUND", message: "not found", identityScope: scope },
+          404,
+        );
+      }
+      return json({ ok: true, identityScope: scope, message: msg });
     }
 
     // --- read: a thread ---
@@ -877,14 +916,26 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && path.startsWith("/api/threads/")) {
       const id = decodeURIComponent(path.slice("/api/threads/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "thread id required" }, 400);
-      const page = await store.thread(env, id, sessionReadScope(env, resolution), {
+      const threadScope = sessionReadScope(env, resolution);
+      const page = await store.thread(env, id, threadScope, {
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
       });
       // `messages` keeps its name and its position, so a caller that read the whole thread
       // before still reads messages; what changed is that it is now a bounded page and the
       // response SAYS whether more exist.
-      return json({ ok: true, threadId: id, messages: page.items, cursor: page.cursor });
+      // The sharpest case of #717, because this envelope made a POSITIVE claim: per the
+      // Page contract a null `cursor` asserts "this is the whole thread", and the thread
+      // had already been narrowed to the reader's own slice. So a caller was told it held
+      // a complete conversation while messages it may not read were omitted. The scope
+      // statement is what makes `cursor: null` readable as "the whole thread YOU may read".
+      return json({
+        ok: true,
+        identityScope: scopeReportOf(threadScope),
+        threadId: id,
+        messages: page.items,
+        cursor: page.cursor,
+      });
     }
 
     return json({ ok: false, error: "not_found" }, 404);
@@ -1906,6 +1957,26 @@ type ReadScopeReport =
   | { kind: "estate" }
   | { kind: "member"; addresses: readonly string[] }
   | { kind: "role"; address: string };
+
+/**
+ * The same report, derived FROM the access scope a read was actually answered under
+ * rather than re-derived from the resolution (#717).
+ *
+ * The routes that read ONE stored object (a message, a thread, an attachment) scope
+ * through `sessionReadScope`, which is the member PLUS every role queue it belongs to.
+ * Re-deriving `[member]` for those would understate their reach, which is the same
+ * completeness defect pointing the other way, and re-deriving anything at all is how the
+ * report and the predicate drift apart. So the value passed to the store is the value
+ * reported, and there is no second computation that can be wrong.
+ *
+ * `undefined` is the store's own literal for an unscoped reader, so it maps to `estate`.
+ * An EMPTY array is NOT estate: it is a reader that may read nothing, and reporting that
+ * as estate would be the one error in this projection that reads reassuring.
+ */
+function scopeReportOf(scope: readonly string[] | undefined): ReadScopeReport {
+  if (scope === undefined) return { kind: "estate" };
+  return { kind: "member", addresses: [...scope] };
+}
 
 function readScopeReport(member: string | undefined, role: string | null): ReadScopeReport {
   if (role) return { kind: "role", address: role };

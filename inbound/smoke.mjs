@@ -73,6 +73,105 @@
 //
 // Exit 0 = all asserted checks passed. Non-zero = first failure (printed).
 
+let passed = 0;
+
+/*
+ * THE COVERAGE LEDGER (#720)
+ *
+ * A declared GAP is only the truth if it can be PRINTED. Every gap() call site used to
+ * be inline and downstream of fatal asserts in the same leg, and fail() ends the run
+ * with process.exit(1), so ONE failed probe erased the coverage statement for everything
+ * behind it.
+ *
+ * Measured on two real v1.6.0 tag deploys. Both carried the SAME uncovered property
+ * (POSTERN_NO_ORGANIZE_TOKEN empty, so the refusal arm was uncoverable in both), and
+ * only the green one said so:
+ *
+ *   run 37945846771 (red, a 401 on the leg 6 grant probe)  0 GAP, 0 NOT COVERED, 0 summary
+ *   run 37946760315 (green, same step, correct token)      2 GAP, 2 NOT COVERED, 1 summary
+ *
+ * The red run published no coverage statement of any kind. A reader grepping it for GAP
+ * gets zero hits, which greps identically to a fully covered run. So the ABSENCE of a
+ * GAP line meant EITHER "this property was covered" OR "the run never reached the
+ * declaration", and removing exactly that ambiguity is what the mechanism is for. A
+ * check that cannot distinguish two states reports the reassuring one.
+ *
+ * Coverage is therefore a LEDGER with THREE states, not a side effect of control flow:
+ *
+ *   declare(id, why)  UNCOVERED, and known from CONFIG before any probe runs. An empty
+ *                     POSTERN_NO_ORGANIZE_TOKEN makes the refusal arm uncoverable
+ *                     whatever happens later, so it is stated up front and printed at
+ *                     once. Independent of control flow is the whole point: it lands on
+ *                     the log even if leg 0 dies.
+ *   pending(id, why)  UNDECIDED. Whether the round trip is coverable depends on a LIVE
+ *                     answer (can this token organize?), so it cannot be known at
+ *                     startup and must not be guessed.
+ *   gap(id)           resolve a pending property as UNCOVERED.
+ *   covered(id)       resolve a pending property as COVERED.
+ *
+ * and reportCoverage() runs from process.on("exit"), which is the ONLY hook that
+ * survives process.exit(). A try/finally around the legs would not work: a hard exit
+ * does not unwind, so the block never runs.
+ *
+ * Anything still PENDING when the run ends prints as NOT REACHED. That is the state the
+ * old two-way mechanism could not express, and it is a different fact from both
+ * "covered" and "declared uncovered": it says the run stopped before deciding.
+ */
+const ledger = new Map();
+
+function declare(id, why) {
+  ledger.set(id, { state: "uncovered", why });
+  console.log(`GAP   ${why} -- NOT COVERED by this run`);
+}
+
+function pending(id, why) {
+  ledger.set(id, { state: "pending", why });
+}
+
+function gap(id) {
+  const e = ledger.get(id);
+  // A gap() for a property nobody registered is a BUG IN THIS FILE, and it must be loud
+  // rather than silently absent from the ledger: an unregistered property is invisible
+  // to the reconciliation below, which is the failure being fixed.
+  if (!e) return fail(`internal: gap() for an unregistered property "${id}"`);
+  ledger.set(id, { ...e, state: "uncovered" });
+  console.log(`GAP   ${e.why} -- NOT COVERED by this run`);
+}
+
+function covered(id) {
+  const e = ledger.get(id);
+  if (!e) return fail(`internal: covered() for an unregistered property "${id}"`);
+  ledger.set(id, { ...e, state: "covered" });
+}
+
+let coverageReported = false;
+function reportCoverage(code) {
+  if (coverageReported) return;
+  coverageReported = true;
+  const entries = [...ledger.entries()];
+  for (const [id, e] of entries.filter(([, e2]) => e2.state === "pending")) {
+    console.log(`GAP   ${e.why} -- NOT REACHED by this run (${id} was never decided)`);
+  }
+  if (entries.length === 0) {
+    // Reachable: required() exits 2 while cfg is still being built, which is before any
+    // property is registered. Saying "0 properties NOT COVERED" there would be the
+    // reassuring reading of a run that measured nothing.
+    console.log("\nCOULD NOT MEASURE: the run ended before it declared any coverage.");
+    return;
+  }
+  const open = entries.filter(([, e]) => e.state !== "covered").length;
+  const verdict =
+    code === 0 ? `PASS: ${passed} checks green.` : `FAILED (exit ${code}) after ${passed} checks green.`;
+  // Stated in BOTH directions on purpose. "0 properties NOT COVERED" and no coverage
+  // line at all used to be the same output, so a fully covered run was indistinguishable
+  // from a run whose ledger never printed.
+  const coverage = open
+    ? ` ${open} property(ies) NOT COVERED -- see GAP lines above.`
+    : " 0 properties NOT COVERED.";
+  console.log(`\n${verdict}${coverage}`);
+}
+process.on("exit", reportCoverage);
+
 const cfg = {
   baseUrl: required("POSTERN_BASE_URL").replace(/\/+$/, ""),
   readToken: required("POSTERN_API_TOKEN"),
@@ -98,6 +197,38 @@ const cfg = {
   versionTimeoutMs: Number(flag("--version-timeout-ms") || 120000),
 };
 
+/*
+ * Register all four coverage properties NOW, before any probe runs.
+ *
+ * Two are a pure function of config, so they are DECLARED uncovered here and printed
+ * immediately. The other two depend on a live answer, so they start PENDING and the run
+ * must resolve them; if it dies first they print as NOT REACHED rather than vanishing.
+ */
+if (cfg.expectVersion) {
+  // The `why` names the PROPERTY, never the state: it is printed verbatim after
+  // "GAP" when the run ends before deciding, so a state-shaped phrase reads as
+  // nonsense there.
+  pending("version-pin", `every check measured the one pinned version ${cfg.expectVersion}`);
+} else {
+  // Named precisely: the risk is not "no version check", it is that a run during a
+  // deploy can measure the version being replaced.
+  declare(
+    "version-pin",
+    `this run is NOT pinned: POSTERN_EXPECT_VERSION is unset, so it measures whatever ` +
+      `${cfg.baseUrl} is serving, which during a deploy can be the PREVIOUS version`,
+  );
+}
+if (cfg.noOrganizeToken) {
+  pending("organize-refusal", "a token that must NOT organize is refused");
+} else {
+  declare(
+    "organize-refusal",
+    "a token that must NOT organize is refused (set POSTERN_NO_ORGANIZE_TOKEN to cover it)",
+  );
+}
+pending("organize-roundtrip", "the seen / flags / move state round-trip (needs an organize-scoped token)");
+pending("folder-counts", "folder counts move on a file (needs an organize-scoped token)");
+
 function required(name) {
   const v = process.env[name];
   if (!v) {
@@ -111,13 +242,7 @@ function flag(name) {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : "";
 }
 
-let passed = 0;
-let gaps = 0;
 function ok(msg) { passed++; console.log(`  ok  ${msg}`); }
-// A property this RUN could not verify, printed so it cannot be mistaken for a pass.
-// An absent check reads like a passed one, which is the whole reason this is not silent
-// and the reason the final line reports the count.
-function gap(msg) { gaps++; console.log(`GAP   ${msg} -- NOT COVERED by this run`); }
 function fail(msg, detail) {
   console.error(`FAIL  ${msg}`);
   if (detail !== undefined) console.error(typeof detail === "string" ? detail : JSON.stringify(detail, null, 2));
@@ -250,12 +375,9 @@ async function pinToVersion() {
   if (!cfg.expectVersion) {
     const seen = await liveVersion();
     assert(seen !== null, "GET /health reports a version", { version: seen });
-    // Named rather than silent, and named precisely: the risk is not "no version
-    // check", it is that a run during a deploy can measure the version being replaced.
-    gap(
-      `this run is NOT pinned: it measured whatever ${cfg.baseUrl} was serving (${seen}), ` +
-      `which during a deploy can be the PREVIOUS version -- set POSTERN_EXPECT_VERSION`,
-    );
+    // The GAP itself was declared from config at startup, so it is already on the log
+    // whatever happens here. This only records WHICH version the unpinned run landed on.
+    console.log(`   (unpinned: this run measured ${seen}; see the GAP declared above)`);
     return seen;
   }
   const started = Date.now();
@@ -284,6 +406,7 @@ async function pinToVersion() {
     });
   }
   ok(`GET /health reports the expected version ${cfg.expectVersion} (waited ${Date.now() - started}ms)`);
+  covered("version-pin");
   return seen;
 }
 
@@ -474,8 +597,7 @@ async function main() {
     });
     assert(denied.status === 403 && /organize/.test(denied.json?.message || ""),
       "REGRESSION GUARD: POSTERN_NO_ORGANIZE_TOKEN is refused on the organize routes", denied);
-  } else {
-    gap("a token that must NOT organize is refused (set POSTERN_NO_ORGANIZE_TOKEN to cover it)");
+    covered("organize-refusal");
   }
 
   if (!canOrganize) {
@@ -489,7 +611,7 @@ async function main() {
       assert(res.status === 403 && /organize/.test(res.json?.message || ""),
         `POST ${path} is refused with 403 requires organize scope`, res);
     }
-    gap("the seen / flags / move state round-trip (needs an organize-scoped token)");
+    gap("organize-roundtrip");
   } else {
     const seen = await api("POST", "/api/messages/seen", { token: organizeBearer, body: { ids: [sentId], seen: false } });
     assert(seen.status === 200 && seen.json?.updated === 1, "POST /api/messages/seen marks it unread", seen);
@@ -521,6 +643,7 @@ async function main() {
     const defaultView = await api("GET", "/api/messages?direction=outbound&limit=50");
     assert(!(defaultView.json?.items || []).some((m) => m.messageId === sentId),
       "and is NO LONGER in the direction-default view", defaultView.json);
+    covered("organize-roundtrip");
     const restore = await api("POST", "/api/messages/move", { token: organizeBearer, body: { ids: [sentId], mailbox: null } });
     assert(restore.json?.updated === 1, "moving it back to the default view is honored (state restored)", restore);
   }
@@ -539,13 +662,14 @@ async function main() {
     // organize scope (#685). Without that token the folder list is still asserted above;
     // the count-moves property is reported as a gap rather than quietly dropped.
     if (!canOrganize) {
-      gap("folder counts move on a file (needs an organize-scoped token)");
+      gap("folder-counts");
     } else {
       await api("POST", "/api/messages/move", { token: organizeBearer, body: { ids: [sentId], mailbox: "archive" } });
       const after = await api("GET", "/api/folders");
       assert(archiveOf(after.json).count === baseline + 1,
         "the archive count MOVES when this run files a message (counts are live, not cached)",
         { baseline, after: archiveOf(after.json).count });
+      covered("folder-counts");
       await api("POST", "/api/messages/move", { token: organizeBearer, body: { ids: [sentId], mailbox: null } });
     }
   }
@@ -679,7 +803,8 @@ async function main() {
     ok(`GET /health still reports ${after}, so every check above measured one version`);
   }
 
-  console.log(`\nPASS: ${passed} checks green.${gaps ? ` ${gaps} property(ies) NOT COVERED -- see GAP lines above.` : ""}`);
+  // No summary line here on purpose. reportCoverage() owns it and runs from
+  // process.on("exit"), so it is published on EVERY path and not only this one.
 }
 
 main().catch((e) => fail("unexpected error", e?.stack || String(e)));
