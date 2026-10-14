@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover
 
 from posternimap.config import Config
 from posternimap.tests.fakes import FakeTransport, make_message
+from posternimap.tests.settle import wait_for_server_connections_to_close
 from posternimap.tests.test_server_e2e import _patched_factory, _restore_account
 
 DATA = b"x" * 4096
@@ -95,6 +96,7 @@ class BodyStructureFilenameE2ETest(twisted_unittest.TestCase):
         finally:
             _restore_account(restore)
             yield port.stopListening()
+            yield wait_for_server_connections_to_close()
         m = re.search(rb"BODYSTRUCTURE (\(.*\))\r\nc OK", raw)
         self.assertIsNotNone(m, "no BODYSTRUCTURE in the response: %r" % raw[-300:])
         # [:-1] drops the ONE trailing paren that closes the untagged FETCH
