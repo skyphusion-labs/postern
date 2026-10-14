@@ -31,7 +31,7 @@
 #
 # When bumping the toolchain for a stdlib CVE (audit #107), bump this tag in the
 # same commit.
-FROM golang:1.26.9-bookworm AS builder
+FROM golang:1.27.2-bookworm AS builder
 
 # GOTOOLCHAIN=local is the second half of the #704 fix, and it belongs in the
 # artifact rather than in CI. It makes THIS TAG the truth about the binary.
