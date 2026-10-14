@@ -1611,16 +1611,19 @@ that swaps one for the other must know four differences:
    states the scope THAT route was answered under. Nothing in either response says the two
    routes would disagree with each other about this thread, so a caller will not notice the
    shortfall from the field alone; the non-equivalence is documented here and nowhere else.
-   The shortfall is closable but not in one request. A bound member reaches a role queue on the
-   list route with `to=<role address>`, accepted only when that address is a queue the member
-   belongs to (#425). It is bounded three ways, and a caller who learns only the first half will
-   wrongly think it reproduces the thread route's reach. It is ONE role per call, so rebuilding
-   the thread row set is one member call plus one call per role plus a union, against the thread
-   route's single read. It is the inbox lens only: a role view is refused with
-   `E_VALIDATION_ERROR` if it names `direction=`, a non-inbox `lens`, or any `mailbox=` (so
-   `mailbox=all` cannot be combined with it, and archived, trashed and junked queue rows are not
-   reachable that way at all). So on the role-queue path the substitute is strictly less capable
-   than on the member path.
+   The shortfall is only PARTLY closable, and never completely. A bound member reaches a role
+   queue on the list route with `to=<role address>`, accepted only when that address is a queue
+   the member belongs to (#425). It is bounded three ways, and a caller who learns only the
+   first half will wrongly think it reproduces the thread route's reach. (a) ONE role per call,
+   so rebuilding the thread row set is one member call plus one call per role plus a union,
+   against the thread route's single read. (b) The inbox lens only: a role view is refused with
+   `E_VALIDATION_ERROR` if it names `direction=` or a non-inbox `lens`. (c) No `mailbox=` at
+   all, `mailbox=all` included: a role queue has no durable folders. Because the member path
+   needs `mailbox=all` to see archived, trashed and junked members and the role path refuses it,
+   those rows are not reachable through a role view in any number of calls. For a caller with
+   role queues and any such mail in the thread, the list route cannot reproduce the thread row
+   set at all. On the role-queue path the substitute is strictly less capable than on the
+   member path.
 4. **Payload.** List rows are summary rows: no `bodyText` or `bodyHtml`, with `hasHtml` and
    `attachmentCount` in their place. That is why it serves a survey at all.
 
