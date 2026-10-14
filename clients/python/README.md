@@ -90,6 +90,9 @@ postern list --to abuse@example.com --lens inbox
 # read one message / a whole thread
 postern get <message-id>
 postern thread <thread-id>
+# --envelope adds identity_scope to stdout: the scope the read was answered under, so a
+# miss or a short thread can be told from a narrowed view. Default output is unchanged.
+postern get <message-id> --envelope
 
 # durable folders: Archive / Trash / Junk are only reachable with --mailbox
 postern list --mailbox trash --limit 20
@@ -110,6 +113,7 @@ postern reply <message-id> --text "here it is" --mode replyAll --quote --attach 
 
 # folders + read state (folders carry server-authoritative unread counts)
 postern folders --to me@example.com
+postern folders --envelope          # adds identity_scope: what a zero unread count means
 postern seen <message-id> --for me@example.com      # --unread to undo
 postern flags <message-id> --flagged --unanswered
 postern move <message-id> --mailbox trash           # --mailbox none restores it
@@ -159,7 +163,9 @@ for summary in page["items"]:
 if page["cursor"]:
     nxt = client.list_messages(direction="inbound", limit=20, cursor=page["cursor"])
 
-msg = client.get_message("<message-id>")           # dict, or None if absent
+msg = client.get_message("<message-id>")           # dict, or None
+# A None is NOT proof of absence under a scoped read. The envelope says which:
+env = client.get_message_envelope("<message-id>")  # {"message": dict|None, "identity_scope": ...}
 thread = client.get_thread("<thread-id>")          # list[dict]
 hits = client.search("invoice", mode="hybrid")     # {"items": [...], "cursor": ...}
 
@@ -186,6 +192,7 @@ client.search(
 
 # durable folders + read state
 client.get_folders(to="me@example.com")            # names + unread counts + UIDVALIDITY
+client.get_folders_envelope(to="me@example.com")   # the same, plus identity_scope
 client.list_messages(mailbox="trash", limit=20)
 client.set_seen(["<message-id>"], True, for_addr="me@example.com")   # -> updated count
 client.set_flags(["<message-id>"], flagged=True)
@@ -211,12 +218,21 @@ API's parsed JSON, so the keys match the worker contract exactly.
 | `send` | `POST /api/send` | `{messageId, threadId, ...}` |
 | `reply` | `POST /api/reply` | `{messageId, threadId, ...}` |
 | `list_messages` | `GET /api/messages` | `{items: [summary], cursor}` |
-| `get_message` | `GET /api/messages/{id}` | message dict or `None` |
+| `get_message` | `GET /api/messages/{id}` | message dict or `None`. A `None` does NOT prove absence under a scoped read; see `get_message_envelope` |
+| `get_message_envelope` | `GET /api/messages/{id}` | `{message, identity_scope}` -- use this when "is it really not there" matters. The two misses, withheld and absent, are deliberately the SAME answer |
 | `get_thread` | `GET /api/threads/{id}` | `[message]` (ONE page, default 20; takes `limit`/`cursor`) |
-| `get_thread_page` | `GET /api/threads/{id}` | `{messages, cursor}` -- use this when "is that the whole thread" matters; `cursor is None` means yes |
+| `get_thread_page` | `GET /api/threads/{id}` | `{messages, cursor, identity_scope}` -- use this when "is that the whole thread" matters. `cursor is None` means every message **you may read**, so read `identity_scope` to know whether that is the whole thread |
 | `search` | `GET /api/search` | `{items: [{message, ...}], cursor}` |
 | `get_attachment` | `GET /api/messages/{id}/attachments/{i}` | `Attachment(body, mime, filename)` |
 | `get_folders` | `GET /api/folders` | `[folder]` (unread counts, UIDVALIDITY) |
+| `get_folders_envelope` | `GET /api/folders` | `{folders, identity_scope}` -- a zero unread count means a different thing under a member scope than an estate one |
+
+**CLI stdout is unchanged.** `postern get` still prints the message and `postern folders`
+still prints the folder list, byte-for-byte as in 1.6.0, so an existing `| jq` pipeline
+keeps working. `--envelope` is how a caller opts into the scope on stdout, where a pipe
+keeps it. `postern get` does change what it prints to STDERR when a message is not found:
+it no longer claims absence from the mailbox when the read was scoped, and under a worker
+that reports no scope it says so rather than guessing.
 | `set_seen` | `POST /api/messages/seen` | updated count |
 | `set_flags` | `POST /api/messages/flags` | updated count |
 | `move_messages` | `POST /api/messages/move` | updated count |
