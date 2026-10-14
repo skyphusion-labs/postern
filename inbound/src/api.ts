@@ -81,8 +81,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   const url = new URL(request.url);
   const path = url.pathname;
 
-  // Demo SEO host: apex/www.posternonline.com always 301 to demo. (Separate CF
-  // account from production skyphusion Postern; see wrangler.demo.jsonc.)
+  // Demo SEO host: apex/www.posternonline.com always 301 to demo. The demo runs on
+  // the REGULAR Skyphusion Labs Cloudflare account, not a separate one (CLAUDE.md);
+  // its account plus D1/R2/Vectorize ids live in inbound/wrangler.demo.jsonc, which is
+  // gitignored operator config and so is absent from a fresh clone by design.
   if (request.method === "GET" || request.method === "HEAD") {
     const apexRedirect = redirectApexToDemo(url);
     if (apexRedirect) return apexRedirect;

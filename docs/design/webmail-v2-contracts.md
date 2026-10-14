@@ -1,7 +1,14 @@
 # Webmail v2: account/session, durable state, and IMAP consistency contracts
 
 Status: **design of record for epic #338, phase 1**. Design only; ZERO implementation
-ships in this PR. This document is the contract the phase 2-6 implementation PRs read
+ships in this PR.
+
+> **Written 2026-07, against the operator fleet topology of that time** (a bastion, a
+> private VLAN, a directory host). That fleet is retired. The topology nouns in sections
+> 1.8 and 1.9 describe the environment this design was reasoned in and are kept so the
+> REASONS stay legible; they are not a description of how anything is deployed now. The
+> contracts themselves (columns, UID rules, bindings, the verifier seam) are
+> host-agnostic and unaffected. This document is the contract the phase 2-6 implementation PRs read
 from, so a binding, a column, or a UID rule never gets invented per-component. It is
 reproducible from the doc alone (ICD discipline). Field names map to the code they will
 touch (`inbound/src/api.ts`, `inbound/src/store.ts`, `inbound/schema.sql`,
