@@ -96,28 +96,6 @@ jobs:
           POSTERN_IDENTITY_TOKEN: ${{ secrets.POSTERN_SMOKE_IDENTITY_TOKEN }}
           POSTERN_DELETE_TOKEN: ${{ secrets.POSTERN_SMOKE_DELETE_TOKEN }}
           POSTERN_ORGANIZE_TOKEN: ${{ secrets.POSTERN_SMOKE_ORGANIZE_TOKEN }}
-          # #692: this deployment's guard token is the read-set member that
-          # POSTERN_SMOKE_API_TOKEN holds. smoke.mjs deliberately refuses to infer that
-          # for itself, and it is right to: a `both`-scoped API token legitimately
-          # organizes, so inferring intent from the other variables would fail a valid
-          # both-token deployment, and a gate that cries wolf is a gate somebody
-          # switches off. Only the operator knows a token's reach, so the claim is made
-          # HERE, in this deployment's own wiring, and not in the shared script.
-          #
-          # Why not the dedicated POSTERN_SMOKE_NO_ORGANIZE_TOKEN secret: its intended
-          # value is the read-set member, and that value is UNRECOVERABLE. It lives only
-          # in the GitHub secret (write-only), in the Worker's read set (unreadable), and
-          # in the crew-secrets minter tier, which has no surviving decryption leg on
-          # this estate. The secret name stays documented above for self-hosters, who
-          # should set it and point this line at it.
-          #
-          # Proven against production 2026-10-14, both directions, in CI:
-          #   run 38581937323  guard fed an organize-CAPABLE token -> RED at the assert,
-          #                    status 200 {"ok":true,"updated":0}, exit 1
-          #   run 38582074641  guard fed THIS token -> PASS (403 naming organize),
-          #                    56 checks green
-          # The failure direction is safe: if this ever becomes a both-scoped token the
-          # guard goes RED, never silently green.
           # The guard token must AUTHENTICATE and be REFUSED on organize. Which secret
           # satisfies that is a per-deployment fact only the operator knows, so it is an
           # explicit operator ASSERTION here, never an inference.
@@ -139,6 +117,7 @@ jobs:
           #                    status 200 {"ok":true,"updated":0}, exit 1, after legs 1-5 passed
           #   run 38582074641  guard fed the read token -> PASS (403 naming organize),
           #                    56 checks green
+          #   run 38594131505  the SHIPPED variable-driven mapping -> PASS, 56 green
           # Both exercised THIS file. deploy.yml carries the identical mapping and is
           # tag-triggered, so it is unexercised until the next release.
           POSTERN_NO_ORGANIZE_TOKEN: ${{ vars.POSTERN_SMOKE_API_TOKEN_IS_READ_ONLY == 'true' && secrets.POSTERN_SMOKE_API_TOKEN || secrets.POSTERN_SMOKE_NO_ORGANIZE_TOKEN }}
