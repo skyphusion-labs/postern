@@ -2,12 +2,10 @@ package main
 
 // PROXY protocol (HAProxy spec, v1 text + v2 binary) on the submission edge.
 //
-// WHY: the postern mail edge moved to a single L4 load balancer that
-// targets the directory host DIRECTLY (no bastion, no HAProxy middle layer). An L4 LB
-// rewrites the source address, so without help every connection would appear to
-// originate from the LB. The LB instead prepends a PROXY protocol header carrying
-// the REAL client address; this file recovers it so logs and any per-IP control
-// see the true peer.
+// WHY: a mail edge that terminates on an L4 load balancer rewrites the source
+// address, so without help every connection would appear to originate from the LB.
+// The LB instead prepends a PROXY protocol header carrying the REAL client address;
+// this file recovers it so logs and any per-IP control see the true peer.
 //
 // TRUST MODEL (the security-critical property): a PROXY header is honored ONLY
 // when the connection's immediate peer (the raw TCP RemoteAddr) is inside a
