@@ -113,9 +113,9 @@ a 1.7.0 worker.
 
 - The retired fleet topology (a bastion, a private VLAN, a directory host) is gone from the
   release, proxy and design docs, and from 10 files across four languages including a
-  Dockerfile and `imap/.env.example`. Two of
-  those lines were not merely stale but **wrong**: they asserted that per-IP throttling is
-  blind, which is false wherever PROXY protocol is configured (#723, #737).
+  Dockerfile and `imap/.env.example`. Two of those lines were not merely stale but **wrong**:
+  they asserted that per-IP throttling is blind, which is false wherever PROXY protocol is
+  configured (#723, #737).
 - `docs/CONTRACT.md` records that surveying a thread through
   `GET /api/messages?thread=<id>` is **not** the same read as `GET /api/threads/{id}`, in four
   ways, two of which no response announces (#734).
