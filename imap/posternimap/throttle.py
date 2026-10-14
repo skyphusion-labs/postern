@@ -13,9 +13,10 @@ seconds) and the two behavioural invariants both doors enforce:
      returns the same generic UnauthorizedLogin it returns for a wrong password,
      and existent + non-existent usernames are throttled identically.
 
-Keyed on the presented ACCOUNT, not the source IP: behind the bastion
-every external connection presents one masqueraded source IP, so per-IP is blind.
-A second GLOBAL layer bounds spread-account spraying through that single IP.
+Keyed on the presented ACCOUNT, not the source IP: a door behind an L4 load
+balancer sees only the balancer's address unless PROXY protocol is configured
+(#155, proxyproto.py), so per-IP cannot be relied on. A second GLOBAL layer bounds
+spread-account spraying arriving through one apparent source.
 
 In-memory + per-process (one portal per proxy process), matching the Go side; a
 multi-instance deploy would need a shared store (documented). Disabled = no-op.

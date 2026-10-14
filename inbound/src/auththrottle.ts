@@ -21,11 +21,12 @@
 //
 // TWO DELIBERATE DEVIATIONS from the relay, both because the environment differs:
 //
-//   1. A SECOND KEYED LAYER on the client IP (CF-Connecting-IP). The relay dropped
-//      per-IP because behind the bastion every public connection presents ONE source
-//      IP, making per-IP blind. A Worker sees the real client IP, so the per-IP layer
-//      is meaningful here and it is what catches spread-spraying (one guess each
-//      across many accounts) WITHOUT punishing anyone else.
+//   1. A SECOND KEYED LAYER on the client IP (CF-Connecting-IP). The relay keyed on
+//      the account instead, because a door behind an L4 load balancer may see one
+//      apparent source IP for everyone unless PROXY protocol is configured. A Worker
+//      ALWAYS sees the real client IP, so the per-IP layer is meaningful here and
+//      it is what catches spread-spraying (one guess each across many accounts)
+//      WITHOUT punishing anyone else.
 //   2. The relay GLOBAL layer is present but DEFAULT-OFF (WEBMAIL_AUTH_GLOBAL_MAX
 //      unset = 0 = disabled). On a public endpoint a global cooldown is a
 //      login-denial lever any anonymous attacker can pull for everyone; the relay

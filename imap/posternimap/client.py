@@ -453,7 +453,7 @@ class Draft:
 # The default transport: reuse ONE persistent HTTP(S) connection to the worker across
 # requests (keep-alive) instead of opening a fresh TCP+TLS connection per call like
 # urllib.urlopen did. During a session message backfill that is one handshake instead
-# of one-per-message; on the live door (directory host -> CF edge over HTTPS) each avoided
+# of one-per-message; on a real deployment (door host -> CF edge over HTTPS) each avoided
 # handshake is ~2 RTT + a TLS negotiation, so this is a real per-message win over the
 # network even though it is ~invisible on loopback (#229 follow-up).
 #
