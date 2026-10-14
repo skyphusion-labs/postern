@@ -23,6 +23,8 @@ import { describe, expect, it } from "vitest";
 import { handleApi } from "./src/api";
 import { realEnv, putInbound } from "./realdb";
 import { sha256Hex } from "./src/sendidentity";
+import { mintNativeSession, SESSION_COOKIE, CSRF_COOKIE } from "./src/session";
+import { hashSecret } from "./src/smtpcreds";
 
 const ESTATE_TOKEN = "test-token";
 const ME = "me@skyphusion.org";
@@ -30,8 +32,17 @@ const OTHER = "other@skyphusion.org";
 const ALICE = "alice@example.com";
 const BOB = "bob@example.com";
 
-const get = (path: string, token = ESTATE_TOKEN) =>
-  new Request(`https://postern.example${path}`, { headers: { authorization: `Bearer ${token}` } });
+/** Either door, because after #718 the two answer DIFFERENT counts on one store. */
+type Auth = { token: string } | { cookie: string };
+
+const asAuth = (a: Auth | string): Auth => (typeof a === "string" ? { token: a } : a);
+
+const get = (path: string, auth: Auth | string = ESTATE_TOKEN) => {
+  const a = asAuth(auth);
+  const headers: Record<string, string> =
+    "cookie" in a ? { cookie: a.cookie } : { authorization: `Bearer ${a.token}` };
+  return new Request(`https://postern.example${path}`, { headers });
+};
 
 /** Three messages for ME, two for OTHER, across two senders and two months. */
 async function seed(env: Env, ctx: ExecutionContext) {
@@ -42,8 +53,13 @@ async function seed(env: Env, ctx: ExecutionContext) {
   await putInbound(env, ctx, { id: "m5@x", from: BOB, to: OTHER, subject: "five", body: "beta", date: "2026-02-11T00:00:00.000Z" });
 }
 
-async function total(env: Env, ctx: ExecutionContext, query: string, token = ESTATE_TOKEN): Promise<number> {
-  const res = await handleApi(get(`/api/messages?countOnly=1${query}`, token), env, ctx);
+async function total(
+  env: Env,
+  ctx: ExecutionContext,
+  query: string,
+  auth: Auth | string = ESTATE_TOKEN,
+): Promise<number> {
+  const res = await handleApi(get(`/api/messages?countOnly=1${query}`, auth), env, ctx);
   expect(res.status, `countOnly${query} should be 200`).toBe(200);
   const body = (await res.json()) as { total?: number };
   expect(typeof body.total, "total must be a number").toBe("number");
@@ -51,12 +67,17 @@ async function total(env: Env, ctx: ExecutionContext, query: string, token = EST
 }
 
 /** Every id the same query returns, paged to exhaustion, so AGREEMENT is against rows. */
-async function pagedIds(env: Env, ctx: ExecutionContext, query: string, token = ESTATE_TOKEN): Promise<string[]> {
+async function pagedIds(
+  env: Env,
+  ctx: ExecutionContext,
+  query: string,
+  auth: Auth | string = ESTATE_TOKEN,
+): Promise<string[]> {
   const out: string[] = [];
   let cursor: string | null = null;
   for (let hop = 0; hop < 20; hop++) {
     const suffix = cursor ? `&limit=2&cursor=${encodeURIComponent(cursor)}` : "&limit=2";
-    const res = await handleApi(get(`/api/messages?x=1${query}${suffix}`.replace("?x=1&", "?"), token), env, ctx);
+    const res = await handleApi(get(`/api/messages?x=1${query}${suffix}`.replace("?x=1&", "?"), auth), env, ctx);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<{ messageId: string }>; cursor: string | null };
     out.push(...body.items.map((i) => i.messageId));
@@ -116,34 +137,54 @@ describe("#648 the total AGREES with the rows the same query pages", () => {
 });
 
 describe("#648 the count runs under the SAME access scope as the rows", () => {
-  async function boundEnv() {
+  // THE SCOPED CALLER IN THIS BLOCK IS NOW A SESSION, and that is the whole reason the
+  // block still measures anything. #718 made a read-capable registry Bearer an estate
+  // reader, so driving these arms with one would have made `scoped` and `estate` both 5:
+  // the DISCRIMINATOR would have compared a number against itself, passed, and stopped
+  // being able to detect a count that ignores scope. The narrow caller moved to the door
+  // that is still narrow rather than the property being dropped.
+  async function agentEnv() {
     const token = "bound-read-token";
     const registry = { [await sha256Hex(token)]: { from: ME, scopes: ["read"] } };
     const { env, ctx } = realEnv({ POSTERN_SEND_IDENTITIES: JSON.stringify(registry) });
     return { env, ctx, token };
   }
 
-  it("an identity-scoped token is counted its OWN slice, not the estate", async () => {
-    const { env, ctx, token } = await boundEnv();
+  async function sessionEnv() {
+    const { env, ctx, raw } = realEnv({ WEBMAIL_AUTH_BACKEND: "native" });
+    const password = "hunter2hunter2";
+    raw
+      .prepare(
+        "INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, created_at, updated_at) " +
+          "VALUES (?, ?, ?, 0, ?, ?)",
+      )
+      .run(ME, ME, await hashSecret(password), "2026-07-26T00:00:00Z", "2026-07-26T00:00:00Z");
+    const minted = await mintNativeSession(env, ME, password);
+    if (!minted) throw new Error("session mint failed: the test would prove nothing");
+    return { env, ctx, cookie: `${SESSION_COOKIE}=${minted.rawId}; ${CSRF_COOKIE}=${minted.csrfToken}` };
+  }
+
+  it("a SESSION is counted its OWN slice, not the estate", async () => {
+    const { env, ctx, cookie } = await sessionEnv();
     await seed(env, ctx);
 
-    const rows = await pagedIds(env, ctx, "", token);
-    const counted = await total(env, ctx, "", token);
+    const rows = await pagedIds(env, ctx, "", { cookie });
+    const counted = await total(env, ctx, "", { cookie });
 
-    // Agreement under the bound token: the number is reachable by paging as that token.
+    // Agreement under the session: the number is reachable by paging as that caller.
     expect(counted).toBe(rows.length);
     // And it is the SLICE, not the table. Three of the five seeded rows are ME's.
     expect(counted).toBe(3);
   });
 
-  it("DISCRIMINATOR: the estate token counts MORE than the scoped token, on one store", async () => {
-    // This is the arm that proves scope is applied rather than merely declared. If the
-    // count ignored scope, both numbers would be 5 and every assertion above would still
-    // pass, because 5 would also be the estate row count.
-    const { env, ctx, token } = await boundEnv();
+  it("DISCRIMINATOR: the estate token counts MORE than the SESSION, on one store", async () => {
+    // The arm that proves scope is applied rather than merely declared. If the count
+    // ignored scope, both numbers would be 5 and every assertion above would still pass,
+    // because 5 would also be the estate row count.
+    const { env, ctx, cookie } = await sessionEnv();
     await seed(env, ctx);
 
-    const scoped = await total(env, ctx, "", token);
+    const scoped = await total(env, ctx, "", { cookie });
     const estate = await total(env, ctx, "", ESTATE_TOKEN);
 
     expect(estate).toBe(5);
@@ -151,25 +192,25 @@ describe("#648 the count runs under the SAME access scope as the rows", () => {
     expect(scoped).toBeLessThan(estate);
   });
 
-  it("a scoped caller cannot widen the count with to=, any more than it can widen a read", async () => {
-    const { env, ctx, token } = await boundEnv();
+  it("a SESSION cannot widen the count with to=, any more than it can widen a read", async () => {
+    const { env, ctx, cookie } = await sessionEnv();
     await seed(env, ctx);
 
     // Naming someone else's address must not count their mail. The row predicate forces
     // the viewer to the bound identity (#544), and the count shares that predicate.
-    const counted = await total(env, ctx, `&to=${OTHER}`, token);
-    const rows = await pagedIds(env, ctx, `&to=${OTHER}`, token);
+    const counted = await total(env, ctx, `&to=${OTHER}`, { cookie });
+    const rows = await pagedIds(env, ctx, `&to=${OTHER}`, { cookie });
 
     expect(counted).toBe(rows.length);
     expect(counted).toBe(0);
   });
 
   it("the count response states the scope it was answered under", async () => {
-    const { env, ctx, token } = await boundEnv();
+    const { env, ctx, cookie } = await sessionEnv();
     await seed(env, ctx);
 
     const bound = (await (
-      await handleApi(get("/api/messages?countOnly=1", token), env, ctx)
+      await handleApi(get("/api/messages?countOnly=1", { cookie }), env, ctx)
     ).json()) as Record<string, unknown>;
     const estate = (await (
       await handleApi(get("/api/messages?countOnly=1"), env, ctx)
@@ -178,6 +219,38 @@ describe("#648 the count runs under the SAME access scope as the rows", () => {
     // A bare "0" means a different thing under each, so the number alone is not an answer.
     expect(bound.identityScope).toEqual({ kind: "member", addresses: [ME] });
     expect(estate.identityScope).toEqual({ kind: "estate" });
+  });
+
+  it("an AGENT credential is counted the estate, and the total still agrees with its rows", async () => {
+    // #718, and the property that must survive the widening: AGREEMENT is independent of
+    // scope. The count moved, so it has to move WITH the rows, or the caller is handed a
+    // number it cannot reach by paging.
+    const { env, ctx, token } = await agentEnv();
+    await seed(env, ctx);
+
+    const rows = await pagedIds(env, ctx, "", token);
+    const counted = await total(env, ctx, "", token);
+
+    expect(counted).toBe(rows.length);
+    expect(counted, "the agent counts every seeded row, not its own three").toBe(5);
+
+    const body = (await (
+      await handleApi(get("/api/messages?countOnly=1", token), env, ctx)
+    ).json()) as Record<string, unknown>;
+    expect(body.identityScope).toEqual({ kind: "estate" });
+  });
+
+  it("an AGENT can now count another address with to=, and the total agrees there too", async () => {
+    // The mirror of the session arm above. `to=` stops being clamped for an agent, so it
+    // becomes an ordinary filter: two of the five rows are OTHER's.
+    const { env, ctx, token } = await agentEnv();
+    await seed(env, ctx);
+
+    const counted = await total(env, ctx, `&to=${OTHER}`, token);
+    const rows = await pagedIds(env, ctx, `&to=${OTHER}`, token);
+
+    expect(counted).toBe(rows.length);
+    expect(counted).toBe(2);
   });
 });
 

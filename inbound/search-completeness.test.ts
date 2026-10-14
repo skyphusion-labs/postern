@@ -229,21 +229,39 @@ describe("every read declares the scope it was answered under (#632 F7 / #544)",
   const get = (path: string, token: string) =>
     new Request(`https://postern.example${path}`, { headers: { authorization: `Bearer ${token}` } });
 
-  it("a bound read token is told it is scoped to itself, on list AND search", async () => {
+  // WHAT THIS BLOCK MEASURES AFTER #718, stated because the old framing no longer holds.
+  //
+  // It used to pair a bound registry token (member) against a static token (estate) and
+  // call that the discrimination. #718 makes a read-capable registry Bearer an estate
+  // reader, so BOTH credentials here now report estate and that pairing discriminates
+  // nothing. The member-versus-estate split is still real, but it is now a SESSION versus
+  // an agent, and it needs a real minted session to drive: it is guarded in
+  // viewer-binding.test.ts and read-scope-split.test.ts, both on realEnv.
+  //
+  // What remains live HERE, and can still go red, is CROSS-SURFACE AGREEMENT: list and
+  // search must declare the SAME scope for the SAME credential. That is the property this
+  // file is positioned to test, it is independent of which value the scope takes, and it
+  // fails if either route drops the field or computes it from its own derivation.
+  it("an agent credential is told ESTATE, identically on list AND search (#718)", async () => {
     const { env, ctx, settle, token } = await boundEnv();
     await seed(env, ctx, onTopic(2, "2026-01-10T00:00:00.000Z"));
     await settle();
 
     const list = (await (await handleApi(get("/api/messages", token), env, ctx)).json()) as Record<string, unknown>;
-    expect(list.identityScope).toEqual({ kind: "member", addresses: [VIEWER] });
+    expect(list.identityScope).toEqual({ kind: "estate" });
 
     const search = (await (
       await handleApi(get("/api/search?q=invoice&mode=fts", token), env, ctx)
     ).json()) as Record<string, unknown>;
-    expect(search.identityScope).toEqual({ kind: "member", addresses: [VIEWER] });
+    expect(search.identityScope).toEqual({ kind: "estate" });
+
+    // The agreement assertion itself, not a restatement: compared to each OTHER, so a
+    // future change that moved one surface and not the other fails here even if both
+    // still happen to be legal values.
+    expect(search.identityScope, "list and search must not come apart").toEqual(list.identityScope);
   });
 
-  it("CONTROL: a static estate token is told it is NOT scoped, so the field discriminates", async () => {
+  it("the field is emitted on both surfaces for a static token too, not only for a bound one", async () => {
     const { env, ctx, settle } = makeFakeEnv({ VECTORIZE_FOR: "" });
     await seed(env, ctx, onTopic(2, "2026-01-10T00:00:00.000Z"));
     await settle();
@@ -257,5 +275,6 @@ describe("every read declares the scope it was answered under (#632 F7 / #544)",
       await handleApi(get("/api/search?q=invoice&mode=fts", "test-token"), env, ctx)
     ).json()) as Record<string, unknown>;
     expect(search.identityScope).toEqual({ kind: "estate" });
+    expect(search.identityScope).toEqual(list.identityScope);
   });
 });
