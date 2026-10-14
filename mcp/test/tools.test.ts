@@ -148,7 +148,9 @@ describe("mailbox_list", () => {
 
 describe("mailbox_get", () => {
   it("returns found:true with the message", async () => {
-    const client: any = { get: vi.fn().mockResolvedValue({ messageId: "m9", bodyText: "hi" }) };
+    const client: any = {
+      get: vi.fn().mockResolvedValue({ message: { messageId: "m9", bodyText: "hi" } }),
+    };
     const out: any = await tool("mailbox_get").handler(client, { message_id: "m9" });
     expect(client.get).toHaveBeenCalledWith("m9");
     expect(out.found).toBe(true);
@@ -156,13 +158,83 @@ describe("mailbox_get", () => {
   });
 
   it("returns found:false when missing", async () => {
-    const client: any = { get: vi.fn().mockResolvedValue(null) };
+    const client: any = { get: vi.fn().mockResolvedValue({ message: null }) };
     const out: any = await tool("mailbox_get").handler(client, { message_id: "nope" });
     expect(out.found).toBe(false);
+  });
+
+  // #717. The worker states the scope a read was answered under, including on its 404,
+  // and this tool is the surface the incident was actually read through: a bare
+  // `found: false` is what got reported to a human as "the mail is not there".
+  it("relays identityScope on a MISS, so found:false is readable as scoped", async () => {
+    const scope = { kind: "member", addresses: ["agent@skyphusion.org"] };
+    const client: any = { get: vi.fn().mockResolvedValue({ message: null, identityScope: scope }) };
+    const out: any = await tool("mailbox_get").handler(client, { message_id: "theirs@x" });
+    expect(out.found, "still a miss").toBe(false);
+    expect(out.identityScope, "and now a scoped one").toEqual(scope);
+  });
+
+  it("relays identityScope on a HIT, with the SAME value, so it is not a miss marker", async () => {
+    const scope = { kind: "member", addresses: ["agent@skyphusion.org"] };
+    const client: any = {
+      get: vi.fn().mockResolvedValue({ message: { messageId: "m9" }, identityScope: scope }),
+    };
+    const out: any = await tool("mailbox_get").handler(client, { message_id: "m9" });
+    expect(out.found).toBe(true);
+    // Load-bearing: if the field appeared only on misses, its PRESENCE would itself be the
+    // existence oracle #717 must not create.
+    expect(out.identityScope).toEqual(scope);
+  });
+
+  it("omits identityScope entirely when the worker sent none", async () => {
+    const client: any = { get: vi.fn().mockResolvedValue({ message: null }) };
+    const out: any = await tool("mailbox_get").handler(client, { message_id: "nope" });
+    expect("identityScope" in out, "an absent scope is not invented").toBe(false);
+  });
+
+  it("the description tells an agent not to read found:false as absence", () => {
+    const d = tool("mailbox_get").description;
+    expect(d).toMatch(/identityScope/);
+    expect(d).toMatch(/not in your slice/);
   });
 });
 
 describe("mailbox_thread", () => {
+  // #717, and the sharpest case in the read surface: this tool's own description says
+  // `cursor: null` means "you have the whole thread". The worker narrows a thread to the
+  // reader's slice BEFORE paging it, so that claim was unqualified over a filtered set.
+  // The handler builds its envelope by hand rather than through `completeness()`, which is
+  // exactly why the field went missing here and nowhere else.
+  it("relays identityScope, which is what qualifies its cursor:null exhaustion claim", async () => {
+    const scope = { kind: "member", addresses: ["agent@skyphusion.org"] };
+    const client: any = {
+      thread: vi.fn().mockResolvedValue({
+        items: [{ messageId: "m1" }],
+        cursor: null,
+        identityScope: scope,
+      }),
+    };
+    const out: any = await tool("mailbox_thread").handler(client, { thread_id: "t1" });
+    expect(out.cursor, "the exhaustion claim itself is unchanged").toBeNull();
+    expect(out.identityScope, "but it is now qualified by the scope it was read under").toEqual(
+      scope,
+    );
+  });
+
+  it("omits identityScope when the worker sent none, rather than inventing estate", async () => {
+    const client: any = {
+      thread: vi.fn().mockResolvedValue({ items: [], cursor: null }),
+    };
+    const out: any = await tool("mailbox_thread").handler(client, { thread_id: "t1" });
+    expect("identityScope" in out).toBe(false);
+  });
+
+  it("the description says what cursor:null claims under a narrowed read", () => {
+    const d = tool("mailbox_thread").description;
+    expect(d).toMatch(/identityScope/);
+    expect(d).toMatch(/that YOU may read/);
+  });
+
   it("maps to client.thread and counts THIS PAGE", async () => {
     const client: any = {
       thread: vi.fn().mockResolvedValue({ items: [{ messageId: "m1" }, { messageId: "m2" }], cursor: null }),
@@ -203,8 +275,10 @@ describe("mailbox_get_attachment", () => {
   it("returns base64 bytes + real filename/mime/size for an in-range index", async () => {
     const client: any = {
       get: vi.fn().mockResolvedValue({
-        messageId: "m1",
-        attachments: [{ filename: "report.pdf", mime: "application/pdf", size: 3 }],
+        message: {
+          messageId: "m1",
+          attachments: [{ filename: "report.pdf", mime: "application/pdf", size: 3 }],
+        },
       }),
       getAttachmentBytes: vi.fn().mockResolvedValue({ base64: "QUJD", contentType: "application/pdf", size: 3 }),
     };
@@ -224,7 +298,10 @@ describe("mailbox_get_attachment", () => {
   });
 
   it("returns found:false when the message does not exist", async () => {
-    const client: any = { get: vi.fn().mockResolvedValue(null), getAttachmentBytes: vi.fn() };
+    const client: any = {
+      get: vi.fn().mockResolvedValue({ message: null }),
+      getAttachmentBytes: vi.fn(),
+    };
     const out: any = await tool("mailbox_get_attachment").handler(client, { message_id: "nope", index: 0 });
     expect(out.found).toBe(false);
     expect(client.getAttachmentBytes).not.toHaveBeenCalled();
@@ -232,7 +309,9 @@ describe("mailbox_get_attachment", () => {
 
   it("throws a clear out-of-range error without fetching bytes", async () => {
     const client: any = {
-      get: vi.fn().mockResolvedValue({ messageId: "m1", attachments: [{ filename: "a", mime: "text/plain", size: 1 }] }),
+      get: vi.fn().mockResolvedValue({
+        message: { messageId: "m1", attachments: [{ filename: "a", mime: "text/plain", size: 1 }] },
+      }),
       getAttachmentBytes: vi.fn(),
     };
     await expect(tool("mailbox_get_attachment").handler(client, { message_id: "m1", index: 2 })).rejects.toThrow(
@@ -246,7 +325,12 @@ describe("mailbox_get_attachment", () => {
     process.env.POSTERN_MCP_MAX_ATTACHMENT_BYTES = "5";
     try {
       const client: any = {
-        get: vi.fn().mockResolvedValue({ messageId: "m1", attachments: [{ filename: "big", mime: "application/octet-stream", size: 10 }] }),
+        get: vi.fn().mockResolvedValue({
+          message: {
+            messageId: "m1",
+            attachments: [{ filename: "big", mime: "application/octet-stream", size: 10 }],
+          },
+        }),
         getAttachmentBytes: vi.fn(),
       };
       await expect(tool("mailbox_get_attachment").handler(client, { message_id: "m1", index: 0 })).rejects.toThrow(
