@@ -45,6 +45,7 @@ except ImportError:  # pragma: no cover
 from posternimap.config import Config
 from posternimap.rfc822 import header_text
 from posternimap.tests.fakes import FakeTransport, make_message
+from posternimap.tests.settle import wait_for_server_connections_to_close
 from posternimap.tests.test_server_e2e import _patched_factory, _restore_account
 
 # A wide spread on purpose: a 2-byte sequence, a 3-byte sequence, and a run of them,
@@ -264,7 +265,9 @@ class Append8BitRefusalE2ETest(twisted_unittest.TestCase):
 
     def tearDown(self):
         _restore_account(self._restore)
-        return self.port.stopListening()
+        d = self.port.stopListening()
+        d.addCallback(lambda _r: wait_for_server_connections_to_close())
+        return d
 
     @staticmethod
     def _mime(msgid, subject, body="hi"):
