@@ -11,6 +11,98 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.7.0
+
+MINOR, and **one entry is a change to a DEFAULT that widens what an agent credential can
+read.** Read that first; everything else is additive.
+
+### An agent credential now reads the mail addressed to the humans on the deployment (#718)
+
+**This is on by default and there is no key that turns it off.** If you give an agent a
+per-identity registry entry in `POSTERN_SEND_IDENTITIES` whose `scopes` include `read`,
+that credential can read mail addressed to every address on the deployment, not only its
+own. A self-hoster inherits this on first run.
+
+It is deliberate. Postern is email for agents AND humans, and an agent that cannot read the
+humans' mail does not deliver the product; an agent asked to find last month's invoice has
+to be able to find it in the mailbox it was delivered to. The capability is documented in
+README's agent section and in DEPLOY.md rather than buried here.
+
+**Two boundaries did NOT move, and both are deliberate:**
+
+- **A human signing into webmail still reads only their own mail** plus any role queue they
+  belong to, exactly as before. The widening keys on a registry Bearer, never on a session
+  cookie, so a browser login is scoped as it always was.
+- **The widening is READ only.** Marking read, flagging, filing, and what a reply or forward
+  may quote all stay bound to the agent's own address. So an agent can read a message it
+  cannot act on. That asymmetry is intentional for now; delegated read AND send with an
+  audit trail is tracked separately and is where the write side belongs.
+
+**If that reach is wider than you want:** an entry whose `scopes` omits `read` is refused on
+every read route, and that is the supported way to run an agent that can send and cannot
+read. Every read response carries `identityScope`, so
+`curl -sH "authorization: Bearer <token>" "$BASE/api/whoami"` tells you what a credential
+actually reaches rather than leaving you to infer it.
+
+### Every read-scoped route now states the scope it was answered under (#717)
+
+`identityScope` was on `GET /api/messages` and `GET /api/search` since v1.5.0. It is now on
+**every** read-scoped route, including the misses: `GET /api/messages/{id}` and its 404,
+both attachment 404s, `GET /api/threads/{id}`, `GET /api/folders`, and
+`GET /api/recipients/recent`. A scoped read previously returned `count: 0`, `messages: []`
+or a 404 and said nothing about having been narrowed, so "not your mail" was
+indistinguishable from "no such mail".
+
+**The 404 is still ONE answer.** The refusal body is byte-identical whether an id is absent
+or withheld, and both attachment refusals share one body. Nothing says "this message exists
+but is not yours", because that would leak existence. The field rides on hits as well as
+misses for the same reason: present only on a miss, its presence would itself be the oracle.
+
+**`cursor: null` on a thread read is a claim about what YOU may read, not about the thread.**
+Under `kind: "estate"` it means the whole thread; under `member` or `role` it means every
+message you are allowed to see, with the rest omitted and not counted. That was true for any
+bound member since v1.2's role queues and only now says so.
+
+### `postern-client` relays it, and gains two envelope methods (#730)
+
+- **New:** `get_message_envelope()` and `get_folders_envelope()` return
+  `{message, identity_scope}` and `{folders, identity_scope}`. `get_thread_page()` gains
+  `identity_scope` in its existing dict.
+- **Unchanged on purpose:** `get_message()` and `get_folders()` return exactly what they
+  returned in 1.6.0, and now delegate to the envelope methods. A `None` from `get_message()`
+  still does not prove absence under a scoped read, which is what the envelope is for.
+- **CLI:** `postern get` and `postern folders` emit the same stdout as 1.6.0. `--envelope` on
+  either emits the envelope instead. `postern get` no longer prints a bare
+  "message not found": it states the scope the miss came out of, and when the server reports
+  no scope it says so rather than picking a side.
+
+### Fixed
+
+- The organize **regression guard** in `inbound/smoke.mjs` could not fire, because the secret
+  it reads was never set, so a worker that had lost the `organize` scope wall would have
+  passed the live smoke. It is wired and runs on every tag deploy and every nightly (#692).
+- `inbound/smoke.mjs` published its coverage ledger only on a green exit, so one failed probe
+  erased the coverage statement for everything behind it and an absent GAP line meant either
+  "covered" or "never reached". Coverage is now a three-state ledger reconciled from an exit
+  handler, and an unreached property prints NOT REACHED (#720).
+- The MCP organize-gate control deep-equalled a frozen tool list, so it broke on every new
+  read tool while staying silent on the one thing a read-scope leak looks like. It now asserts
+  the property, and a separate case fails if an organize tool carries `scope: "read"` (#714).
+- Five more IMAP end-to-end test classes settle the server side before the reactor check,
+  removing a `DirtyReactorAggregateError` flake (#716).
+
+### Docs
+
+- The retired fleet topology (a bastion, a private VLAN, a directory host) is gone from the
+  release, proxy and design docs and from 10 source comments across four languages. Two of
+  those lines were not merely stale but **wrong**: they asserted that per-IP throttling is
+  blind, which is false wherever PROXY protocol is configured (#723, #737).
+- `docs/CONTRACT.md` records that surveying a thread through
+  `GET /api/messages?thread=<id>` is **not** the same read as `GET /api/threads/{id}`, in four
+  ways, two of which no response announces (#734).
+- The IMAP proxy's MIT licence is stated in NOTICE and README, and `imap/LICENSE` ships (#722).
+- The public demo mailbox is disclosed in the privacy and legal docs (#721).
+
 ## v1.6.0
 
 MINOR: **one** new endpoint (`GET /api/whoami`), two new request parameters, the
