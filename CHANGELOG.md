@@ -28,15 +28,24 @@ humans' mail does not deliver the product; an agent asked to find last month's i
 to be able to find it in the mailbox it was delivered to. The capability is documented in
 README's agent section and in DEPLOY.md rather than buried here.
 
-**Two boundaries did NOT move, and both are deliberate:**
+**One boundary did NOT move, and one is narrower than it looks:**
 
-- **A human signing into webmail still reads only their own mail** plus any role queue they
-  belong to, exactly as before. The widening keys on a registry Bearer, never on a session
-  cookie, so a browser login is scoped as it always was.
+- **The widening follows the CREDENTIAL, not the person, and this is the trap.** It keys on a
+  registry Bearer and never on a session cookie, which is correct, but **cookie sessions
+  exist only when you set `WEBMAIL_AUTH_BACKEND = "native"`, and unset is the DEFAULT.**
+  Default webmail is BYO-token and sends `Authorization: Bearer`. So a human who pastes a
+  read-capable registry token into webmail reads the estate: the worker sees a registry
+  Bearer and cannot tell there is a browser on the other end. Being a person in a browser is
+  not what scopes you. To scope someone to their own mail, give them a cookie session, or a
+  token whose `scopes` omits `read`.
 - **The widening is READ only.** Marking read, flagging, filing, and what a reply or forward
   may quote all stay bound to the agent's own address. So an agent can read a message it
   cannot act on. That asymmetry is intentional for now; delegated read AND send with an
   audit trail is tracked separately and is where the write side belongs.
+
+**UPGRADING FROM 1.6.0: check `POSTERN_SEND_IDENTITIES` BEFORE you deploy.** Any existing
+entry whose `scopes` already include `read` widens the moment this version goes live. You add
+nothing for this to take effect and nothing prompts you.
 
 **If that reach is wider than you want:** an entry whose `scopes` omits `read` is refused on
 every read route, and that is the supported way to run an agent that can send and cannot
@@ -61,7 +70,12 @@ misses for the same reason: present only on a miss, its presence would itself be
 **`cursor: null` on a thread read is a claim about what YOU may read, not about the thread.**
 Under `kind: "estate"` it means the whole thread; under `member` or `role` it means every
 message you are allowed to see, with the rest omitted and not counted. That was true for any
-bound member since v1.2's role queues and only now says so.
+bound member since role queues arrived in **v1.2.0** (#425) and only now says so.
+
+**The npm MCP package does not relay this yet.** `@skyphusion/postern-mcp` is published at
+1.4.1 and carries no `identityScope` at all. The in-tree client that relays it rides its own
+`postern-mcp-v*` tag and has not been cut, so an MCP caller cannot see the field even against
+a 1.7.0 worker.
 
 ### `postern-client` relays it, and gains two envelope methods (#730)
 
@@ -80,7 +94,11 @@ bound member since v1.2's role queues and only now says so.
 
 - The organize **regression guard** in `inbound/smoke.mjs` could not fire, because the secret
   it reads was never set, so a worker that had lost the `organize` scope wall would have
-  passed the live smoke. It is wired and runs on every tag deploy and every nightly (#692).
+  passed the live smoke. It is now wired, and it runs **wherever the guard token is
+  configured**: either `POSTERN_SMOKE_NO_ORGANIZE_TOKEN`, or the repo variable
+  `POSTERN_SMOKE_API_TOKEN_IS_READ_ONLY = "true"` declaring your API token read-only. With
+  neither set it reports its declared GAP rather than asserting anything, so a self-hoster who
+  configures nothing gets the GAP and not a false pass (#692).
 - `inbound/smoke.mjs` published its coverage ledger only on a green exit, so one failed probe
   erased the coverage statement for everything behind it and an absent GAP line meant either
   "covered" or "never reached". Coverage is now a three-state ledger reconciled from an exit
@@ -94,7 +112,8 @@ bound member since v1.2's role queues and only now says so.
 ### Docs
 
 - The retired fleet topology (a bastion, a private VLAN, a directory host) is gone from the
-  release, proxy and design docs and from 10 source comments across four languages. Two of
+  release, proxy and design docs, and from 10 files across four languages including a
+  Dockerfile and `imap/.env.example`. Two of
   those lines were not merely stale but **wrong**: they asserted that per-IP throttling is
   blind, which is false wherever PROXY protocol is configured (#723, #737).
 - `docs/CONTRACT.md` records that surveying a thread through

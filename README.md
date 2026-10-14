@@ -216,14 +216,19 @@ Concretely, for a read-capable entry in `POSTERN_SEND_IDENTITIES`:
 | Credential | Reads | Sends as | May change |
 |---|---|---|---|
 | agent (registry token, `scopes` includes `read`) | **every address in the deployment** | its own bound address | **only its own mail** |
-| human (webmail session) | its own address, plus any role queue it is on | its own address | only its own mail |
+| human with a cookie SESSION (`WEBMAIL_AUTH_BACKEND = "native"`) | its own address, plus any role queue it is on | its own address | only its own mail |
+| human in DEFAULT BYO-token webmail, pasting a read-capable registry token | **every address in the deployment**, because the worker sees a registry Bearer and not a person | that token's bound address | only that address's mail |
 | static `POSTERN_API_TOKEN` / `_READ` | every address (unchanged, always did) | un-bound | per slot |
 
-Two boundaries did NOT move with it, and both are deliberate:
+One boundary did NOT move, and one is narrower than it looks. Both are deliberate:
 
-- **A human logging into webmail still reads only their own mail.** The widening is for
-  agent credentials. It is not a switch to a shared mailbox, and a browser login is
-  scoped exactly as it was.
+- **The widening follows the CREDENTIAL, not the person.** A cookie SESSION is scoped
+  exactly as it was, to that person plus any role queue they are on. But sessions exist
+  only under `WEBMAIL_AUTH_BACKEND = "native"`, and **unset is the default**: default
+  webmail is BYO-token and sends an `Authorization: Bearer`. So a human who pastes a
+  read-capable registry token into webmail reads the estate, because the worker sees a
+  registry Bearer and has no way to know a browser is on the other end. Being in a browser
+  is not what scopes you; the credential is.
 - **An agent can read a message it cannot act on.** Marking read, flagging, filing and
   quoting on reply or forward stay bound to the agent's own address, so a wider read
   never becomes a wider write.
