@@ -343,8 +343,9 @@ returns `E_VALIDATION_ERROR`.
 
 ### 10.9.1 `identityScope`: every read declares the scope it was answered under
 
-`GET /api/messages` and `GET /api/search` both return an `identityScope` field, which is the unbuilt
-half of #544 ("reads attributable to the identity that made them") and ask 1 of #631:
+**EVERY read-scoped route returns an `identityScope` field**, which is the unbuilt half of #544
+("reads attributable to the identity that made them"), ask 1 of #631, and since #717 a property of
+the whole read surface rather than of two routes on it:
 
 ```ts
 type ReadScopeReport =
@@ -358,6 +359,48 @@ It reports what the SERVER imposed, never what the caller asked for: a caller-su
 question it cannot answer for itself. **A scoped view that does not announce its scope is
 indistinguishable from a complete one**, which is how a zero result gets read as "not in the estate"
 when it means "not in your slice".
+
+**Where it appears (#717).** #636 shipped the field on `GET /api/messages` and `GET /api/search` and
+stopped there, so five read surfaces kept answering silently and the defect stayed open on all of
+them. The field is now on every route whose row set an access predicate can narrow:
+
+| Route | Carries it on |
+|---|---|
+| `GET /api/whoami` | the answer (it IS the answer) |
+| `GET /api/messages` | the page, and the `countOnly` total |
+| `GET /api/search` | the page |
+| `GET /api/messages/{id}` | the hit **and the 404** |
+| `GET /api/messages/{id}/attachments/{i}` | the **404** only (a hit is raw bytes, not JSON) |
+| `GET /api/threads/{id}` | the page |
+| `GET /api/folders` | the rail |
+| `GET /api/recipients/recent` | the list |
+
+`GET /api/mobileconfig` is the one read-scoped route that does NOT carry it, because it serves an
+Apple `.mobileconfig` plist built from env rather than a row set: no predicate narrows it, so there
+is no scope to declare. A test derived from `ROUTE_TABLE` enforces this split
+(`inbound/read-scope-announced.test.ts`): a new `read` route must be probed or exempted with a
+reason, so the next read surface cannot ship silent by omission.
+
+**On the single-object routes the report names the WHOLE scope the read used**, which is the bound
+member plus every role queue it belongs to (`sessionReadScope`), not the member alone. Those routes
+genuinely read under the wider set, and naming only the member would understate their reach, which
+is the same completeness defect pointing the other way. The value is derived FROM the scope handed to
+the store, never re-derived beside it, so the report and the predicate cannot drift.
+
+**The 404 is the point, and it is still ONE answer.** `GET /api/messages/{id}` is where "not your
+mail" and "no such mail" collapse, and they STAY collapsed: the refusal body is byte-identical
+whether the id is absent or withheld, and both attachment refusals share one body too. The field adds
+the fact a caller cannot otherwise obtain, that the 404 came out of a narrowed read and so is not
+evidence about the mailbox; it never adds the fact a caller must not obtain, whether some particular
+message exists. **A response that says "this message exists but is not yours" would leak existence
+and is explicitly NOT the contract.** For the same reason the field is present on hits and misses
+alike: were it present only on a miss, its presence would itself be the existence oracle.
+
+Clients relay it rather than interpret it. In `@skyphusion/postern-mcp` it rides on `mailbox_get`
+(including `found: false`), `mailbox_get_attachment`, `mailbox_thread`, `mailbox_folders`,
+`mailbox_list`, `mailbox_search` and `mailbox_whoami`. An absent field means the worker sent none (an
+older deployment); a client must leave it absent and must never substitute `{kind: "estate"}`, which
+would present a guess as the server's answer.
 
 ---
 
