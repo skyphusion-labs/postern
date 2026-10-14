@@ -407,9 +407,19 @@ alike: were it present only on a miss, its presence would itself be the existenc
 
 Clients relay it rather than interpret it. In `@skyphusion/postern-mcp` it rides on `mailbox_get`
 (including `found: false`), `mailbox_get_attachment`, `mailbox_thread`, `mailbox_folders`,
-`mailbox_list`, `mailbox_search` and `mailbox_whoami`. An absent field means the worker sent none (an
-older deployment); a client must leave it absent and must never substitute `{kind: "estate"}`, which
-would present a guess as the server's answer.
+`mailbox_list`, `mailbox_search` and `mailbox_whoami`. In `postern-client` (Python) it rides on
+`get_message_envelope`, `get_folders_envelope` and `get_thread_page`, with `get_message` and
+`get_folders` kept as lossy projections of the first two for existing callers, and the `postern get`
+and `postern folders` CLI commands emit the envelope (#730). An absent field means the worker sent
+none (an older deployment); a client must leave it absent and must never substitute
+`{kind: "estate"}`, which would present a guess as the server's answer.
+
+**A client must not reconstruct what the worker withheld.** The two 404 bodies on
+`GET /api/messages/{id}` are byte-identical by design, so a client that returned a different SHAPE
+for a withheld miss than for an absent one would rebuild the existence oracle at the layer above.
+The Python envelope returns `{"message": None, "identity_scope": ...}` for both and carries no third
+key, and the scope rides on hits as well, because a field present only on a miss makes its own
+presence the oracle.
 
 ---
 

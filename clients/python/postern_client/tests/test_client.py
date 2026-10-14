@@ -372,6 +372,115 @@ class GetThreadTest(unittest.TestCase):
         self.assertEqual([m["messageId"] for m in msgs], ["a", "b"])
 
 
+class ReadScopeRelayTest(unittest.TestCase):
+    """#730: the client relays the scope a read was answered under, and reconstructs
+    nothing the worker withheld.
+
+    THE RED DRIVES. Every arm here fails against the pre-#730 client: there was no
+    `get_message_envelope` or `get_folders_envelope` at all, `get_message` discarded the
+    whole 404 body, `get_thread_page` hand-built its dict without the field, and
+    `PosternError` carried no body to read it from.
+    """
+
+    SCOPED = b'{"ok":false,"error":"E_NOT_FOUND","identityScope":{"kind":"member","addresses":["me@x.com"]}}'
+
+    def test_envelope_carries_the_scope_on_a_HIT(self):
+        t = FakeTransport(
+            body=b'{"ok":true,"message":{"messageId":"m"},"identityScope":{"kind":"estate"}}'
+        )
+        env = _client(t).get_message_envelope("m")
+        self.assertEqual(env["message"]["messageId"], "m")
+        self.assertEqual(env["identity_scope"], {"kind": "estate"})
+
+    def test_envelope_carries_the_scope_on_a_MISS(self):
+        t = FakeTransport(status=404, body=self.SCOPED)
+        env = _client(t).get_message_envelope("theirs")
+        self.assertIsNone(env["message"])
+        self.assertEqual(env["identity_scope"], {"kind": "member", "addresses": ["me@x.com"]})
+
+    def test_the_scope_is_on_BOTH_so_its_presence_is_not_the_oracle(self):
+        # Load-bearing. If the field appeared only on a miss, a caller could infer the
+        # outcome from its presence, and the field would BE the existence oracle #717
+        # exists to avoid. So a hit and a miss both carry it.
+        hit = FakeTransport(
+            body=b'{"ok":true,"message":{"messageId":"m"},'
+                 b'"identityScope":{"kind":"member","addresses":["me@x.com"]}}'
+        )
+        miss = FakeTransport(status=404, body=self.SCOPED)
+        a = _client(hit).get_message_envelope("m")
+        b = _client(miss).get_message_envelope("theirs")
+        self.assertEqual(a["identity_scope"], b["identity_scope"])
+        self.assertEqual(sorted(a.keys()), sorted(b.keys()))
+
+    def test_a_WITHHELD_and_an_ABSENT_miss_are_the_SAME_answer(self):
+        # THE HARD CONSTRAINT. The worker's two 404 bodies are byte-identical by design
+        # (#728), so the only way this client could reconstruct the difference is by
+        # ADDING something of its own. Compared as whole objects, not field by field, so a
+        # key added later is caught rather than skipped.
+        withheld = FakeTransport(status=404, body=self.SCOPED)
+        absent = FakeTransport(status=404, body=self.SCOPED)
+        a = _client(withheld).get_message_envelope("theirs")
+        b = _client(absent).get_message_envelope("no-such")
+        self.assertEqual(a, b)
+        # And nothing beyond the two documented keys, so there is no third field for a
+        # future edit to leak through.
+        self.assertEqual(sorted(a.keys()), ["identity_scope", "message"])
+
+    def test_an_absent_scope_is_NOT_invented(self):
+        # An older worker sends no identityScope. None is the honest answer; substituting
+        # {"kind":"estate"} would present a guess as the server's, and estate is the
+        # reassuring direction, which is the one that must never be guessed.
+        t = FakeTransport(status=404, body=b'{"ok":false,"error":"E_NOT_FOUND"}')
+        env = _client(t).get_message_envelope("nope")
+        self.assertIsNone(env["message"])
+        self.assertIsNone(env["identity_scope"])
+
+    def test_get_message_still_returns_the_bare_message_or_None(self):
+        # Part 3 of the precedent: the lossy method is a PROJECTION of the envelope one,
+        # so there is one request path and no second implementation to drift. Its shape is
+        # unchanged, which is what keeps this additive for existing consumers.
+        hit = FakeTransport(body=b'{"ok":true,"message":{"messageId":"m","subject":"s"}}')
+        self.assertEqual(_client(hit).get_message("m")["subject"], "s")
+        miss = FakeTransport(status=404, body=self.SCOPED)
+        self.assertIsNone(_client(miss).get_message("theirs"))
+
+    def test_get_folders_envelope_and_its_projection(self):
+        body = (b'{"ok":true,"folders":[{"name":"INBOX","unread":0}],'
+                b'"identityScope":{"kind":"member","addresses":["me@x.com"]}}')
+        env = _client(FakeTransport(body=body)).get_folders_envelope()
+        self.assertEqual(env["folders"][0]["name"], "INBOX")
+        self.assertEqual(env["identity_scope"], {"kind": "member", "addresses": ["me@x.com"]})
+        # The projection keeps the published list shape.
+        self.assertEqual(
+            _client(FakeTransport(body=body)).get_folders()[0]["name"], "INBOX"
+        )
+
+    def test_thread_page_carries_the_scope_without_changing_its_shape(self):
+        # No new method here: the page already returns a dict, so the field is additive
+        # and a caller reading ["messages"] or ["cursor"] is untouched.
+        t = FakeTransport(
+            body=b'{"ok":true,"messages":[{"messageId":"a"}],"cursor":null,'
+                 b'"identityScope":{"kind":"member","addresses":["me@x.com"]}}'
+        )
+        page = _client(t).get_thread_page("t")
+        self.assertEqual([m["messageId"] for m in page["messages"]], ["a"])
+        self.assertIsNone(page["cursor"])
+        self.assertEqual(page["identity_scope"], {"kind": "member", "addresses": ["me@x.com"]})
+
+    def test_PosternError_carries_the_refusal_body(self):
+        # The mechanism the 404 relay rests on, asserted directly rather than only
+        # through its caller, since a 403 or a 409 now also carries it.
+        t = FakeTransport(status=403, body=b'{"ok":false,"error":"forbidden","message":"requires organize scope"}')
+        with self.assertRaises(PosternError) as cm:
+            _client(t).get_message_envelope("m")
+        self.assertEqual(cm.exception.body["error"], "forbidden")
+        self.assertEqual(cm.exception.status, 403)
+
+    def test_a_transport_failure_has_an_EMPTY_body_not_a_missing_attribute(self):
+        # `body` is always a dict, so a caller never has to guard the attribute.
+        self.assertEqual(PosternError("boom").body, {})
+
+
 class AttachmentTest(unittest.TestCase):
     def test_attachment_bytes_and_filename(self):
         t = FakeTransport(

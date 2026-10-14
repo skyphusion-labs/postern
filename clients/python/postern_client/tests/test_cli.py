@@ -74,16 +74,56 @@ class ReadCliTest(unittest.TestCase):
         self.assertIn("direction=inbound", t.last.full_url)
 
     def test_get_found(self):
-        t = FakeTransport(body=b'{"ok":true,"message":{"messageId":"m","subject":"s"}}')
+        # THE ENVELOPE since #730, not the bare message, and this is a user-visible stdout
+        # change: `postern get X | jq .subject` becomes `| jq .message.subject`. Same
+        # reasoning as `thread` below, which already emits its page rather than its
+        # messages: the scope is what makes the answer interpretable, so it has to survive
+        # a pipe, and stderr does not.
+        t = FakeTransport(
+            body=b'{"ok":true,"message":{"messageId":"m","subject":"s"},'
+                 b'"identityScope":{"kind":"estate"}}'
+        )
         code, out, _ = run(["get", "m"], t)
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["subject"], "s")
+        body = json.loads(out)
+        self.assertEqual(body["message"]["subject"], "s")
+        self.assertEqual(body["identity_scope"], {"kind": "estate"})
 
-    def test_get_not_found_exit_1(self):
+    def test_get_not_found_under_a_SCOPED_read_does_not_claim_absence(self):
+        # #730 at the human surface. The old line was a bare "message not found", which
+        # asserts absence from the mailbox when it can equally mean absence from the
+        # caller's slice. THE RED DRIVE: this fails against the pre-#730 CLI, which
+        # printed that bare line and had no access to the scope at all.
+        t = FakeTransport(
+            status=404,
+            body=b'{"ok":false,"error":"E_NOT_FOUND",'
+                 b'"identityScope":{"kind":"member","addresses":["me@x.com"]}}',
+        )
+        code, _, err = run(["get", "nope"], t)
+        self.assertEqual(code, 1)
+        self.assertIn("me@x.com", err)
+        self.assertIn("NOT evidence", err)
+
+    def test_get_not_found_under_an_ESTATE_read_may_claim_the_mailbox(self):
+        # The pair. Same route, same status, different scope, and the wording must differ,
+        # or the scoped arm above is passing on a message that says the same thing always.
+        t = FakeTransport(
+            status=404,
+            body=b'{"ok":false,"error":"E_NOT_FOUND","identityScope":{"kind":"estate"}}',
+        )
+        code, _, err = run(["get", "nope"], t)
+        self.assertEqual(code, 1)
+        self.assertIn("not found in the mailbox", err)
+        self.assertNotIn("NOT evidence", err)
+
+    def test_get_not_found_with_NO_scope_reported_picks_no_side(self):
+        # An older worker sends no identityScope. Claiming either absence or withholding
+        # would be inventing the server's answer, so the CLI says it does not know.
         t = FakeTransport(status=404, body=b'{"ok":false,"error":"E_NOT_FOUND"}')
         code, _, err = run(["get", "nope"], t)
         self.assertEqual(code, 1)
         self.assertIn("not found", err)
+        self.assertIn("did not state the scope", err)
 
     def test_thread(self):
         # The PAGE since #649, not a bare list: the worker bounds a thread read, so the
@@ -246,10 +286,19 @@ class ListSearchCliTest(unittest.TestCase):
 
 class FolderStateCliTest(unittest.TestCase):
     def test_folders(self):
-        t = FakeTransport(body=b'{"ok":true,"folders":[{"name":"INBOX"}]}')
+        # THE ENVELOPE since #730, a user-visible stdout change: `postern folders | jq
+        # '.[0]'` becomes `| jq '.folders[0]'`. A zero unread count means a different
+        # thing under a member scope than under an estate one, so the scope has to reach
+        # the output rather than stderr, which a pipe drops.
+        t = FakeTransport(
+            body=b'{"ok":true,"folders":[{"name":"INBOX"}],'
+                 b'"identityScope":{"kind":"member","addresses":["me@x.com"]}}'
+        )
         code, out, _ = run(["folders", "--to", "me@x.com"], t)
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)[0]["name"], "INBOX")
+        body = json.loads(out)
+        self.assertEqual(body["folders"][0]["name"], "INBOX")
+        self.assertEqual(body["identity_scope"], {"kind": "member", "addresses": ["me@x.com"]})
         self.assertEqual(t.last_query(), {"to": ["me@x.com"]})
 
     def test_seen_marks_read_by_default(self):

@@ -46,12 +46,25 @@ class PosternError(Exception):
     """A non-2xx response or transport failure from the Postern API.
 
     `code` is the API's stable error code (e.g. E_NOT_FOUND) when present.
+
+    `body` is the worker's parsed refusal body, or `{}` for a transport failure or a
+    non-JSON response (#730). A refusal is not only a status: a 404 from a read route
+    carries `identityScope`, the scope the refusal was produced under, which is the one
+    fact that separates "not in the mailbox" from "not in your slice". It is always a
+    dict, so a caller never has to guard the attribute itself.
     """
 
-    def __init__(self, message: str, status: Optional[int] = None, code: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: Optional[int] = None,
+        code: Optional[str] = None,
+        body: Optional[dict[str, Any]] = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
+        self.body: dict[str, Any] = body or {}
 
 
 class PosternAuthError(PosternError):
@@ -396,15 +409,48 @@ class PosternClient:
         return int(total) if isinstance(total, (int, float)) else 0
 
     def get_message(self, message_id: str) -> Optional[dict[str, Any]]:
-        """GET /api/messages/{id}. Returns the message dict, or None if absent."""
+        """GET /api/messages/{id}. Returns the message dict, or None if absent.
+
+        **A None here does NOT prove the message is absent from the mailbox.** Under a
+        narrowed read it also means "not in your slice", and this return type cannot say
+        which. Use `get_message_envelope` when that matters; it carries the scope the
+        answer was produced under. This method keeps its shape for the callers that
+        already depend on it, and is a projection of that one (#730).
+        """
+        return self.get_message_envelope(message_id)["message"]
+
+    def get_message_envelope(self, message_id: str) -> dict[str, Any]:
+        """GET /api/messages/{id} as ``{"message": dict|None, "identity_scope": ...}``.
+
+        `identity_scope` is the scope the read was ANSWERED UNDER (#717): kind "estate"
+        means the whole mailbox was searched, so a None message is evidence of absence;
+        kind "member" or "role" means a slice was, so a None means "not in your slice"
+        and a wider credential may still find it. Absent when the worker sent none, which
+        an older deployment genuinely does; it is never substituted with a guess.
+
+        **The two misses are deliberately the SAME ANSWER.** A withheld message and an
+        absent one both yield `{"message": None, ...}` with an identical scope, because
+        the worker's 404 bodies are byte-identical by design (#728) and this client must
+        not reconstruct a difference the worker was careful not to expose. The scope rides
+        on a HIT as well for the same reason: a field that appeared only on a miss would
+        make its own presence the existence oracle.
+        """
+        scope: Any = None
         try:
             body = self._json("GET", f"/api/messages/{_quote(message_id)}")
         except PosternError as e:
             if e.status == 404:
-                return None
+                # The refusal BODY is the answer on this route, not just the status: it
+                # carries the scope. Discarding it is what left this client unable to say
+                # anything about a None at all.
+                scope = (e.body or {}).get("identityScope")
+                return {"message": None, "identity_scope": scope}
             raise
         msg = body.get("message")
-        return msg if isinstance(msg, dict) else None
+        return {
+            "message": msg if isinstance(msg, dict) else None,
+            "identity_scope": body.get("identityScope"),
+        }
 
     def get_thread(
         self,
@@ -434,13 +480,24 @@ class PosternClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> dict[str, Any]:
-        """GET /api/threads/{id} as ``{"messages": [...], "cursor": str|None}``.
+        """GET /api/threads/{id} as ``{"messages", "cursor", "identity_scope"}``.
 
-        `cursor` is the ONLY signal that distinguishes a complete thread from a
-        first page: None means there are genuinely no more messages, and a
-        string means there are, and must be passed back to continue. A caller
-        that reads `messages` and ignores `cursor` can silently present a
-        truncated conversation as a whole one.
+        `cursor` distinguishes a complete thread PAGE from a first page: None means there
+        are no more messages to return, and a string means there are, and must be passed
+        back to continue. A caller that reads `messages` and ignores `cursor` can silently
+        present a truncated conversation as a whole one.
+
+        **`cursor: None` is a claim about what YOU may read, not about the thread.** Read
+        `identity_scope` to know which: under kind "estate" it means the whole thread,
+        and under kind "member" or "role" it means every message in the thread you are
+        allowed to see, with the rest omitted and not counted.
+
+        That caveat applies to ANY narrowed read and is not new. A thread read has been
+        scoped to the bound member plus its role queues since #425 (2026-07-25), so this
+        docstring's older claim that None "means there are genuinely no more messages" was
+        overclaiming for every bound member from that day. What changed is only that the
+        worker now SAYS so: #717 named the defect and #728 put `identityScope` on the
+        thread envelope, and #730 relays it here.
         """
         params: dict[str, str] = {}
         if limit is not None:
@@ -449,9 +506,12 @@ class PosternClient:
             params["cursor"] = cursor
         body = self._json("GET", f"/api/threads/{_quote(thread_id)}", params=params)
         msgs = body.get("messages", [])
+        # Additive: a caller reading ["messages"] or ["cursor"] is untouched, which is why
+        # this method needed no new sibling the way get_message did (#730).
         return {
             "messages": list(msgs) if isinstance(msgs, list) else [],
             "cursor": body.get("cursor"),
+            "identity_scope": body.get("identityScope"),
         }
 
     def search(
@@ -549,11 +609,28 @@ class PosternClient:
 
         `to` scopes the unread counts to one viewer, mirroring list/search; a
         bound session identity wins over it server-side.
+
+        A zero unread count here carries the same ambiguity a None message does: under a
+        narrowed read it means none in YOUR slice. Use `get_folders_envelope` when that
+        matters. A projection of that method (#730).
+        """
+        return self.get_folders_envelope(to=to)["folders"]
+
+    def get_folders_envelope(self, *, to: Optional[str] = None) -> dict[str, Any]:
+        """GET /api/folders as ``{"folders": [...], "identity_scope": ...}``.
+
+        The counts are computed server-side under the SAME predicates a read uses, so they
+        agree with what `list_messages` returns for the same folder. `identity_scope` is
+        what makes a zero interpretable: it means a different thing under an estate read
+        than under a member one (#717).
         """
         params = {"to": to} if to else {}
         body = self._json("GET", "/api/folders", params=params)
         folders = body.get("folders", [])
-        return list(folders) if isinstance(folders, list) else []
+        return {
+            "folders": list(folders) if isinstance(folders, list) else [],
+            "identity_scope": body.get("identityScope"),
+        }
 
     # --- read state + placement ---------------------------------------------
 
@@ -816,12 +893,14 @@ class PosternClient:
                 parsed.get("message") or "Postern API rejected the token",
                 status=401,
                 code=parsed.get("error"),
+                body=parsed,
             )
         if status >= 400:
             raise PosternError(
                 parsed.get("message") or f"Postern API error (HTTP {status})",
                 status=status,
                 code=parsed.get("error"),
+                body=parsed,
             )
         return parsed
 

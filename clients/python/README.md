@@ -159,7 +159,9 @@ for summary in page["items"]:
 if page["cursor"]:
     nxt = client.list_messages(direction="inbound", limit=20, cursor=page["cursor"])
 
-msg = client.get_message("<message-id>")           # dict, or None if absent
+msg = client.get_message("<message-id>")           # dict, or None
+# A None is NOT proof of absence under a scoped read. The envelope says which:
+env = client.get_message_envelope("<message-id>")  # {"message": dict|None, "identity_scope": ...}
 thread = client.get_thread("<thread-id>")          # list[dict]
 hits = client.search("invoice", mode="hybrid")     # {"items": [...], "cursor": ...}
 
@@ -186,6 +188,7 @@ client.search(
 
 # durable folders + read state
 client.get_folders(to="me@example.com")            # names + unread counts + UIDVALIDITY
+client.get_folders_envelope(to="me@example.com")   # the same, plus identity_scope
 client.list_messages(mailbox="trash", limit=20)
 client.set_seen(["<message-id>"], True, for_addr="me@example.com")   # -> updated count
 client.set_flags(["<message-id>"], flagged=True)
@@ -211,12 +214,14 @@ API's parsed JSON, so the keys match the worker contract exactly.
 | `send` | `POST /api/send` | `{messageId, threadId, ...}` |
 | `reply` | `POST /api/reply` | `{messageId, threadId, ...}` |
 | `list_messages` | `GET /api/messages` | `{items: [summary], cursor}` |
-| `get_message` | `GET /api/messages/{id}` | message dict or `None` |
+| `get_message` | `GET /api/messages/{id}` | message dict or `None`. A `None` does NOT prove absence under a scoped read; see `get_message_envelope` |
+| `get_message_envelope` | `GET /api/messages/{id}` | `{message, identity_scope}` -- use this when "is it really not there" matters. The two misses, withheld and absent, are deliberately the SAME answer |
 | `get_thread` | `GET /api/threads/{id}` | `[message]` (ONE page, default 20; takes `limit`/`cursor`) |
-| `get_thread_page` | `GET /api/threads/{id}` | `{messages, cursor}` -- use this when "is that the whole thread" matters; `cursor is None` means yes |
+| `get_thread_page` | `GET /api/threads/{id}` | `{messages, cursor, identity_scope}` -- use this when "is that the whole thread" matters. `cursor is None` means every message **you may read**, so read `identity_scope` to know whether that is the whole thread |
 | `search` | `GET /api/search` | `{items: [{message, ...}], cursor}` |
 | `get_attachment` | `GET /api/messages/{id}/attachments/{i}` | `Attachment(body, mime, filename)` |
 | `get_folders` | `GET /api/folders` | `[folder]` (unread counts, UIDVALIDITY) |
+| `get_folders_envelope` | `GET /api/folders` | `{folders, identity_scope}` -- a zero unread count means a different thing under a member scope than an estate one |
 | `set_seen` | `POST /api/messages/seen` | updated count |
 | `set_flags` | `POST /api/messages/flags` | updated count |
 | `move_messages` | `POST /api/messages/move` | updated count |

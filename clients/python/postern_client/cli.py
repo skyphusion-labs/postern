@@ -67,6 +67,22 @@ def _emit(obj: object) -> None:
     sys.stdout.write("\n")
 
 
+def _scope_addresses(scope: object) -> list[str]:
+    """The addresses an identity_scope covers, for a human-readable line.
+
+    Tolerant on purpose: the worker's report is `{kind:"estate"}`,
+    `{kind:"member", addresses:[...]}` or `{kind:"role", address:"..."}`, and a client
+    that crashed on an unexpected shape would be worse than one that says less.
+    """
+    if not isinstance(scope, dict):
+        return []
+    addrs = scope.get("addresses")
+    if isinstance(addrs, list):
+        return [str(a) for a in addrs]
+    one = scope.get("address")
+    return [str(one)] if isinstance(one, str) else []
+
+
 def _add_draft_fields(p: argparse.ArgumentParser) -> None:
     """The draft document fields, shared by create and update."""
     p.add_argument("--to", help="recipient string (comma/semicolon/newline separated)")
@@ -449,11 +465,40 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
         return 0
 
     if cmd == "get":
-        msg = client.get_message(args.message_id)
-        if msg is None:
-            print(f"message not found: {args.message_id}", file=sys.stderr)
+        # The ENVELOPE, not the bare message, for the reason the `thread` command below
+        # already emits its page rather than its messages (#730): `identity_scope` is what
+        # makes the answer interpretable, so it rides in the OUTPUT where a caller and a
+        # human can both see it, not on stderr where a pipe drops it. That is the
+        # discriminator against the attachment command's stderr metadata: "wrote N bytes"
+        # is incidental, the scope is needed to READ the data.
+        env = client.get_message_envelope(args.message_id)
+        if env["message"] is None:
+            # NOT a bare "message not found" any more. That line was this issue at the
+            # human surface: it asserted absence from the mailbox when it could equally
+            # mean absence from the caller's slice, and a person reading it had no way to
+            # tell. The scope is stated, and the wording claims only what it knows.
+            scope = env.get("identity_scope")
+            kind = scope.get("kind") if isinstance(scope, dict) else None
+            if kind in ("member", "role"):
+                where = ", ".join(_scope_addresses(scope)) or "your own mail"
+                print(
+                    f"not found in the mail you can read ({where}): {args.message_id}\n"
+                    "  This read was scoped, so it is NOT evidence the message is absent "
+                    "from the mailbox.",
+                    file=sys.stderr,
+                )
+            elif kind == "estate":
+                print(f"message not found in the mailbox: {args.message_id}", file=sys.stderr)
+            else:
+                # No scope reported: an older worker. Say that rather than pick a side.
+                print(
+                    f"message not found: {args.message_id}\n"
+                    "  The server did not state the scope of this read, so whether the "
+                    "message is absent or withheld is unknown.",
+                    file=sys.stderr,
+                )
             return 1
-        _emit(msg)
+        _emit(env)
         return 0
 
     if cmd == "thread":
@@ -496,7 +541,9 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
         return 0
 
     if cmd == "folders":
-        _emit(client.get_folders(to=args.to))
+        # The envelope, same reasoning as `get`: a zero unread count means a different
+        # thing under a member scope than under an estate one (#730).
+        _emit(client.get_folders_envelope(to=args.to))
         return 0
 
     if cmd == "seen":
