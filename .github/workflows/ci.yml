@@ -213,6 +213,17 @@ jobs:
           node-version: 22
       - name: tag-preflight + CHANGELOG matcher
         run: bash .github/scripts/tests/tag-preflight.test.sh
+      # Real checkout, not the fixture (#732). A pull_request merge commit is
+      # not on main, and this step measures the pin rather than whether a tag
+      # may ship, so the ancestry sha is origin/main. The pin is read from the
+      # checkout. A bump of mcp/package.json with no new postern-mcp-v* tag
+      # fails here.
+      - name: mcp pin equals newest postern-mcp-v tag
+        run: |
+          git fetch --quiet --no-tags origin main
+          sha="$(git rev-parse origin/main)"
+          GITHUB_REF=refs/heads/main GITHUB_REF_NAME=main GITHUB_SHA="$sha" \
+            bash .github/scripts/tag-preflight.sh mcp
       - name: post-deploy artifact verification
         run: bash .github/scripts/tests/verify-worker-deployment.test.sh
       - name: topology scrub (fleet hostnames + RFC1918)
