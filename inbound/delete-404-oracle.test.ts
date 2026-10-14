@@ -42,6 +42,8 @@ const WITHHELD = "conrads-private@skyphusion.org"; // exists, addressed to CONRA
 const ADA_LIVE = "ada-live@skyphusion.org"; // exists, hers, not in trash
 const ADA_TRASH = "ada-trash@skyphusion.org"; // exists, hers, in trash
 const QUEUE_MSG = "queue-1@skyphusion.org"; // exists, addressed to the queue ADA belongs to
+const ADA_ARCHIVE = "ada-archive@skyphusion.org"; // exists, hers, archived (not in the trash)
+const ADA_JUNK = "ada-junk@skyphusion.org"; // exists, hers, in junk (not in the trash)
 
 async function world() {
   resetRoleCache();
@@ -54,8 +56,12 @@ async function world() {
   await putInbound(env, ctx, { id: ADA_LIVE, from: "x@example.com", to: ADA });
   await putInbound(env, ctx, { id: ADA_TRASH, from: "x@example.com", to: ADA });
   await putInbound(env, ctx, { id: QUEUE_MSG, from: "x@example.com", to: QUEUE });
+  await putInbound(env, ctx, { id: ADA_ARCHIVE, from: "x@example.com", to: ADA });
+  await putInbound(env, ctx, { id: ADA_JUNK, from: "x@example.com", to: ADA });
   // ADA_TRASH really is in the trash, by the product's own move path.
   expect(await store.moveMessages(env, [ADA_TRASH], "trash", [ADA])).toBe(1);
+  expect(await store.moveMessages(env, [ADA_ARCHIVE], "archive", [ADA])).toBe(1);
+  expect(await store.moveMessages(env, [ADA_JUNK], "junk", [ADA])).toBe(1);
   return { env, ctx, raw };
 }
 
@@ -178,19 +184,89 @@ describe("#731 the two-route oracle: both calls, one id, one caller, one test", 
   });
 });
 
-describe("#731 what the 404 does NOT disambiguate, recorded so it is not mistaken for an oracle", () => {
-  it("own mail that is not in the trash is refused with the same 404 an absent id gets", async () => {
+describe("#745 own, readable mail that is not in the trash says so, and only that", () => {
+  const WHY = "E_NOT_IN_TRASH";
+
+  it("answers 409 with a reason the caller can act on, and deletes nothing", async () => {
     const { env, ctx, raw } = await world();
     const ada = await signIn(env, raw, ADA);
-    const live = await pair(env, ctx, ADA_LIVE, ada);
-    const absent = await pair(env, ctx, ABSENT, ada);
-    expect(live.read.status).toBe(200);
-    expect(live.del.status).toBe(404);
-    // Same delete answer as an absent id: the precondition (must be in the trash) collapses
-    // into "not found". This tells the caller nothing it did not already learn from the
-    // read, but it IS a third reason hiding behind one body.
-    expect(live.del).toEqual(absent.del);
+    const res = await handleApi(request("DELETE", ADA_LIVE, ada), env, ctx);
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe(WHY);
+    expect(String(body.message)).toMatch(/trash/i);
+    expect(body.identityScope).toEqual({ kind: "member", addresses: [ADA] });
     expect(await store.getUnscoped(env, ADA_LIVE)).not.toBeNull();
+  });
+
+  it("the two-step path the response describes then works: trash it, then delete it", async () => {
+    const { env, ctx, raw } = await world();
+    const ada = await signIn(env, raw, ADA);
+    expect((await handleApi(request("DELETE", ADA_LIVE, ada), env, ctx)).status).toBe(409);
+    const moved = await handleApi(
+      new Request("https://postern.example/api/messages/move", {
+        method: "POST",
+        headers: { cookie: ada.cookie, "x-postern-csrf": ada.csrf, "content-type": "application/json" },
+        body: JSON.stringify({ ids: [ADA_LIVE], mailbox: "trash" }),
+      }),
+      env,
+      ctx,
+    );
+    expect(await moved.json()).toMatchObject({ ok: true, updated: 1 });
+    const gone = await handleApi(request("DELETE", ADA_LIVE, ada), env, ctx);
+    expect(gone.status).toBe(200);
+    expect(await store.getUnscoped(env, ADA_LIVE)).toBeNull();
+  });
+
+  it("every non-trash mailbox of the caller's own mail gets the same answer", async () => {
+    const { env, ctx, raw } = await world();
+    const ada = await signIn(env, raw, ADA);
+    for (const id of [ADA_LIVE, ADA_ARCHIVE, ADA_JUNK]) {
+      const res = await handleApi(request("DELETE", id, ada), env, ctx);
+      expect([id, res.status]).toEqual([id, 409]);
+      expect(((await res.json()) as { error: string }).error).toBe(WHY);
+    }
+  });
+
+  it("a queue message the member can read but may not trash stays a plain 404", async () => {
+    const { env, ctx, raw } = await world();
+    const ada = await signIn(env, raw, ADA);
+    const q = await pair(env, ctx, QUEUE_MSG, ada);
+    const absent = await pair(env, ctx, ABSENT, ada);
+    expect(q.read.status).toBe(200);
+    // "trash it first" would be WRONG advice here: the #404 ruling forbids trashing it.
+    expect(q.del).toEqual(absent.del);
+    expect(q.del.status).toBe(404);
+  });
+
+  it("INVARIANT: a 409 is reachable only for an id the same caller can read", async () => {
+    const { env, ctx, raw } = await world();
+    const ada = await signIn(env, raw, ADA);
+    const ids = [ABSENT, WITHHELD, ADA_LIVE, ADA_ARCHIVE, ADA_JUNK, QUEUE_MSG];
+    const seen409: string[] = [];
+    for (const id of ids) {
+      // Both calls in one loop turn, same caller. Read FIRST: the delete of a trashed id
+      // would destroy what the read is about to observe, and ADA_TRASH is left out on purpose.
+      const p = await pair(env, ctx, id, ada);
+      if (p.del.status === 409) {
+        seen409.push(id);
+        expect([id, p.read.status]).toEqual([id, 200]);
+      }
+    }
+    expect(seen409.sort()).toEqual([ADA_ARCHIVE, ADA_JUNK, ADA_LIVE].sort());
+    // And the two ids the caller may not read are still ONE answer, byte for byte.
+    const absent = await pair(env, ctx, ABSENT, ada);
+    const withheld = await pair(env, ctx, WITHHELD, ada);
+    expect(withheld).toEqual(absent);
+    expect(absent.del.status).toBe(404);
+  });
+
+  it("a static estate token is untouched: it has no trash precondition", async () => {
+    const { env, ctx } = await world();
+    const res = await handleApi(request("DELETE", ADA_LIVE, { token: ESTATE }), env, ctx);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, deleted: ADA_LIVE });
   });
 
   it("and the same mail IS deletable once it is in the trash", async () => {
