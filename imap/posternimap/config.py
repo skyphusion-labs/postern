@@ -276,10 +276,9 @@ class Config:
     throttle_global_window_seconds: int = 60  # aggregate window + cooldown
 
     # --- PROXY protocol on the listener edge (#155) ---
-    # The mail edge moved to a single L4 load balancer targeting the directory host
-    # directly (no bastion). An L4 LB rewrites the source address, so the door
-    # recovers the REAL client IP from a PROXY header the LB prepends, HONORED ONLY
-    # from a trusted source (anti-spoof). Config names (PROXY_PROTOCOL /
+    # An L4 load balancer in front of the door rewrites the source address, so the
+    # door recovers the REAL client IP from a PROXY header the LB prepends, HONORED
+    # ONLY from a trusted source (anti-spoof). Config names (PROXY_PROTOCOL /
     # PROXY_PROTOCOL_TRUSTED / PROXY_PROTOCOL_TIMEOUT_SECONDS) are shared 1:1 with the
     # Go 587 door per docs/PROXY-PROTOCOL.md. Default off = the listener is not
     # wrapped at all (byte-for-byte the prior behavior). See proxyproto.py / proxywrap.py.

@@ -201,6 +201,41 @@ Release tags: `postern-mcp-v*` (npm CI) and GitHub Release `v*` matching
   `POSTERN_TRANSPORT_TOKEN`, never the API token, so an API-token leak cannot
   inject mail and vice versa.
 
+### What an agent credential can read
+
+**An agent credential on a Postern deployment can read the mail addressed to the humans
+on it. This is on by default and there is no key to turn it off.**
+
+That is the product, not an accident of the implementation: Postern is email for agents
+AND humans, and an agent that cannot read the humans' mail does not deliver it. An agent
+asked to find last month's invoice has to be able to find it in the mailbox it was
+delivered to.
+
+Concretely, for a read-capable entry in `POSTERN_SEND_IDENTITIES`:
+
+| Credential | Reads | Sends as | May change |
+|---|---|---|---|
+| agent (registry token, `scopes` includes `read`) | **every address in the deployment** | its own bound address | **only its own mail** |
+| human (webmail session) | its own address, plus any role queue it is on | its own address | only its own mail |
+| static `POSTERN_API_TOKEN` / `_READ` | every address (unchanged, always did) | un-bound | per slot |
+
+Two boundaries did NOT move with it, and both are deliberate:
+
+- **A human logging into webmail still reads only their own mail.** The widening is for
+  agent credentials. It is not a switch to a shared mailbox, and a browser login is
+  scoped exactly as it was.
+- **An agent can read a message it cannot act on.** Marking read, flagging, filing and
+  quoting on reply or forward stay bound to the agent's own address, so a wider read
+  never becomes a wider write.
+
+Every read states the scope it was answered under, in `identityScope` on the response, so
+a caller never has to guess whether an empty result means "not in the mailbox" or "not in
+my slice". See [docs/CONTRACT.md](docs/CONTRACT.md) section 10.9.1.
+
+If that reach is wider than you want for your deployment, do not issue read-capable
+registry entries: an entry whose `scopes` omits `read` is refused on every read route, and
+it is the supported way to keep an agent send-only.
+
 ## Relay (optional, bring-your-own-SMTP)
 
 Go 1.25+ (what `relay/go.mod` requires; an older Go with the default

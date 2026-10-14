@@ -7,6 +7,15 @@ reproducible from the doc alone (ICD discipline). Field names map to the code th
 touch (`inbound/src/api.ts`, `inbound/src/store.ts`, `inbound/schema.sql`,
 `imap/posternimap/`) so the implementation diff stays traceable.
 
+> **Written 2026-07, against the operator fleet topology of that time** (a bastion, a
+> private VLAN, a directory host). That fleet is retired. Two passages describe the
+> environment this design was reasoned in: the throttle-reasoning passage in **1.6.1**
+> ("the relay dropped it because behind the bastion...") and the directory-seam passage
+> in **1.9** (the VLAN and `nslcd`). Both are kept so the REASONS stay legible; neither
+> is a description of how anything is deployed now, and the first is the one most likely
+> to be mistaken for a live claim. The contracts themselves (columns, UID rules,
+> bindings, the verifier seam) are host-agnostic and unaffected.
+
 It inherits the Fable product-gap review (`docs/reviews/fable-product-gap-review-2026-07-17.md`,
 PR #340) and closes the finding class it names: D5/D6 (APPEND silent discard + Trash
 hard-delete masquerading as recovery), D10 (seen-state divergence between doors), C4

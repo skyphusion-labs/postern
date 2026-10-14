@@ -1,9 +1,20 @@
-// #417 / #544: viewer-binding call sites, made explicit and pinned.
+// #417 / #544 / #718: viewer-binding call sites, made explicit and pinned.
 //
-// #417 unified spellings (sessionViewer / boundViewer). #544 decided the open
-// semantics: a registry token with scopes including "read" reaches list/search and
-// is forced to its bound identity (same as a session). Send-only registry tokens
-// stay 403 on read routes (estate operator tokens remain estate-wide).
+// #417 unified spellings (sessionViewer / boundViewer). #544 decided the open semantics:
+// a registry token with scopes including "read" reaches list/search and is forced to its
+// bound identity, the same as a session. Send-only registry tokens stay 403 on read
+// routes, and estate operator tokens remain estate-wide.
+//
+// #718 SUPERSEDES THE READ HALF OF #544 FOR REGISTRY TOKENS ONLY. Conrad ruled an agent
+// credential reads estate-wide, on by default, no opt-in key: the tagline is email for
+// agents AND humans, so an agent that cannot read the humans' mail does not deliver the
+// product. What #544 decided for a SESSION is untouched, and that is the whole substance
+// of the change: the two callers used to be one case here and are now two.
+//
+// So this file carries both halves on purpose, and the PAIRS are the evidence. The same
+// route, the same store, the same seeded rows, read once as an agent and once as a human,
+// must now give DIFFERENT answers. Either answer alone proves nothing: an estate result
+// could be a broken predicate, and a narrow result could be a change that never landed.
 
 import { describe, expect, it } from "vitest";
 import { handleApi } from "./src/api";
@@ -80,7 +91,7 @@ describe("#544 send-only registry tokens stay out of read routes", () => {
   });
 });
 
-describe("#544 identity-bound read credentials force the viewer", () => {
+describe("#718 an identity-bound READ credential reads the estate (agents only)", () => {
   async function readIdentityEnv() {
     const hash = await sha256Hex(IDENTITY_TOKEN);
     return realEnv({
@@ -104,29 +115,57 @@ describe("#544 identity-bound read credentials force the viewer", () => {
     });
   }
 
-  it("list and search return only the bound identity's mail (not the estate)", async () => {
+  it("list and search return the ESTATE, not just the bound identity's mail (#718)", async () => {
     const { env, ctx } = await readIdentityEnv();
     await seed(env, ctx);
 
     const list = (await (await handleApi(bearer("/api/messages", IDENTITY_TOKEN), env, ctx)).json()) as {
       ok: boolean;
       items: Array<{ messageId: string }>;
+      identityScope: unknown;
     };
     expect(list.ok).toBe(true);
-    expect(list.items.map((m) => m.messageId)).toEqual(["mine@x"]);
+    expect(list.items.map((m) => m.messageId).sort()).toEqual(["mine@x", "theirs@x"]);
+    // The #717 observable, and the reason #717 landed first: before this change the
+    // widening would have been invisible from outside, because a narrowed read and a
+    // complete one both just returned rows with nothing naming the boundary.
+    expect(list.identityScope, "an estate read must SAY estate").toEqual({ kind: "estate" });
 
     const search = (await (
       await handleApi(bearer("/api/search?q=probe", IDENTITY_TOKEN), env, ctx)
-    ).json()) as { ok: boolean; items: Array<{ message: { messageId: string } }> };
+    ).json()) as { ok: boolean; items: Array<{ message: { messageId: string } }>; identityScope: unknown };
     expect(search.ok).toBe(true);
-    expect(search.items.map((h) => h.message.messageId)).toEqual(["mine@x"]);
+    expect(search.items.map((h) => h.message.messageId).sort()).toEqual(["mine@x", "theirs@x"]);
+    expect(search.identityScope).toEqual({ kind: "estate" });
   });
 
-  it("get of another identity's message is not found (not a silent estate read)", async () => {
+  it("get of another identity's message now RESOLVES, and is the real reported case", async () => {
     const { env, ctx } = await readIdentityEnv();
     await seed(env, ctx);
     const res = await handleApi(bearer("/api/messages/theirs@x", IDENTITY_TOKEN), env, ctx);
-    expect(res.status).toBe(404);
+    expect(res.status, "this 404 is exactly what sent the lead to production D1").toBe(200);
+    const body = (await res.json()) as { message: { messageId: string }; identityScope: unknown };
+    expect(body.message.messageId).toBe("theirs@x");
+    expect(body.identityScope).toEqual({ kind: "estate" });
+  });
+
+  it("PAIR: a SESSION on the same store and the same route is still narrowed", async () => {
+    // The arm that proves the predicate SPLIT rather than a blanket widening. Same env,
+    // same two rows, same routes; the only difference is cookie instead of Bearer.
+    const { env, ctx, raw } = await readIdentityEnv();
+    await seed(env, ctx);
+    const cookie = await session(env, raw);
+
+    const list = (await (await handleApi(cookied("/api/messages", cookie), env, ctx)).json()) as {
+      items: Array<{ messageId: string }>;
+      identityScope: unknown;
+    };
+    expect(list.items.map((m) => m.messageId), "a human must not inherit the agent widening")
+      .toEqual(["mine@x"]);
+    expect(list.identityScope).toEqual({ kind: "member", addresses: [IDENTITY] });
+
+    const got = await handleApi(cookied("/api/messages/theirs@x", cookie), env, ctx);
+    expect(got.status, "and still cannot open another human's message by id").toBe(404);
   });
 
   it("CONTROL: estate POSTERN_API_TOKEN still sees both messages", async () => {
@@ -200,7 +239,10 @@ describe("#544 identity-bound read credentials force the viewer", () => {
     const res = await handleApi(bearer("/api/messages", IDENTITY_TOKEN), env, ctx);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<{ messageId: string }> };
-    expect(body.items.map((m) => m.messageId)).toEqual(["mine@x"]);
+    // Its own mail is now a SUBSET of what it reads, so this control asserts presence
+    // rather than equality. Keeping `toEqual(["mine@x"])` here would have made the control
+    // contradict the feature, and the honest reading of it was always "this token works".
+    expect(body.items.map((m) => m.messageId)).toContain("mine@x");
   });
 });
 

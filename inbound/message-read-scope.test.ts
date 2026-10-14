@@ -60,16 +60,43 @@ function req(method: string, path: string, body?: unknown): Request {
 
 describe("message read scope holds on every path that reads a stored message", () => {
   describe("CONTROL: the scope boundary exists and the instrument can see both sides", () => {
-    it("the read route serves a message the agent IS a party to, and 404s one it is not", async () => {
+    // THIS CONTROL GOT STRONGER AT #718, not weaker, and the reason is worth stating.
+    //
+    // It used to show the READ route refusing a non-party, and the write arms below were
+    // read as honoring that same boundary. But that made the write refusals ambiguous: a
+    // 404 on reply could have been the write check OR the read underneath it refusing
+    // first, and nothing in this file could tell those apart.
+    //
+    // #718 separated them. An agent credential now READS the estate (Conrad's ruling) and
+    // `writeReadScope` was deliberately left alone, so the same token, on the same id, is
+    // 200 on the read route and 404 as a reply target. That divergence is what makes every
+    // arm below evidence about `writeReadScope` SPECIFICALLY, which is what
+    // GHSA-49mc-vh6w-95h4 is about.
+    it("the agent READS a message it is not a party to, and still cannot QUOTE it (#718)", async () => {
+      const { e, ctx, sent } = await env();
+      await putInbound(e, ctx, { id: "theirs@x", from: OUTSIDER, to: OTHER, body: SECRET_BODY });
+
+      const read = await handleApi(req("GET", "/api/messages/theirs@x"), e, ctx);
+      expect(read.status, "estate-wide agent read is the #718 ruling").toBe(200);
+
+      const quoted = await handleApi(
+        req("POST", "/api/reply", { messageId: "theirs@x", text: "hi", quoteOriginal: true }),
+        e,
+        ctx,
+      );
+      expect(
+        quoted.status,
+        "the write boundary is independent of the read one and must not have moved with it",
+      ).toBe(404);
+      expect(sent, "and nothing went on the wire").toHaveLength(0);
+    });
+
+    it("the read route still serves a message the agent IS a party to", async () => {
       const { e, ctx } = await env();
       await putInbound(e, ctx, { id: "mine@x", from: OUTSIDER, to: AGENT, body: "ok" });
-      await putInbound(e, ctx, { id: "theirs@x", from: OUTSIDER, to: OTHER, body: SECRET_BODY });
 
       const ok = await handleApi(req("GET", "/api/messages/mine@x"), e, ctx);
       expect(ok.status, "a party to the message must be able to read it").toBe(200);
-
-      const no = await handleApi(req("GET", "/api/messages/theirs@x"), e, ctx);
-      expect(no.status, "a non-party must not: this is the boundary the write paths must honor").toBe(404);
     });
   });
 

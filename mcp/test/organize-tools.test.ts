@@ -87,13 +87,49 @@ describe("the organize scope gate (#645: never advertise a tool that always 403s
     expect([...handlers.keys()].sort()).toEqual(NAMES);
   });
 
+  // Derived from READ_TOOLS, never a frozen list (#714). #701 added mailbox_whoami, a
+  // legitimate seventh read tool, and the hard-coded expectation that used to sit here
+  // went red on that SAFE addition while staying silent on the unsafe one. A deep-equal
+  // over a whole tool set is brittle in exactly the wrong direction, so the two
+  // properties it was conflating are now asserted one each, and neither needs editing
+  // when a read tool is added.
+  const READ_NAMES = READ_TOOLS.map((t) => t.name).sort();
+
   it("CONTROL: the same call still registers the read tools, so the gate is not refusing everything", () => {
-    const { server } = fakeServer();
+    // LIVENESS, which is this control's own stated subject: the scope filter does not
+    // drop read tools. Deriving the expectation loses nothing the case is for, because a
+    // filter that wrongly dropped one still fails this.
+    //
+    // The denominator is asserted first: a derived expectation over an EMPTY source would
+    // pass vacuously, which is the same reassuring-reading defect in a new place.
+    expect(
+      READ_NAMES.length,
+      "READ_TOOLS carries fewer than 2 tools, so this control would pass without measuring anything",
+    ).toBeGreaterThan(1);
+    const { server, handlers } = fakeServer();
     const names = registerTools(server, {} as any, new Set<Scope>(["read"]), READ_TOOLS);
-    expect(names.sort()).toEqual([
-      "mailbox_folders", "mailbox_get", "mailbox_get_attachment", "mailbox_list",
-      "mailbox_search", "mailbox_thread", "mailbox_whoami",
-    ]);
+    expect(names.sort()).toEqual(READ_NAMES);
+    expect([...handlers.keys()].sort()).toEqual(READ_NAMES);
+  });
+
+  it("a read scope over EVERY tool set registers the read tools and NONE of the organize ones", () => {
+    // The LEAK, pinned deliberately rather than as a side effect of a control in another
+    // describe block. The three cases above only ever pass ORGANIZE_TOOLS, so they prove
+    // the gate refuses that LIST; they cannot see an organize tool that carries
+    // `scope: "read"` by typo or by a careless copy. index.ts registers each set under
+    // its own scope, so such a tool rides in on the read call, and the union is the shape
+    // where that shows up.
+    const { server } = fakeServer();
+    const names = registerTools(
+      server,
+      {} as any,
+      new Set<Scope>(["read"]),
+      [...READ_TOOLS, ...SEND_TOOLS, ...ORGANIZE_TOOLS],
+    );
+    for (const n of NAMES) {
+      expect(names, `${n} is an organize tool and it reached a read-scoped server`).not.toContain(n);
+    }
+    expect(names.sort()).toEqual(READ_NAMES);
   });
 });
 

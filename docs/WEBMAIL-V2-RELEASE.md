@@ -47,9 +47,13 @@ that expects those tables.
    CI runs `wrangler d1 migrations apply` then `wrangler deploy` (see
    `.github/workflows/deploy.yml`).
 2. Confirm migrations: `migrations list` shows 0010-0013 applied.
-3. **IMAP doors** (if used): roll the Swarm image to a tip that includes the
-   projected-size + draft IMAP routes; keep `VIEWER_MODE` / service token as
-   already documented in fleet-chezmoi `system/postern/`.
+3. **IMAP doors** (if used): roll the container image
+   (`ghcr.io/skyphusion-labs/postern-imap`) to a tip that includes the
+   projected-size + draft IMAP routes, and keep `VIEWER_MODE` plus the IMAP
+   service token as your own deployment already sets them. Where that container
+   runs is the operator's choice; the production RECEIVE path is Cloudflare Email
+   Routing into the inbound Worker, never a host MTA, and Skyphusion Labs runs no
+   IMAP door for anyone else.
 4. Smoke:
    - `GET https://<origin>/webmail` returns HTML with CSP
      `frame-ancestors 'none'` and `connect-src 'self'`.
@@ -82,7 +86,7 @@ migration history).
 | Session auth backend | Native vs off; see AUTH-CONTRACT / webmail-v2-contracts §1 |
 | CSP | Served from `serveWebmail()`; do not loosen `connect-src` or `frame-ancestors` |
 | Attachment caps | 20 attachments, 25 MiB decoded total (drafts + send) |
-| IMAP service token | `POSTERN_API_TOKEN_IMAP` / Swarm `postern_imap_imap_token` |
+| IMAP service token | `POSTERN_API_TOKEN_IMAP`, a secret handed to the IMAP container |
 
 ## User-facing summary (short)
 

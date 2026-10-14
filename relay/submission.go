@@ -105,7 +105,8 @@ func (s *submissionSession) Auth(mech string) (sasl.Server, error) {
 // exists or whether the relay itself is misconfigured.
 func (s *submissionSession) authenticate(username, password string) error {
 	// #105: per-account online brute-force throttle. Keyed on the account, not the
-	// source IP (behind the bastion every connection is one IP). A throttled
+	// source IP (a door behind an L4 load balancer may see one apparent IP for
+	// everyone unless PROXY protocol is configured; see proxyproto.go). A throttled
 	// attempt returns the SAME generic auth failure as a wrong password, so it
 	// never reveals whether the account exists -- and we do NOT touch the backend,
 	// so a guess against a locked account costs the attacker nothing useful.

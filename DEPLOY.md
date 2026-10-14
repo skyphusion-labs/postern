@@ -236,6 +236,26 @@ npx wrangler secret put POSTERN_API_TOKEN_IMAP
 npx wrangler secret put POSTERN_API_TOKEN_ORGANIZE
 ```
 
+**Read this before you hand a credential to an agent.** If you give an agent a
+per-identity registry entry whose `scopes` include `read` (see
+[docs/SEND-IDENTITIES.md](docs/SEND-IDENTITIES.md)), **that agent reads the mail addressed
+to every human on this deployment.** It is on by default, there is no key that narrows it,
+and you inherit it on first run.
+
+That is deliberate: Postern is email for agents and humans, and an agent that cannot read
+the humans' mail does not deliver the product. But if you are standing this up for a
+family, a team or anyone whose mail is not yours to read, decide it on purpose:
+
+- An entry whose `scopes` omits `read` is refused on every read route. That is the
+  supported way to run an agent that can send and cannot read.
+- The widening is READ only. Marking read, flagging, filing, and what a reply or forward
+  may quote all stay bound to the agent's own address.
+- **Humans are unaffected.** A webmail sign-in reads only that person's own mail plus any
+  role queue they are on, exactly as before.
+- Every read response carries `identityScope`, so you can confirm what a credential
+  actually reaches: `curl -sH "authorization: Bearer <token>" "$BASE/api/whoami"` reports
+  it directly.
+
 With `workers_dev` enabled (above), `npm run deploy` prints the deployed URL, e.g.
 `https://postern.<your-subdomain>.workers.dev`. Allow up to a minute after the
 first deploy for the workers.dev route to go live before you smoke it.

@@ -59,15 +59,34 @@ async function whoami(env: Env, ctx: ExecutionContext, token: string) {
 }
 
 describe("#650 an agent can ask its own identity and scope over Bearer", () => {
-  it("a bound read token is told WHICH identity it is and that it is scoped to itself", async () => {
+  it("a bound read token is told WHICH identity it is, and that it reads the estate (#718)", async () => {
     const { env, ctx, token } = await boundEnv(ME, ["read"]);
 
     const body = await whoami(env, ctx, token);
 
     expect(body.ok).toBe(true);
+    // Still bound, and that still matters: this is the From the send routes force. #718
+    // widened the READ, so `identity` and `identityScope` now answer two genuinely
+    // different questions for the same credential, where before they tracked each other.
     expect(body.identity).toBe(ME);
-    expect(body.identityScope).toEqual({ kind: "member", addresses: [ME] });
+    expect(body.identityScope).toEqual({ kind: "estate" });
     expect(body.via).toBe("bearer");
+  });
+
+  it("DISCRIMINATOR: an agent and a static estate token differ in `identity`, not in scope", async () => {
+    // The two now report the SAME identityScope, so a test that only read identityScope
+    // could no longer tell a registry read token from the operator token at all. This arm
+    // names the field that still separates them, so the pair stays distinguishable in the
+    // suite rather than only in the implementation.
+    const { env: agentEnv, ctx: agentCtx, token } = await boundEnv(ME, ["read"]);
+    const agent = await whoami(agentEnv, agentCtx, token);
+
+    const { env, ctx } = makeFakeEnv({});
+    const operator = await whoami(env, ctx, ESTATE_TOKEN);
+
+    expect(agent.identityScope).toEqual(operator.identityScope);
+    expect(agent.identity).toBe(ME);
+    expect(operator).toHaveProperty("identity", null);
   });
 
   it("CONTROL: a static estate token is told it is NOT bound, so both fields discriminate", async () => {
@@ -142,26 +161,30 @@ describe("#650 the capability set comes from the GATE, not from the token's name
   });
 });
 
-describe("#650 role queues are reported, because identityScope alone understates reach", () => {
-  it("a member is told the queue it may also read by naming to=", async () => {
-    const { env, ctx, token } = await boundEnv(ME, ["read"], `${QUEUE}=${ME}`);
+describe("#650 role queues, after #718 made every BEARER reader an estate reader", () => {
+  // WHY THE MEMBERSHIP ARMS MOVED. This block used to prove two things with a bound
+  // registry token: that a member's queue is reported, and (its control) that a NON-member's
+  // is not. #718 makes every read-capable Bearer an estate reader, which reports no queues
+  // at all because queues add no reach to a caller that already reads every address.
+  //
+  // That does not just change the expectation, it DESTROYS the control: member and
+  // non-member would both answer `[]`, so the arm would pass without membership ever being
+  // evaluated and could never go red again. A control that cannot fail is decoration, so
+  // the membership property is guarded where it is still live, over a SESSION, in
+  // read-scope-split.test.ts (realEnv, a real minted session). What stays here is the
+  // Bearer truth, asserted as the deliberate consequence it is.
+  it("an estate reader reports NO queues, member or not, because they add no reach", async () => {
+    const asMember = await boundEnv(ME, ["read"], `${QUEUE}=${ME}`);
+    const member = await whoami(asMember.env, asMember.ctx, asMember.token);
 
-    const body = await whoami(env, ctx, token);
+    expect(member.identityScope).toEqual({ kind: "estate" });
+    expect(member.roleQueues).toEqual([]);
 
-    expect(body.roleQueues).toEqual([QUEUE]);
-    // identityScope stays the SINGLE member, exactly as a bare read binds it. The queue is
-    // reported as the separate fact it is, never folded into the bound scope.
-    expect(body.identityScope).toEqual({ kind: "member", addresses: [ME] });
-  });
-
-  it("CONTROL: a configured queue the caller is NOT a member of is not reported", async () => {
-    const { env, ctx, token } = await boundEnv(ME, ["read"], `${QUEUE}=${OTHER}`);
-
-    const body = await whoami(env, ctx, token);
-
-    // The map is configured and non-empty, so an empty answer here is membership being
-    // evaluated, not the map failing to load.
-    expect(body.roleQueues).toEqual([]);
+    // Stated rather than implied: these two are now the SAME answer, which is exactly why
+    // the old control could no longer discriminate.
+    const asOutsider = await boundEnv(ME, ["read"], `${QUEUE}=${OTHER}`);
+    const outsider = await whoami(asOutsider.env, asOutsider.ctx, asOutsider.token);
+    expect(outsider.roleQueues).toEqual(member.roleQueues);
   });
 
   it("an unbound estate token has no queues, because membership needs an identity", async () => {

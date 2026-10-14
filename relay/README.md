@@ -189,16 +189,18 @@ enumeration, but ONLINE password guessing needs an application backstop. The
 submission AUTH door applies a **per-account** failure counter with lockout +
 exponential backoff (default: lock after 5 consecutive failures, 60s base
 doubling to a 900s cap), plus a **global** aggregate ceiling that cools down ALL
-auth for one window once tripped (default 100 failures / 60s). It is keyed on the
-**account, not the source IP**: behind the bastion every public
-connection presents one IP, so per-IP throttling (and fail2ban) is blind here. A
-throttled attempt returns the **same generic auth failure** as a wrong password,
-and a locked account is rejected **without** touching the backend, so the throttle
-never reveals whether an account exists and a guess against a locked account costs
-the attacker nothing. Infra errors (backend down) do NOT count, so an outage
-cannot lock users out. On by default; tune or disable via `AUTH_THROTTLE_*` (see
-`postern-submission.env.example`). The knob names are shared 1:1 with the Python
-IMAP checker's LOGIN throttle (the 993 door); state is in-memory + per-process.
+auth for one window once tripped (default 100 failures / 60s). It is keyed on
+the **account, not the source IP**: a door behind an L4 load balancer can see
+only the balancer's own address unless PROXY protocol is configured
+(`docs/PROXY-PROTOCOL.md`), so per-IP throttling (and fail2ban) cannot be relied
+on there. A throttled attempt returns the **same generic auth failure** as a
+wrong password, and a locked account is rejected **without** touching the
+backend, so the throttle never reveals whether an account exists and a guess
+against a locked account costs the attacker nothing. Infra errors (backend down)
+do NOT count, so an outage cannot lock users out. On by default; tune or disable
+via `AUTH_THROTTLE_*` (see `postern-submission.env.example`). The knob names are
+shared 1:1 with the Python IMAP checker's LOGIN throttle (the 993 door); state
+is in-memory + per-process.
 
 ### Bridge to the send seam + From-enforcement
 
@@ -396,7 +398,7 @@ swaks --server 127.0.0.1:2525 --from cron@example.com \
       --to you@example.com --header "Subject: relay test" --body "hello"
 ```
 
-## Install (container / Swarm)
+## Install (container)
 
 The relay also ships as a versioned image, built + pushed by
 `.github/workflows/relay-image.yml` to `ghcr.io/skyphusion-labs/postern-relay`

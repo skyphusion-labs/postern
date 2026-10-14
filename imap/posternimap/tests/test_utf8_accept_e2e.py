@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover
 
 from posternimap.config import Config
 from posternimap.tests.fakes import FakeTransport, make_message
+from posternimap.tests.settle import wait_for_server_connections_to_close
 from posternimap.tests.test_server_e2e import _patched_factory, _restore_account
 
 IRT_NONASCII = "parent-café-日本語@example.com"
@@ -97,7 +98,9 @@ class _DoorTest(twisted_unittest.TestCase):
 
     def tearDown(self):
         _restore_account(self._restore)
-        return self.port.stopListening()
+        d = self.port.stopListening()
+        d.addCallback(lambda _r: wait_for_server_connections_to_close())
+        return d
 
     def _plain(self, *commands):
         return threads.deferToThread(

@@ -343,8 +343,9 @@ returns `E_VALIDATION_ERROR`.
 
 ### 10.9.1 `identityScope`: every read declares the scope it was answered under
 
-`GET /api/messages` and `GET /api/search` both return an `identityScope` field, which is the unbuilt
-half of #544 ("reads attributable to the identity that made them") and ask 1 of #631:
+**EVERY read-scoped route returns an `identityScope` field**, which is the unbuilt half of #544
+("reads attributable to the identity that made them"), ask 1 of #631, and since #717 a property of
+the whole read surface rather than of two routes on it:
 
 ```ts
 type ReadScopeReport =
@@ -358,6 +359,57 @@ It reports what the SERVER imposed, never what the caller asked for: a caller-su
 question it cannot answer for itself. **A scoped view that does not announce its scope is
 indistinguishable from a complete one**, which is how a zero result gets read as "not in the estate"
 when it means "not in your slice".
+
+**Where it appears (#717).** #636 shipped the field on `GET /api/messages` and `GET /api/search` and
+stopped there, so five read surfaces kept answering silently and the defect stayed open on all of
+them. The field is now on every route whose row set an access predicate can narrow:
+
+| Route | Carries it on |
+|---|---|
+| `GET /api/whoami` | the answer (it IS the answer) |
+| `GET /api/messages` | the page, and the `countOnly` total |
+| `GET /api/search` | the page |
+| `GET /api/messages/{id}` | the hit **and the 404** |
+| `GET /api/messages/{id}/attachments/{i}` | the **404** only (a hit is raw bytes, not JSON) |
+| `GET /api/threads/{id}` | the page |
+| `GET /api/folders` | the rail |
+| `GET /api/recipients/recent` | the list |
+
+`GET /api/mobileconfig` is the one read-scoped route that does NOT carry it, because it serves an
+Apple `.mobileconfig` plist built from env rather than a row set: no predicate narrows it, so there
+is no scope to declare. A test derived from `ROUTE_TABLE` enforces this split
+(`inbound/read-scope-announced.test.ts`): a new `read` route must be probed or exempted with a
+reason, so the next read surface cannot ship silent by omission.
+
+**#718 changed which callers are narrowed, not what the field means.** A read-capable
+registry token (an agent credential) now reads the estate and reports `{kind: "estate"}`;
+a webmail session is still bound and still reports `{kind: "member", ...}`. The two were
+one case here before, and are told apart by `viaSession`. One read route is deliberately
+NOT widened: `GET /api/recipients/recent` stays keyed to the bound identity, because it
+answers "who have I corresponded with" for composing rather than reading a mailbox, and it
+reports `{kind: "member", ...}` for an agent accordingly. That is the field doing its job:
+two read routes under one credential can honestly report different scopes.
+
+**On the single-object routes the report names the WHOLE scope the read used**, which is the bound
+member plus every role queue it belongs to (`sessionReadScope`), not the member alone. Those routes
+genuinely read under the wider set, and naming only the member would understate their reach, which
+is the same completeness defect pointing the other way. The value is derived FROM the scope handed to
+the store, never re-derived beside it, so the report and the predicate cannot drift.
+
+**The 404 is the point, and it is still ONE answer.** `GET /api/messages/{id}` is where "not your
+mail" and "no such mail" collapse, and they STAY collapsed: the refusal body is byte-identical
+whether the id is absent or withheld, and both attachment refusals share one body too. The field adds
+the fact a caller cannot otherwise obtain, that the 404 came out of a narrowed read and so is not
+evidence about the mailbox; it never adds the fact a caller must not obtain, whether some particular
+message exists. **A response that says "this message exists but is not yours" would leak existence
+and is explicitly NOT the contract.** For the same reason the field is present on hits and misses
+alike: were it present only on a miss, its presence would itself be the existence oracle.
+
+Clients relay it rather than interpret it. In `@skyphusion/postern-mcp` it rides on `mailbox_get`
+(including `found: false`), `mailbox_get_attachment`, `mailbox_thread`, `mailbox_folders`,
+`mailbox_list`, `mailbox_search` and `mailbox_whoami`. An absent field means the worker sent none (an
+older deployment); a client must leave it absent and must never substitute `{kind: "estate"}`, which
+would present a guess as the server's answer.
 
 ---
 
@@ -1548,6 +1600,44 @@ The bound lives in `store.thread`, not in the HTTP handler, so every seam gets i
 `MailboxService` RPC `thread()` returns a `Page` too, matching its `list` and `search`
 siblings. `thread` was the one read on that entrypoint that returned an unbounded array,
 which is exactly why it was the one that could return a whole conversation in a single call.
+
+**SURVEYING A THREAD WITHOUT BODIES: there is no `fields=` on `GET /api/threads/{id}` (#705).**
+`fields` (#646) is a projection over the SUMMARY row, and a thread read returns the full
+message, so declaring it there would make one parameter mean two things. It was declined
+rather than built, because no caller has asked. The nearest substitute is
+`GET /api/messages?thread=<id>&mailbox=all&fields=...`, and it is NOT the same read. A caller
+that swaps one for the other must know four differences:
+
+1. **Mailbox.** The list route defaults to `mailbox` unset, which keeps only rows with no
+   mailbox placement, so archived, trashed and junked members of the thread are dropped.
+   `mailbox=all` removes that filter. `GET /api/threads/{id}` has no mailbox filter at all.
+   This difference is NOT announced in the response.
+2. **Order.** The list route is newest first; the thread route is oldest first. Also not
+   announced, and cursors are not interchangeable between the two.
+3. **Scope.** The list route reads under the single bound member. The thread route reads under
+   the member PLUS every role queue it belongs to (#425). So for the same caller, the list
+   survey can return FEWER rows than the thread. Each route carries `identityScope` (#717), which
+   states the scope THAT route was answered under. Nothing in either response says the two
+   routes would disagree with each other about this thread, so a caller will not notice the
+   shortfall from the field alone; the non-equivalence is documented here and nowhere else.
+   The shortfall is only PARTLY closable, and never completely. A bound member reaches a role
+   queue on the list route with `to=<role address>`, accepted only when that address is a queue
+   the member belongs to (#425). It is bounded three ways, and a caller who learns only the
+   first half will wrongly think it reproduces the thread route's reach. (a) ONE role per call,
+   so rebuilding the thread row set is one member call plus one call per role plus a union,
+   against the thread route's single read. (b) The inbox lens only: a role view is refused with
+   `E_VALIDATION_ERROR` if it names `direction=` or a non-inbox `lens`. (c) No `mailbox=` at
+   all, `mailbox=all` included: a role queue has no durable folders. Because the member path
+   needs `mailbox=all` to see archived, trashed and junked members and the role path refuses it,
+   those rows are not reachable through a role view in any number of calls. For a caller with
+   role queues and any such mail in the thread, the list route cannot reproduce the thread row
+   set at all. On the role-queue path the substitute is strictly less capable than on the
+   member path.
+4. **Payload.** List rows are summary rows: no `bodyText` or `bodyHtml`, with `hasHtml` and
+   `attachmentCount` in their place. That is why it serves a survey at all.
+
+If a caller needs the thread route's reach with summary rows, that is option 1 or 2 of #705
+and is a contract change, not a documentation one.
 
 **HOW MANY ROWS MATCH: `countOnly` (#648).** The fifth axis, and the only one that changes
 what the response IS rather than what it contains. `countOnly=1` on `/api/messages` answers
