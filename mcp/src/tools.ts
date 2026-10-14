@@ -407,14 +407,26 @@ export const READ_TOOLS: ToolDef[] = [
   {
     name: "mailbox_get",
     scope: "read",
-    description: "Fetch one full message (headers + body text + attachment metadata) by its message id.",
+    description:
+      "Fetch one full message (headers + body text + attachment metadata) by its message id. " +
+      "READING THE RESULT: `found: false` does NOT prove the message is absent from the " +
+      "mailbox. Check `identityScope`: kind 'member' or 'role' means this lookup ran inside " +
+      "your own slice, so a miss means 'not in your slice' and a wider credential may still " +
+      "find it. Only under kind 'estate' is a miss evidence about the mailbox as a whole. " +
+      "The answer is deliberately the same whether a message is absent or withheld, so " +
+      "never read a miss as a statement that some particular message does or does not exist.",
     inputSchema: {
       message_id: z.string().min(1).describe("the message id (as returned by search/list)"),
     },
     handler: async (client, a) => {
-      const msg = await client.get(a.message_id);
-      if (!msg) return { found: false, messageId: a.message_id };
-      return { found: true, message: msg };
+      const { message, identityScope } = await client.get(a.message_id);
+      // `found: false` was the #717 defect at this layer: a bare miss that an agent reads
+      // as "no such message" when it can equally mean "not in your slice". The scope rides
+      // on BOTH answers, and it is the same value either way, so it says how to read the
+      // miss without ever saying whether something was withheld.
+      const scope = identityScope === undefined ? {} : { identityScope };
+      if (!message) return { found: false, messageId: a.message_id, ...scope };
+      return { found: true, ...scope, message };
     },
   },
   {
@@ -427,7 +439,10 @@ export const READ_TOOLS: ToolDef[] = [
       + "tool result. READING THE RESULT: `cursor` is the only signal that tells a COMPLETE "
       + "thread from a FIRST PAGE. `cursor: null` means you have the whole thread; a non-null "
       + "cursor means there are more messages and you must pass it back to continue. `count` "
-      + "is the size of THIS page, never the length of the thread.",
+      + "is the size of THIS page, never the length of the thread. `identityScope` says "
+      + "whose mail the thread was read as: kind 'member' or 'role' means the thread was "
+      + "narrowed to your slice first, so `cursor: null` means 'every message in this "
+      + "thread that YOU may read', not 'every message in this thread'.",
     inputSchema: {
       thread_id: z.string().min(1).describe("the thread id (as returned by search/list/get)"),
       limit: z.number().int().positive().max(200).optional().describe(
@@ -448,6 +463,11 @@ export const READ_TOOLS: ToolDef[] = [
         // Surfaced so an agent can tell a whole thread from a first page without having to
         // compare `count` against a limit it may not have set.
         cursor: page.cursor ?? null,
+        // What `cursor: null` is a claim ABOUT (#717). The thread was narrowed to the
+        // reader's own slice before it was paged, so "the whole thread" means "every
+        // message in it you may read". Dropping this field here left the strongest
+        // unqualified claim in the whole read surface sitting in front of the agent.
+        ...(page.identityScope === undefined ? {} : { identityScope: page.identityScope }),
         messages: page.items,
       };
     },
@@ -472,8 +492,13 @@ export const READ_TOOLS: ToolDef[] = [
       // bytes endpoint sanitizes the filename in its header). This also gives an
       // exact out-of-range error and lets us refuse an oversize file before any
       // download (cheap), keeping the byte fetch as a second, capped step.
-      const msg = await client.get(a.message_id);
-      if (!msg) return { found: false, messageId: a.message_id };
+      const { message: msg, identityScope } = await client.get(a.message_id);
+      if (!msg) {
+        // Same reasoning as mailbox_get: the miss carries the scope it was produced under.
+        return identityScope === undefined
+          ? { found: false, messageId: a.message_id }
+          : { found: false, messageId: a.message_id, identityScope };
+      }
       const list = Array.isArray(msg.attachments) ? msg.attachments : [];
       const idx: number = a.index;
       if (idx < 0 || idx >= list.length) {
@@ -538,8 +563,13 @@ export const READ_TOOLS: ToolDef[] = [
         .describe("scope the unread counts to this address; ignored when the token is identity-bound"),
     },
     handler: async (client, a) => {
-      const folders = await client.folders({ to: a.to });
-      return { count: folders.length, folders };
+      const { folders, identityScope } = await client.folders({ to: a.to });
+      // The unread counts are narrowed by the same authority the mail routes are, so the
+      // rail says so too: a zero unread count under a member scope is "none in your
+      // slice", which is not the same claim as "none in the mailbox".
+      return identityScope === undefined
+        ? { count: folders.length, folders }
+        : { count: folders.length, identityScope, folders };
     },
   },
 ];

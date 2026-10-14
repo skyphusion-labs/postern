@@ -112,15 +112,67 @@ describe("list", () => {
 describe("get", () => {
   it("returns the message on 200", async () => {
     mockFetch(200, { ok: true, message: { messageId: "m9", bodyText: "hi" } });
-    const msg = await client().get("m9");
-    expect(msg?.messageId).toBe("m9");
+    const { message } = await client().get("m9");
+    expect(message?.messageId).toBe("m9");
   });
 
-  it("encodes the id and returns null on 404", async () => {
+  it("encodes the id and returns a null message on 404", async () => {
     const calls = mockFetch(404, { ok: false, error: "E_NOT_FOUND" });
-    const msg = await client().get("a@b.com");
+    const { message } = await client().get("a@b.com");
     expect(calls[0].url).toContain("/api/messages/a%40b.com");
-    expect(msg).toBeNull();
+    expect(message).toBeNull();
+  });
+
+  // #717: the 404 BODY is the answer, not just the status. The worker states the scope
+  // its refusal was produced under, and this client used to discard the whole body, so
+  // `mailbox_get` could only ever report a bare miss.
+  it("carries identityScope off a 404 body, so a miss is readable as scoped", async () => {
+    mockFetch(404, {
+      ok: false,
+      error: "E_NOT_FOUND",
+      identityScope: { kind: "member", addresses: ["agent@skyphusion.org"] },
+    });
+    const out = await client().get("theirs@x");
+    expect(out.message, "a withheld message is still a miss").toBeNull();
+    expect(out.identityScope, "and the miss now says what it was scoped by").toEqual({
+      kind: "member",
+      addresses: ["agent@skyphusion.org"],
+    });
+  });
+
+  it("carries identityScope off a 200 body too", async () => {
+    mockFetch(200, {
+      ok: true,
+      message: { messageId: "m9" },
+      identityScope: { kind: "estate" },
+    });
+    const out = await client().get("m9");
+    expect(out.identityScope).toEqual({ kind: "estate" });
+  });
+
+  // The negative direction, at this layer: a 404 with NO body must not acquire one.
+  // `undefined` is "the worker said nothing", which an older worker genuinely does, and
+  // inventing `{kind:"estate"}` there would be a guess presented as the server's answer.
+  it("reports no scope at all when the worker sent none", async () => {
+    mockFetch(404, { ok: false, error: "E_NOT_FOUND" });
+    const out = await client().get("m9");
+    expect(out.identityScope, "absence is not estate").toBeUndefined();
+  });
+});
+
+describe("folders (#717)", () => {
+  it("returns the rail and the scope it was counted under", async () => {
+    mockFetch(200, {
+      ok: true,
+      folders: [{ id: "inbox", unread: 0 }],
+      identityScope: { kind: "member", addresses: ["agent@skyphusion.org"] },
+    });
+    const out = await client().folders();
+    expect(out.folders.length).toBe(1);
+    expect(out.identityScope, "a zero unread count needs its scope to be readable").toEqual({
+      kind: "member",
+      addresses: ["agent@skyphusion.org"],
+    });
   });
 });
 
