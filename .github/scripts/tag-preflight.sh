@@ -46,6 +46,12 @@
 #     no CHANGELOG or GitHub Release assert: postern-mcp-v* tags are
 #     release-less by convention (see the CHANGELOG.md preamble); the npm
 #     registry is that train ledger.
+#   mcp track on a NON-tag ref (#732):
+#     mcp/package.json equals the newest postern-mcp-v* tag (version sort).
+#     An unreadable or absent package.json FAILS. A missing tag FAILS.
+#     There is no pending-release marker: one pin has nothing in-tree to
+#     disagree with, so the tag is the discriminator, and a marker that
+#     carries a pass would disarm the check while it still printed green.
 #
 # Exit 0 only when every hard check passed. Failures are COLLECTED, not
 # fail-fast, so one run shows the operator every drift to fix.
@@ -191,7 +197,30 @@ else
       note "postern-mcp-v* tags cut no GitHub Release and no CHANGELOG section by convention (npm is that ledger)"
     fi
   else
-    note "mcp track on non-tag ref ${ref_name:-HEAD}: publishes mcp/package.json version $(json_version mcp/package.json)"
+    # One pin, so nothing in the tree can disagree with it. The discriminator
+    # is the tag track. note() does not touch rc, which is why printing the
+    # version here used to pass on an unreadable file (a trailing space and a
+    # green summary). Fetch the tags explicitly: checkout does not promise
+    # them, and the ancestry fetch above is --no-tags on purpose.
+    pkg="$(json_version mcp/package.json)"
+    if [ -z "$pkg" ]; then
+      fail "mcp/package.json version: could not read a version (unreadable or missing pin)"
+    elif ! git fetch --quiet origin 'refs/tags/postern-mcp-v*:refs/tags/postern-mcp-v*'; then
+      fail "could not fetch postern-mcp-v* tags (drift unverifiable; refusing to pass)"
+    else
+      newest="$(git tag -l 'postern-mcp-v*' --sort=-v:refname)"
+      newest="${newest%%$'\n'*}"
+      if [ -z "$newest" ]; then
+        fail "no postern-mcp-v* tag to compare mcp/package.json (${pkg}) against"
+      else
+        tagged="${newest#postern-mcp-v}"
+        if [ "$pkg" != "$tagged" ]; then
+          fail "mcp/package.json version is ${pkg}, newest postern-mcp-v* tag is ${newest}"
+        else
+          note "mcp/package.json ${pkg} equals newest tag ${newest}"
+        fi
+      fi
+    fi
   fi
 fi
 
