@@ -911,14 +911,43 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // delete or both token has no bound identity and is estate by construction.
       const deleteScope =
         resolution.viaSession && resolution.identity ? [resolution.identity.from] : undefined;
-      // Both refusals below share ONE body, scope statement included, so "withheld", "absent"
-      // and "not in the trash" stay a single answer and nothing says a message exists.
+      // The 404 below is ONE body, scope statement included, for "withheld" and "absent", so
+      // nothing says a message exists. "Not in the trash" is NOT part of that answer any more
+      // (#745): it is its own refusal, and is reachable only for the caller's own mail.
       const notFound = () =>
         json(
           { ok: false, error: "E_NOT_FOUND", message: "not found", identityScope: scopeReportOf(deleteScope) },
           404,
         );
       if (deleteScope && !(await store.messageAccessible(env, id, deleteScope, true))) {
+        // #745: ONE refusal is not a "not found", and it is the only one that may say so.
+        // The id is in the caller's OWN mail (the same single identity the check above ran
+        // under, so it is a subset of what this caller may read) and simply is not in the
+        // trash yet. A bare 404 told a human to look elsewhere and told an agent to stop,
+        // when the answer is "trash it, then delete it". 409, not 412: the request
+        // conflicts with the resource's state and the caller can resolve it; 412 is for
+        // conditional headers the caller sent.
+        //
+        // WHY THIS IS NOT THE ORACLE #731 CLOSED. The predicate is the SAME single-identity
+        // accessibility check, minus only the trash precondition. An id the caller may not
+        // read fails it, so absent and withheld still fall through to the identical 404
+        // below; and a queue message (readable through #425, not deletable or trashable by
+        // the #404 ruling) fails it too, which is correct, because "trash it first" would be
+        // wrong advice there. The new status is therefore reachable ONLY for mail the caller
+        // already reads. `delete-404-oracle.test.ts` asserts that as an invariant.
+        if (await store.messageAccessible(env, id, deleteScope, false)) {
+          return json(
+            {
+              ok: false,
+              error: "E_NOT_IN_TRASH",
+              message:
+                "this message is not in the trash; move it there first " +
+                "(POST /api/messages/move with mailbox=trash), then delete it",
+              identityScope: scopeReportOf(deleteScope),
+            },
+            409,
+          );
+        }
         return notFound();
       }
       const deleted = await store.deleteMessage(env, id, ctx);

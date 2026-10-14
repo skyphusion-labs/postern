@@ -391,9 +391,17 @@ SAME session reads an id under `{kind: "member", addresses: [self, ...queues]}` 
 id's delete refused under `{kind: "member", addresses: [self]}`. That difference is correct.
 It is not an existence oracle: an id the caller may not read produces, on BOTH routes, exactly the
 pair an absent id produces (`inbound/delete-404-oracle.test.ts` makes both calls in one test).
-One thing the 404 does not separate, stated rather than hidden: for a session the delete also
-requires the message to be in the trash, so a readable message that is not trashed is refused
-with the same 404 as an absent one.
+**A session's delete also requires the message to be in the trash, and #745 makes that refusal
+its own answer.** `409` with `error: "E_NOT_IN_TRASH"` and the same `identityScope`, for a message
+that is in the caller's OWN mail and is not trashed (inbox, sent, archive or junk). The body says
+to move it to the trash (`POST /api/messages/move`, `mailbox=trash`) and delete it again; the two
+calls then succeed in order. The predicate is the same single-identity accessibility check the
+delete already ran, minus only the trash precondition, so the `409` is reachable only for mail the
+caller can already read. An id the caller may not read, an absent id, and a queue message (readable
+through #425 but neither deletable nor trashable by the #404 ruling, so "trash it first" would be
+wrong advice) all remain the byte-identical `404`. A static delete or both token has no trash
+precondition and is unchanged. `inbound/delete-404-oracle.test.ts` asserts the reachability
+invariant with both calls in one test and carries two injections that must turn it red.
 
 **#718 changed which callers are narrowed, not what the field means.** A read-capable
 registry token (an agent credential) now reads the estate and reports `{kind: "estate"}`;
@@ -582,7 +590,7 @@ none touches D1 directly (#25, #26).
 | POST | `/api/drafts/{id}/send` | load staged attachments, send through the one send core, then remove the draft and staging only after success | webmail v2 (#352/#353) |
 | GET/POST/PUT/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity; PUT is the autosave revision, mirroring `PUT /api/drafts/{id}` | webmail v2 (#352) |
 | POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it; `rawMime` decoding past **22 MiB** is `413 E_PAYLOAD_TOO_LARGE` BEFORE the MIME is parsed | webmail v2 (#352/#493) |
-| DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope) | (#278/#352) |
+| DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope). A webmail session may delete only mail already in the trash: its own untrashed mail answers `409 E_NOT_IN_TRASH`, an unreadable or absent id answers one `404`, both under `identityScope` (see 10.9.1) | (#278/#352/#731/#745) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
 | DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
