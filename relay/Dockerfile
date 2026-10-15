@@ -18,7 +18,7 @@
 
 # ---- stage 1: builder -- compile a static, cgo-free binary ------------------
 # #541: pin the builder image to the same Go line as relay/go.mod
-# (`go 1.25.0` + `toolchain go1.26.9`). CI reads that same pin through
+# (`go 1.26.0` + `toolchain go1.27.2`). CI reads that same pin through
 # go-version-file, so the gate measures the toolchain this image ships.
 #
 # Never float this tag off the go.mod toolchain line. Go picks the NEWER of the
