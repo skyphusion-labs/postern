@@ -9,8 +9,14 @@ name: npm-mcp
 # convention those tags cut no GitHub Release and get no CHANGELOG.md section;
 # the npm registry is this train's ledger (stated in the CHANGELOG preamble).
 #
-# Required repo secret: NPM_TOKEN (npmjs.com automation token with publish scope
-# for the @skyphusion org).
+# Auth is npm trusted publishing (OIDC). npmjs.com trusts this filename
+# (npm-mcp.yml) and no GitHub environment. The publish job presents the
+# Actions OIDC token. It does not read NPM_TOKEN: a configured token is
+# the fallback, and the one this repo still holds is dead. Renaming this
+# file, or setting environment: on the publish job, breaks that trust.
+# npm CLI 11.5.1 or newer is required for the exchange. Node 22 ships an
+# older npm, so the publish step installs npm 11 first. The build and the
+# tests stay on the Node 22 toolchain the rest of CI uses.
 
 on:
   push:
@@ -36,6 +42,11 @@ jobs:
     name: npm publish @skyphusion/postern-mcp
     needs: preflight
     runs-on: ubuntu-latest
+    # Job permissions replace the workflow set. id-token has to be on this
+    # job or GitHub will not mint the OIDC token npm exchanges.
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         working-directory: mcp
@@ -53,6 +64,7 @@ jobs:
       - run: npm run typecheck && npm test && npm run build
 
       - name: Publish to npm
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+          npm publish --access public --provenance
