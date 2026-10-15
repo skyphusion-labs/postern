@@ -241,7 +241,7 @@ under the hardened `DynamicUser` unit (already set in `systemd/`).
 ## Build, test
 
 Go 1.26+ (`go.mod` requires 1.26.0; built and tested on its `toolchain` line,
-currently 1.26.9; the door image is `FROM golang:1.26.9-bookworm` in lockstep,
+currently 1.27.2; the door image is `FROM golang:1.27.2-bookworm` in lockstep,
 #541). The `go` directive sets the language version. It held at 1.25.0 until
 #709, when a DEPENDENCY moved it: `golang.org/x/net v0.60.0` is the first release
 that clears GO-2026-6603 / 6610 / 6611 / 6612 / 6617, it declares `go 1.26.0` for
@@ -270,16 +270,15 @@ them are non-zero, so "it came back non-zero, the gate fired" is wrong:
 
 An `exit 1` read as a red is the false pass this table exists to prevent.
 
-Measured with `govulncheck v1.5.0`, the CI pin, against this module as it stands
-after #709:
+The `go1.26.0` and `go1.27.2` rows were measured 2026-10-15 with `govulncheck v1.9.0`, the CI pin. The two 1.25 rows are the earlier v1.5.0 measurement (they were not re-run):
 
 | toolchain | exit | affecting | note |
 |---|---|---|---|
 | `go1.25.13` | 1 | n/a | load error: below the `go 1.26.0` directive since #709. NOT a verdict |
 | `go1.25.14` | 1 | n/a | same, and no 1.25 release can exercise this gate any more |
 | `go1.26.0` | 3 | 29 | the LOWEST toolchain that still returns a verdict. **Use this as the control** |
-| `go1.26.9` | 0 | 0 | the landed pin, resolved through the `toolchain` line |
-| `go1.27.0` | 1 | n/a | load error: `govulncheck v1.5.0` cannot type-check a go1.27 stdlib |
+| `go1.27.2` | 0 | 0 | the landed pin, resolved through the `toolchain` line |
+| `go1.27.0` on v1.5.0 | 1 | n/a | load error: the previous pin cannot type-check a go1.27 stdlib |
 
 Three rules come out of it.
 
@@ -294,9 +293,10 @@ this gate still goes red, use `GOTOOLCHAIN=go1.26.0` and require `exit 3`. Any
 toolchain below the `go` directive now fails to load, which looks like a red and
 is not one.
 
-Third, do not jump to the 1.27 line while `ci.yml` pins `govulncheck v1.5.0`. That
-build cannot type-check a go1.27 standard library. Bump the tool pin first, then
-re-establish the control and watch it return `exit 3`.
+Third, a govulncheck pin that cannot type-check the toolchain is not a gate.
+v1.5.0 exits 1 on a go1.27 stdlib, which is why the tool pin moved to v1.9.0
+in the same commit as `toolchain go1.27.2`. The control row above was re-run
+on v1.9.0 and still returns `exit 3`. Re-run it whenever the tool pin moves.
 
 ### The scanned Go and the shipped Go are asserted equal
 
