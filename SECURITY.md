@@ -30,3 +30,11 @@ DNS, and Cloudflare account of any operator running their own instance; those ar
 the operator responsibility. If you are an operator with an incident on your own
 deployment, this project cannot access or act on data in an instance it does not
 run.
+
+Two things are documented defaults, not vulnerabilities: a per-identity agent
+credential whose `scopes` include `read` reading mail addressed to every address
+on a deployment (README, "What an agent credential can read"), and the published
+demo token reading the whole demo mailbox ([PRIVACY.md](PRIVACY.md)). A report is
+in scope where the software crosses a boundary it states: a credential changing
+mail outside its own bound address, or a webmail cookie session reading beyond
+its own person and role queues.

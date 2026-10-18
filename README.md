@@ -49,6 +49,14 @@ token you issue has the same limits.
 
 The demo mailbox is shared and public, so do not mail anything private.
 
+The demo being readable by anyone is not the agent-credential default described under
+[Auth](#what-an-agent-credential-can-read) below, even though both look like "one token
+reads every address". The demo token is the static `POSTERN_API_TOKEN_READ` slot, which is
+un-bound and has read the whole mailbox on every release; the demo issues no per-identity
+registry entries, and that default is about registry entries. Read the demo as one shared
+mailbox that is public on purpose, and read the Auth section as what a credential you issue
+reaches on an instance that is not.
+
 MCP config for agents:
 
 ```
@@ -240,6 +248,12 @@ my slice". See [docs/CONTRACT.md](docs/CONTRACT.md) section 10.9.1.
 If that reach is wider than you want for your deployment, do not issue read-capable
 registry entries: an entry whose `scopes` omits `read` is refused on every read route, and
 it is the supported way to keep an agent send-only.
+
+None of this is why the [public demo](#try-it-live) is readable. The demo token is the
+static `_READ` slot in the last row of the table, un-bound and estate-wide on every release,
+and the demo issues no registry entries. The demo shows a mailbox that is public on purpose;
+this section describes what a credential you issue reaches on one that is not. Neither is a
+measure of the other.
 
 ## Relay (optional, bring-your-own-SMTP)
 
