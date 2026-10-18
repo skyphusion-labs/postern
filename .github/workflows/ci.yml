@@ -216,9 +216,10 @@ jobs:
       # Real checkout, not the fixture (#732). A pull_request merge commit is
       # not on main, and this step measures the pin rather than whether a tag
       # may ship, so the ancestry sha is origin/main. The pin is read from the
-      # checkout. A bump of mcp/package.json with no new postern-mcp-v* tag
-      # fails here.
-      - name: mcp pin equals newest postern-mcp-v tag
+      # checkout. A bump of mcp/package.json ahead of the newest
+      # postern-mcp-v* tag is the release window and passes. A pin behind
+      # that tag fails here.
+      - name: mcp pin is not behind its newest postern-mcp-v tag
         run: |
           git fetch --quiet --no-tags origin main
           sha="$(git rev-parse origin/main)"

@@ -47,11 +47,12 @@
 #     release-less by convention (see the CHANGELOG.md preamble); the npm
 #     registry is that train ledger.
 #   mcp track on a NON-tag ref (#732):
-#     mcp/package.json equals the newest postern-mcp-v* tag (version sort).
-#     An unreadable or absent package.json FAILS. A missing tag FAILS.
-#     There is no pending-release marker: one pin has nothing in-tree to
-#     disagree with, so the tag is the discriminator, and a marker that
-#     carries a pass would disarm the check while it still printed green.
+#     mcp/package.json is not behind the newest postern-mcp-v* tag
+#     (version sort). Equal passes. Ahead passes: the bump lands on main,
+#     then the tag is pushed. Behind fails. An unreadable or absent
+#     package.json FAILS. A missing tag FAILS.
+#     There is no pending-release marker: a marker that carries a pass
+#     would disarm the check while it still printed green.
 #
 # Exit 0 only when every hard check passed. Failures are COLLECTED, not
 # fail-fast, so one run shows the operator every drift to fix.
@@ -123,6 +124,42 @@ check_pin() {
   else
     note "${label} == ${want}"
   fi
+}
+
+# 0 when left is a strictly older X.Y.Z than right. 1 when it is equal or
+# newer. 2 when either side is not three numeric components. A suffix after
+# - or + is ignored so a tag like 1.2.3-rc.1 compares as 1.2.3.
+version_behind() {
+  local left="$1" right="$2"
+  local lm li lp rm ri rp
+  left="${left%%-*}"
+  left="${left%%+*}"
+  right="${right%%-*}"
+  right="${right%%+*}"
+  case "$left" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 2 ;;
+  esac
+  case "$right" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 2 ;;
+  esac
+  lm="${left%%.*}"; left="${left#*.}"
+  li="${left%%.*}"; lp="${left#*.}"
+  rm="${right%%.*}"; right="${right#*.}"
+  ri="${right%%.*}"; rp="${right#*.}"
+  case "$lm$li$lp$rm$ri$rp" in
+    *[!0-9]*) return 2 ;;
+  esac
+  if [ -z "$lm" ] || [ -z "$li" ] || [ -z "$lp" ] || [ -z "$rm" ] || [ -z "$ri" ] || [ -z "$rp" ]; then
+    return 2
+  fi
+  if [ "$lm" -lt "$rm" ]; then return 0; fi
+  if [ "$lm" -gt "$rm" ]; then return 1; fi
+  if [ "$li" -lt "$ri" ]; then return 0; fi
+  if [ "$li" -gt "$ri" ]; then return 1; fi
+  if [ "$lp" -lt "$rp" ]; then return 0; fi
+  return 1
 }
 
 # ---------------------------------------------------------------- ancestry
@@ -214,10 +251,14 @@ else
         fail "no postern-mcp-v* tag to compare mcp/package.json (${pkg}) against"
       else
         tagged="${newest#postern-mcp-v}"
-        if [ "$pkg" != "$tagged" ]; then
-          fail "mcp/package.json version is ${pkg}, newest postern-mcp-v* tag is ${newest}"
+        version_behind "$pkg" "$tagged"
+        cmp=$?
+        if [ "$cmp" = 0 ]; then
+          fail "mcp/package.json version is ${pkg}, behind newest postern-mcp-v* tag ${newest}"
+        elif [ "$cmp" = 1 ]; then
+          note "mcp/package.json ${pkg} is not behind newest tag ${newest}"
         else
-          note "mcp/package.json ${pkg} equals newest tag ${newest}"
+          fail "mcp/package.json version is ${pkg}, newest postern-mcp-v* tag is ${newest}, and the two could not be compared"
         fi
       fi
     fi

@@ -178,11 +178,11 @@ run_case "no mcp tag fails rather than printing the package version" \
 git tag postern-mcp-v3.4.5 "$main_sha"
 git push --quiet origin postern-mcp-v3.4.5
 run_case "package.json agreeing with the newest mcp tag passes" \
-  0 "mcp/package.json 3.4.5 equals newest tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
+  0 "mcp/package.json 3.4.5 is not behind newest tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
 
 write_mcp 3.4.6
-run_case "package.json ahead of the newest mcp tag fails" \
-  1 "mcp/package.json version is 3.4.6, newest postern-mcp-v* tag is postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
+run_case "package.json ahead of the newest mcp tag passes" \
+  0 "mcp/package.json 3.4.6 is not behind newest tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
 write_mcp 3.4.5
 
 printf 'not-json\n' > mcp/package.json
@@ -199,10 +199,10 @@ git tag postern-mcp-v3.10.0 "$main_sha"
 git push --quiet origin postern-mcp-v3.9.0 postern-mcp-v3.10.0
 write_mcp 3.10.0
 run_case "newest tag is version-sorted, so 3.10.0 beats 3.9.0" \
-  0 "equals newest tag postern-mcp-v3.10.0" mcp refs/heads/main main "$main_sha"
+  0 "is not behind newest tag postern-mcp-v3.10.0" mcp refs/heads/main main "$main_sha"
 write_mcp 3.9.0
 run_case "a stale lower version fails once a higher tag exists" \
-  1 "newest postern-mcp-v* tag is postern-mcp-v3.10.0" mcp refs/heads/main main "$main_sha"
+  1 "behind newest postern-mcp-v* tag postern-mcp-v3.10.0" mcp refs/heads/main main "$main_sha"
 write_mcp 3.4.5
 
 echo "argument handling"
