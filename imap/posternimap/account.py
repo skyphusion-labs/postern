@@ -57,6 +57,52 @@ from .measure import Meter
 
 _DURABLE_FOLDERS = ("archive", "trash", "junk", "drafts")
 
+# Hard bounds on a LIST/LSUB mailbox pattern (CWE-1333, the class of
+# CVE-2026-106454 / GHSA-8pqf-f4m5-798g).
+#
+# #427 already made every non-wildcard character LITERAL (re.escape per
+# character), so regex syntax in a pattern is inert on this door; that is what
+# keeps us off the upstream advisory, whose cause is unescaped pass-through to
+# re.compile. What #427 did not bound is the COUNT of wildcards. Each one
+# compiles to its own lazy quantifier, and several of them matched against one
+# name backtrack combinatorially.
+#
+# The cost tracks the wildcard COUNT, not the pattern length and not adjacency
+# (measured on CPython 3.14, worst shape per count, name length in brackets):
+#   [64 chars]  4 wildcards 0.005s   5 wildcards 0.067s
+#   [128 chars] 4 wildcards 0.068s   5 wildcards 1.82s
+# Twisted's reactor is single-threaded and cooperative, so that time is a stall
+# for EVERY connected client, not only the caller (cf. bench/reactor_stall.py).
+#
+# _MAX_WILDCARDS = 4 is measured, not taste. The longest name this door can
+# advertise is Roles/<local part>, and RFC 5321 bounds a local part at 64
+# octets, so ~70 characters; 4 wildcards stay under 0.07s even at DOUBLE that.
+# It costs no reachable behavior either: the namespace is one level deep
+# (Roles/abuse), so no 5-wildcard pattern can match a name that a 4-wildcard
+# pattern does not already match.
+#
+# _MAX_PATTERN_LEN is fail-closed hygiene rather than a ReDoS control (17
+# characters was enough to cost 31s at 8 wildcards, so length alone bounds
+# nothing). The longest legitimate pattern is a full role folder name, ~70.
+_MAX_PATTERN_LEN = 128
+_MAX_WILDCARDS = 4
+
+
+def _list_pattern_refusal(pattern: str) -> Optional[str]:
+    """Why this LIST/LSUB pattern must not be compiled, or None to allow it.
+
+    Fails CLOSED: this returns a reason for anything it cannot vouch for, and
+    the caller serves nothing for a refused pattern. Runs BEFORE
+    ``_wildcard_matcher``, so a refused pattern never reaches ``re.compile``.
+    """
+    if len(pattern) > _MAX_PATTERN_LEN:
+        return "longer than %d characters" % _MAX_PATTERN_LEN
+    wildcards = pattern.count("*") + pattern.count("%")
+    if wildcards > _MAX_WILDCARDS:
+        return "more than %d wildcards" % _MAX_WILDCARDS
+    return None
+
+
 def _wildcard_matcher(pattern: str, delim: str = "/") -> "re.Pattern[str]":
     """Compile an RFC 3501 6.3.8 mailbox pattern (#427).
 
@@ -537,6 +583,16 @@ class PosternAccount:
         # This is the one matching site for both LIST and LSUB: Twisted's
         # _listWork calls listMailboxes for either command and filters LSUB by
         # subscription afterwards.
+        # Bound the pattern BEFORE compiling it: each wildcard is a lazy
+        # quantifier and several of them backtrack combinatorially against one
+        # name, which on a single-threaded reactor stalls every connected
+        # client (CWE-1333, the class of CVE-2026-106454). A refused pattern
+        # serves nothing, which is also the RFC 3501 6.3.8 answer for a pattern
+        # that matches no mailbox: a tagged OK with no untagged LIST lines.
+        refusal = _list_pattern_refusal(wildcard)
+        if refusal is not None:
+            self._log_pattern_refused(wildcard, refusal)
+            return []
         matcher = _wildcard_matcher(wildcard, "/")
         out: List[Tuple[str, imap4.IMailbox]] = []
         for name, folder in _MAILBOXES.items():
@@ -667,6 +723,16 @@ class PosternAccount:
             "postern-imap: per_account is on but login %r has no derivable viewer "
             "address (empty local part); refusing %s, serving nothing (fail closed)."
             % (self._username, op)
+        )
+
+    def _log_pattern_refused(self, pattern: str, reason: str) -> None:
+        from twisted.python import log
+
+        log.msg(
+            "postern-imap: refusing LIST/LSUB pattern %r (%s); serving nothing "
+            "(fail closed). Bounding the pattern keeps a wildcard-heavy pattern "
+            "from stalling the reactor for every connected client (CWE-1333)."
+            % (pattern, reason)
         )
 
     def getPersonalNamespaces(self):
