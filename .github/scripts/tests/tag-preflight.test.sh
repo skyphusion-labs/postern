@@ -73,9 +73,9 @@ git checkout --quiet main
 # ------------------------------------------------------------------ runner
 # want_rc: expected exit code. want_text: substring the output must contain.
 run_case() {
-  local desc="$1" want_rc="$2" want_text="$3" track="$4" ref="$5" ref_name="$6" sha="$7"
+  local desc="$1" want_rc="$2" want_text="$3" track="$4" ref="$5" ref_name="$6" sha="$7" event="${8:-}"
   local out rc
-  out="$(cd "$fixture" && GITHUB_REF="$ref" GITHUB_REF_NAME="$ref_name" GITHUB_SHA="$sha" \
+  out="$(cd "$fixture" && GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" GITHUB_REF_NAME="$ref_name" GITHUB_SHA="$sha" \
     GITHUB_STEP_SUMMARY="" bash .github/scripts/tag-preflight.sh "$track" 2>&1)"
   rc=$?
   if [ "$rc" != "$want_rc" ]; then
@@ -181,8 +181,10 @@ run_case "package.json agreeing with the newest mcp tag passes" \
   0 "mcp/package.json 3.4.5 is not behind newest tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
 
 write_mcp 3.4.6
-run_case "package.json ahead of the newest mcp tag passes" \
-  0 "mcp/package.json 3.4.6 is not behind newest tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
+run_case "package.json ahead of the newest mcp tag fails on main" \
+  1 "mcp/package.json version is 3.4.6, ahead of newest postern-mcp-v* tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
+run_case "package.json ahead of the newest mcp tag passes on a pull request" \
+  0 "is ahead of newest tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha" pull_request
 write_mcp 3.4.5
 
 printf 'not-json\n' > mcp/package.json

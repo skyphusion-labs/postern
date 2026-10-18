@@ -48,8 +48,10 @@
 #     registry is that train ledger.
 #   mcp track on a NON-tag ref (#732):
 #     mcp/package.json is not behind the newest postern-mcp-v* tag
-#     (version sort). Equal passes. Ahead passes: the bump lands on main,
-#     then the tag is pushed. Behind fails. An unreadable or absent
+#     (version sort). Equal passes. Behind fails. Ahead fails on main:
+#     that is the pin with no tag. Ahead passes only when
+#     GITHUB_EVENT_NAME is pull_request, because the tag does not exist
+#     until after the bump merges. An unreadable or absent
 #     package.json FAILS. A missing tag FAILS.
 #     There is no pending-release marker: a marker that carries a pass
 #     would disarm the check while it still printed green.
@@ -253,10 +255,18 @@ else
         tagged="${newest#postern-mcp-v}"
         version_behind "$pkg" "$tagged"
         cmp=$?
+        pkg_s="${pkg%%-*}"
+        pkg_s="${pkg_s%%+*}"
+        tag_s="${tagged%%-*}"
+        tag_s="${tag_s%%+*}"
         if [ "$cmp" = 0 ]; then
           fail "mcp/package.json version is ${pkg}, behind newest postern-mcp-v* tag ${newest}"
-        elif [ "$cmp" = 1 ]; then
+        elif [ "$cmp" = 1 ] && [ "$pkg_s" = "$tag_s" ]; then
           note "mcp/package.json ${pkg} is not behind newest tag ${newest}"
+        elif [ "$cmp" = 1 ] && [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+          note "mcp/package.json ${pkg} is ahead of newest tag ${newest}; a pull request may land the bump before the tag"
+        elif [ "$cmp" = 1 ]; then
+          fail "mcp/package.json version is ${pkg}, ahead of newest postern-mcp-v* tag ${newest}"
         else
           fail "mcp/package.json version is ${pkg}, newest postern-mcp-v* tag is ${newest}, and the two could not be compared"
         fi
