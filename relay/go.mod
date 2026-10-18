@@ -15,10 +15,12 @@ go 1.26.0
 // same. Bump to whatever release the advisory names as fixed, minor line
 // included. relay/README.md carries the measurements.
 //
-// Do NOT jump to the 1.27 line yet. govulncheck v1.5.0, the pin in ci.yml,
-// cannot type-check a go1.27 stdlib. It exits 1 on a load error instead of
-// returning a verdict, so the gate stops answering. Bump that tool pin first,
-// then prove the gate still goes red on an old toolchain.
+// The toolchain is go1.27.2 so it matches relay/Dockerfile
+// `FROM golang:1.27.2-bookworm`. govulncheck v1.5.0 cannot type-check a
+// go1.27 stdlib (exit 1, no verdict), so ci.yml pins v1.9.0. Measured
+// 2026-10-15: v1.9.0 on go1.27.2 exits 0 with 0 affecting findings, and
+// GOTOOLCHAIN=go1.26.0 still exits 3 with 29 affecting findings. That
+// control is what proves the new tool still goes red.
 //
 // The `go` directive above is 1.26.0, and a DEPENDENCY moved it rather than a
 // preference. #707 deliberately held it at 1.25.0: a toolchain above the language
@@ -38,12 +40,12 @@ go 1.26.0
 // .github/scripts/assert-relay-go-pin.sh fails CI when the two disagree, so
 // this is enforced and not merely remembered. Its suite is
 // .github/scripts/tests/assert-relay-go-pin.test.sh.
-toolchain go1.26.9
+toolchain go1.27.2
 
 require (
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.25.0
-	github.com/go-ldap/ldap/v3 v3.4.14
+	github.com/go-ldap/ldap/v3 v3.4.15
 	github.com/jhillyerd/enmime v1.3.0
 	github.com/msteinert/pam v1.2.0
 )
