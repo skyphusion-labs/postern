@@ -46,6 +46,15 @@
 #     no CHANGELOG or GitHub Release assert: postern-mcp-v* tags are
 #     release-less by convention (see the CHANGELOG.md preamble); the npm
 #     registry is that train ledger.
+#   mcp track on a NON-tag ref (#732):
+#     mcp/package.json is not behind the newest postern-mcp-v* tag
+#     (version sort). Equal passes. Behind fails. Ahead fails on main:
+#     that is the pin with no tag. Ahead passes only when
+#     GITHUB_EVENT_NAME is pull_request, because the tag does not exist
+#     until after the bump merges. An unreadable or absent
+#     package.json FAILS. A missing tag FAILS.
+#     There is no pending-release marker: a marker that carries a pass
+#     would disarm the check while it still printed green.
 #
 # Exit 0 only when every hard check passed. Failures are COLLECTED, not
 # fail-fast, so one run shows the operator every drift to fix.
@@ -117,6 +126,42 @@ check_pin() {
   else
     note "${label} == ${want}"
   fi
+}
+
+# 0 when left is a strictly older X.Y.Z than right. 1 when it is equal or
+# newer. 2 when either side is not three numeric components. A suffix after
+# - or + is ignored so a tag like 1.2.3-rc.1 compares as 1.2.3.
+version_behind() {
+  local left="$1" right="$2"
+  local lm li lp rm ri rp
+  left="${left%%-*}"
+  left="${left%%+*}"
+  right="${right%%-*}"
+  right="${right%%+*}"
+  case "$left" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 2 ;;
+  esac
+  case "$right" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) return 2 ;;
+  esac
+  lm="${left%%.*}"; left="${left#*.}"
+  li="${left%%.*}"; lp="${left#*.}"
+  rm="${right%%.*}"; right="${right#*.}"
+  ri="${right%%.*}"; rp="${right#*.}"
+  case "$lm$li$lp$rm$ri$rp" in
+    *[!0-9]*) return 2 ;;
+  esac
+  if [ -z "$lm" ] || [ -z "$li" ] || [ -z "$lp" ] || [ -z "$rm" ] || [ -z "$ri" ] || [ -z "$rp" ]; then
+    return 2
+  fi
+  if [ "$lm" -lt "$rm" ]; then return 0; fi
+  if [ "$lm" -gt "$rm" ]; then return 1; fi
+  if [ "$li" -lt "$ri" ]; then return 0; fi
+  if [ "$li" -gt "$ri" ]; then return 1; fi
+  if [ "$lp" -lt "$rp" ]; then return 0; fi
+  return 1
 }
 
 # ---------------------------------------------------------------- ancestry
@@ -191,7 +236,42 @@ else
       note "postern-mcp-v* tags cut no GitHub Release and no CHANGELOG section by convention (npm is that ledger)"
     fi
   else
-    note "mcp track on non-tag ref ${ref_name:-HEAD}: publishes mcp/package.json version $(json_version mcp/package.json)"
+    # One pin, so nothing in the tree can disagree with it. The discriminator
+    # is the tag track. note() does not touch rc, which is why printing the
+    # version here used to pass on an unreadable file (a trailing space and a
+    # green summary). Fetch the tags explicitly: checkout does not promise
+    # them, and the ancestry fetch above is --no-tags on purpose.
+    pkg="$(json_version mcp/package.json)"
+    if [ -z "$pkg" ]; then
+      fail "mcp/package.json version: could not read a version (unreadable or missing pin)"
+    elif ! git fetch --quiet origin 'refs/tags/postern-mcp-v*:refs/tags/postern-mcp-v*'; then
+      fail "could not fetch postern-mcp-v* tags (drift unverifiable; refusing to pass)"
+    else
+      newest="$(git tag -l 'postern-mcp-v*' --sort=-v:refname)"
+      newest="${newest%%$'\n'*}"
+      if [ -z "$newest" ]; then
+        fail "no postern-mcp-v* tag to compare mcp/package.json (${pkg}) against"
+      else
+        tagged="${newest#postern-mcp-v}"
+        version_behind "$pkg" "$tagged"
+        cmp=$?
+        pkg_s="${pkg%%-*}"
+        pkg_s="${pkg_s%%+*}"
+        tag_s="${tagged%%-*}"
+        tag_s="${tag_s%%+*}"
+        if [ "$cmp" = 0 ]; then
+          fail "mcp/package.json version is ${pkg}, behind newest postern-mcp-v* tag ${newest}"
+        elif [ "$cmp" = 1 ] && [ "$pkg_s" = "$tag_s" ]; then
+          note "mcp/package.json ${pkg} is not behind newest tag ${newest}"
+        elif [ "$cmp" = 1 ] && [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+          note "mcp/package.json ${pkg} is ahead of newest tag ${newest}; a pull request may land the bump before the tag"
+        elif [ "$cmp" = 1 ]; then
+          fail "mcp/package.json version is ${pkg}, ahead of newest postern-mcp-v* tag ${newest}"
+        else
+          fail "mcp/package.json version is ${pkg}, newest postern-mcp-v* tag is ${newest}, and the two could not be compared"
+        fi
+      fi
+    fi
   fi
 fi
 

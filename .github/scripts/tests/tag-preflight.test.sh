@@ -73,9 +73,9 @@ git checkout --quiet main
 # ------------------------------------------------------------------ runner
 # want_rc: expected exit code. want_text: substring the output must contain.
 run_case() {
-  local desc="$1" want_rc="$2" want_text="$3" track="$4" ref="$5" ref_name="$6" sha="$7"
+  local desc="$1" want_rc="$2" want_text="$3" track="$4" ref="$5" ref_name="$6" sha="$7" event="${8:-}"
   local out rc
-  out="$(cd "$fixture" && GITHUB_REF="$ref" GITHUB_REF_NAME="$ref_name" GITHUB_SHA="$sha" \
+  out="$(cd "$fixture" && GITHUB_EVENT_NAME="$event" GITHUB_REF="$ref" GITHUB_REF_NAME="$ref_name" GITHUB_SHA="$sha" \
     GITHUB_STEP_SUMMARY="" bash .github/scripts/tag-preflight.sh "$track" 2>&1)"
   rc=$?
   if [ "$rc" != "$want_rc" ]; then
@@ -169,6 +169,43 @@ run_case "mcp track on a v* tag fails (wrong train)" \
 
 run_case "mcp tag off main fails" \
   1 "is not an ancestor of origin/main" mcp refs/tags/postern-mcp-v3.4.5 postern-mcp-v3.4.5 "$side_sha"
+
+echo "mcp track, non-tag ref (#732)"
+# The script fetches postern-mcp-v* from origin, so a local-only tag is invisible.
+run_case "no mcp tag fails rather than printing the package version" \
+  1 "no postern-mcp-v* tag to compare" mcp refs/heads/main main "$main_sha"
+
+git tag postern-mcp-v3.4.5 "$main_sha"
+git push --quiet origin postern-mcp-v3.4.5
+run_case "package.json agreeing with the newest mcp tag passes" \
+  0 "mcp/package.json 3.4.5 is not behind newest tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
+
+write_mcp 3.4.6
+run_case "package.json ahead of the newest mcp tag fails on main" \
+  1 "mcp/package.json version is 3.4.6, ahead of newest postern-mcp-v* tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha"
+run_case "package.json ahead of the newest mcp tag passes on a pull request" \
+  0 "is ahead of newest tag postern-mcp-v3.4.5" mcp refs/heads/main main "$main_sha" pull_request
+write_mcp 3.4.5
+
+printf 'not-json\n' > mcp/package.json
+run_case "unreadable mcp/package.json fails instead of reading as agreement" \
+  1 "mcp/package.json version: could not read a version" mcp refs/heads/main main "$main_sha"
+rm -f mcp/package.json
+run_case "absent mcp/package.json fails instead of reading as agreement" \
+  1 "mcp/package.json version: could not read a version" mcp refs/heads/main main "$main_sha"
+write_mcp 3.4.5
+
+# 3.10.0 must beat 3.9.0. A lexical sort of the tag names picks 3.9.0.
+git tag postern-mcp-v3.9.0 "$main_sha"
+git tag postern-mcp-v3.10.0 "$main_sha"
+git push --quiet origin postern-mcp-v3.9.0 postern-mcp-v3.10.0
+write_mcp 3.10.0
+run_case "newest tag is version-sorted, so 3.10.0 beats 3.9.0" \
+  0 "is not behind newest tag postern-mcp-v3.10.0" mcp refs/heads/main main "$main_sha"
+write_mcp 3.9.0
+run_case "a stale lower version fails once a higher tag exists" \
+  1 "behind newest postern-mcp-v* tag postern-mcp-v3.10.0" mcp refs/heads/main main "$main_sha"
+write_mcp 3.4.5
 
 echo "argument handling"
 run_case "unknown track exits 2 (never a silent pass)" \
