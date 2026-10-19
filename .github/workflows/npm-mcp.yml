@@ -2,7 +2,11 @@ name: npm-mcp
 
 # Publish @skyphusion/postern-mcp to the public npm registry.
 # Tag push: git tag postern-mcp-v1.1.1 && git push origin postern-mcp-v1.1.1
-# Or: workflow_dispatch (uses version in mcp/package.json).
+# The tag must equal mcp/package.json version, on a commit already on main.
+# Or: workflow_dispatch, which publishes the version in mcp/package.json. The
+# preflight only lets a dispatch through when that version EQUALS the newest
+# postern-mcp-v* tag (behind or ahead fails), so it re-publishes an already
+# tagged version and cannot ship an untagged bump.
 #
 # The MCP server rides its OWN tag track (postern-mcp-v*), separate from the v*
 # train that ships the inbound Worker, postern-client, and the door images. By
