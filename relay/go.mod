@@ -15,12 +15,17 @@ go 1.26.0
 // same. Bump to whatever release the advisory names as fixed, minor line
 // included. relay/README.md carries the measurements.
 //
-// The toolchain is go1.27.2 so it matches relay/Dockerfile
-// `FROM golang:1.27.2-bookworm`. govulncheck v1.5.0 cannot type-check a
+// The toolchain is go1.27.3 so it matches relay/Dockerfile
+// `FROM golang:1.27.3-bookworm`. govulncheck v1.5.0 cannot type-check a
 // go1.27 stdlib (exit 1, no verdict), so ci.yml pins v1.9.0. Measured
 // 2026-10-15: v1.9.0 on go1.27.2 exits 0 with 0 affecting findings, and
 // GOTOOLCHAIN=go1.26.0 still exits 3 with 29 affecting findings. That
 // control is what proves the new tool still goes red.
+//
+// go1.27.2 went red again on GO-2026-6809 (crypto/x509, reachable from
+// smtp.Server.ListenAndServe). The advisory names go1.27.3 as the fix.
+// golang.org/x/net v0.60.0 went red on GO-2026-6860 (html.Parse via enmime);
+// v0.62.0 is the fix. Bump both in this same commit as the Dockerfile tag.
 //
 // The `go` directive above is 1.26.0, and a DEPENDENCY moved it rather than a
 // preference. #707 deliberately held it at 1.25.0: a toolchain above the language
@@ -40,7 +45,7 @@ go 1.26.0
 // .github/scripts/assert-relay-go-pin.sh fails CI when the two disagree, so
 // this is enforced and not merely remembered. Its suite is
 // .github/scripts/tests/assert-relay-go-pin.test.sh.
-toolchain go1.27.2
+toolchain go1.27.3
 
 require (
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
@@ -62,7 +67,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/ssor/bom v0.0.0-20170718123548-6386211fdfcf // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 )
