@@ -122,27 +122,17 @@ jobs:
       # pip toolchain; --skip-editable skips the local posternimap package (no PyPI
       # version). pip-audit is pinned for reproducibility.
       #
-      # IGNORE: CVE-2026-106454 (GHSA-8pqf-f4m5-798g / PYSEC-2026-4304), added
-      # 2026-10-18. "Twisted: IMAP wildcardToRegexp() ReDoS", MODERATE.
-      # NO UPSTREAM FIX EXISTS: OSV carries `introduced: 0` and
-      # `last_affected: 26.4.0` with NO `fixed` event, and 26.4.0 is the newest
-      # release on PyPI, so there is no version to bump the pin to.
-      # MITIGATED IN OUR OWN CODE, not accepted. Two parts: the vulnerable
-      # function is not on this door's path (PosternAccount implements
-      # imap4.IAccount and matches patterns itself, so Twisted's one production
-      # call site in MemoryAccountWithoutNamespaces is never reached), and
-      # posternimap/account.py bounds a LIST/LSUB pattern BEFORE compiling it
-      # (_list_pattern_refusal), which closes the same CWE-1333 class in our
-      # replacement matcher. Covered by tests/test_list_pattern_bounds.py.
-      # RE-CHECK TRIGGER: remove this ignore the moment Twisted ships a fixed
-      # release, and bump the pin in imap/pyproject.toml instead.
-      # The flag names exactly ONE advisory id, so every other advisory, in
-      # Twisted or any other dep, still fails this gate.
+      # The CVE-2026-106454 ignore (added 2026-10-18, when 26.4.0 had no fix)
+      # is gone. imap/pyproject.toml pins Twisted==26.10.0rc2, the only PyPI
+      # release that clears that ReDoS and the six advisories that landed on
+      # 26.4.0, including CVE-2026-115774 (IMAP4 SEARCH DoS). pip-audit on
+      # that pin exits 0 with no ignore. Move the pin to final 26.10.0 when
+      # it exists; do not put the ignore back.
       - name: pip-audit (dependency vulnerability gate)
         run: |
           python -m pip install --upgrade pip
           pip install pip-audit==2.10.1
-          pip-audit --skip-editable --ignore-vuln CVE-2026-106454
+          pip-audit --skip-editable
 
   clients-python:
     runs-on: ubuntu-latest
