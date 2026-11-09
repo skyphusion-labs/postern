@@ -13,8 +13,8 @@ hard dependency. From a fresh clone, with only your own domain, you can deploy i
 and receive + read it back. Public, on CF Email (formerly `skyphusion-email`). See **DEPLOY.md** for
 the clean-install quickstart.
 
-**Inbound Worker version:** trust `inbound/package.json` (currently **1.4.3** train; do not hardcode
-a frozen version in this file). Tag-gated release on `main` (`v*`).
+**Inbound Worker version:** trust `inbound/package.json` (do not hardcode a frozen
+version in this file). Tag-gated release on `main` (`v*`).
 
 **Public demo (Skyphusion Labs account, 2026-08):** zone **posternonline.com** lives on the regular
 Skyphusion Labs Cloudflare account (not a separate demo account). Live Worker name **`postern`**,
@@ -41,8 +41,10 @@ Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/A
   the same isolate as the store. **Production receiving is CF Email Routing -> this Worker**, not a
   host MTA on a fleet box.
 - **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) for local services that can only speak
-  SMTP (cron, backups, CI failure mail). Accepts MIME on **`127.0.0.1` only** (never `0.0.0.0`),
-  parses it, POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP). Box-side relay is an
+  SMTP (cron, backups, CI failure mail). Unauthenticated intake is **loopback only**
+  (default `127.0.0.1:2525`; `0.0.0.0` is refused). Authenticated submission (587/465) is a
+  separate door and may bind a public address (`relay/config.go`, `relay/README.md`).
+  It parses MIME and POSTs to the worker over HTTPS. Optional (bring-your-own-SMTP). Box-side relay is an
   **operator/dev seam**, not the production inbound path.
 - **`mcp/`** -- the MCP server (TypeScript) so agents speak the mailbox over MCP. Published on npm
   as **`@skyphusion/postern-mcp`** (`npx -y @skyphusion/postern-mcp`). **Per-identity send** is
@@ -93,7 +95,7 @@ npm run cf-typegen                 # regenerate Env types from wrangler.jsonc
 npx wrangler d1 migrations apply postern   # apply D1 migrations
 
 # mcp/     (TypeScript)  -- npm run typecheck; npx vitest run
-# relay/   (Go 1.25+)    -- go vet ./... ; go build -o skyphusion-email-relay .
+# relay/   (Go 1.26+)    -- go vet ./... ; go build -o skyphusion-email-relay .
 # imap/    (Python/Twisted) -- see imap/README.md; trial-based tests
 ```
 
@@ -115,7 +117,7 @@ changes the answer, against the real handler), and one contract suite per client
 `imap/posternimap/tests/test_worker_contract.py`) asserting each client emits only what the contract
 declares, and can reach everything it honors.
 End-to-end: verify against `npx wrangler dev --config wrangler.dev.jsonc` + `curl` the mailbox API;
-verify the relay on the box with `swaks --server 127.0.0.1:2525 ...`. Always `npm run typecheck`
+verify the relay locally with `swaks --server 127.0.0.1:2525 ...`. Always `npm run typecheck`
 first (it is not part of any test run).
 
 ## Architecture (load-bearing)
@@ -123,15 +125,17 @@ first (it is not part of any test run).
 - **One send core.** All sends funnel through `inbound/src/mailbox.ts` so behavior cannot drift.
   `POST /send` is a back-compat alias of `/api/send`. Keep the Bearer-token gate constant-time;
   never replace with `===`.
-- **Sender-domain rewriting.** The worker only accepts `from` on `ALLOWED_FROM_DOMAIN`
-  (`skyphusion.org`); the relay rewrites off-domain senders (e.g. `root@directory-host`) to `DEFAULT_FROM`
-  and moves the original into `Reply-To`, so CI/cron mail is not rejected.
+- **Sender domain.** `ALLOWED_FROM_DOMAIN` has no product default
+  (`inbound/src/fromdomain.ts`); unset refuses rather than borrowing one.
+  The legacy relay `/send` path rewrites an off-domain sender to `DEFAULT_FROM`
+  and keeps the original as `Reply-To` (`relay/smtp.go`). The `/ingest` seam does not rewrite.
+  Relay defaults are `example.com` and `noreply@example.com` (`relay/config.go`).
 - **Store:** D1 (`messages`/`attachments`, FTS5), R2 (attachment bytes), Vectorize (embeddings for RAG).
 
 ## Gotchas
 
-- **Never bind the relay to `0.0.0.0`.** It sends as `@skyphusion.org`; an internet-reachable SMTP port
-  is an open spam relay. Loopback / private bridge IP only.
+- **Never bind unauthenticated intake to `0.0.0.0`.** That listener carries no AUTH verdict,
+  so a public bind is an open relay (`relay/smtp.go`). Submission (587/465) is the separate public door.
 - **Max 50 recipients** (to + cc + bcc), enforced in both `mailbox.ts` (`MAX_RECIPIENTS`) and `smtp.go`
   (`MaxRecipients`). Keep them in sync.
 - **No queue.** Synchronous sends; on worker failure the relay returns SMTP 451 (transient) so the MTA
@@ -189,8 +193,10 @@ then runs `inbound/smoke.mjs` against the live instance when the `POSTERN_SMOKE_
 configured (and says so loudly when they are not). After any release, confirm the **live Worker
 version** matches the tag you intended.
 
-The relay is rebuilt and reinstalled on the directory host by hand (`go build` + `systemctl`); the
-pipeline does not ship the binary.
+The relay image is `ghcr.io/skyphusion-labs/postern-relay`, published by `relay-image.yml`
+(a `v*` tag, a `relay/**` push to `main`, or `workflow_dispatch`). Nothing installs it
+on a host: the directory-host `systemctl` path is gone (2026-09-24; see that workflow).
+Production receiving stays CF Email Routing to the inbound Worker.
 
 ## Conventions (SkyPhusion house style)
 
