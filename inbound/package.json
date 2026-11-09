@@ -17,12 +17,12 @@
     "postal-mime": "^4.2.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261016.1",
+    "@cloudflare/workers-types": "^5.20261106.1",
     "@types/node": "26.6.6",
     "@vitest/coverage-istanbul": "^5.0.5",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5",
-    "wrangler": "^4.151.1"
+    "wrangler": "^4.158.0"
   },
   "overrides": {
     "sharp": "0.35.5",
