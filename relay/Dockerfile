@@ -18,7 +18,7 @@
 
 # ---- stage 1: builder -- compile a static, cgo-free binary ------------------
 # #541: pin the builder image to the same Go line as relay/go.mod
-# (`go 1.26.0` + `toolchain go1.27.2`). CI reads that same pin through
+# (`go 1.26.0` + `toolchain go1.27.3`). CI reads that same pin through
 # go-version-file, so the gate measures the toolchain this image ships.
 #
 # Never float this tag off the go.mod toolchain line. Go picks the NEWER of the
@@ -31,7 +31,7 @@
 #
 # When bumping the toolchain for a stdlib CVE (audit #107), bump this tag in the
 # same commit.
-FROM golang:1.27.2-bookworm AS builder
+FROM golang:1.27.3-bookworm AS builder
 
 # GOTOOLCHAIN=local is the second half of the #704 fix, and it belongs in the
 # artifact rather than in CI. It makes THIS TAG the truth about the binary.

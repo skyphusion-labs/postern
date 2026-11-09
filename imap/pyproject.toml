@@ -16,7 +16,10 @@ authors = [{ name = "skyphusion" }]
 # carrying known advisories. We pin to a single audited version so CI and a fresh
 # operator install resolve identically; the pip-audit gate in CI flags this pin the
 # moment a new advisory lands, which is the signal to bump it (controlled, visible).
-dependencies = ["Twisted==26.4.0"]
+# 26.4.0 is inside six advisories (postern#776). The only PyPI release that
+# clears them is 26.10.0rc2, including CVE-2026-115774 (IMAP4 SEARCH DoS on
+# this door's protocol parser). Move to the final 26.10.0 the day it exists.
+dependencies = ["Twisted==26.10.0rc2"]
 
 [project.optional-dependencies]
 # Tests use stdlib unittest only; mypy is the type gate (mirrors the worker's
@@ -34,7 +37,7 @@ pam = ["python-pam>=2.0", "six"]  # python-pam 2.0.2 imports six but does not de
 # Native IMAPS (POSTERN_IMAP_TLS_CERT/KEY) goes through Twisted's TLS stack, which
 # needs pyOpenSSL + service-identity. Install .[tls] (or .[pam,tls]) when serving 993.
 # Pinned in lockstep with the base Twisted pin above.
-tls = ["Twisted[tls]==26.4.0"]
+tls = ["Twisted[tls]==26.10.0rc2"]
 
 [project.scripts]
 postern-imap = "posternimap.__main__:main"

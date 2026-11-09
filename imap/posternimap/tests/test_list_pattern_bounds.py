@@ -2,11 +2,11 @@
 
 This is the class of CVE-2026-106454 / GHSA-8pqf-f4m5-798g ("Twisted: IMAP
 wildcardToRegexp() ReDoS"). The upstream cause is NOT live on this door:
-`imap4.wildcardToRegexp` has exactly one production call site in Twisted 26.4.0,
+`imap4.wildcardToRegexp` has exactly one production call site in Twisted,
 inside `MemoryAccountWithoutNamespaces.listMailboxes`, and `PosternAccount`
-implements `imap4.IAccount` directly and does its own matching (#427). There is
-no fixed Twisted release; OSV carries `last_affected: 26.4.0` and no `fixed`
-event, so the pin cannot be bumped out of it.
+implements `imap4.IAccount` directly and does its own matching (#427). The
+pin moved to 26.10.0rc2 (postern#776), which clears the advisory upstream.
+The bound below stays, because this door's matcher is ours.
 
 What #427 did NOT bound is the wildcard COUNT. Each wildcard compiles to its own
 lazy quantifier, so several of them matched against one name backtrack
