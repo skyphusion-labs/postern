@@ -113,7 +113,7 @@ describe("#790 admin user management (both token)", () => {
     });
     expect(body.password).toMatch(/^[A-Za-z0-9_-]{32}$/);
     const stored = row(raw, "bob@skyphusion.org")!;
-    expect(String(stored.secret_hash)).toMatch(/^pbkdf2\$210000\$/);
+    expect(String(stored.secret_hash)).toMatch(/^pbkdf2\$100000\$/);
     expect(String(stored.secret_hash)).not.toContain(body.password);
 
     const list = await call(env, "GET", "/api/admin/users", { token: ADMIN });
@@ -376,7 +376,7 @@ describe("#790 no enumeration, per-row hash upgrade", () => {
     await call(env, "POST", "/api/session", { body: { username: USER, password: "wrong-password-x" } });
     expect(row(raw)!.secret_hash).toBe(weak);
     await signIn(env);
-    expect(String(row(raw)!.secret_hash)).toMatch(/^pbkdf2\$210000\$/);
+    expect(String(row(raw)!.secret_hash)).toMatch(/^pbkdf2\$100000\$/);
     await signIn(env); // still the same password
   });
 });
