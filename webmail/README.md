@@ -20,45 +20,71 @@ step**, zero runtime dependencies.
 
 ## Screenshots
 
-An HTML email rendered safely in the sandboxed iframe (no scripts, no remote
-trackers; author colors on a white background, like any mail client):
+The inbox, a message, and its thread (light theme, wide screen):
+
+![Webmail: list, read and thread](screenshots/webmail-inbox.png)
+
+An HTML email rendered in the sandboxed iframe: no scripts, and remote content is
+always blocked (the notice above the body counts what was stripped). Author colors
+sit on a white canvas, as in any mail client:
 
 ![HTML email render](screenshots/webmail-html-email.png)
 
-The inbox list, a single message (headers, trust verdict, body, attachments), and
-the thread view:
-
-![Webmail: list + read + thread](screenshots/webmail-inbox.png)
-
-Reading a message with an attachment listing, and search:
-
-| Read view | Search |
+| Read view with an attachment | Search, with the filters open |
 |---|---|
 | ![Read view](screenshots/webmail-message.png) | ![Search](screenshots/webmail-search.png) |
 
+Dark theme (follows the system by default), the phone layout, and native sign-in:
+
+![Dark theme](screenshots/webmail-dark.png)
+
+| Phone: list | Phone: message | Sign-in |
+|---|---|---|
+| ![Phone list](screenshots/webmail-mobile-list.png) | ![Phone message](screenshots/webmail-mobile-message.png) | ![Sign-in](screenshots/webmail-signin.png) |
+
 (Synthetic example data; no real mail.)
 
-The shots are captured against a real local `wrangler dev` instance of the inbound
-worker, seeded with the synthetic messages in `inbound/seed.dev.sql` via
-`inbound/wrangler.dev.jsonc` (a local D1, no remote bindings). To regenerate:
-apply `schema.sql` then `seed.dev.sql` to a local D1, `wrangler dev`, open
-`/webmail`, and point it at the dev origin with the dev `POSTERN_API_TOKEN`.
+The shots are captured with Playwright against a real local `wrangler dev` of the
+inbound worker (`inbound/wrangler.dev.jsonc`, a local D1, no remote bindings),
+seeded from `inbound/seed.dev.sql`. To regenerate: apply the migrations, then
+`seed.dev.sql`, to a local D1, run `wrangler dev` with a dev `POSTERN_API_TOKEN`
+in `.dev.vars`, and open `/webmail`. Use `WEBMAIL_AUTH_BACKEND=native` for the
+sign-in shot.
 
-## What it does (v1)
+## What it does
 
-- **Message list** with an Inbox / Sent / All folder filter (the API's `lens`
-  view in session mode, its `direction` filter in token mode, which has no viewer;
-  CONTRACT 10.9).
-- **Read view** for a single message: headers, trust verdict (spf/dkim/dmarc),
-  the body (HTML or plain text, rendered in a sandboxed iframe), and attachments
-  with a **Download** button each.
+- **Message list** with the folder rail (Inbox, Sent, All, Drafts, Trash, Junk,
+  Archive, plus any role queues you belong to), unread dots and counts, and a quiet
+  trust marker (only an untrusted sender is flagged in the list; the reading pane
+  always states the verdict). The list view is the API's `lens` in session mode
+  and its `direction` filter in token mode, which has no viewer (CONTRACT 10.9).
+- **Read view**: sender, recipients and date, the trust verdict with SPF/DKIM/DMARC
+  behind an **Authentication** disclosure, the body (HTML or plain text, in a
+  sandboxed iframe), and attachments with a **Download** button each.
 - **Thread view**: sibling messages in the same thread, click to jump.
-- **Search** over the mailbox (the `/api/search` endpoint).
-- **Compose and reply** when a send-scoped token is configured at connect;
-  plain or rich HTML bodies from one editor (rich HTML is sanitized server-side at
-  send). Read-only without one: the compose controls are gated on a
-  probed send capability, never on the presence of a token, so a read-only token is
-  never offered a UI that can only fail. Full contract: [`COMPOSE.md`](COMPOSE.md).
+- **Search** over the mailbox (`/api/search`), with Unread / Read / Has attachment,
+  From and date filters folded behind a **Filters** button that counts what is active.
+- **Compose, reply, reply all and forward** when the credential can send: plain or
+  rich HTML from one editor (rich HTML is sanitized server-side at send), Cc/Bcc on
+  demand, attachments, autosaved drafts, and a Send bar that stays in reach. The
+  compose controls are gated on a **probed** send capability, never on the presence
+  of a token, so a read-only token is never offered a UI that can only fail. Full
+  contract: [`COMPOSE.md`](COMPOSE.md).
+- **Organize**: star, archive, trash, junk and restore, with a confirmation toast.
+- **Themes**: Match system (the default; follows `prefers-color-scheme`), Light or
+  Dark, from the header **Theme** button or Settings. Stored as `postern_theme` in
+  `localStorage`, with `postern_density` (comfortable or compact). Every color,
+  size and space comes from one token layer of CSS custom properties, and both
+  palettes are tested for WCAG AA contrast (`inbound/webmail-tokens.test.ts`).
+- **Phone layout**: under 1100px the folders become a drawer; under 760px the list
+  and the message are separate views with a **Back to list** control, and Sign out
+  moves into Settings.
+- **Keyboard and screen readers**: a skip link, landmarks (banner, Folders nav,
+  Message list region, one main), visible focus, arrow keys / Home / End in the list,
+  and single-key shortcuts that never fire while you type: `j` / `k` next and
+  previous message, `/` search, `c` compose, `Esc` closes a panel or goes back.
+  Loads and errors are announced through a live region.
+- **Change password** in Settings when signed in with a session (below).
 
 ## Auth (#32): bring your own token
 
@@ -82,11 +108,11 @@ type, no account, domain, or resource name is hardcoded.
 
 ## Sign-in (session) mode (#351)
 
-For a hosted deployment, webmail also offers a **native sign-in**: a username and
-password (the SAME credential you configure for SMTP submission, `smtp_credentials`)
-that mints a short-lived server-side **session** instead of pasting a token. It is
-the default hosted experience; BYO-token stays as the advanced / self-host path (a
-"Use an API token instead" link switches between them).
+Webmail can also offer a **native sign-in**: a username and password (the SAME
+account your mail app uses for SMTP submission and IMAP, `smtp_credentials`) that
+mints a short-lived server-side **session** instead of pasting a token. When it is on,
+the sign-in form is what people see first; BYO-token stays available for operators and
+agents through a "Use an API token instead" link.
 
 Why a session and not a token in the browser: the session lives in an **HttpOnly,
 Secure, SameSite, same-origin cookie** (`__Host-postern_session`), so an XSS through
@@ -99,7 +125,9 @@ echoed in `X-Postern-CSRF`, bound to the session). The browser can finally show
 section 1.
 
 **Enabling it (operator).** Session sign-in is OFF unless explicitly enabled, so
-enabling this feature changes nothing on an existing deployment:
+upgrading changes nothing on an existing deployment. While it is off, `/webmail`
+shows a plain "Webmail sign-in is not enabled on this server" page (no form), with a
+link to the BYO-token gate for operators and agents:
 
 ```
 # wrangler config "vars" (config, not a secret -- holds no credential):
@@ -109,10 +137,20 @@ WEBMAIL_SESSION_IDLE_SECONDS      = "1800"    # sliding idle window (default 30 
 WEBMAIL_SESSION_ABSOLUTE_SECONDS  = "43200"   # absolute cap (default 12 h)
 ```
 
-With `native`, a user signs in with the username + secret you provisioned via
-`POST /api/admin/smtp-credentials`. A native session is granted `read` + `send` + `delete`
-(browse, compose, reply, delete its own mail); admin stays operator-only (never
-reindex or credential provisioning, held only by a `both` token). Directory
+With `native`, people sign in with an account you create with the `both` token:
+`postern admin users create <address>` (the Python client CLI, see
+[`clients/python/README.md`](../clients/python/README.md)) or
+`POST /api/admin/users` (`docs/design/webmail-v2-contracts.md` section 1.10.4;
+the older `POST /api/admin/smtp-credentials` still works). A native session is granted
+`read` + `send` + `delete` + `organize` (browse, compose, reply, file and delete its
+own mail); admin stays operator-only (never reindex or user management, held only by
+a `both` token).
+
+**Change password.** A signed-in person can change their own password in
+**Settings** (`POST /api/session/password`, contract section 1.10.5): current
+password, new password (at least 12 characters, not the username), and confirm. Every
+other session of the account is signed out and this tab stays signed in. It is not
+offered in token mode, where there is no person and no password. Directory
 (`ldap`/`system`) sign-in is designed but deferred and out of this phase; those
 deployments keep using BYO-token webmail.
 
@@ -126,7 +164,9 @@ the token stays in one security context):
 https://<your-postern-origin>/webmail
 ```
 
-Open that, paste your API origin + token, and connect.
+With sign-in on, sign in. With it off (the default), the page says so; choose
+"Operators and agents: connect with an API token", paste your token (the API origin
+is prefilled with the page's own origin), and connect.
 
 You can also host `webmail/index.html` as a static file anywhere (or open it
 locally) and point it at a remote API origin; in that cross-origin case the API
@@ -236,7 +276,7 @@ Recent-recipients autocomplete (`GET /api/recipients/recent`) is D-CONTACTS-1:
 outbound to/cc/bcc for one bound identity (session) or an explicit `viewer=` on
 BYO. It is never estate-wide when unbound.
 
-Settings (theme / density) live in `localStorage`. Remote images remain blocked
+Settings (theme: system, light or dark; density) live in `localStorage`. Remote images remain blocked
 by CSP (`img-src 'self' data:` only) plus body neutralization; the settings panel
 states that honestly (no fake toggle).
 
