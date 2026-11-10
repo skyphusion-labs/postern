@@ -826,6 +826,89 @@ class PosternClient:
         """DELETE /api/drafts/{id}/attachments/{attachmentId}."""
         self._json("DELETE", f"/api/drafts/{_quote(draft_id)}/attachments/{_quote(attachment_id)}")
 
+    # --- human user management (operator; needs the `both` token) ----------
+    #
+    # Contract docs/design/webmail-v2-contracts.md 1.10.4 (#790). A user is one
+    # smtp_credentials row: the same login the webmail, IMAP and SMTP submission
+    # verify. Every answer is the worker JSON; a user object never carries a hash.
+    # A password is only ever returned when the worker GENERATED it, once.
+
+    def list_users(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
+        """GET /api/admin/users. Returns {users, nextCursor}; page with the cursor."""
+        params: dict[str, str] = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        return self._json("GET", "/api/admin/users", params=params or None)
+
+    def get_user(self, username: str) -> Optional[dict[str, Any]]:
+        """GET /api/admin/users/{username}. The user dict, or None if absent."""
+        try:
+            body = self._json("GET", f"/api/admin/users/{_quote(username)}")
+        except PosternError as e:
+            if e.status == 404:
+                return None
+            raise
+        user = body.get("user")
+        return user if isinstance(user, dict) else None
+
+    def create_user(
+        self,
+        username: str,
+        *,
+        from_addr: Optional[str] = None,
+        display_name: Optional[str] = None,
+        password: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """POST /api/admin/users. Never overwrites (E_CONFLICT, 409, if it exists).
+
+        Omit `password` and the worker generates one and returns it ONCE.
+        """
+        body: dict[str, Any] = {"username": username}
+        if from_addr is not None:
+            body["from"] = from_addr
+        if display_name is not None:
+            body["displayName"] = display_name
+        if password is not None:
+            body["password"] = password
+        return self._json("POST", "/api/admin/users", body=body)
+
+    def update_user(
+        self,
+        username: str,
+        *,
+        disabled: Optional[bool] = None,
+        display_name: Optional[str] = None,
+        from_addr: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """PATCH /api/admin/users/{username}. `display_name=""` clears the name.
+
+        Disabling, or moving the bound `from`, ends the user's webmail sessions.
+        """
+        body: dict[str, Any] = {}
+        if disabled is not None:
+            body["disabled"] = disabled
+        if display_name is not None:
+            body["displayName"] = display_name
+        if from_addr is not None:
+            body["from"] = from_addr
+        return self._json("PATCH", f"/api/admin/users/{_quote(username)}", body=body)
+
+    def reset_password(self, username: str, *, password: Optional[str] = None) -> dict[str, Any]:
+        """POST /api/admin/users/{username}/password. Ends the user's sessions.
+
+        Omit `password` and the worker generates one and returns it ONCE.
+        """
+        body: dict[str, Any] = {}
+        if password is not None:
+            body["password"] = password
+        return self._json("POST", f"/api/admin/users/{_quote(username)}/password", body=body)
+
+    def delete_user(self, username: str) -> dict[str, Any]:
+        """DELETE /api/admin/users/{username}. Ends the user's sessions."""
+        return self._json("DELETE", f"/api/admin/users/{_quote(username)}")
+
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""
         try:
