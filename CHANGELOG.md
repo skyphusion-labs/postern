@@ -11,6 +11,18 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+### LDAP: the directory certificate is verified by default
+
+**BREAKING for self-hosters using `AUTH_BACKEND=ldap` with no TLS trust knob.** With neither `LDAP_TLS_CA` nor `LDAP_TLS_PIN_SHA256` set, the IMAP door (Python) used to encrypt the directory channel without checking the certificate, and logged a startup warning. It now verifies the directory certificate against the system roots and the `LDAP_URL` host, on both `ldaps://` and StartTLS, and refuses the login before the bind if the certificate does not verify. **A directory on a private or self-signed CA now fails closed: set `LDAP_TLS_CA` (pin the CA) or `LDAP_TLS_PIN_SHA256` (pin the leaf) to restore it.** The warning is gone with the state it described.
+
+The SMTP relay (Go) already verified `ldaps://` by default, but its no-knob StartTLS path set no TLS ServerName, so it refused every handshake and could not connect at all. It now sends the `LDAP_URL` host and verifies against the system roots.
+
+Both doors are covered by real-handshake tests (`relay/auth_ldap_default_tls_wire_test.go`, `imap/posternimap/tests/test_ldap_tls_wire.py`): an untrusted or wrong-host certificate never receives the bind password, a trusted one does, and both pins still work. CI now installs the IMAP `[ldap]` extra so these run on every PR.
+
+Also: the relay's leaf pin (`LDAP_TLS_PIN_SHA256`) runs in `VerifyConnection`, which also covers resumed TLS sessions (#785).
+
 ## v1.7.1
 
 PATCH. Two security fixes; both are behaviour changes for self-hosters, so read them.

@@ -124,11 +124,10 @@ class Config:
     # verification against a pinned root, never added to the system roots).
     # LDAP_TLS_PIN_SHA256: exact-leaf SHA-256 pin (hex, colons optional, any case),
     # SAN-independent -- THE mechanism for Authentik's default outpost cert.
-    # Mutually exclusive with LDAP_TLS_CA. Neither set = the channel is encrypted
-    # but UNAUTHENTICATED (CERT_NONE, today's behavior) and the proxy logs a loud
-    # startup warning.
+    # Mutually exclusive with LDAP_TLS_CA. Neither set = full verification against
+    # the system roots and the LDAP_URL host (a private-CA directory fails closed).
     ldap_tls_ca: Optional[str] = None
-    ldap_tls_server_name: Optional[str] = None  # LDAP_TLS_SERVER_NAME, extra accepted cert name (CA mode)
+    ldap_tls_server_name: Optional[str] = None  # LDAP_TLS_SERVER_NAME, extra accepted cert name (CA and system-roots mode)
     ldap_tls_pin_sha256: Optional[str] = None
     # LDAP_TIMEOUT (integer seconds, default 10): bounds BOTH the directory connect
     # and the bind/search operations, so a dead or slow directory cannot hang a

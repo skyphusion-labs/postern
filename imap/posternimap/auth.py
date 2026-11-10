@@ -291,31 +291,32 @@ class LDAPBinder:
         """The ldap3 Tls used for BOTH ldaps:// and the ldap:// StartTLS upgrade.
 
         Mirrors relay buildLDAPTLSConfig: CA-pin -> full verification with the PEM
-        as the ONLY trust anchor (plus LDAP_TLS_SERVER_NAME as an accepted cert
-        name when the URL dials an IP); fingerprint-pin -> channel-only here
-        (CERT_NONE) with the exact-leaf check enforced in _secure_channel BEFORE
-        any credential flows; neither -> the prior unauthenticated channel
-        (CERT_NONE), warned loudly at startup (#153). Every path floors the
-        protocol at TLS 1.2, matching the relay's MinVersion doctrine (#186).
+        as the ONLY trust anchor; fingerprint-pin -> channel-only here (CERT_NONE)
+        with the exact-leaf check enforced in _secure_channel BEFORE any credential
+        flows; neither -> full verification against the SYSTEM roots. Verified
+        modes check the certificate against the LDAP_URL host, plus
+        LDAP_TLS_SERVER_NAME as an accepted cert name when the URL dials an IP.
+        Every path floors the protocol at TLS 1.2, matching the relay's MinVersion
+        doctrine (#186).
         """
         import ssl
 
         floor = [ssl.OP_NO_SSLv3, ssl.OP_NO_TLSv1, ssl.OP_NO_TLSv1_1]
         cfg = self._cfg
+        if self._pin is not None:
+            # Pin mode runs the channel at CERT_NONE; _secure_channel then
+            # authenticates the peer by its exact leaf hash BEFORE the bind
+            # (stricter than a CA, mirroring the Go door's InsecureSkipVerify +
+            # VerifyConnection pattern). This is the ONLY CERT_NONE path.
+            return ldap3.Tls(validate=ssl.CERT_NONE, ssl_options=floor)
+        # CA-pin (LDAP_TLS_CA as the ONLY trust anchor) or, with no trust knob, the
+        # system roots. ldap3 checks the cert against the LDAP_URL host itself.
+        kwargs: dict[str, Any] = {"validate": ssl.CERT_REQUIRED, "ssl_options": floor}
         if cfg.ldap_tls_ca:
-            kwargs: dict[str, Any] = {
-                "validate": ssl.CERT_REQUIRED,
-                "ca_certs_file": cfg.ldap_tls_ca,
-                "ssl_options": floor,
-            }
-            if cfg.ldap_tls_server_name:
-                kwargs["valid_names"] = [cfg.ldap_tls_server_name]
-            return ldap3.Tls(**kwargs)
-        # Pin mode and the unauthenticated default both run the channel at
-        # CERT_NONE; under the pin, _secure_channel authenticates the peer by its
-        # exact leaf hash instead (stricter than a CA, mirroring the Go door's
-        # InsecureSkipVerify + VerifyPeerCertificate pattern).
-        return ldap3.Tls(validate=ssl.CERT_NONE, ssl_options=floor)
+            kwargs["ca_certs_file"] = cfg.ldap_tls_ca
+        if cfg.ldap_tls_server_name:
+            kwargs["valid_names"] = [cfg.ldap_tls_server_name]
+        return ldap3.Tls(**kwargs)
 
     def _secure_channel(self, conn: Any) -> None:
         """Establish and AUTHENTICATE the TLS channel before any credential flows.
@@ -464,14 +465,13 @@ def build_portal(
         verify = TokenVerifier(cfg)
 
     if cfg.auth_mode == "ldap" and not cfg.ldap_tls_ca and not cfg.ldap_tls_pin_sha256:
-        # #153: the directory channel is encrypted but UNAUTHENTICATED (CERT_NONE)
-        # until a trust anchor is configured. Keep today's behavior (opt-in-by-
-        # config-present) but never keep it silently.
+        # No trust knob: the directory certificate is verified against the system
+        # roots and the LDAP_URL host. Say so once, because a directory on a
+        # private CA now fails closed until LDAP_TLS_CA or LDAP_TLS_PIN_SHA256 is set.
         log.msg(
-            "WARNING: LDAP TLS is UNAUTHENTICATED (certificate not validated): an "
-            "active MITM between this proxy and the directory could capture bind "
-            "passwords. Set LDAP_TLS_CA (pinned root) or LDAP_TLS_PIN_SHA256 "
-            "(exact leaf) to authenticate the channel (#153)."
+            "LDAP TLS: verifying the directory certificate against the system roots "
+            "(no LDAP_TLS_CA or LDAP_TLS_PIN_SHA256 set). A directory on a private CA "
+            "needs one of them."
         )
 
     if throttle is None:

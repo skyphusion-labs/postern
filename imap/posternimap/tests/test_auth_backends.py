@@ -413,17 +413,30 @@ class LDAPTLSWiringTest(unittest.TestCase):
         finally:
             td()
 
-    def test_default_is_cert_none_with_tls12_floor(self):
-        # No trust knob -> today's unauthenticated channel (warned at startup),
-        # but never below TLS 1.2 (symmetric with the relay's MinVersion doctrine).
+    def test_default_verifies_against_system_roots_with_tls12_floor(self):
+        # No trust knob -> full verification against the SYSTEM roots (no CA file),
+        # never below TLS 1.2 (symmetric with the relay's MinVersion doctrine).
+        # The real-handshake proof is test_ldap_tls_wire.py.
         record = {}
         td = _install_fake_ldap3(directory={(JOAN_DN, "right"): True}, record=record)
         try:
             self.assertTrue(LDAPBinder(self._cfg())("joan", "right"))
             tls = record["tls"]
-            self.assertEqual(tls["validate"], ssl.CERT_NONE)
+            self.assertEqual(tls["validate"], ssl.CERT_REQUIRED)
+            self.assertNotIn("ca_certs_file", tls)
             for opt in (ssl.OP_NO_SSLv3, ssl.OP_NO_TLSv1, ssl.OP_NO_TLSv1_1):
                 self.assertIn(opt, tls["ssl_options"])
+        finally:
+            td()
+
+    def test_leaf_pin_is_the_only_cert_none_path(self):
+        # CERT_NONE survives ONLY under the pin, where _secure_channel checks the
+        # exact leaf before the bind.
+        record = {}
+        td = _install_fake_ldap3(directory={(JOAN_DN, "right"): True}, record=record)
+        try:
+            self.assertTrue(LDAPBinder(self._cfg(ldap_tls_pin_sha256=PEER_PIN))("joan", "right"))
+            self.assertEqual(record["tls"]["validate"], ssl.CERT_NONE)
         finally:
             td()
 

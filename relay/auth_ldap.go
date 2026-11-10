@@ -46,6 +46,11 @@ type ldapConn interface {
 // (SetTimeout: bind/search read deadline), so a dead or slow directory can neither
 // hang the connect nor hang a bind/search mid-login. A non-positive timeout leaves
 // go-ldap's defaults in place (no timeout); the config default is 10s.
+// ldapDefaultRoots is the trust anchor for the no-knob StartTLS default. nil means
+// the system roots, which is the only production value; the wire tests point it at
+// a test CA so the real verification path can be driven both ways.
+var ldapDefaultRoots *x509.CertPool
+
 var ldapDial = func(url string, timeout time.Duration, tlsConf *tls.Config) (ldapConn, error) {
 	var opts []ldap.DialOpt
 	if timeout > 0 {
@@ -224,15 +229,19 @@ func (a *ldapAuth) Authenticate(username, secret string) (string, error) {
 	defer conn.Close()
 
 	if a.cfg.StartTLS && strings.HasPrefix(strings.ToLower(a.cfg.URL), "ldap://") {
-		// a.tlsConf is nil unless an LDAP_TLS_* knob is set, so the default keeps
-		// system-roots verification -- but the protocol floor is still OURS to state
-		// (#186): the pinned paths set MinVersion TLS 1.2 in buildLDAPTLSConfig, and
-		// the unpinned default must not negotiate lower than they would. go-ldap
-		// passes this straight to tls.Client, so when a CA is pinned the config
-		// carries RootCAs + ServerName.
+		// a.tlsConf is nil unless an LDAP_TLS_* knob is set. The default then
+		// verifies against the system roots and the LDAP_URL host. go-ldap passes
+		// this config straight to tls.Client WITHOUT deriving ServerName, so the
+		// default MUST carry it: without it crypto/tls refuses every handshake and
+		// the no-knob StartTLS path could never connect. The protocol floor is
+		// still OURS to state (#186): the pinned paths set MinVersion TLS 1.2 in
+		// buildLDAPTLSConfig, and the default must not negotiate lower.
 		tc := a.tlsConf
 		if tc == nil {
-			tc = &tls.Config{MinVersion: tls.VersionTLS12}
+			tc = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: ldapDefaultRoots}
+			if u, err := url.Parse(a.cfg.URL); err == nil {
+				tc.ServerName = u.Hostname()
+			}
 		}
 		if err := conn.StartTLS(tc); err != nil {
 			return "", fmt.Errorf("ldap starttls: %w", err)
