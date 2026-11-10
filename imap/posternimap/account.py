@@ -60,40 +60,33 @@ _DURABLE_FOLDERS = ("archive", "trash", "junk", "drafts")
 # Hard bounds on a LIST/LSUB mailbox pattern (CWE-1333, the class of
 # CVE-2026-106454 / GHSA-8pqf-f4m5-798g).
 #
-# #427 already made every non-wildcard character LITERAL (re.escape per
-# character), so regex syntax in a pattern is inert on this door; that is what
-# keeps us off the upstream advisory, whose cause is unescaped pass-through to
-# re.compile. What #427 did not bound is the COUNT of wildcards. Each one
-# compiles to its own lazy quantifier, and several of them matched against one
-# name backtrack combinatorially.
+# #761 replaced the glob-to-regex converter with a linear two-pointer
+# matcher, which retires the backtracking class. The caps stay as defence
+# in depth: a linear matcher does not need them for safety, but they
+# remain a sane input bound on a protocol path, and the #759 tests keep
+# them observable.
 #
-# The cost tracks the wildcard COUNT, not the pattern length and not adjacency
-# (measured on CPython 3.14, worst shape per count, name length in brackets):
-#   [64 chars]  4 wildcards 0.005s   5 wildcards 0.067s
-#   [128 chars] 4 wildcards 0.068s   5 wildcards 1.82s
-# Twisted's reactor is single-threaded and cooperative, so that time is a stall
-# for EVERY connected client, not only the caller (cf. bench/reactor_stall.py).
+# _MAX_WILDCARDS = 4 is the #759 measurement against the old engine.
+# The longest name this door can advertise is Roles/<local part>, and
+# RFC 5321 bounds a local part at 64 octets, so ~70 characters; 4
+# wildcards stayed under 0.07s even at DOUBLE that, and the namespace
+# is one level deep (Roles/abuse), so no 5-wildcard pattern can match
+# a name a 4-wildcard pattern does not. The linear matcher makes the
+# cost argument historical; do not raise the cap without editing the
+# pin in test_list_pattern_bounds.py.
 #
-# _MAX_WILDCARDS = 4 is measured, not taste. The longest name this door can
-# advertise is Roles/<local part>, and RFC 5321 bounds a local part at 64
-# octets, so ~70 characters; 4 wildcards stay under 0.07s even at DOUBLE that.
-# It costs no reachable behavior either: the namespace is one level deep
-# (Roles/abuse), so no 5-wildcard pattern can match a name that a 4-wildcard
-# pattern does not already match.
-#
-# _MAX_PATTERN_LEN is fail-closed hygiene rather than a ReDoS control (17
-# characters was enough to cost 31s at 8 wildcards, so length alone bounds
-# nothing). The longest legitimate pattern is a full role folder name, ~70.
+# _MAX_PATTERN_LEN is fail-closed hygiene. The longest legitimate
+# pattern is a full role folder name, ~70.
 _MAX_PATTERN_LEN = 128
 _MAX_WILDCARDS = 4
 
 
 def _list_pattern_refusal(pattern: str) -> Optional[str]:
-    """Why this LIST/LSUB pattern must not be compiled, or None to allow it.
+    """Why this LIST/LSUB pattern must not be matched, or None to allow it.
 
     Fails CLOSED: this returns a reason for anything it cannot vouch for, and
     the caller serves nothing for a refused pattern. Runs BEFORE
-    ``_wildcard_matcher``, so a refused pattern never reaches ``re.compile``.
+    ``_wildcard_match``, so a refused pattern never reaches the matcher.
     """
     if len(pattern) > _MAX_PATTERN_LEN:
         return "longer than %d characters" % _MAX_PATTERN_LEN
@@ -103,8 +96,40 @@ def _list_pattern_refusal(pattern: str) -> Optional[str]:
     return None
 
 
-def _wildcard_matcher(pattern: str, delim: str = "/") -> "re.Pattern[str]":
-    """Compile an RFC 3501 6.3.8 mailbox pattern (#427).
+def _imap_char_eq(left: str, right: str) -> bool:
+    """Case-insensitive equality matching the previous ``re.I`` matcher.
+
+    ASCII uses ``str.lower``. Non-ASCII uses one escaped character against
+    ``re.I``, which has no quantifier and cannot backtrack; it is the same
+    Unicode folding the #427 matcher applied to literals. ``str.lower``
+    and ``str.casefold`` disagree with ``re.I`` on a handful of pairs
+    (Turkish I, Greek final sigma), and a LIST verdict must not change
+    on those names.
+    """
+    if left == right:
+        return True
+    if left.isascii() and right.isascii():
+        return left.lower() == right.lower()
+    return re.fullmatch(re.escape(left), right, re.I) is not None
+
+
+def _is_hierarchy_delimiter(ch: str, delim: str) -> bool:
+    """True when ``ch`` is the IMAP hierarchy delimiter.
+
+    RFC 3501 6.3.8: ``%`` matches any characters except the hierarchy
+    delimiter. The delimiter is a single character; this door advertises
+    it through ``getPersonalNamespaces``. Comparison is case-insensitive
+    to match the previous ``re.I`` matcher.
+    """
+    if not delim:
+        return False
+    if len(delim) == 1:
+        return _imap_char_eq(ch, delim)
+    return any(_imap_char_eq(ch, d) for d in delim)
+
+
+def _wildcard_match(pattern: str, name: str, delim: str = "/") -> bool:
+    """RFC 3501 6.3.8 mailbox pattern, linear time (#761).
 
     6.3.8 gives the pattern exactly TWO wildcards, and they are the only
     characters with meaning:
@@ -112,29 +137,70 @@ def _wildcard_matcher(pattern: str, delim: str = "/") -> "re.Pattern[str]":
       ``*``  zero or more characters, INCLUDING the hierarchy delimiter
       ``%``  zero or more characters, EXCLUDING the hierarchy delimiter
 
-    Every other character is LITERAL, and 6.3.8 matches the pattern against the
-    WHOLE mailbox name (callers use ``fullmatch``, never ``match``).
+    Every other character is LITERAL, and 6.3.8 matches the pattern against
+    the WHOLE mailbox name.
 
-    We do not use ``imap4.wildcardToRegexp`` because it gives us neither half of
-    that: it substitutes the two wildcards but hands every other character to the
-    regex engine, so ``IN.OX`` matched INBOX, ``Roles/(abuse)`` was a group rather
-    than a name, and an unbalanced paren raised re.error out of LIST instead of
-    listing nothing. Escaping character by character keeps the two wildcards and
-    makes the rest literal, which is what the RFC actually says.
+    Two-pointer glob with a backtrack anchor per wildcard kind. ``*`` can
+    consume any character (including the delimiter); ``%`` cannot. Expanding
+    ``*`` resets the ``%`` anchor, because the star now owns that character
+    and any later ``%`` restarts after it. Worst case O(len(pattern) *
+    len(name)): each name index is consumed at most once per star/percent
+    expansion, with no exponential backtracking.
 
-    ``re.I`` is kept from the inherited matcher: RFC 3501 5.1 makes INBOX
-    case-insensitive, and our other mailbox names are a fixed set, so this is the
-    pre-existing behavior, unchanged by #427.
+    Case-insensitive: RFC 3501 5.1 makes INBOX case-insensitive, and the
+    previous matcher used ``re.I`` for every name. Keeping that is a
+    compatibility constraint, not a new choice.
+
+    We do not use ``imap4.wildcardToRegexp`` and we no longer compile a
+    glob to a regex. The #427 converter escaped every non-wildcard so
+    ``IN.OX`` could not match INBOX, but it still handed the wildcards to
+    a backtracking engine. This matcher keeps the literals literal and
+    retires the engine.
     """
-    parts = []
-    for ch in pattern:
-        if ch == "*":
-            parts.append("(?:.*?)")
-        elif ch == "%":
-            parts.append("(?:[^" + re.escape(delim) + "]*?)")
+    i = 0
+    j = 0
+    star_i = -1
+    star_j = -1
+    pct_i = -1
+    pct_j = -1
+    plen = len(pattern)
+    nlen = len(name)
+
+    while j < nlen:
+        if i < plen and pattern[i] == "*":
+            star_i = i
+            star_j = j
+            pct_i = -1
+            pct_j = -1
+            i += 1
+        elif i < plen and pattern[i] == "%":
+            pct_i = i
+            pct_j = j
+            i += 1
+        elif (
+            i < plen
+            and pattern[i] != "*"
+            and pattern[i] != "%"
+            and _imap_char_eq(pattern[i], name[j])
+        ):
+            i += 1
+            j += 1
+        elif pct_i != -1 and not _is_hierarchy_delimiter(name[j], delim):
+            pct_j += 1
+            j = pct_j
+            i = pct_i + 1
+        elif star_i != -1:
+            star_j += 1
+            j = star_j
+            i = star_i + 1
+            pct_i = -1
+            pct_j = -1
         else:
-            parts.append(re.escape(ch))
-    return re.compile("".join(parts), re.I)
+            return False
+
+    while i < plen and (pattern[i] == "*" or pattern[i] == "%"):
+        i += 1
+    return i == plen
 
 
 # A loose but sufficient shape check for "does this login look like a mail
@@ -576,33 +642,36 @@ class PosternAccount:
         # In the pool (ThreadedAccount.listMailboxes), which is where the Worker read of
         # the role map belongs (#438).
         self._ensure_role_folders()
-        # RFC 3501 6.3.8 matches the pattern against the WHOLE name, so fullmatch,
-        # never match: `LIST "" "IN"` used to return every folder because IN is a
+        # RFC 3501 6.3.8 matches the pattern against the WHOLE name, never a
+        # prefix: `LIST "" "IN"` used to return every folder because IN is a
         # prefix of INBOX, and `LIST "" "%"` used to return children below the
         # delimiter because the child's empty prefix satisfied the pattern (#427).
         # This is the one matching site for both LIST and LSUB: Twisted's
         # _listWork calls listMailboxes for either command and filters LSUB by
         # subscription afterwards.
-        # Bound the pattern BEFORE compiling it: each wildcard is a lazy
-        # quantifier and several of them backtrack combinatorially against one
-        # name, which on a single-threaded reactor stalls every connected
-        # client (CWE-1333, the class of CVE-2026-106454). A refused pattern
-        # serves nothing, which is also the RFC 3501 6.3.8 answer for a pattern
-        # that matches no mailbox: a tagged OK with no untagged LIST lines.
+        # Bound the pattern BEFORE matching it. The matcher is linear, so
+        # the caps are defence in depth rather than a ReDoS fence (CWE-1333,
+        # the class of CVE-2026-106454). A refused pattern serves nothing,
+        # which is also the RFC 3501 6.3.8 answer for a pattern that matches
+        # no mailbox: a tagged OK with no untagged LIST lines.
         refusal = _list_pattern_refusal(wildcard)
         if refusal is not None:
             self._log_pattern_refused(wildcard, refusal)
             return []
-        matcher = _wildcard_matcher(wildcard, "/")
+        # RFC 3501 6.3.8: % does not match the hierarchy delimiter. The
+        # delimiter this door advertises is the NAMESPACE one
+        # (getPersonalNamespaces), which is also getHierarchicalDelimiter
+        # on every listed mailbox.
+        delim = self.getPersonalNamespaces()[0][1]
         out: List[Tuple[str, imap4.IMailbox]] = []
         for name, folder in _MAILBOXES.items():
-            if matcher.fullmatch(name):
+            if _wildcard_match(wildcard, name, delim):
                 out.append((name, self._mailbox(folder, list_view=True)))  # type: ignore[arg-type]
         if self._role_folders:
-            if matcher.fullmatch(ROLE_FOLDER_PREFIX):
+            if _wildcard_match(wildcard, ROLE_FOLDER_PREFIX, delim):
                 out.append((ROLE_FOLDER_PREFIX, RolesParentNode()))  # type: ignore[arg-type]
             for name, folder in self._role_folders.items():
-                if matcher.fullmatch(name):
+                if _wildcard_match(wildcard, name, delim):
                     out.append((name, self._mailbox(folder, list_view=True)))  # type: ignore[arg-type]
         return out
 
