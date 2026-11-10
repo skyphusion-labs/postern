@@ -344,7 +344,83 @@ def build_parser() -> argparse.ArgumentParser:
     ddt = drs.add_parser("detach", help="remove one staged attachment from a draft")
     ddt.add_argument("draft_id")
     ddt.add_argument("attachment_id")
+
+    ad = sub.add_parser(
+        "admin",
+        help="operator commands (need the `both` token)",
+        description="Operator commands. POSTERN_API_TOKEN must be the `both` token.",
+    )
+    ads = ad.add_subparsers(dest="admin_command", required=True)
+    us = ads.add_parser(
+        "users",
+        help="manage the people who sign in (webmail, IMAP, SMTP submission)",
+        description="A password is read from stdin (--password-stdin), never from argv. "
+        "Without it the server generates one and it is printed ONCE.",
+    )
+    uss = us.add_subparsers(dest="users_command", required=True)
+    ul = uss.add_parser("list", help="list users (no hashes, ever)")
+    ul.add_argument("--limit", type=int)
+    ul.add_argument("--cursor")
+    for name, text in (("show", "show one user"), ("disable", "disable a user and end their sessions"),
+                       ("enable", "enable a disabled user (same password)"),
+                       ("delete", "delete a user and end their sessions")):
+        sp = uss.add_parser(name, help=text)
+        sp.add_argument("username")
+    uc = uss.add_parser("create", help="create a user (never overwrites an existing one)")
+    uc.add_argument("username")
+    uc.add_argument("--from", dest="from_addr", help="bound sending address (default: the username)")
+    uc.add_argument("--name", dest="display_name", help="display name")
+    uc.add_argument("--password-stdin", action="store_true", help="read the password from stdin")
+    un = uss.add_parser("set-name", help="set or clear (empty string) the display name")
+    un.add_argument("username")
+    un.add_argument("display_name")
+    ur = uss.add_parser("reset-password", help="reset a password and end the user's sessions")
+    ur.add_argument("username")
+    ur.add_argument("--password-stdin", action="store_true", help="read the password from stdin")
     return p
+
+
+def _stdin_password(wanted: bool) -> Optional[str]:
+    """One line from stdin, without its line ending; None when not asked for."""
+    if not wanted:
+        return None
+    line = sys.stdin.readline().rstrip("\r\n")
+    if not line:
+        raise SystemExit("--password-stdin: no password on stdin")
+    return line
+
+
+def _run_users(client: PosternClient, args: argparse.Namespace) -> int:
+    cmd = args.users_command
+    if cmd == "list":
+        _emit(client.list_users(limit=args.limit, cursor=args.cursor))
+        return 0
+    if cmd == "show":
+        user = client.get_user(args.username)
+        if user is None:
+            print(f"no such user: {args.username}", file=sys.stderr)
+            return 1
+        _emit(user)
+        return 0
+    if cmd == "create":
+        _emit(client.create_user(
+            args.username, from_addr=args.from_addr, display_name=args.display_name,
+            password=_stdin_password(args.password_stdin),
+        ))
+        return 0
+    if cmd in ("disable", "enable"):
+        _emit(client.update_user(args.username, disabled=(cmd == "disable")))
+        return 0
+    if cmd == "set-name":
+        _emit(client.update_user(args.username, display_name=args.display_name))
+        return 0
+    if cmd == "reset-password":
+        _emit(client.reset_password(args.username, password=_stdin_password(args.password_stdin)))
+        return 0
+    if cmd == "delete":
+        _emit(client.delete_user(args.username))
+        return 0
+    raise SystemExit(f"unknown users subcommand: {cmd}")
 
 
 def _run_drafts(client: PosternClient, args: argparse.Namespace) -> int:
@@ -575,6 +651,8 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
 
     if cmd == "drafts":
         return _run_drafts(client, args)
+    if cmd == "admin":
+        return _run_users(client, args)
 
     raise SystemExit(f"unknown command: {cmd}")
 
