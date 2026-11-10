@@ -428,4 +428,39 @@ test.describe("webmail critical journeys (#355)", () => {
     expect(await pageBg()).toBe("rgb(17, 19, 24)");
     expect(await page.evaluate(() => localStorage.getItem("postern_theme"))).toBe("dark");
   });
+
+  test("phone width: list and reading are stacked views with Back, and folders open as a drawer (#795)", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installMocks(page, "token");
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+
+    const row = page.getByText("Hello from Alice");
+    await expect(row).toBeVisible();
+    await expect(page.locator("#folders")).toBeHidden();
+    // Nothing in the header may be pushed off-screen at phone width.
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+
+    await row.click();
+    await expect(page.locator("#reading h2")).toBeVisible();
+    await expect(page.locator("#reading h2")).toHaveText("Hello from Alice");
+    await expect(page.locator("#list")).toBeHidden();
+
+    await page.locator("#backBtn").click();
+    await expect(page.locator("#list")).toBeVisible();
+    await expect(page.locator("#reading h2")).toBeHidden();
+
+    await page.locator("#railBtn").click();
+    await expect(page.locator("#railBtn")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#folders")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#folders")).toBeHidden();
+    await expect(page.locator("#railBtn")).toHaveAttribute("aria-expanded", "false");
+
+    // Sign out stays reachable at phone width, via Settings.
+    await page.locator("#settingsBtn").click();
+    await expect(page.locator("#settingsSignout")).toBeVisible();
+  });
 });
