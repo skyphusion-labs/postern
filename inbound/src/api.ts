@@ -291,17 +291,17 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         }
         forRecipient = body.for.trim().toLowerCase();
       }
-      // Viewer binding under bound-identity auth (#410 / #544). Under a session or a
-      // registry token with the `read` cap, the viewer is the BOUND identity, never a
-      // caller-supplied address: cannot write another account read-state override
-      // (`for: someone-else@`) nor flip ROW-LEVEL messages.seen estate-wide by omitting
-      // `for`. A mismatched explicit `for` is refused rather than silently rewritten.
+      // Viewer binding under bound-identity auth (#410 / #544). Under a session or ANY
+      // registry or runtime identity, whatever its other caps, the viewer is the BOUND
+      // identity, never a caller-supplied address: cannot write another account read-state
+      // override (`for: someone-else@`) nor flip ROW-LEVEL messages.seen estate-wide by
+      // omitting `for`. A mismatched explicit `for` is refused rather than silently rewritten.
       //
       // Static estate Bearer tokens (POSTERN_API_TOKEN / _READ / IMAP door) are
       // UNTOUCHED: they stay estate-scoped and may pass `for` (#350/#357), and they now
       // say so with the literal instead of by omitting an argument.
       let scope: store.AccessScope = "estate";
-      const boundMember = boundReadMember(resolution);
+      const boundMember = boundWriteMember(resolution);
       if (boundMember) {
         const bound = boundMember.trim().toLowerCase();
         if (forRecipient && forRecipient !== bound) {
@@ -315,20 +315,14 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // mark queue mail read; the override written is still keyed to the ONE person
         // above. Widening what you may touch is not widening whose state you write.
         //
-        // DELIBERATELY `sessionReadScope` and NOT `readAccessScope` (#718). This is a
-        // WRITE path, and the ruling widened READ. An agent credential may now read mail
-        // addressed to a human and still may not mark it read, which is the #404 ruling
-        // holding: whose state you may write did not change.
-        //
-        // The `?? []` is the fail-closed half and it is deliberate: sessionReadScope cannot
-        // be empty for a caller that HAS a bound member, so this branch is unreachable
-        // today, but an empty member set is the honest answer to "bound, yet no addresses
-        // resolved" and the store matches it to nothing. It must never fall back to estate.
-        // Had this line been switched to `readAccessScope`, that unreachable branch would
-        // have become the agent's ONLY branch: estate reads undefined, `?? []` makes it the
-        // empty set, `accessClause` turns the empty set into `1=0`, and every agent
-        // mark-as-read would have silently updated zero rows. Fail-closed, and invisible.
-        scope = sessionReadScope(env, resolution) ?? [];
+        // DELIBERATELY the bound member and its role queues, NOT `readAccessScope` (#718).
+        // This is a WRITE path, and the ruling widened READ. An agent credential may read
+        // mail addressed to a human and still may not mark it read, which is the #404
+        // ruling holding: whose state you may write did not change. It is built from the
+        // bound identity directly, not from `sessionReadScope`, because that one binds only
+        // a READ-capable identity, and a write scope must not depend on whether the caller
+        // may also read.
+        scope = [bound, ...rolesForViewer(env, bound)];
       }
       const updated = await store.setSeen(env, body.ids as string[], body.seen, scope, forRecipient);
       return json({ ok: true, updated });
@@ -1211,8 +1205,20 @@ function readViewer(resolution: AuthResolution): string | undefined {
  *  whole point of `store.AccessScope`: there is no argument to leave off, so a route added
  *  later cannot inherit estate reach by forgetting one. */
 function memberWriteScope(resolution: AuthResolution): store.AccessScope {
-  const member = boundReadMember(resolution);
+  const member = boundWriteMember(resolution);
   return member ? [member] : "estate";
+}
+
+/** The single address a resolution is bound to for a state-changing WRITE, or undefined.
+ *
+ *  ANY bound identity: a session, or a registry or runtime identity WHATEVER its caps.
+ *  Deliberately not `boundReadMember`, which binds a Bearer only when it holds `read`:
+ *  the write scope follows the identity, never the presence of another cap, so a token
+ *  with `organize` and no `read` is held to its own address like every other bound
+ *  caller. Only a resolution with NO identity (a static operator or IMAP token) is
+ *  estate, and that is by construction. */
+function boundWriteMember(resolution: AuthResolution): string | undefined {
+  return resolution.identity?.from;
 }
 
 /** The ROLE queue a bound session is asking to read, or null (#425).
