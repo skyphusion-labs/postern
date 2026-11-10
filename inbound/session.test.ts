@@ -5,7 +5,7 @@ import {
   mintNativeSession,
   resolveSession,
   verifyCsrf,
-  webmailAuthSetting,
+  webmailAuthBackend,
   parseCookies,
   SESSION_COOKIE,
   CSRF_COOKIE,
@@ -182,22 +182,16 @@ function setCookies(res: Response): string[] {
 
 // --- session.ts unit tests --------------------------------------------------
 
-// #791 replaced the D3 "unset => off" default with D-AUTH-3 (contract 1.10.6): unset is
-// `auto`, which resolves against the account table (first-run.test.ts proves the
-// resolution on real SQL). This pins only the parse of the configured value.
-describe("webmailAuthSetting (the configured value)", () => {
-  it("unset or empty is auto (native once a user exists; first-run.test.ts)", () => {
-    expect(webmailAuthSetting({} as unknown as Env)).toBe("auto");
-    expect(webmailAuthSetting({ WEBMAIL_AUTH_BACKEND: "  " } as unknown as Env)).toBe("auto");
+describe("webmailAuthBackend (deploy-safe default)", () => {
+  it("defaults to off when unset (no surprise exposure on merge)", () => {
+    expect(webmailAuthBackend({} as unknown as Env)).toBe("off");
   });
-  it("explicit native and explicit off are honored as written", () => {
-    expect(webmailAuthSetting({ WEBMAIL_AUTH_BACKEND: "native" } as unknown as Env)).toBe("native");
-    expect(webmailAuthSetting({ WEBMAIL_AUTH_BACKEND: " OFF " } as unknown as Env)).toBe("off");
+  it("is native only when explicitly configured", () => {
+    expect(webmailAuthBackend({ WEBMAIL_AUTH_BACKEND: "native" } as unknown as Env)).toBe("native");
   });
-  it("treats the deferred ldap/system backends, and a typo, as off (D-AUTH-2 not built)", () => {
-    expect(webmailAuthSetting({ WEBMAIL_AUTH_BACKEND: "ldap" } as unknown as Env)).toBe("off");
-    expect(webmailAuthSetting({ WEBMAIL_AUTH_BACKEND: "system" } as unknown as Env)).toBe("off");
-    expect(webmailAuthSetting({ WEBMAIL_AUTH_BACKEND: "nativ" } as unknown as Env)).toBe("off");
+  it("treats the deferred ldap/system backends as off (D-AUTH-2 not built)", () => {
+    expect(webmailAuthBackend({ WEBMAIL_AUTH_BACKEND: "ldap" } as unknown as Env)).toBe("off");
+    expect(webmailAuthBackend({ WEBMAIL_AUTH_BACKEND: "system" } as unknown as Env)).toBe("off");
   });
 });
 

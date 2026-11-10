@@ -1,9 +1,9 @@
 // First run: POST /api/setup (#791, contract docs/design/webmail-v2-contracts.md 1.10.7).
 // Creates the FIRST user of a fresh deploy and signs them in, so a one-click install
-// needs nobody to paste a token. It is armed only while BOTH hold: the Worker secret
-// POSTERN_SETUP_TOKEN is set (at least 32 characters) and smtp_credentials has no row
-// at all. An explicit WEBMAIL_AUTH_BACKEND=off disarms it. Once any row exists it is
-// closed for good (409 E_SETUP_COMPLETE); the token is then inert.
+// needs nobody to paste a token. It is armed only while ALL hold: WEBMAIL_AUTH_BACKEND
+// is explicitly native (unset is off), the Worker secret POSTERN_SETUP_TOKEN is set (at
+// least 32 characters), and smtp_credentials has no row at all. Once any row exists it
+// is closed for good (409 E_SETUP_COMPLETE); the token is then inert.
 //
 // It writes ONE smtp_credentials row through the same validation as the admin create,
 // so there is no second path to an account. Scripted installers that hold the `both`
@@ -22,7 +22,7 @@ import {
   setupToken,
   throttled,
   unavailable,
-  webmailAuthSetting,
+  webmailAuthBackend,
 } from "./session";
 import { anyUser, createFirstUser, getUser, hashSecret } from "./smtpcreds";
 import { validateNewUser } from "./useradmin";
@@ -42,7 +42,8 @@ const complete = () => sjson({ ok: false, error: "E_SETUP_COMPLETE", message: "s
 /** The /api/setup route. Pre-gate (it carries its own auth: the setup token). */
 export async function handleSetup(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  if (webmailAuthSetting(env) === "off") return notArmed();
+  // Armed only with an EXPLICIT native backend (decision D-AUTH-3): unset is off.
+  if (webmailAuthBackend(env) !== "native") return notArmed();
   const expected = setupToken(env);
   if (expected === null) return notArmed();
   if (request.method !== "POST") {

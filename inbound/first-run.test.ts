@@ -7,9 +7,10 @@ import { handleApi } from "./src/api";
 import { hashSecret } from "./src/smtpcreds";
 import { SESSION_COOKIE, CSRF_COOKIE } from "./src/session";
 
-// #791: which webmail backend is on when WEBMAIL_AUTH_BACKEND is unset, and the
-// first-run POST /api/setup (contract docs/design/webmail-v2-contracts.md 1.10.6 and
-// 1.10.7). Real sqlite from schema.sql: the atomic first-user insert and the
+// #791: which webmail backend is on, and the first-run POST /api/setup (contract
+// docs/design/webmail-v2-contracts.md 1.10.6 and 1.10.7, decision D-AUTH-3 as RULED:
+// unset stays OFF whatever the table holds; setup needs an explicit native backend,
+// the setup secret, and zero users). Real sqlite from schema.sql: the atomic first-user insert and the
 // "any user?" read are SQL, and a fake would only agree with itself.
 
 const ORIGIN = "https://postern.example";
@@ -68,6 +69,8 @@ async function discovery(env: Env) {
   return await res.json();
 }
 
+// Every arming condition at once; tests that need setup armed spread this.
+const ARMED = { WEBMAIL_AUTH_BACKEND: "native", POSTERN_SETUP_TOKEN: TOKEN };
 const SETUP = { setupToken: TOKEN, username: USER, displayName: "Owner", password: PASSWORD };
 const users = (db: DatabaseSync) => (db.prepare("SELECT COUNT(*) AS n FROM smtp_credentials").get() as { n: number }).n;
 
@@ -80,8 +83,31 @@ describe("#791 which backend is on (contract 1.10.6)", () => {
     expect(await res.json()).toMatchObject({ error: "E_SESSIONS_DISABLED" });
   });
 
-  it("unset with a user: native, and the user signs in", async () => {
+  it("unset WITH users stays off: an upgrade never turns sign-in on", async () => {
     const { env, raw } = realEnv();
+    await seed(raw);
+    expect(await discovery(env)).toEqual({ ok: false, authBackend: "off", setupRequired: false });
+    const res = await call(env, "POST", "/api/session", { body: { username: "alice@skyphusion.org", password: PASSWORD } });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "E_SESSIONS_DISABLED" });
+  });
+
+  it("unset, zero users, setup token set: setup is NOT armed", async () => {
+    const { env, raw } = realEnv({ POSTERN_SETUP_TOKEN: TOKEN });
+    expect(await discovery(env)).toEqual({ ok: false, authBackend: "off", setupRequired: false });
+    const res = await call(env, "POST", "/api/setup", { body: SETUP });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "E_NOT_FOUND" });
+    expect(users(raw)).toBe(0);
+  });
+
+  it("explicit native, zero users, setup token set: setup IS armed", async () => {
+    const { env } = realEnv(ARMED);
+    expect(await discovery(env)).toEqual({ ok: false, authBackend: "native", setupRequired: true });
+  });
+
+  it("explicit native with users: native, and a user signs in", async () => {
+    const { env, raw } = realEnv({ WEBMAIL_AUTH_BACKEND: "native" });
     await seed(raw);
     expect(await discovery(env)).toEqual({ ok: false, authBackend: "native", setupRequired: false });
     const res = await call(env, "POST", "/api/session", { body: { username: "alice@skyphusion.org", password: PASSWORD } });
@@ -90,13 +116,8 @@ describe("#791 which backend is on (contract 1.10.6)", () => {
     expect((await call(env, "GET", "/api/folders", { headers: { cookie } })).status).toBe(200);
   });
 
-  it("unset, no users, setup armed: native with setupRequired", async () => {
-    const { env } = realEnv({ POSTERN_SETUP_TOKEN: TOKEN });
-    expect(await discovery(env)).toEqual({ ok: false, authBackend: "native", setupRequired: true });
-  });
-
-  it("only a DISABLED user still counts as a user: native, setup closed", async () => {
-    const { env, raw } = realEnv({ POSTERN_SETUP_TOKEN: TOKEN });
+  it("only a DISABLED user still counts as a user: setup closed", async () => {
+    const { env, raw } = realEnv(ARMED);
     await seed(raw, "alice@skyphusion.org", 1);
     expect(await discovery(env)).toEqual({ ok: false, authBackend: "native", setupRequired: false });
     const res = await call(env, "POST", "/api/setup", { body: SETUP });
@@ -104,8 +125,8 @@ describe("#791 which backend is on (contract 1.10.6)", () => {
     expect(await res.json()).toMatchObject({ error: "E_SETUP_COMPLETE" });
   });
 
-  it("explicit off always wins: no sign-in, no setup, an existing cookie is ignored", async () => {
-    const on = realEnv();
+  it("explicit off disarms setup and ignores an existing cookie", async () => {
+    const on = realEnv({ WEBMAIL_AUTH_BACKEND: "native" });
     await seed(on.raw);
     const signed = await call(on.env, "POST", "/api/session", { body: { username: "alice@skyphusion.org", password: PASSWORD } });
     const cookie = `${SESSION_COOKIE}=${cookieValue(signed, SESSION_COOKIE)}`;
@@ -118,6 +139,11 @@ describe("#791 which backend is on (contract 1.10.6)", () => {
     expect((await call(off, "POST", "/api/session", { body: { username: "alice@skyphusion.org", password: PASSWORD } })).status).toBe(404);
     on.raw.prepare("DELETE FROM smtp_credentials").run();
     expect((await call(off, "POST", "/api/setup", { body: SETUP })).status).toBe(404);
+    // ...and an UNSET backend ignores that cookie too: only explicit native honors it.
+    on.raw.prepare("INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled) SELECT 'alice@skyphusion.org', 'alice@skyphusion.org', 'x', 0").run();
+    const unset = { ...(on.env as unknown as Record<string, unknown>), WEBMAIL_AUTH_BACKEND: undefined } as unknown as Env;
+    expect((await call(unset, "GET", "/api/folders", { headers: { cookie } })).status).toBe(401);
+    expect((await call(unset, "GET", "/api/session", { headers: { cookie } })).status).toBe(401);
   });
 
   it("explicit native with no users and no token: native, nothing to set up", async () => {
@@ -136,7 +162,7 @@ describe("#791 which backend is on (contract 1.10.6)", () => {
 
 describe("#791 POST /api/setup (contract 1.10.7)", () => {
   it("creates the first user with the chosen password and signs them in", async () => {
-    const { env, raw } = realEnv({ POSTERN_SETUP_TOKEN: TOKEN });
+    const { env, raw } = realEnv(ARMED);
     const res = await call(env, "POST", "/api/setup", { body: SETUP });
     expect(res.status).toBe(201);
     const body = (await res.json()) as Record<string, unknown>;
@@ -162,7 +188,7 @@ describe("#791 POST /api/setup (contract 1.10.7)", () => {
   });
 
   it("a wrong setup token is 401, counted, and locks out (even the right token) at the threshold", async () => {
-    const { env, raw } = realEnv({ POSTERN_SETUP_TOKEN: TOKEN, WEBMAIL_AUTH_MAX_FAILURES: "3" });
+    const { env, raw } = realEnv({ ...ARMED, WEBMAIL_AUTH_MAX_FAILURES: "3" });
     const ip = { "cf-connecting-ip": "203.0.113.9" };
     for (let i = 0; i < 3; i++) {
       const res = await call(env, "POST", "/api/setup", { headers: ip, body: { ...SETUP, setupToken: `wrong-${i}-0123456789abcdef0123456789` } });
@@ -178,7 +204,7 @@ describe("#791 POST /api/setup (contract 1.10.7)", () => {
   });
 
   it("after setup, any further attempt is 409 before the token is even compared", async () => {
-    const { env, raw } = realEnv({ POSTERN_SETUP_TOKEN: TOKEN });
+    const { env, raw } = realEnv(ARMED);
     await seed(raw);
     const res = await call(env, "POST", "/api/setup", { body: { ...SETUP, setupToken: "wrong-0123456789abcdef0123456789" } });
     expect(res.status).toBe(409);
@@ -187,20 +213,20 @@ describe("#791 POST /api/setup (contract 1.10.7)", () => {
   });
 
   it("a short setup token arms nothing", async () => {
-    const { env } = realEnv({ POSTERN_SETUP_TOKEN: "too-short" });
-    expect(await discovery(env)).toEqual({ ok: false, authBackend: "off", setupRequired: false });
+    const { env } = realEnv({ WEBMAIL_AUTH_BACKEND: "native", POSTERN_SETUP_TOKEN: "too-short" });
+    expect(await discovery(env)).toEqual({ ok: false, authBackend: "native", setupRequired: false });
     expect((await call(env, "POST", "/api/setup", { body: { ...SETUP, setupToken: "too-short" } })).status).toBe(404);
   });
 
   it("no setup token configured: the route does not exist", async () => {
-    const { env } = realEnv();
+    const { env } = realEnv({ WEBMAIL_AUTH_BACKEND: "native" });
     const res = await call(env, "POST", "/api/setup", { body: SETUP });
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ error: "E_NOT_FOUND" });
   });
 
   it("refuses cross-site, oversized, incomplete and weak requests before touching the token", async () => {
-    const { env, raw } = realEnv({ POSTERN_SETUP_TOKEN: TOKEN });
+    const { env, raw } = realEnv(ARMED);
     const cases: Array<[Parameters<typeof call>[3], number, string]> = [
       [{ headers: { "sec-fetch-site": "cross-site" }, body: SETUP }, 403, "E_CROSS_ORIGIN"],
       [{ headers: { origin: "https://evil.example" }, body: SETUP }, 403, "E_CROSS_ORIGIN"],
@@ -209,7 +235,7 @@ describe("#791 POST /api/setup (contract 1.10.7)", () => {
       [{ body: { ...SETUP, password: undefined } }, 400, "E_FIELD_MISSING"],
       [{ body: { ...SETUP, setupToken: undefined } }, 400, "E_FIELD_MISSING"],
       [{ body: { ...SETUP, password: "short" } }, 400, "E_PASSWORD_POLICY"],
-      [{ body: { ...SETUP, username: "bad user" } }, 400, "E_VALIDATION_ERROR"],
+      [{ body: { ...SETUP, username: "bad user" } }, 400, "E_INVALID_USERNAME"],
       [{ body: { ...SETUP, from: "owner@evil.example" } }, 400, "E_SENDER_NOT_ALLOWED"],
     ];
     for (const [opts, status, error] of cases) {
@@ -223,7 +249,7 @@ describe("#791 POST /api/setup (contract 1.10.7)", () => {
   });
 
   it("two racing setups produce exactly one user", async () => {
-    const { env, raw } = realEnv({ POSTERN_SETUP_TOKEN: TOKEN });
+    const { env, raw } = realEnv(ARMED);
     const [a, b] = await Promise.all([
       call(env, "POST", "/api/setup", { body: SETUP }),
       call(env, "POST", "/api/setup", { body: { ...SETUP, username: "rival@skyphusion.org" } }),

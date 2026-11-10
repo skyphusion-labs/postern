@@ -42,7 +42,7 @@ import {
   resolveSession,
   verifyCsrf,
   sessionCookieValue,
-  webmailAuthSetting,
+  webmailAuthBackend,
 } from "./session";
 import { roleMap, rolesForViewer } from "./roles";
 import { readBodyCapped, readBytesCapped, PayloadTooLargeError } from "./body";
@@ -2031,10 +2031,9 @@ interface AuthResolution extends TokenResolution {
 // only when no Authorization header is present (Bearer wins, contract 1.8). Gated on
 // the native backend so flipping WEBMAIL_AUTH_BACKEND to off is an instant kill-switch.
 async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolution | null> {
-  // An explicit `off` ignores the cookie; otherwise a valid session row is itself proof
-  // a user existed, and resolveSession re-checks that user (contract 1.10.6), so the
-  // cookie path needs no "any user?" read.
-  if (webmailAuthSetting(env) === "off") return null;
+  // Only an explicit native honors the cookie (contract 1.10.6); resolveSession then
+  // re-checks the minting account (1.10.3).
+  if (webmailAuthBackend(env) !== "native") return null;
   const rawId = sessionCookieValue(request);
   if (!rawId) return null;
   const session = await resolveSession(env, rawId);

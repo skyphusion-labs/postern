@@ -48,17 +48,14 @@ export const CSRF_HEADER = "x-postern-csrf";
 // an honest "sessions disabled", never a half-built directory bind.
 export type AuthBackend = "native" | "off";
 
-// The CONFIGURED setting (contract 1.10.6, #791, decision D-AUTH-3). `auto` is the
-// unset/empty value: native once any user exists (or first run is armed), else off.
-// An explicit `off` always wins; `ldap`/`system` (deferred, 1.9) and any typo are off.
-// This replaced the D3 "unset => off" default: that guarded a merge-deploys-live repo
-// against surprise exposure, and deploys are now tag-gated with the change stated in
-// the release note, while a non-technical operator needs sign-in to just work.
-export type AuthSetting = "native" | "off" | "auto";
-
-export function webmailAuthSetting(env: Env): AuthSetting {
+// DELIBERATE deploy-safety default (design-conformance note D3), REAFFIRMED by decision
+// D-AUTH-3 (contract 1.10.6, #791): UNSET => `off`, always, whatever smtp_credentials
+// holds. A release must never silently open a sign-in surface on an existing
+// self-hosted deploy. An operator (or the installer, for a new install) opts in with
+// an explicit WEBMAIL_AUTH_BACKEND=native. `ldap`/`system` (deferred, 1.9) and any typo
+// are `off`. Off also means a session cookie is ignored everywhere.
+export function webmailAuthBackend(env: Env): AuthBackend {
   const raw = (env.WEBMAIL_AUTH_BACKEND || "").trim().toLowerCase();
-  if (raw === "") return "auto";
   return raw === "native" ? "native" : "off";
 }
 
@@ -84,18 +81,13 @@ export interface BackendState {
   setupRequired: boolean;
 }
 
-// Resolve what is ON right now. Costs one indexed read (anyUser) unless the setting
-// is an explicit `off`. Called only on the session routes and /api/setup; a request
-// that carries a session cookie never needs it (a session row implies a user did
-// exist, and resolveSession re-checks that user).
+// Resolve the discovery state (contract 1.10.6/1.10.7). First run is armed only when
+// ALL hold: an explicit native backend, a usable POSTERN_SETUP_TOKEN, and zero users.
+// The "any user?" read (one indexed SELECT) runs only when the first two already hold.
 export async function resolveAuthBackend(env: Env): Promise<BackendState> {
-  const setting = webmailAuthSetting(env);
-  if (setting === "off") return { backend: "off", setupRequired: false };
-  const users = await anyUser(env);
-  const setupRequired = !users && setupToken(env) !== null;
-  if (setting === "native") return { backend: "native", setupRequired };
-  if (users || setupRequired) return { backend: "native", setupRequired };
-  return { backend: "off", setupRequired: false };
+  if (webmailAuthBackend(env) === "off") return { backend: "off", setupRequired: false };
+  if (setupToken(env) === null) return { backend: "native", setupRequired: false };
+  return { backend: "native", setupRequired: !(await anyUser(env)) };
 }
 
 // Windows (contract 1.5.3). Idle window + absolute cap; expires_at = min(last_seen +
@@ -371,14 +363,14 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
   const path = url.pathname;
   if (path !== "/api/session" && path !== "/api/session/refresh" && path !== "/api/session/password") return null;
 
-  const setting = webmailAuthSetting(env);
+  const backend = webmailAuthBackend(env);
   const idle = idleSeconds(env);
-  // An explicit `off` ignores the cookie everywhere (contract 1.10.6); sign-out still
-  // clears it.
-  const cookieId = setting === "off" ? "" : sessionCookieValue(request);
+  // Off (unset included) ignores the cookie everywhere (contract 1.10.6); sign-out
+  // still clears it.
+  const cookieId = backend === "off" ? "" : sessionCookieValue(request);
 
   if (path === "/api/session" && request.method === "POST") {
-    if ((await resolveAuthBackend(env)).backend === "off") {
+    if (backend === "off") {
       return sjson({ ok: false, error: "E_SESSIONS_DISABLED", authBackend: "off" }, 404);
     }
     // Login CSRF (#409 part 3): a mint is state-changing and carries no token, so an

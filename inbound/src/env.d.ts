@@ -238,19 +238,21 @@ interface Env {
 
   // --- Webmail v2 session auth (#351, epic #338; docs/design/webmail-v2-contracts.md) ---
   /**
-   * Webmail session backend selector (contract 1.10.6, #791). "native" mints a session
-   * by verifying a smtp_credentials login (the same PBKDF2 the submission relay uses);
-   * "off" exposes NO sign-in, NO first-run setup and ignores session cookies (BYO-token
-   * webmail only) and ALWAYS wins. UNSET or empty means native once any user exists or
-   * first-run setup is armed, else off. "ldap"/"system" (directory login, contract 1.9
-   * / decision D-AUTH-2) are DEFERRED and Conrad-gated; they, and any other value, are
-   * "off". Config VAR, not a secret (holds no credential).
+   * Webmail session backend selector (contract 1.10.6, #791, decision D-AUTH-3).
+   * Only an explicit "native" turns sign-in on: it mints a session by verifying a
+   * smtp_credentials login (the same PBKDF2 the submission relay uses). UNSET, empty,
+   * "off", the deferred "ldap"/"system" (contract 1.9 / D-AUTH-2) and any typo are all
+   * "off": NO sign-in, NO first-run setup, session cookies ignored, BYO-token webmail
+   * only. Unset stays off whatever smtp_credentials holds, so an upgrade never turns
+   * sign-in on; the installer writes "native" for a new install. Config VAR, not a
+   * secret (holds no credential).
    */
   WEBMAIL_AUTH_BACKEND?: string;
   /**
-   * First-run setup secret (contract 1.10.7, #791). While smtp_credentials has NO row,
-   * POST /api/setup with this value creates the first user and signs them in. At least
-   * 32 characters, else treated as unset. Inert once any user exists. SECRET
+   * First-run setup secret (contract 1.10.7, #791). With WEBMAIL_AUTH_BACKEND explicitly
+   * "native" and NO smtp_credentials row, POST /api/setup with this value creates the
+   * first user and signs them in. At least 32 characters, else treated as unset. Inert
+   * once any user exists; the installer deletes it then. SECRET
    * (`wrangler secret put POSTERN_SETUP_TOKEN`), never a plain var.
    */
   POSTERN_SETUP_TOKEN?: string;

@@ -134,7 +134,7 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     auth: "session-cookie" },
   { id: "setup", method: "ANY", path: "/api/setup", match: "exact", scope: null, auth: "session-mint",
     body: ["setupToken", "username", "from", "displayName", "password"],
-    note: "first run (#791, contract 1.10.7): armed only by the POSTERN_SETUP_TOKEN secret on an EMPTY account table; atomic; 409 E_SETUP_COMPLETE once any user exists; 404 when not armed" },
+    note: "first run (#791, contract 1.10.7): armed only when WEBMAIL_AUTH_BACKEND is explicitly native AND the POSTERN_SETUP_TOKEN secret is set AND the account table is EMPTY; atomic; 409 E_SETUP_COMPLETE once any user exists; 404 when not armed" },
   { id: "session-password", method: "POST", path: "/api/session/password", match: "exact", scope: null,
     auth: "session-cookie", body: ["currentPassword", "newPassword"],
     note: "self-service change password (#790, contract 1.10.5): cookie session + CSRF only, a Bearer is refused; throttled on the sign-in keys; rotates this session and ends the others" },

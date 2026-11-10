@@ -36,7 +36,7 @@
         "displayName",
         "password"
       ],
-      "note": "first run (#791, contract 1.10.7): armed only by the POSTERN_SETUP_TOKEN secret on an EMPTY account table; atomic; 409 E_SETUP_COMPLETE once any user exists; 404 when not armed"
+      "note": "first run (#791, contract 1.10.7): armed only when WEBMAIL_AUTH_BACKEND is explicitly native AND the POSTERN_SETUP_TOKEN secret is set AND the account table is EMPTY; atomic; 409 E_SETUP_COMPLETE once any user exists; 404 when not armed"
     },
     "session-password": {
       "body": [
