@@ -106,6 +106,12 @@ export function fakeFetch(m) {
     }
 
     if (p === `${z}/email/routing` && method === "GET") return ok(m.routing);
+    if (p === `${z}/email/routing/disable` && method === "POST") {
+      // measured 2026-11-10: disabling Routing deletes the MX / SPF / DKIM it manages
+      m.routing.enabled = false;
+      m.dns = m.dns.filter((r) => !(r.type === "MX" && r.name === m.domain) && !(r.type === "TXT" && r.name === m.domain && /^v=spf1/.test(r.content)));
+      return ok(m.routing);
+    }
     if (p === `${z}/email/routing/dns` && method === "POST") {
       m.routing.enabled = true;
       for (const n of [1, 2, 3]) m.dns.push({ id: `mx${n}`, type: "MX", name: m.domain, content: `route${n}.mx.cloudflare.net`, priority: n });

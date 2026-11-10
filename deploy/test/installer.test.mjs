@@ -91,6 +91,8 @@ describe("install", () => {
       assert.match(text, new RegExp(`[+~] (created|updated)   .*${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), `output does not say it created ${w}`);
     }
     assertNoSecretPrinted(null, text);
+    assert.match(text, /E_SENDER_DOMAIN_NOT_AVAILABLE[\s\S]*about a minute before the first send/);
+    assert.match(text, /wrote v=DMARC1; p=none before enabling Sending/);
   });
 
   test("the credentials file is mode 600 and holds what the installer generated", async () => {
@@ -382,6 +384,20 @@ describe("upgrade and rollback", () => {
     assert.equal(c.m.scripts.postern.live, oldVersion);
     assert.equal(c.m.restores.length, 0, "rollback without --restore-db touched D1");
     await assert.rejects(rollback(c.deps, c.opts), (e) => e instanceof Refused && /nothing to roll back/.test(e.message));
+  });
+
+  test("rollback never writes to Email Routing or DNS (disabling Routing deletes the zone's MX, SPF and DKIM)", async () => {
+    const c = await installed();
+    writeFileSync(join(c.repoRoot, "inbound", "migrations", "0099_new_index.sql"), "CREATE INDEX IF NOT EXISTS idx_x ON messages(id);\n");
+    writeFileSync(join(c.repoRoot, "inbound", "src", "index.ts"), "export default { v: 2 };\n");
+    await install(c.deps, c.opts, "upgrade");
+    const before = c.m.requests.length;
+    const dns = JSON.stringify(c.m.dns);
+    await rollback(c.deps, { ...c.opts, restoreDb: true });
+    const touched = c.m.requests.slice(before).filter((r) => r.method !== "GET" && /\/email\/routing|\/dns_records/.test(r.path));
+    assert.deepEqual(touched, [], `rollback wrote to Routing or DNS: ${JSON.stringify(touched.map((r) => r.method + " " + r.path))}`);
+    assert.equal(JSON.stringify(c.m.dns), dns);
+    assert.equal(c.m.routing.enabled, true);
   });
 
   test("rollback --restore-db restores D1 to the bookmark taken before the upgrade", async () => {

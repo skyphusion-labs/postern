@@ -522,6 +522,7 @@ async function ensureSending(ctx, pf) {
     // Measured 2026-11-10: a send in the first seconds after enabling is refused with
     // E_SENDER_DOMAIN_NOT_AVAILABLE; it was accepted about a minute later.
     ctx.log(`  note: Cloudflare can take about a minute before it accepts the first send from ${opts.domain}.`);
+    ctx.sendingNew = true;
   } else {
     rep.unchanged(`Email Sending for ${opts.domain}`);
   }
@@ -565,6 +566,7 @@ async function ensureDmarc(ctx, pf) {
   const have = records.find((r) => r.type === "TXT" && norm(r.name) === norm(name) && /^v=DMARC1/i.test(unquote(r.content)));
   if (have) return rep.kept(`DNS TXT ${name} (your existing DMARC policy is left as it is)`);
   await ensureDnsRecords(ctx, pf, [{ type: "TXT", name, content: `v=DMARC1; p=${opts.dmarcPolicy}` }], "DMARC");
+  ctx.dmarcWritten = !opts.dryRun;
   if (opts.dmarcPolicy !== "reject") {
     ctx.log(`  note: Cloudflare Email Sending recommends p=reject. If only Postern sends as ${opts.domain}, use --dmarc reject (a new install only; an existing DMARC is never changed).`);
   }
@@ -722,6 +724,13 @@ export async function install(deps, opts, mode = "install") {
   log(opts.dryRun ? `dry run: ${ctx.rep.changes.length} change(s) would be made.` : n ? `done: ${n} change(s) made.` : "done: nothing to change; this install is current.");
   if (!opts.dryRun) {
     log(`credentials: ${ctx.paths.creds} (mode 600; keep it, it is not shown here)`);
+    if (ctx.sendingNew) {
+      log(`sending:     Email Sending was just enabled. Sends are refused with E_SENDER_DOMAIN_NOT_AVAILABLE`);
+      log(`             for up to about 60 s while Cloudflare propagates it. Wait about a minute before the first send.`);
+    }
+    if (ctx.dmarcWritten) {
+      log(`dmarc:       wrote v=DMARC1; p=${opts.dmarcPolicy} before enabling Sending, so Cloudflare did not write its own p=reject.`);
+    }
     log(`webmail:     https://${opts.hostname}/webmail  (sign in as ${opts.admin})`);
   }
   return { changes: ctx.rep.changes, state: ctx.state };

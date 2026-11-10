@@ -130,6 +130,12 @@ node deploy/postern.mjs rollback --domain example.com             # Worker back 
 node deploy/postern.mjs rollback --domain example.com --restore-db # and D1 back to the bookmark
 ```
 
+`rollback` touches only the Worker version and, with `--restore-db`, the D1 store. It never
+changes Email Routing or DNS. That is deliberate: **disabling Email Routing deletes the MX,
+SPF and DKIM records it manages** (measured 2026-11-10), so a zone's mail would stop
+arriving. If you ever disable Routing yourself, first save what
+`GET /zones/<zone>/email/routing/dns` returns, so that you can re-create those records.
+
 `--restore-db` LOSES mail stored after the upgrade. Use it only when the new schema is the
 problem. Most rollbacks need only the Worker. Migrations are additive, so the older Worker
 runs against the newer schema. After a rollback, check out the older tag before the next
