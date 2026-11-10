@@ -6,6 +6,7 @@
 // lays the rails and changes NO behaviour: nothing reads a grant for authorization yet.
 // The powers are named now so a grant made today means what the later slices enforce:
 //
+//   read      read the address's mail (under AGENT_READ_SCOPE=granted) (S2)
 //   organize  mark read / flags / move on the address's mail          (S2)
 //   quote     quote the address's mail into a reply or forward        (S3)
 //   send_as   send with the address as From                           (S4)
@@ -16,8 +17,11 @@
 //   - The grantee must be a LIVE agent identity at mint. D1 does not enforce foreign keys,
 //     so the INSERT itself is conditional on the grantee row existing unrevoked; a revoke
 //     that lands between the check and the write leaves no grant and no "ok" audit row.
-//   - powers is a non-empty subset of the three above; anything else is 400, never
-//     stripped. The address must be on ALLOWED_FROM_DOMAIN and must not be the grantee's
+//   - powers is a non-empty subset of the four above; anything else is 400, never
+//     stripped. Every power implies `read` (filing, quoting or sending as mail you cannot
+//     read means nothing), so the STORED set always carries it: the record says what the
+//     grant allows, with no rule left for a reader to re-derive.
+//   - The address must be on ALLOWED_FROM_DOMAIN and must not be the grantee's
 //     own address (an identity already acts on its own mail; a grant there means nothing).
 //   - At most one ACTIVE grant per (grantee, address), enforced by a partial unique index.
 //   - Every grant, list and revoke writes one audit_log row, refusals included; a grant or
@@ -41,8 +45,8 @@ import {
   runAudited,
 } from "./adminkit";
 
-export type DelegationPower = "organize" | "quote" | "send_as";
-export const DELEGATION_POWERS: readonly DelegationPower[] = ["organize", "quote", "send_as"];
+export type DelegationPower = "read" | "organize" | "quote" | "send_as";
+export const DELEGATION_POWERS: readonly DelegationPower[] = ["read", "organize", "quote", "send_as"];
 export const DELEGATION_ID_RE = /^dlg_[0-9a-f]{24}$/;
 const LABEL_MAX = 100;
 
@@ -101,7 +105,10 @@ function requestedPowers(body: Record<string, unknown>): DelegationPower[] {
     }
     if (!out.includes(item as DelegationPower)) out.push(item as DelegationPower);
   }
-  return out;
+  // Every power implies read. Returned in the canonical order, so equal grants store
+  // byte-equal sets.
+  if (!out.includes("read")) out.push("read");
+  return DELEGATION_POWERS.filter((p) => out.includes(p));
 }
 
 function bodyAddress(body: Record<string, unknown>, domain: string): string {

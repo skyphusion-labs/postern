@@ -25,7 +25,7 @@ one human address, and how.
 | `id` | `dlg_` plus 24 hex characters. Stable; never reused. |
 | `granteeId` | an agent identity id (`idn_...`, [SEND-IDENTITIES.md section 10](SEND-IDENTITIES.md)). Must be LIVE (unrevoked) when the grant is made. |
 | `address` | the human address the grantee may act on. On `ALLOWED_FROM_DOMAIN`, and never the grantee's own address. |
-| `powers` | a non-empty subset of the powers below. |
+| `powers` | a non-empty subset of the powers below. Every power implies `read`, so the stored set always carries it. |
 | `label` | an optional operator note. |
 | `createdBy` | `operator` (S1 grants are operator-made; S5 adds the human). |
 | `createdAt` / `revokedAt` | revocation sets `revokedAt`; a row is never deleted. |
@@ -34,12 +34,18 @@ one human address, and how.
 
 | power | will allow | slice |
 |---|---|---|
+| `read` | read the address's mail when the operator has set `AGENT_READ_SCOPE=granted` (Conrad's Q1 ruling) | S2 |
 | `organize` | mark read, flags and move on the address's mail | S2 |
 | `quote` | quote the address's mail into a reply or forward | S3 |
 | `send_as` | send with the address as From | S4 |
 
-Anything else in `powers` (`read`, `send`, `delete`, `admin`, a typo) is refused with
-`400 E_VALIDATION_ERROR`, never stripped.
+**Every power implies `read`.** Filing, quoting or sending as mail you cannot read means
+nothing, so a grant of `["organize"]` is stored, returned and audited as
+`["read", "organize"]`, in this canonical order. The record says exactly what the grant
+allows; no reader has to re-derive a rule.
+
+Anything else in `powers` (`send`, `delete`, `admin`, a typo, a different case) is
+refused with `400 E_VALIDATION_ERROR`, never stripped.
 
 **One ACTIVE grant per (grantee, address).** A second is `409 E_CONFLICT`. To change the
 powers, revoke the grant and make a new one, so every change is its own audited event.
@@ -69,14 +75,24 @@ curl -sS -X DELETE "$POSTERN_API_URL/api/admin/delegations/dlg_..." -H "Authoriz
 All three routes are `admin`-scoped. No agent identity, no static scoped token, and no
 webmail session can reach them.
 
+**Known limit: a refusal at the scope gate is not audited.** A request that the gate
+refuses (`401` with no credential, `403` with the wrong scope) never reaches a handler,
+so it writes no `audit_log` row. That is true of every route, not only these. Refusals
+the HANDLER makes (bad powers, an unknown grantee, a duplicate) are audited. Whether
+the gate itself should record refusals is a gate-level decision, deliberately left for
+later.
+
 **Audit.** Every grant, list and revoke writes one `audit_log` row (actions
 `delegation.grant`, `delegation.list`, `delegation.revoke`), refusals included. A grant or
 revoke and its row land in one D1 batch. Read the log at `GET /api/admin/audit`.
 
 ## 4. What is not built yet (the plan)
 
-- **S2, `organize`:** the mark-read, flags and move paths widen from the agent's own
-  address to its own address plus every address it holds an active `organize` grant on.
+- **S2, `read` and `organize`:** adds `AGENT_READ_SCOPE`. Under `granted`, an agent's
+  reads narrow to its own address plus every address it holds an active grant on (every
+  grant carries `read`); under `estate` (and when unset) reads stay estate-wide as today.
+  The mark-read, flags and move paths widen from the agent's own address to its own
+  address plus every address it holds an active `organize` grant on.
   Each such write is audited in the same batch as the write, and fails if the audit
   write fails.
 - **S3, `quote`:** the reply and forward quote source widens on a `quote` grant.
@@ -86,9 +102,15 @@ revoke and its row land in one D1 batch. Read the log at `GET /api/admin/audit`.
   address from webmail. That is what makes the trail a product feature rather than an
   operator log.
 
-Two questions are open with Conrad and S2 does not start until they are answered: whether
-the #718 estate-wide agent READ stays the default once grants exist, and whether
-per-message exclusion (privileged material) is in scope for the first release.
+**Conrad's rulings (2026-11-10), recorded on #740:**
+
+- **Q1, opt-in fallback.** Once grants exist, an agent reads its own address plus its
+  granted addresses. The #718 estate-wide agent read becomes an explicit operator flag,
+  `AGENT_READ_SCOPE` (`estate` or `granted`). It is off on a new install (the installer
+  writes `granted`). An UNSET flag means `estate`, so an upgraded deploy keeps today's
+  behaviour until the operator flips it. An unknown value fails closed to `granted`
+  with a config error. S2 builds this.
+- **Q2, per-message exclusion is not in v1.** It is #853, in the backlog.
 
 ## 5. Provenance
 

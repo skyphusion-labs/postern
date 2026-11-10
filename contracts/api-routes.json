@@ -337,7 +337,7 @@
       "match": "exact",
       "scope": "admin",
       "auth": "bearer",
-      "note": "#740 S1: granteeId must be a LIVE agent identity (400 E_GRANTEE_INVALID otherwise, checked in the same statement as the insert); powers from organize|send_as|quote, anything else 400; address on the deploy domain and not the grantee's own; one active grant per (grantee, address), else 409 E_CONFLICT. No behaviour change in S1. Audited (delegation.grant)"
+      "note": "#740 S1: granteeId must be a LIVE agent identity (400 E_GRANTEE_INVALID otherwise, checked in the same statement as the insert); powers from read|organize|quote|send_as, anything else 400, and every power implies read (the stored set always carries it); address on the deploy domain and not the grantee's own; one active grant per (grantee, address), else 409 E_CONFLICT. No behaviour change in S1. Audited (delegation.grant)"
     },
     {
       "id": "admin-delegation-revoke",

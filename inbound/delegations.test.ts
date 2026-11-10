@@ -62,12 +62,14 @@ function setup(extra: Record<string, unknown> = {}) {
 }
 
 describe("#740 S1 an operator grants, lists and revokes delegations", () => {
-  it("a grant to a live identity is 201 and is stored as given", async () => {
+  it("a grant to a live identity is 201 and is stored with read implied", async () => {
     const s = setup();
     const a = await s.identity();
     const res = await s.grant(a.id, ["organize", "quote"], HUMAN, { label: "inbox triage" });
     expect(res.status, res.text).toBe(201);
-    expect(res.body).toMatchObject({ granteeId: a.id, address: HUMAN, powers: ["organize", "quote"], label: "inbox triage", createdBy: "operator" });
+    expect(res.body).toMatchObject({ granteeId: a.id, address: HUMAN, powers: ["read", "organize", "quote"], label: "inbox triage", createdBy: "operator" });
+    const row = s.raw.prepare("SELECT powers FROM delegation_grants").get() as { powers: string };
+    expect(JSON.parse(row.powers)).toEqual(["read", "organize", "quote"]);
     expect(res.body.id).toMatch(/^dlg_[0-9a-f]{24}$/);
     expect(s.grants()).toBe(1);
   });
@@ -76,7 +78,7 @@ describe("#740 S1 an operator grants, lists and revokes delegations", () => {
     const s = setup();
     const a = await s.identity();
     const addrs = ["a@skyphusion.org", "b@skyphusion.org", "c@skyphusion.org", "D@SKYPHUSION.ORG"];
-    const sets = [["organize"], ["quote"], ["send_as"], ["organize", "quote", "send_as"]];
+    const sets = [["read"], ["organize"], ["send_as"], ["read", "organize", "quote", "send_as"]];
     for (let i = 0; i < sets.length; i++) {
       const res = await s.grant(a.id, sets[i], addrs[i]);
       expect(res.status, res.text).toBe(201);
@@ -193,12 +195,31 @@ describe("#740 S1 grants are validated, never stripped", () => {
   it("unknown or empty powers are 400 and store nothing", async () => {
     const s = setup();
     const a = await s.identity();
-    for (const bad of [[], ["read"], ["admin"], ["delete"], ["send"], ["ORGANIZE"], ["organize", "admin"], "organize", [1]]) {
+    for (const bad of [[], ["admin"], ["delete"], ["send"], ["READ"], ["ORGANIZE"], ["organize", "admin"], "organize", [1]]) {
       const res = await s.grant(a.id, bad);
       expect(res.status, JSON.stringify(bad)).toBe(400);
       expect(res.body.field).toBe("powers");
     }
     expect(s.grants()).toBe(0);
+  });
+
+  it("every power implies read: each set is stored as itself plus read, canonical and deduplicated", async () => {
+    const s = setup();
+    const a = await s.identity();
+    const cases: Array<[string[], string[]]> = [
+      [["read"], ["read"]],
+      [["organize"], ["read", "organize"]],
+      [["quote"], ["read", "quote"]],
+      [["send_as"], ["read", "send_as"]],
+      [["send_as", "organize", "read", "organize"], ["read", "organize", "send_as"]],
+    ];
+    for (let i = 0; i < cases.length; i++) {
+      const res = await s.grant(a.id, cases[i][0], `p${i}@skyphusion.org`);
+      expect(res.status, res.text).toBe(201);
+      expect(res.body.powers, JSON.stringify(cases[i][0])).toEqual(cases[i][1]);
+    }
+    const listed = await s.call("GET", "/api/admin/delegations", ADMIN);
+    for (const item of listed.body.items as Array<{ powers: string[] }>) expect(item.powers[0]).toBe("read");
   });
 
   it("the address must be on the deploy domain and must not be the grantee's own", async () => {
@@ -330,7 +351,7 @@ describe("#740 S1 every grant, list and revoke writes an audit row", () => {
       ["delegation.revoke", g.id, "ok"],
       ["delegation.revoke", `dlg_${"0".repeat(24)}`, "refused"],
     ]);
-    expect(JSON.parse(s.audits()[0].detail!)).toEqual({ granteeId: a.id, address: HUMAN, powers: ["organize"] });
+    expect(JSON.parse(s.audits()[0].detail!)).toEqual({ granteeId: a.id, address: HUMAN, powers: ["read", "organize"] });
     expect(JSON.parse(s.audits()[2].detail!)).toMatchObject({ error: "E_GRANTEE_INVALID" });
   });
 

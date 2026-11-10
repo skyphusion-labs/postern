@@ -280,7 +280,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_id, id);
 CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(target_id, id);
 
 -- Delegation grants (#740 S1, migration 0017): which agent identity (agent_identities.id)
--- may act on which human address, with which powers (organize, quote, send_as). The
+-- may act on which human address, with which powers (read, organize, quote, send_as;
+-- each implies read). The
 -- grantee reference is checked at mint, not by a FOREIGN KEY. One ACTIVE grant per
 -- (grantee, address); revocation sets revoked_at. See inbound/src/delegations.ts.
 CREATE TABLE IF NOT EXISTS delegation_grants (

@@ -971,8 +971,8 @@ class PosternClient:
     # --- delegation grants (#740 S1) ---------------------------------------------
     #
     # docs/DELEGATION.md. Operator routes: they need the `both` token. A grant names an
-    # agent identity, a human address and a set of powers (organize, quote, send_as). S1
-    # stores grants only: nothing enforces them yet.
+    # agent identity, a human address and a set of powers (read, organize, quote,
+    # send_as; each implies read). S1 stores grants only: nothing enforces them yet.
 
     def grant_delegation(
         self,
