@@ -9,7 +9,11 @@ git clone https://github.com/skyphusion-labs/postern && cd postern
 export CLOUDFLARE_API_TOKEN=...            # see "The token" below; never printed
 node deploy/postern.mjs install --domain example.com --dry-run   # the plan, no changes
 node deploy/postern.mjs install --domain example.com
+node deploy/postern.mjs status  --domain example.com             # read-only report, any time
 ```
+
+(`example.com` stands for your own domain here. The installer refuses the documentation
+domains themselves: an install on one deploys and then refuses every send.)
 
 Needs Node 22 or later. The first run installs the pinned wrangler (`npm ci` in `inbound/`).
 
@@ -39,6 +43,9 @@ prints that path, never the values.
 
 All refusals are collected and shown together before any write:
 
+- the domain is a documentation placeholder (`example.com`, `example.net`, `example.org`,
+  `*.example`, `*.invalid`, `*.localhost`), or a `--var` moves `ALLOWED_FROM_DOMAIN` or
+  `DEFAULT_FROM` off `--domain`;
 - the token lacks a permission the run needs (the permission is named);
 - the domain is not a zone this token can see;
 - the domain already receives mail elsewhere (an MX record not pointing at Cloudflare);
@@ -70,6 +77,13 @@ account and the one zone, with:
 
 The installer probes each one with a read before it writes anything. Outbound mail needs
 the Workers Paid plan; that is a billing choice, so the installer leaves it to you.
+
+## Names, and running beside other Workers
+
+The Worker, D1 database and R2 bucket are named from `--name` (default `postern`; the bucket
+is `<name>-attachments`). `--prefix <p>` puts `<p>` in front of all three. Use it to stand a
+test install up in an account that already runs other things. The installer never writes an
+account resource under any other name.
 
 ## Upgrade and rollback
 

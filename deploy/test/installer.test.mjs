@@ -39,7 +39,7 @@ function setup(extra = {}) {
     healthDelayMs: 0,
     randomSecret: () => `generated-secret-${++secretSeq}-0123456789abcdef0123456789abcdef`,
   };
-  const opts = parseArgs(["install", "--domain", "example.com", "--state-dir", join(dir, "state"), ...(extra.args || [])]);
+  const opts = parseArgs(["install", "--domain", "acme-mail.test", "--state-dir", join(dir, "state"), ...(extra.args || [])]);
   return { m, deps, opts, out, dir, repoRoot };
 }
 
@@ -72,22 +72,22 @@ describe("install", () => {
     assert.deepEqual(m.r2.map((b) => b.name), ["postern-attachments"]);
     assert.ok(m.scripts.postern.live, "Worker not deployed");
     assert.ok(m.scripts.postern.secrets.get("POSTERN_API_TOKEN"), "mailbox token not set");
-    assert.equal(m.scripts.postern.vars.ALLOWED_FROM_DOMAIN, "example.com");
-    assert.equal(m.scripts.postern.vars.DEFAULT_FROM, "noreply@example.com");
+    assert.equal(m.scripts.postern.vars.ALLOWED_FROM_DOMAIN, "acme-mail.test");
+    assert.equal(m.scripts.postern.vars.DEFAULT_FROM, "noreply@acme-mail.test");
     assert.equal(m.scripts.postern.vars.WEBMAIL_AUTH_BACKEND, "native");
     const applied = m.migrations[m.d1[0].uuid];
     assert.ok(applied.includes("0000_base_schema.sql") && applied.length >= 15, "migrations not applied");
     assert.equal(m.routing.enabled, true);
     assert.deepEqual(m.catchAll.actions, [{ type: "worker", value: ["postern"] }]);
     assert.equal(m.catchAll.enabled, true);
-    assert.ok(m.dns.some((r) => r.name === "cf-bounce._domainkey.example.com"), "DKIM record missing");
-    assert.ok(m.dns.some((r) => r.name === "_dmarc.example.com" && r.content === "v=DMARC1; p=none"), "DMARC missing");
-    assert.equal(m.dns.filter((r) => r.type === "TXT" && r.name === "example.com" && /^v=spf1/.test(r.content)).length, 1, "SPF duplicated");
-    assert.ok(m.admins["admin@example.com"], "first admin not created");
-    assert.deepEqual(m.domains, [{ hostname: "mail.example.com", service: "postern" }]);
+    assert.ok(m.dns.some((r) => r.name === "cf-bounce._domainkey.acme-mail.test"), "DKIM record missing");
+    assert.ok(m.dns.some((r) => r.name === "_dmarc.acme-mail.test" && r.content === "v=DMARC1; p=none"), "DMARC missing");
+    assert.equal(m.dns.filter((r) => r.type === "TXT" && r.name === "acme-mail.test" && /^v=spf1/.test(r.content)).length, 1, "SPF duplicated");
+    assert.ok(m.admins["admin@acme-mail.test"], "first admin not created");
+    assert.deepEqual(m.domains, [{ hostname: "mail.acme-mail.test", service: "postern" }]);
 
     const text = c.out.join("\n");
-    for (const w of ["D1 database postern", "R2 bucket postern-attachments", "Worker postern", "Email Sending for example.com", "Email Routing on example.com", "catch-all rule -> Worker postern", "DNS TXT _dmarc.example.com", "first admin admin@example.com"]) {
+    for (const w of ["D1 database postern", "R2 bucket postern-attachments", "Worker postern", "Email Sending for acme-mail.test", "Email Routing on acme-mail.test", "catch-all rule -> Worker postern", "DNS TXT _dmarc.acme-mail.test", "first admin admin@acme-mail.test"]) {
       assert.match(text, new RegExp(`[+~] (created|updated)   .*${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), `output does not say it created ${w}`);
     }
     assertNoSecretPrinted(null, text);
@@ -96,16 +96,16 @@ describe("install", () => {
   test("the credentials file is mode 600 and holds what the installer generated", async () => {
     const c = setup();
     await install(c.deps, c.opts);
-    const fd = openSync(join(c.opts.stateDir, "postern.example.com.credentials.env"), "r");
+    const fd = openSync(join(c.opts.stateDir, "postern.acme-mail.test.credentials.env"), "r");
     const mode = fstatSync(fd).mode & 0o777;
     const body = readFileSync(fd, "utf8");
     closeSync(fd);
     assert.equal(mode, 0o600);
-    assert.match(body, /^POSTERN_API_URL=https:\/\/mail\.example\.com$/m);
+    assert.match(body, /^POSTERN_API_URL=https:\/\/mail\.acme-mail\.test$/m);
     const tok = /^POSTERN_API_TOKEN=(.*)$/m.exec(body)[1];
     assert.equal(c.m.scripts.postern.secrets.get("POSTERN_API_TOKEN"), tok);
     const pw = /^POSTERN_ADMIN_PASSWORD=(.*)$/m.exec(body)[1];
-    assert.equal(c.m.admins["admin@example.com"], pw);
+    assert.equal(c.m.admins["admin@acme-mail.test"], pw);
     assert.equal(statSync(c.opts.stateDir).mode & 0o777, 0o700);
     assert.deepEqual(readdirSync(c.opts.stateDir).filter((f) => f.startsWith(".secrets-")), [], "the temporary secrets file was left behind");
   });
@@ -159,7 +159,7 @@ describe("install", () => {
     assert.equal(c.m.r2.length, 1, "resume created a second bucket");
     assert.equal(wranglerWrites(c.m).filter((x) => x.startsWith("deploy")).length, deploys, "resume redeployed an unchanged Worker");
     assert.equal(c.m.sendingSubs.length, 1);
-    assert.ok(c.m.admins["admin@example.com"]);
+    assert.ok(c.m.admins["admin@acme-mail.test"]);
   });
 
   test("RESUME: a failed deploy leaves state that the re-run completes, not refuses", async () => {
@@ -183,7 +183,7 @@ describe("install", () => {
     await assert.rejects(install(c.deps, c.opts), /did not answer yet/);
     down = false;
     await install(c.deps, c.opts);
-    assert.ok(c.m.admins["admin@example.com"]);
+    assert.ok(c.m.admins["admin@acme-mail.test"]);
     const posts = c.m.requests.filter((r) => r.path.endsWith("/api/admin/smtp-credentials"));
     assert.equal(posts.length, 1);
   });
@@ -223,20 +223,20 @@ describe("refusals: each is named, and none of them writes anything", () => {
     await expectRefusal(c, /Zone Read/);
     const d = setup();
     d.m.zone.name = "other.example";
-    await expectRefusal(d, /no zone named example\.com is visible to this token/);
+    await expectRefusal(d, /no zone named acme-mail\.test is visible to this token/);
   });
 
   test("a domain whose MX points at another mail host", async () => {
     const c = setup();
-    c.m.dns.push({ id: "x", type: "MX", name: "example.com", content: "aspmx.l.google.com", priority: 1 });
+    c.m.dns.push({ id: "x", type: "MX", name: "acme-mail.test", content: "aspmx.l.google.com", priority: 1 });
     await expectRefusal(c, /already receives mail elsewhere: MX aspmx\.l\.google\.com/);
   });
 
   test("an Email Routing rule that forwards an address away from the Worker", async () => {
     const c = setup();
     c.m.routing.enabled = true;
-    c.m.rules.push({ id: "r1", name: "boss", enabled: true, matchers: [{ type: "literal", field: "to", value: "boss@example.com" }], actions: [{ type: "forward", value: ["boss@gmail.example"] }] });
-    await expectRefusal(c, /rule "boss" sends boss@example\.com to forward boss@gmail\.example/);
+    c.m.rules.push({ id: "r1", name: "boss", enabled: true, matchers: [{ type: "literal", field: "to", value: "boss@acme-mail.test" }], actions: [{ type: "forward", value: ["boss@gmail.example"] }] });
+    await expectRefusal(c, /rule "boss" sends boss@acme-mail\.test to forward boss@gmail\.example/);
   });
 
   test("a catch-all that already goes somewhere else", async () => {
@@ -248,14 +248,14 @@ describe("refusals: each is named, and none of them writes anything", () => {
 
   test("an SPF record that would need a hand merge", async () => {
     const c = setup();
-    c.m.dns.push({ id: "s", type: "TXT", name: "example.com", content: "v=spf1 include:_spf.google.com ~all" });
+    c.m.dns.push({ id: "s", type: "TXT", name: "acme-mail.test", content: "v=spf1 include:_spf.google.com ~all" });
     await expectRefusal(c, /already has an SPF record that does not include Cloudflare/);
   });
 
   test("a web hostname already in use", async () => {
     const c = setup();
-    c.m.dns.push({ id: "h", type: "A", name: "mail.example.com", content: "192.0.2.1" });
-    await expectRefusal(c, /mail\.example\.com already has a DNS record \(A\)/);
+    c.m.dns.push({ id: "h", type: "A", name: "mail.acme-mail.test", content: "192.0.2.1" });
+    await expectRefusal(c, /mail\.acme-mail\.test already has a DNS record \(A\)/);
   });
 
   test("a same-named Worker, D1 or bucket this installer did not create, unless --adopt", async () => {
@@ -271,24 +271,24 @@ describe("refusals: each is named, and none of them writes anything", () => {
 
   test("several unsafe states are reported together, not one per run", async () => {
     const c = setup();
-    c.m.dns.push({ id: "x", type: "MX", name: "example.com", content: "mx.other.example", priority: 1 });
-    c.m.dns.push({ id: "h", type: "CNAME", name: "mail.example.com", content: "elsewhere.example" });
+    c.m.dns.push({ id: "x", type: "MX", name: "acme-mail.test", content: "mx.other.example", priority: 1 });
+    c.m.dns.push({ id: "h", type: "CNAME", name: "mail.acme-mail.test", content: "elsewhere.example" });
     await assert.rejects(install(c.deps, c.opts), (e) => e instanceof Refused && e.reasons.length === 2);
   });
 
   test("a Sending DKIM record that collides is refused at that record, nothing overwritten", async () => {
     const c = setup();
-    c.m.dns.push({ id: "k", type: "TXT", name: "cf-bounce._domainkey.example.com", content: "v=DKIM1; p=SOMEONEELSE" });
-    await assert.rejects(install(c.deps, c.opts), /a different DKIM key already sits at cf-bounce\._domainkey\.example\.com/);
-    assert.equal(c.m.dns.filter((r) => r.name === "cf-bounce._domainkey.example.com").length, 1);
+    c.m.dns.push({ id: "k", type: "TXT", name: "cf-bounce._domainkey.acme-mail.test", content: "v=DKIM1; p=SOMEONEELSE" });
+    await assert.rejects(install(c.deps, c.opts), /a different DKIM key already sits at cf-bounce\._domainkey\.acme-mail\.test/);
+    assert.equal(c.m.dns.filter((r) => r.name === "cf-bounce._domainkey.acme-mail.test").length, 1);
   });
 
   test("an existing DMARC policy is kept, not replaced", async () => {
     const c = setup();
-    c.m.dns.push({ id: "d", type: "TXT", name: "_dmarc.example.com", content: "v=DMARC1; p=reject; rua=mailto:x@example.com" });
+    c.m.dns.push({ id: "d", type: "TXT", name: "_dmarc.acme-mail.test", content: "v=DMARC1; p=reject; rua=mailto:x@acme-mail.test" });
     await install(c.deps, c.opts);
-    assert.deepEqual(c.m.dns.filter((r) => r.name === "_dmarc.example.com").map((r) => r.content), ["v=DMARC1; p=reject; rua=mailto:x@example.com"]);
-    assert.match(c.out.join("\n"), /- kept      DNS TXT _dmarc\.example\.com/);
+    assert.deepEqual(c.m.dns.filter((r) => r.name === "_dmarc.acme-mail.test").map((r) => r.content), ["v=DMARC1; p=reject; rua=mailto:x@acme-mail.test"]);
+    assert.match(c.out.join("\n"), /- kept      DNS TXT _dmarc\.acme-mail\.test/);
   });
 });
 
@@ -317,7 +317,7 @@ describe("upgrade and rollback", () => {
     assert.equal(c.m.migrations[db].length, before + 1);
     assert.equal(c.m.migrations[db].at(-1), "0099_new_index.sql");
     assert.notEqual(c.m.scripts.postern.live, oldVersion);
-    const st = JSON.parse(readFileSync(join(c.opts.stateDir, "postern.example.com.json"), "utf8"));
+    const st = JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.json"), "utf8"));
     assert.equal(st.history.at(-1).fromVersionId, oldVersion);
     assert.equal(st.history.at(-1).d1Bookmark, `bookmark-${before}`);
     // and a second upgrade on the same tree is a no-op
@@ -358,14 +358,92 @@ describe("upgrade and rollback", () => {
 
 describe("CLI arguments", () => {
   test("defaults and validation", () => {
-    const o = parseArgs(["install", "--domain", "Example.com"]);
-    assert.equal(o.hostname, "mail.example.com");
-    assert.equal(o.admin, "admin@example.com");
+    const o = parseArgs(["install", "--domain", "Acme-Mail.test"]);
+    assert.equal(o.hostname, "mail.acme-mail.test");
+    assert.equal(o.admin, "admin@acme-mail.test");
     assert.equal(o.bucket, "postern-attachments");
     assert.throws(() => parseArgs(["install"]), /--domain is required/);
-    assert.throws(() => parseArgs(["frobnicate", "--domain", "example.com"]), /unknown command/);
-    assert.throws(() => parseArgs(["install", "--domain", "example.com", "--hostname", "mail.other.com"]), /inside --domain/);
-    assert.throws(() => parseArgs(["install", "--domain", "example.com", "--admin", "a@other.com"]), /address on --domain/);
-    assert.throws(() => parseArgs(["install", "--domain", "example.com", "--var", "lower=x"]), /KEY=VALUE/);
+    assert.throws(() => parseArgs(["frobnicate", "--domain", "acme-mail.test"]), /unknown command/);
+    assert.throws(() => parseArgs(["install", "--domain", "acme-mail.test", "--hostname", "mail.other.com"]), /inside --domain/);
+    assert.throws(() => parseArgs(["install", "--domain", "acme-mail.test", "--admin", "a@other.com"]), /address on --domain/);
+    assert.throws(() => parseArgs(["install", "--domain", "acme-mail.test", "--var", "lower=x"]), /KEY=VALUE/);
+  });
+});
+
+describe("lead rulings: placeholder defaults, prefix, status, AUTH seam", () => {
+  test("a documentation placeholder domain is refused before any API call", async () => {
+    for (const d of ["example.com", "mail.example.org", "corp.example", "x.invalid"]) {
+      const c = setup();
+      c.opts.domain = d;
+      c.opts.hostname = `mail.${d}`;
+      c.opts.admin = `admin@${d}`;
+      await assert.rejects(install(c.deps, c.opts), (e) => e instanceof Refused && /documentation placeholder/.test(e.message));
+      assert.equal(c.m.requests.length, 0, `${d}: a placeholder refusal still called the API`);
+    }
+  });
+
+  test("a --var that moves the sending domain off --domain is refused", async () => {
+    const c = setup({ args: ["--var", "ALLOWED_FROM_DOMAIN=example.com"] });
+    await expectRefusal(c, /ALLOWED_FROM_DOMAIN=example\.com differs from --domain acme-mail\.test/);
+    const d = setup({ args: ["--var", "DEFAULT_FROM=noreply@example.com"] });
+    await expectRefusal(d, /DEFAULT_FROM=noreply@example\.com is not an address on acme-mail\.test/);
+  });
+
+  test("--prefix names every account resource, and nothing unprefixed is created", async () => {
+    const c = setup({ args: ["--prefix", "pt1110-test-"] });
+    await install(c.deps, c.opts);
+    assert.deepEqual(Object.keys(c.m.scripts), ["pt1110-test-postern"]);
+    assert.deepEqual(c.m.d1.map((d) => d.name), ["pt1110-test-postern"]);
+    assert.deepEqual(c.m.r2.map((b) => b.name), ["pt1110-test-postern-attachments"]);
+    assert.deepEqual(c.m.catchAll.actions, [{ type: "worker", value: ["pt1110-test-postern"] }]);
+    for (const r of writes(c.m).filter((r) => r.path.startsWith("/accounts/"))) {
+      const named = r.body?.name ?? "";
+      assert.ok(!named || named.startsWith("pt1110-test-"), `unprefixed account write: ${r.method} ${r.path} ${named}`);
+    }
+  });
+
+  test("status is read-only on a fresh account and on an installed one", async () => {
+    const c = setup();
+    const st = parseArgs(["status", "--domain", "acme-mail.test", "--state-dir", c.opts.stateDir]);
+    await install(c.deps, st);
+    assert.equal(writes(c.m).length, 0);
+    await install(c.deps, c.opts);
+    const w = writes(c.m).length;
+    const wr = wranglerWrites(c.m).length;
+    await install(c.deps, st);
+    assert.equal(writes(c.m).length, w);
+    assert.equal(wranglerWrites(c.m).length, wr);
+  });
+
+  test("the admin call sends `password` (and the `secret` alias); 409 E_CONFLICT counts as done", async () => {
+    const c = setup();
+    const real = c.deps.http;
+    let seen;
+    c.deps.http = async (url, init) => {
+      if (url.endsWith("/api/admin/smtp-credentials")) {
+        seen = JSON.parse(init.body);
+        return { ok: false, status: 409, json: async () => ({ ok: false, error: "E_CONFLICT" }) };
+      }
+      return real(url, init);
+    };
+    await install(c.deps, c.opts);
+    assert.ok(seen.password && seen.password === seen.secret);
+    const st = JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.json"), "utf8"));
+    assert.equal(st.admin, "admin@acme-mail.test");
+  });
+
+  test("a password the server minted replaces ours in the credentials file", async () => {
+    const c = setup();
+    const real = c.deps.http;
+    c.deps.http = async (url, init) => {
+      if (url.endsWith("/api/admin/smtp-credentials")) {
+        return { ok: true, status: 201, json: async () => ({ ok: true, username: "admin@acme-mail.test", password: "server-minted-pw-0123456789" }) };
+      }
+      return real(url, init);
+    };
+    await install(c.deps, c.opts);
+    const body = readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.credentials.env"), "utf8");
+    assert.match(body, /^POSTERN_ADMIN_PASSWORD=server-minted-pw-0123456789$/m);
+    assert.ok(!c.out.join("\n").includes("server-minted-pw"), "the minted password was printed");
   });
 });

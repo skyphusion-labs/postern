@@ -19,7 +19,7 @@ const json = (status, body) => ({
 const ok = (result, extra = {}) => json(200, { success: true, errors: [], result, ...extra });
 const fail = (status, code, message) => json(status, { success: false, errors: [{ code, message }], result: null });
 
-export function newAccount(domain = "example.com") {
+export function newAccount(domain = "acme-mail.test") {
   return {
     domain,
     zone: { id: "zone-1", name: domain, account: { id: "acct-1" } },

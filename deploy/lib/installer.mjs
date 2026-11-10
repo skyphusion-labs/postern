@@ -133,9 +133,28 @@ function dnsSatisfied(records, want) {
 // ---------------------------------------------------------------------------
 // PREFLIGHT: read-only. Collect every refusal, then throw them together.
 
+// Documentation domains (RFC 2606 / 6761). The template ships them as placeholders;
+// an install on one deploys fine and then refuses or misroutes every send.
+const PLACEHOLDER = /(^|\.)(example\.(com|net|org)|example|invalid|localhost)$/i;
+
+export function configRefusals(opts) {
+  const out = [];
+  if (PLACEHOLDER.test(opts.domain)) out.push(`${opts.domain} is a documentation placeholder, not your domain. Pass --domain <the domain you own>.`);
+  const v = opts.vars || {};
+  if (v.ALLOWED_FROM_DOMAIN !== undefined && norm(v.ALLOWED_FROM_DOMAIN) !== norm(opts.domain)) {
+    out.push(`--var ALLOWED_FROM_DOMAIN=${v.ALLOWED_FROM_DOMAIN} differs from --domain ${opts.domain}; every send would be refused or sent off-domain. Drop the --var.`);
+  }
+  if (v.DEFAULT_FROM !== undefined && !norm(v.DEFAULT_FROM).endsWith(`@${norm(opts.domain)}`)) {
+    out.push(`--var DEFAULT_FROM=${v.DEFAULT_FROM} is not an address on ${opts.domain}.`);
+  }
+  return out;
+}
+
 async function preflight(ctx) {
   const { cf, opts, state } = ctx;
   const refusals = [];
+  const cfgBad = configRefusals({ ...opts, vars: { ...(state.vars || {}), ...(opts.vars || {}) } });
+  if (cfgBad.length) throw new Refused(cfgBad);
 
   let zones;
   try {
@@ -530,11 +549,21 @@ async function ensureFirstAdmin(ctx, pf) {
   const res = await ctx.http(`${base}/api/admin/smtp-credentials`, {
     method: "POST",
     headers: { authorization: `Bearer ${creds.POSTERN_API_TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ username: opts.admin, from: opts.admin, secret: creds.POSTERN_ADMIN_PASSWORD }),
+    // `password` is the canonical field in the AUTH contract (G7); `secret` is the
+    // name today's route reads. Sending both works before and after the alias lands.
+    body: JSON.stringify({ username: opts.admin, from: opts.admin, password: creds.POSTERN_ADMIN_PASSWORD, secret: creds.POSTERN_ADMIN_PASSWORD }),
   });
   let body = {};
   try { body = await res.json(); } catch { body = {}; }
-  if (!res.ok || body.ok !== true) throw new Error(`creating the first admin failed: HTTP ${res.status} ${body.error || ""}`.trim());
+  // 409 E_CONFLICT (the user exists) is the AUTH contract's "already done".
+  const done = res.status === 409 && body.error === "E_CONFLICT";
+  if (!done && (!res.ok || body.ok !== true)) throw new Error(`creating the first admin failed: HTTP ${res.status} ${body.error || ""}`.trim());
+  // If the server minted its own password (it ignored ours), keep the one that works.
+  const minted = body.password || body.secret;
+  if (minted && minted !== creds.POSTERN_ADMIN_PASSWORD) {
+    creds.POSTERN_ADMIN_PASSWORD = minted;
+    saveCreds(opts, creds);
+  }
   state.admin = opts.admin;
   saveState(opts, state);
   rep.created(`first admin ${opts.admin} (password in ${ctx.paths.creds})`);

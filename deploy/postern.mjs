@@ -15,12 +15,15 @@ import { fileURLToPath } from "node:url";
 import { cfClient } from "./lib/cf.mjs";
 import { EXIT, Refused, install, rollback } from "./lib/installer.mjs";
 
-const USAGE = `usage: node deploy/postern.mjs <install|upgrade|rollback> --domain <domain> [options]
+const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback> --domain <domain> [options]
+
+  status is a read-only report: what exists, what install or upgrade would change.
 
   --domain <d>        the domain Postern receives and sends for (required)
   --hostname <h>      where the API and webmail answer (default mail.<domain>)
   --admin <address>   the first admin login (default admin@<domain>)
   --name <n>          Worker name (default postern); also names D1 and R2
+  --prefix <p>        put <p> in front of the Worker, D1 and R2 names (e.g. a test prefix)
   --var KEY=VALUE     set a Worker var; remembered for later upgrades (repeatable)
   --dmarc <policy>    DMARC policy if the domain has none: none|quarantine|reject (default none)
   --state-dir <dir>   where the install state lives (default ./.postern)
@@ -44,6 +47,7 @@ export function parseArgs(argv) {
     else if (a === "--hostname") o.hostname = val().toLowerCase();
     else if (a === "--admin") o.admin = val().toLowerCase();
     else if (a === "--name") o.name = val();
+    else if (a === "--prefix") o.prefix = val();
     else if (a === "--state-dir") o.stateDir = val();
     else if (a === "--dmarc") o.dmarcPolicy = val();
     else if (a === "--var") {
@@ -56,9 +60,9 @@ export function parseArgs(argv) {
     else if (a === "--restore-db") o.restoreDb = true;
     else throw new Error(`unknown option ${a}`);
   }
-  if (!["install", "upgrade", "rollback"].includes(cmd)) throw new Error(cmd ? `unknown command ${cmd}` : "no command");
+  if (!["install", "upgrade", "status", "rollback"].includes(cmd)) throw new Error(cmd ? `unknown command ${cmd}` : "no command");
   if (!o.domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(o.domain)) throw new Error("--domain is required (for example --domain example.com)");
-  o.name ??= "postern";
+  o.name = `${o.prefix ?? ""}${o.name ?? "postern"}`;
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(o.name)) throw new Error("--name must be lower-case letters, digits and dashes");
   o.hostname ??= `mail.${o.domain}`;
   o.admin ??= `admin@${o.domain}`;
@@ -66,6 +70,7 @@ export function parseArgs(argv) {
   if (!o.admin.endsWith(`@${o.domain}`)) throw new Error("--admin must be an address on --domain");
   o.dmarcPolicy ??= "none";
   if (!["none", "quarantine", "reject"].includes(o.dmarcPolicy)) throw new Error("--dmarc must be none, quarantine or reject");
+  if (cmd === "status") o.dryRun = true;
   o.stateDir = resolve(o.stateDir ?? ".postern");
   o.d1Name = o.name;
   o.bucket = `${o.name}-attachments`;
@@ -123,7 +128,7 @@ async function main(argv) {
   };
   try {
     if (opts.cmd === "rollback") await rollback(deps, opts);
-    else await install(deps, opts, opts.cmd);
+    else await install(deps, opts, opts.cmd === "status" ? "install" : opts.cmd);
     return EXIT.OK;
   } catch (e) {
     if (e instanceof Refused) {
