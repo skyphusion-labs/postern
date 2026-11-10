@@ -12,6 +12,7 @@ import { selectTransport, type OutboundMessage, type OutboundAttachment } from "
 import type { BoundIdentity } from "./sendidentity";
 import { sanitizeHtml } from "./sanitize-html";
 import { allowedFromDomain } from "./fromdomain";
+import { headerNameProblem } from "./headernames";
 
 export interface EmailAddress {
   email: string;
@@ -635,6 +636,12 @@ function validateHeaders(headers: Record<string, string> | undefined): Record<st
     throw new MailboxError("E_VALIDATION_ERROR", "headers must be an object");
   }
   for (const [key, value] of Object.entries(headers)) {
+    // Name first: a refused name is reported as JSON so a control byte in it is never
+    // echoed raw. One rule for every transport (headernames.ts).
+    const problem = headerNameProblem(key);
+    if (problem) {
+      throw new MailboxError("E_VALIDATION_ERROR", `header ${JSON.stringify(key)} ${problem}`);
+    }
     if (typeof value !== "string") {
       throw new MailboxError("E_VALIDATION_ERROR", `header ${key} must be a string`);
     }

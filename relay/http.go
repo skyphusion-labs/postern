@@ -66,6 +66,10 @@ func (s *dispatchServer) handleDispatch(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, "invalid OutboundMessage JSON: "+err.Error())
 		return
 	}
+	if err := validateCallerHeaders(msg); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if len(msg.recipients()) == 0 {
 		writeJSONError(w, http.StatusBadRequest, "no recipients (to/cc/bcc all empty)")
 		return

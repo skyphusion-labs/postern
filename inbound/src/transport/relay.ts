@@ -5,6 +5,7 @@
 // OUTBOUND_TRANSPORT=relay. The wire shape is pinned against relay/http.go.
 
 import type { Transport, OutboundMessage, DispatchResult } from "./index";
+import { headerNameProblem } from "../headernames";
 
 // Failure codes the mailbox/api layer maps to HTTP status (E_DELIVERY_FAILED is
 // retryable -> 502). Kept aligned with the standalone worker's E_* vocabulary.
@@ -35,6 +36,16 @@ export class RelayTransport implements Transport {
   }
 
   async dispatch(msg: OutboundMessage): Promise<DispatchResult> {
+    // The relay writes header names to the SMTP wire, so hold them to the same rule the
+    // mailbox applies (headernames.ts) at this seam too. The one reserved name allowed
+    // is the core-stamped Message-ID, and only with the core-generated value.
+    for (const [k, v] of Object.entries(msg.headers ?? {})) {
+      if (k === "Message-ID" && v === `<${msg.messageId}>`) continue;
+      const problem = headerNameProblem(k);
+      if (problem) {
+        throw new RelayError("E_VALIDATION_ERROR", `header ${JSON.stringify(k)} ${problem}`);
+      }
+    }
     // The body is the OutboundMessage verbatim (the relay decodes with
     // unknown-field rejection, so we send exactly the contract keys). bcc rides
     // in msg.bcc and is never written into headers -- the mailbox builds headers
