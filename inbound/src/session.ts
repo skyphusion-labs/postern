@@ -30,7 +30,6 @@ import {
   passwordProblem,
   setPassword,
   verifySecret,
-  UnverifiableHashError,
   type AuthenticatedAccount,
 } from "./smtpcreds";
 import { sha256Hex } from "./sendidentity";
@@ -386,16 +385,7 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
     // Only a definite credential REJECTION counts. An infra error inside
     // mintNativeSession throws past this point without recording anything, so a D1
     // outage cannot lock users out (the relay draws the same line).
-    let minted: Minted | null;
-    try {
-      minted = await mintNativeSession(env, username, password);
-    } catch (err) {
-      // #821: a stored hash this runtime cannot verify is a data condition, not a
-      // wrong password. Answer the infra shape and record NOTHING, so it can never
-      // lock the user out; the account is logged for an operator reset.
-      if (err instanceof UnverifiableHashError) return unavailable();
-      throw err;
-    }
+    const minted = await mintNativeSession(env, username, password);
     if (!minted) {
       try {
         await recordFailure(env, keys, gate);
@@ -556,16 +546,7 @@ async function handleChangePassword(request: Request, env: Env, url: URL): Promi
   // The session resolved, so the account existed and was enabled a moment ago; a
   // vanished row here is a race and reads as a plain rejection.
   const cred = await lookup(env, resolved.username);
-  let ok = false;
-  if (cred && !cred.disabled) {
-    try {
-      ok = await verifySecret(current, cred.secretHash);
-    } catch (err) {
-      // #821, as at sign-in: not a guess, so not counted.
-      if (err instanceof UnverifiableHashError) return unavailable();
-      throw err;
-    }
-  }
+  const ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash, cred.username) : false;
   if (!cred || !ok) {
     try {
       await recordFailure(env, keys, gate);
