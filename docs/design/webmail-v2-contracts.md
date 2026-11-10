@@ -412,9 +412,16 @@ ONCE in that response. It is never stored or logged in plaintext.
 
 #### 1.10.2 The stored hash: per-row parameters, upgrade on sign-in
 
-The hash is `pbkdf2$<iterations>$<saltB64>$<hashB64>` (PBKDF2-HMAC-SHA256, 16-byte
-salt, 32-byte output). The iteration count lives in EACH row, so the target can change
-without a schema change and an old row still verifies at its own count.
+The hash is `pbkdf2-sha512$<iterations>$<saltB64>$<hashB64>` (PBKDF2-HMAC-SHA512, 16-byte
+salt, 64-byte output; #828). A row written before #828 is `pbkdf2$<iterations>$<saltB64>$<hashB64>`
+(PBKDF2-HMAC-SHA256, 32-byte output) and still verifies. The KDF tag and the iteration count
+live in EACH row, so the target can change without a schema change and an old row still
+verifies at its own parameters. An unknown tag, or an output of the wrong length for its tag,
+never verifies.
+
+**Why SHA-512 at the same count (#828).** The count cannot rise past the cap below, and at a
+fixed count PBKDF2-HMAC-SHA512 costs a GPU attacker more per guess than PBKDF2-HMAC-SHA256.
+It is a strength upgrade under the same ceiling, not a fix.
 
 **The target is 100,000 iterations, the Workers ceiling (#821, RULED by the lead).** The
 deployed Cloudflare Workers runtime refuses a PBKDF2 iteration count above 100,000
@@ -434,15 +441,18 @@ throttle like any rejection, so the account is not distinguishable), `200 {ok:fa
 operator reset (`POST /api/admin/users/{u}/password`).
 
 **Upgrade on sign-in.** After a successful password verify (sign-in, change password),
-if the row's iteration count is below the target (100,000), the server re-hashes the
-same password at the target, never above it, and writes it with a conditional update
+if the row is not at the target (a legacy SHA-256 row, or an iteration count below 100,000),
+the server re-hashes the same password at the target (SHA-512 at 100,000), never above it,
+and writes it with a conditional update
 (`WHERE username = ? AND secret_hash = <the hash just verified>`), so a concurrent reset
 always wins. The upgrade never changes the answer to the caller; if the write fails,
 the sign-in still succeeds and the next one retries.
 
 Every compare is constant-time. An unknown, disabled or deleted user is verified
-against a dummy hash at the target count (100,000), so it costs the same work and returns the
-same error as a wrong password.
+against a dummy hash at the target (SHA-512 at 100,000), so it costs the same work and returns
+the same error as a wrong password on a current row. A row still on the legacy SHA-256 KDF costs
+somewhat less to verify until its owner next signs in and it is re-hashed: the same transitional
+property a lower iteration count had, closing per row on the next sign-in.
 
 #### 1.10.3 Sessions follow the account
 
