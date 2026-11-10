@@ -114,7 +114,9 @@ CREATE TABLE IF NOT EXISTS smtp_credentials (
   secret_hash TEXT NOT NULL,
   disabled    INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT,
-  updated_at  TEXT
+  updated_at  TEXT,
+  -- optional human name shown as "Sending as" (#790, migration 0015)
+  display_name TEXT
 );
 
 -- Vectorize id ledger (#279): one row per chunk-vector upserted. Reconcile reads
@@ -143,9 +145,12 @@ CREATE TABLE IF NOT EXISTS webmail_sessions (
   issued_at    TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   expires_at   TEXT NOT NULL,
-  revoked      INTEGER NOT NULL DEFAULT 0
+  revoked      INTEGER NOT NULL DEFAULT 0,
+  -- the login that minted it (#790, migration 0015); NULL on pre-0015 rows
+  username     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_identity ON webmail_sessions(identity);
+CREATE INDEX IF NOT EXISTS idx_sessions_username ON webmail_sessions(username);
 
 -- Webmail session-mint brute-force counters (#409, migration 0014). One row per
 -- throttle scope: "a:<lower-cased username>" per-account, "i:<client ip>" per client
