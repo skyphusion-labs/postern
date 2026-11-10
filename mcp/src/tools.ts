@@ -173,9 +173,11 @@ export const READ_TOOLS: ToolDef[] = [
       "the primary tool for finding mail by topic. READING THE RESULT: `count` is the " +
       "size of THIS page, never a total. `complete: false` means messages matched that " +
       "are NOT in this response, so the result CANNOT prove absence -- `retrievalCap` " +
-      "and `degraded` say why, and the score-ranked modes (semantic, hybrid) have no " +
-      "cursor to resume from, so raise limit or narrow the query instead. To prove a " +
-      "message is NOT there, use mode 'fts', which is exhaustively paginated. " +
+      "and `degraded` say why. Pagination: mode 'fts' and mode 'substr' are keyset-paged " +
+      "and accept `cursor`. The score-ranked modes (semantic, hybrid) do not paginate; " +
+      "a `cursor` on those modes is REFUSED (HTTP 400), not dropped, so raise limit or " +
+      "narrow the query instead. To prove a message is NOT there, use mode 'fts', which " +
+      "is exhaustively paginated. " +
       "`identityScope` states whose mail was searched: kind 'member' or 'role' means " +
       "you were shown a SLICE, so a zero result means 'not in your slice', not 'not in " +
       "the estate'.",
@@ -204,7 +206,12 @@ export const READ_TOOLS: ToolDef[] = [
           "with no reader of its own (e.g. to=abuse@ with lens=inbox), pass the human " +
           "reading it, e.g. seenFor=ada@example.com",
       ),
-      cursor: z.string().optional().describe("opaque pagination cursor from a previous page"),
+      cursor: z.string().optional().describe(
+        "opaque pagination cursor from a previous page. Honoured by mode fts and substr " +
+          "only. REFUSED (HTTP 400), not dropped, on semantic and hybrid, which are " +
+          "score-ranked and do not paginate. mode defaults to hybrid, so a cursor with " +
+          "no mode is refused: pass mode=fts or mode=substr to page",
+      ),
       fields: z.array(z.string().min(1)).optional().describe(
         // Deliberately spelled out against its SINGULAR neighbour above: an agent that
         // conflates `field` with `fields` is the predictable failure of this pair, so

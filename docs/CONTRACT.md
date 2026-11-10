@@ -312,8 +312,11 @@ Vectorize index the store populates for BOTH inbound and outbound mail, #116 ws2
 (`@cf/baai/bge-base-en-v1.5`) and queries Vectorize, collapsing chunk-hits to unique messages
 (best chunk score wins) and hydrating from D1; `hybrid` blends the fts and semantic result sets
 by `message_id` on a normalized score. semantic/hybrid are SCORE-ranked, so they return a single
-ranked page of up to `limit` hits -- a date keyset cursor does not apply, and paging a re-ranked
-semantic set is a post-v1 nicety. They therefore report completeness explicitly rather than implying
+ranked page of up to `limit` hits. A date keyset `cursor` does not continue them: supplying one
+with `mode=semantic` or `mode=hybrid` is refused (`E_VALIDATION_ERROR`, HTTP 400) rather than
+accepted and dropped (#803). `fts` and `substr` still page on that cursor, and so does a search
+that omits `mode` (that default is `fts`). Paging a re-ranked semantic set remains a post-v1
+nicety. They therefore report completeness explicitly rather than implying
 it: `cursor: null` with `complete: true` ONLY when the vector index ran out of candidates before the
 retrieval ceiling did, and otherwise NO `cursor` key plus `complete: false` and `retrievalCap`.
 
@@ -583,7 +586,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/messages/{messageId}` | full message + attachment metadata | M1 (done) |
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}?limit=&cursor=` | one BOUNDED page of a thread, oldest first: `{ok, threadId, messages, cursor}`. Default 20, max 200. `cursor: null` is the POSITIVE claim that this is the whole thread, so a non-null cursor means first page, not thread | M1 (done) / #649 |
-| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&fields=&to=&from=&direction=&lens=&seenFor=&mailbox=&after=&before=&hasAttachment=&seen=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` / `seenFor` / `fields` mean exactly what they do on `/api/messages` (#403/#404/#646). Mind the pair: `field` (singular) = the substr COLUMN matched, `fields` (plural) = the summary keys RETURNED | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 / #404 / #646 |
+| GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&fields=&to=&from=&direction=&lens=&seenFor=&mailbox=&after=&before=&hasAttachment=&seen=&limit=&cursor=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` / `seenFor` / `fields` mean exactly what they do on `/api/messages` (#403/#404/#646). Mind the pair: `field` (singular) = the substr COLUMN matched, `fields` (plural) = the summary keys RETURNED. `cursor` pages `fts` and `substr` only; on `semantic` and `hybrid` it is refused (`E_VALIDATION_ERROR`, 400), never dropped (#803) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 / #404 / #646 / #803 |
 | GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | GET/POST/DELETE | `/api/session` | webmail native session: POST signs in `{username,password}` -> `Set-Cookie` + identity + caps + CSRF token; GET is whoami/restore; DELETE signs out | webmail v2 (#352) |

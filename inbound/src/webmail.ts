@@ -1769,6 +1769,14 @@ export const WEBMAIL_HTML = `<!doctype html>
     refreshFolders();
   }
 
+  // Score-ranked search with no AI or Vectorize is HTTP 200, ok:true, and
+  // degraded "semantic search unavailable..." (not an error, and not an empty
+  // mailbox). The keyword retry below is the page that can carry a cursor.
+  function semanticUnavailable(body) {
+    var d = body && body.degraded;
+    return typeof d === "string" && /semantic search unavailable/i.test(d);
+  }
+
   function loadMore(fallbackFts) {
     var loading = el("div", { class: "loading skel-list", role: "status" },
       [el("span", { class: "vh", text: "Loading messages" })].concat(skeletonRows(state.items.length ? 2 : 6)));
@@ -1823,6 +1831,14 @@ export const WEBMAIL_HTML = `<!doctype html>
     }
     req.then(function (body) {
       $("list").removeChild(loading);
+      // The dropdown stays on semantic or hybrid. This retry is mode=fts, and
+      // its cursor is only valid for that mode (#803).
+      if (state.q && !fallbackFts && state.searchMode !== "fts" && semanticUnavailable(body)) {
+        state.cursor = null; state.items = [];
+        clear($("list"));
+        loadMore(true);
+        return;
+      }
       // search returns SearchHit { message, ... }; list returns summaries.
       var rows = (body.items || []).map(function (it) { return it.message ? it.message : it; });
       state.items = state.items.concat(rows);
@@ -1838,7 +1854,10 @@ export const WEBMAIL_HTML = `<!doctype html>
       }
       if (state.cursor) {
         var more = el("div", { class: "more" }, [el("button", { class: "link", text: "Load more" })]);
-        more.firstChild.addEventListener("click", function () { $("list").removeChild(more); loadMore(); });
+        // Page in the mode that produced this cursor. A fallback fts page must
+        // keep mode=fts; the dropdown may still be semantic or hybrid, and
+        // those modes refuse a cursor (#803).
+        more.firstChild.addEventListener("click", function () { $("list").removeChild(more); loadMore(fallbackFts); });
         $("list").appendChild(more);
       } else if (state.items.length === 0) {
         $("list").appendChild(state.q

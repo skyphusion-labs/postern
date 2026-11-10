@@ -80,6 +80,36 @@ describe("mailbox_search", () => {
     expect(client.search).toHaveBeenCalledWith(expect.objectContaining({ mode: "fts" }));
   });
 
+  it("says fts and substr paginate, and semantic and hybrid refuse a cursor (#803)", () => {
+    // The description is what an agent reads. "no cursor to resume from" was true
+    // of the response and silent about a cursor the caller sent, which is how the
+    // parameter was accepted and dropped.
+    const d = tool("mailbox_search").description;
+    expect(d).toMatch(/fts/);
+    expect(d).toMatch(/substr/);
+    expect(d).toMatch(/semantic/);
+    expect(d).toMatch(/hybrid/);
+    expect(d).toMatch(/REFUSED/);
+    const schema: any = tool("mailbox_search").inputSchema;
+    const cursor = String(schema.cursor?.description ?? "");
+    expect(cursor).toMatch(/fts/);
+    expect(cursor).toMatch(/substr/);
+    expect(cursor).toMatch(/semantic/);
+    expect(cursor).toMatch(/hybrid/);
+    expect(cursor).toMatch(/REFUSED/);
+  });
+
+  it("still forwards a cursor on every mode, including hybrid (#803)", async () => {
+    // The worker refuses semantic and hybrid. This client must not drop the
+    // cursor itself: dropping it here would reintroduce the accepted-and-ignored
+    // bug one layer up, and the worker would never see the parameter to refuse.
+    for (const mode of ["fts", "substr", "semantic", "hybrid"]) {
+      const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+      await tool("mailbox_search").handler(client, { query: "x", mode, cursor: "c1" });
+      expect(client.search).toHaveBeenCalledWith(expect.objectContaining({ mode, cursor: "c1" }));
+    }
+  });
+
   it("forwards from, mailbox, after, before, hasAttachment, and seen to client.search (#419 sync)", async () => {
     const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
     const out: any = await tool("mailbox_search").handler(client, {
