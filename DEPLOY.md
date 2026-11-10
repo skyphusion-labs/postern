@@ -63,7 +63,10 @@ prints the path, never the values. Keep a copy somewhere safe.
   domain with `E_SENDER_DOMAIN_NOT_AVAILABLE` for up to about a minute. The installer
   says so in its output. Wait about 60 seconds before the first send.
 - **Receive:** send a message from any outside mailbox to any address on your domain.
-  It shows up in webmail.
+  It shows up in webmail. If one address never arrives, run
+  `node deploy/postern.mjs routing --domain example.com`: it names every Email Routing
+  rule that sends an address somewhere other than Postern (deploy/README.md, "the routing
+  report").
 - **The scripted acceptance smoke** (outbound, store, threading, inbound):
 
 ```bash
