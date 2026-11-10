@@ -32,9 +32,10 @@ const DUMMY_HASH = `pbkdf2$${PBKDF2_ITERATIONS}$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAA
 // Contract 1.10.1 bounds.
 export const PASSWORD_MIN = 12;
 export const PASSWORD_MAX = 256;
-const USERNAME_MAX = 254;
+const LOGIN_MAX = 64;
 const DISPLAY_NAME_MAX = 128;
-const USERNAME_RE = /^[a-z0-9][a-z0-9._+@-]*$/;
+// A login is always a safe address local part (contract 1.10.1, lead ruling G11).
+const LOGIN_RE = /^[a-z0-9._-]+$/;
 
 export interface SmtpCredential {
   username: string;
@@ -251,6 +252,37 @@ export async function createUser(
   return (res.meta?.changes ?? 0) > 0;
 }
 
+/**
+ * Does ANY account row exist (enabled or not)? The default-backend rule and the
+ * first-run gate both key on this (contract 1.10.6/1.10.7): a disabled user is still
+ * a row, so disabling everyone never re-opens setup. One indexed read.
+ */
+export async function anyUser(env: Env): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT 1 AS one FROM smtp_credentials LIMIT 1").first<{ one: number }>();
+  return row !== null;
+}
+
+/**
+ * Create the FIRST user, atomically: the insert happens only while the table is still
+ * empty, so two racing first-run requests produce exactly one user (contract 1.10.7).
+ * Returns false when any row already exists.
+ */
+export async function createFirstUser(
+  env: Env,
+  user: { username: string; fromAddr: string; displayName: string | null },
+  secretHash: string,
+  now: string,
+): Promise<boolean> {
+  const res = await env.DB.prepare(
+    `INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, display_name, created_at, updated_at)
+     SELECT ?, ?, ?, 0, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM smtp_credentials)`,
+  )
+    .bind(normalizeUsername(user.username), user.fromAddr, secretHash, user.displayName, now, now)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
 /** Change any of disabled / displayName / from. Returns the updated user, or null. */
 export async function updateUser(
   env: Env,
@@ -342,13 +374,20 @@ export function normalizeUsername(username: string): string {
   return (username ?? "").trim().toLowerCase();
 }
 
-/** Contract 1.10.1: the reason a NEW username is refused, or null. Input is normalized. */
-export function usernameProblem(username: string): string | null {
-  if (!username) return "username is required";
-  if (username.length > USERNAME_MAX) return `username must be at most ${USERNAME_MAX} characters`;
-  if (!USERNAME_RE.test(username)) {
-    return "username may use a-z, 0-9 and . _ + @ - and must start with a letter or digit";
-  }
+/**
+ * Contract 1.10.1: the reason a NEW username is refused, or null. Input is normalized.
+ * Either a bare login L, or L@<allowedDomain>; L is 1 to 64 of a-z 0-9 . _ - with no
+ * leading or trailing dot and no "..", so it is always a safe address local part.
+ * Existing rows are not re-validated.
+ */
+export function usernameProblem(username: string, allowedDomain: string): string | null {
+  const rule = `username must be 1 to ${LOGIN_MAX} characters of a-z 0-9 . _ - (no leading, trailing or double dot), optionally followed by @${allowedDomain}`;
+  if (!username) return rule;
+  const at = username.indexOf("@");
+  const login = at < 0 ? username : username.slice(0, at);
+  if (at >= 0 && username.slice(at + 1) !== allowedDomain) return rule;
+  if (login.length < 1 || login.length > LOGIN_MAX || !LOGIN_RE.test(login)) return rule;
+  if (login.startsWith(".") || login.endsWith(".") || login.includes("..")) return rule;
   return null;
 }
 
