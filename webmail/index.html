@@ -361,9 +361,9 @@
   .msg-head .sender-addr { color: var(--muted); font-size: var(--fs-sm); margin-left: var(--sp-1); }
   .msg-head .sender-date { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; flex-shrink: 0; }
   .msg-head .trust { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-top: var(--sp-3); font-size: var(--fs-sm); }
-  .msg-head details.auth { color: var(--muted); }
-  .msg-head details.auth summary { cursor: pointer; color: var(--accent); }
-  .msg-head details.auth span { margin-left: var(--sp-2); }
+  .msg-head details.auth-detail { color: var(--muted); }
+  .msg-head details.auth-detail summary { cursor: pointer; color: var(--accent); }
+  .msg-head details.auth-detail span { margin-left: var(--sp-2); }
 
   .empty-state { text-align: center; padding: var(--sp-7) var(--sp-4); color: var(--muted); }
   .empty-state .es-ico { width: 40px; height: 40px; color: var(--line-strong); }
@@ -2486,7 +2486,7 @@
       el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted sender" : "untrusted sender" })
     ];
     if (m.auth) {
-      trustKids.push(el("details", { class: "auth" }, [
+      trustKids.push(el("details", { class: "auth-detail" }, [
         el("summary", { text: "Authentication" }),
         el("span", { text: "SPF " + (m.auth.spf || "none") + ", DKIM " + (m.auth.dkim || "none") + ", DMARC " + (m.auth.dmarc || "none") })
       ]));

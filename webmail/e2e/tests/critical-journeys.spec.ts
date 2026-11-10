@@ -797,4 +797,25 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#pwSection")).toHaveCount(1);
     await expect(page.locator("#pwSection")).toBeHidden();
   });
+
+  test("reading-pane trust line stays one row: no auth-card styles leak onto it (#832)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+    await page.getByText("Hello from Alice").click();
+    const trust = page.locator("#reading .msg-head .trust");
+    await expect(trust.locator("details summary")).toHaveText("Authentication");
+    const m = await trust.evaluate((t) => {
+      const d = t.querySelector("details") as HTMLElement;
+      const c = getComputedStyle(d);
+      return { trustH: t.getBoundingClientRect().height, padTop: c.paddingTop, marginLeft: c.marginLeft,
+               gap: d.getBoundingClientRect().left - (t.querySelector(".tag") as HTMLElement).getBoundingClientRect().right };
+    });
+    expect(m.trustH).toBeLessThan(40);      // one row; the leaked card rule made it 84px
+    expect(m.padTop).toBe("0px");           // the card rule padded it 32px
+    expect(m.marginLeft).toBe("0px");       // the card rule centered it with auto margins
+    expect(m.gap).toBeLessThan(24);         // the disclosure sits next to the trust tag
+  });
 });
