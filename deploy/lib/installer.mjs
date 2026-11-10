@@ -13,7 +13,7 @@
 // never its contents.
 
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CfError } from "./cf.mjs";
 import { renderConfig } from "./config.mjs";
@@ -53,8 +53,13 @@ function loadState(opts) {
   return JSON.parse(readFileSync(p, "utf8"));
 }
 
-function saveState(opts, state) {
+function ensureStateDir(opts) {
   mkdirSync(opts.stateDir, { recursive: true, mode: 0o700 });
+  chmodSync(opts.stateDir, 0o700);
+}
+
+function saveState(opts, state) {
+  ensureStateDir(opts);
   writeFileSync(statePaths(opts).state, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
 }
 
@@ -70,7 +75,7 @@ function loadCreds(opts) {
 }
 
 function saveCreds(opts, creds) {
-  mkdirSync(opts.stateDir, { recursive: true, mode: 0o700 });
+  ensureStateDir(opts);
   const p = statePaths(opts).creds;
   const body = Object.entries(creds).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
   writeFileSync(p, body, { mode: 0o600 });
@@ -354,10 +359,11 @@ function tail(r) {
 function hashTree(dir) {
   const h = createHash("sha256");
   const walk = (d) => {
-    for (const f of readdirSync(d).sort()) {
-      const p = join(d, f);
-      if (statSync(p).isDirectory()) walk(p);
-      else { h.update(f); h.update(readFileSync(p)); }
+    // Dirents, not a stat per path: one read of each file, no check-then-use gap.
+    for (const e of readdirSync(d, { withFileTypes: true }).sort((x, y) => (x.name < y.name ? -1 : 1))) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile()) { h.update(e.name); h.update(readFileSync(p)); }
     }
   };
   if (existsSync(dir)) walk(dir);
@@ -401,8 +407,10 @@ async function ensureWorker(ctx, pf) {
       creds.POSTERN_API_TOKEN = ctx.randomSecret();
       saveCreds(opts, creds);
     }
-    secretsFile = join(opts.stateDir, `.secrets-${process.pid}.json`);
-    writeFileSync(secretsFile, JSON.stringify({ POSTERN_API_TOKEN: creds.POSTERN_API_TOKEN }), { mode: 0o600 });
+    // Unpredictable name, exclusive create: never write the token through a
+    // file or symlink that was already sitting at that path.
+    secretsFile = join(opts.stateDir, `.secrets-${randomBytes(12).toString("hex")}.json`);
+    writeFileSync(secretsFile, JSON.stringify({ POSTERN_API_TOKEN: creds.POSTERN_API_TOKEN }), { mode: 0o600, flag: "wx" });
     args.push("--secrets-file", secretsFile);
   }
   let r;
@@ -561,7 +569,7 @@ function makeCtx(deps, opts, mode) {
 }
 
 function writeConfig(ctx) {
-  mkdirSync(ctx.opts.stateDir, { recursive: true, mode: 0o700 });
+  ensureStateDir(ctx.opts);
   const cfg = renderConfig({ repoRoot: ctx.repoRoot, state: ctx.state, opts: ctx.opts });
   writeFileSync(ctx.paths.config, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
 }

@@ -5,7 +5,7 @@
 // fake's STATE and its request log, not on the installer's prose.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, beforeEach, describe, test } from "node:test";
@@ -96,15 +96,25 @@ describe("install", () => {
   test("the credentials file is mode 600 and holds what the installer generated", async () => {
     const c = setup();
     await install(c.deps, c.opts);
-    const p = join(c.opts.stateDir, "postern.example.com.credentials.env");
-    assert.equal(statSync(p).mode & 0o777, 0o600);
-    const body = readFileSync(p, "utf8");
+    const fd = openSync(join(c.opts.stateDir, "postern.example.com.credentials.env"), "r");
+    const mode = fstatSync(fd).mode & 0o777;
+    const body = readFileSync(fd, "utf8");
+    closeSync(fd);
+    assert.equal(mode, 0o600);
     assert.match(body, /^POSTERN_API_URL=https:\/\/mail\.example\.com$/m);
     const tok = /^POSTERN_API_TOKEN=(.*)$/m.exec(body)[1];
     assert.equal(c.m.scripts.postern.secrets.get("POSTERN_API_TOKEN"), tok);
     const pw = /^POSTERN_ADMIN_PASSWORD=(.*)$/m.exec(body)[1];
     assert.equal(c.m.admins["admin@example.com"], pw);
-    assert.ok(!statSync(c.opts.stateDir).isFile());
+    assert.equal(statSync(c.opts.stateDir).mode & 0o777, 0o700);
+    assert.deepEqual(readdirSync(c.opts.stateDir).filter((f) => f.startsWith(".secrets-")), [], "the temporary secrets file was left behind");
+  });
+
+  test("a state dir that already existed with loose permissions is tightened to 700", async () => {
+    const c = setup();
+    mkdirSync(c.opts.stateDir, { recursive: true, mode: 0o755 });
+    await install(c.deps, c.opts);
+    assert.equal(statSync(c.opts.stateDir).mode & 0o777, 0o700);
   });
 
   test("IDEMPOTENT: a second run makes no write of any kind", async () => {
