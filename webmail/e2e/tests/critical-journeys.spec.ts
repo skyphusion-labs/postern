@@ -60,6 +60,14 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
   });
 }
 
+// An unset or "off" WEBMAIL_AUTH_BACKEND shows the "not enabled" notice first (#798);
+// the BYO-token gate is one click away from it.
+async function openTokenGate(page: Page) {
+  await expect(page.locator("#disabled")).toBeVisible();
+  await page.locator("#toTokenFromOff").click();
+  await expect(page.locator("#gate")).toBeVisible();
+}
+
 async function installMocks(page: Page, mode: "token" | "session") {
   await page.route("https://postern.test/**", async (route) => {
     const req = route.request();
@@ -176,6 +184,7 @@ test.describe("webmail critical journeys (#355)", () => {
     // work, so a new user should not have to retype the URL they are already on.
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
 
     await expect(page.locator("#gate")).toBeVisible();
     await expect(page.locator("#origin")).toHaveValue("https://postern.test");
@@ -189,6 +198,7 @@ test.describe("webmail critical journeys (#355)", () => {
   test("BYO token: connect, list, open sandboxed HTML body", async ({ page }) => {
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
 
     await expect(page.locator("#gate")).toBeVisible();
     await page.locator("#origin").fill("https://postern.test");
@@ -241,6 +251,7 @@ test.describe("webmail critical journeys (#355)", () => {
     });
 
     await page.goto("https://postern.test/webmail");
+    if (mode === "token") await openTokenGate(page);
     if (mode === "token") {
       await page.locator("#origin").fill("https://postern.test");
       await page.locator("#token").fill("read-token");
@@ -272,6 +283,7 @@ test.describe("webmail critical journeys (#355)", () => {
   test("compose opens when send token is present", async ({ page }) => {
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#origin").fill("https://postern.test");
     await page.locator("#token").fill("read-token");
     await page.locator("#sendToken").fill("send-token");
@@ -401,6 +413,7 @@ test.describe("webmail critical journeys (#355)", () => {
       fulfillJson(route, { ...SAMPLE_MESSAGE, message: { ...SAMPLE_MESSAGE.message, bodyHtml: null } }));
     await page.emulateMedia({ colorScheme: "dark" });
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#token").fill("read-token");
     await page.locator("#connect").click();
     await page.getByText("Hello from Alice").click();
@@ -433,6 +446,7 @@ test.describe("webmail critical journeys (#355)", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#token").fill("read-token");
     await page.locator("#connect").click();
 
@@ -468,6 +482,7 @@ test.describe("webmail critical journeys (#355)", () => {
     await installMocks(page, "token");
     await page.route("https://postern.test/api/search**", (route) => fulfillJson(route, { ok: true, items: [], cursor: null }));
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#token").fill("read-token");
     await page.locator("#sendToken").fill("send-token");
     await page.locator("#connect").click();
@@ -508,6 +523,7 @@ test.describe("webmail critical journeys (#355)", () => {
     await page.route("https://postern.test/api/messages?**", (route) =>
       fulfillJson(route, { ok: true, items: [SAMPLE_LIST.items[0], second], cursor: null }));
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#token").fill("read-token");
     await page.locator("#connect").click();
     await expect(page.locator(".row-item")).toHaveCount(2);
@@ -662,5 +678,38 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#signinErr")).toHaveText("Too many attempts. Try again in 2 minutes.");
     await expect(page.locator("#siSubmit")).toHaveText("Sign in");
     await expect(page.locator("#siSubmit")).toBeEnabled();
+  });
+
+  test("sign-in off: a plain not-enabled notice, no form; the token gate is one click away (#798)", async ({ page }) => {
+    await installMocks(page, "token");  // GET /api/session -> 401 { authBackend: "off" }
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#disabled")).toBeVisible();
+    await expect(page.locator("#disabledTitle")).toHaveText("Webmail sign-in is not enabled on this server");
+    await expect(page.locator("#signin")).toBeHidden();
+    await expect(page.locator("#setup")).toBeHidden();
+    await expect(page.locator("#gate")).toBeHidden();
+    // Nothing to type: no visible text or password field on the notice.
+    await expect(page.locator("input:visible")).toHaveCount(0);
+    await page.locator("#toTokenFromOff").click();
+    await expect(page.locator("#gate")).toBeVisible();
+  });
+
+  test("setupRequired on a non-native answer is ignored: off stays off (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
+      ? fulfillJson(route, { ok: false, authBackend: "off", setupRequired: true }, 401)
+      : route.fallback());
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#disabled")).toBeVisible();
+    await expect(page.locator("#setup")).toBeHidden();
+  });
+
+  test("discovery unreachable is not reported as off: token gate with a reachability note (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.abort("connectionrefused"));
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#gate")).toBeVisible();
+    await expect(page.locator("#disabled")).toBeHidden();
+    await expect(page.locator("#gateErr")).toHaveText("Could not reach the server to check sign-in. Try again, or connect with an API token.");
   });
 });

@@ -167,6 +167,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
     min-height: 30px; padding: 0 var(--sp-2); font-size: var(--fs-xs);
   }
+  .auth code { font: var(--fs-xs) var(--font-mono); background: var(--panel-2); padding: 1px 4px; border-radius: 4px; color: var(--fg); }
   .auth details.help { margin-top: var(--sp-4); font-size: var(--fs-sm); color: var(--muted); }
   .auth details.help summary { cursor: pointer; color: var(--accent); }
   .auth details.help p { margin: var(--sp-2) 0 0; }
@@ -433,7 +434,7 @@ export const WEBMAIL_HTML = `<!doctype html>
   }
   .skip:focus { top: var(--sp-2); }
   .list:focus { outline: none; }
-  .msg-head h2:focus { outline: none; }
+  .msg-head h2:focus, .auth h2:focus { outline: none; }
   .toast {
     position: fixed; left: 50%; bottom: var(--sp-4); transform: translateX(-50%); z-index: 40;
     max-width: calc(100vw - 32px); padding: var(--sp-2) var(--sp-4); border-radius: var(--r-md);
@@ -571,6 +572,19 @@ export const WEBMAIL_HTML = `<!doctype html>
     <div class="err" id="signinErr" role="alert" aria-live="assertive"></div>
     <p class="note-ok" id="signinNote" role="status"></p>
     <p class="switch"><button type="button" class="link" id="toTokenGate">Use an API token instead</button></p>
+  </div>
+</div>
+
+<!-- Sign-in not enabled (#798): WEBMAIL_AUTH_BACKEND unset or "off". Unset means OFF;
+     only an explicit "native" turns sign-in on (lead ruling, contract #793 amended). -->
+<div id="disabled" class="auth" style="display:none" role="region" aria-labelledby="disabledTitle">
+  <div class="card">
+    <p class="eyebrow">Not enabled</p>
+    <h2 id="disabledTitle" tabindex="-1">Webmail sign-in is not enabled on this server</h2>
+    <p class="lede">This Postern server does not offer username and password sign-in. If you run it,
+       set <code>WEBMAIL_AUTH_BACKEND</code> to <code>native</code> and create an account; see DEPLOY.md.</p>
+    <p class="lede">Your mail is unaffected: mail apps (IMAP and SMTP) and the API work as before.</p>
+    <p class="switch"><button type="button" class="link" id="toTokenFromOff">Operators and agents: connect with an API token</button></p>
   </div>
 </div>
 
@@ -1212,6 +1226,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("app").className = "";
     $("signin").style.display = "none";
     $("setup").style.display = "none";
+    $("disabled").style.display = "none";
     $("gate").style.display = "";
     $("logout").style.display = "none";
     $("railBtn").style.display = "none";
@@ -1233,6 +1248,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("app").className = "";
     $("gate").style.display = "none";
     $("setup").style.display = "none";
+    $("disabled").style.display = "none";
     $("signin").style.display = "";
     $("logout").style.display = "none";
     $("railBtn").style.display = "none";
@@ -1252,6 +1268,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("app").className = "";
     $("gate").style.display = "none";
     $("signin").style.display = "none";
+    $("disabled").style.display = "none";
     $("setup").style.display = "";
     $("logout").style.display = "none";
     $("railBtn").style.display = "none";
@@ -1259,6 +1276,23 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("who").textContent = "";
     $("setupErr").textContent = msg || "";
     focusFirst("suToken");
+  }
+
+  // Sign-in is off on this server (#798). A plain notice, not a form: a person who is
+  // not an operator has nothing to type here. The token gate stays one click away for
+  // operators and agents (contract 1.7, the off-mode path).
+  function showDisabled() {
+    state.authMode = "token";
+    $("app").className = "";
+    $("gate").style.display = "none";
+    $("signin").style.display = "none";
+    $("setup").style.display = "none";
+    $("disabled").style.display = "";
+    $("logout").style.display = "none";
+    $("railBtn").style.display = "none";
+    $("identity").textContent = "";
+    $("who").textContent = "";
+    focusFirst("disabledTitle");
   }
 
   // Show / hide a password field (#798). The value never leaves the input.
@@ -1275,6 +1309,7 @@ export const WEBMAIL_HTML = `<!doctype html>
   function showApp() {
     $("gate").style.display = "none";
     $("setup").style.display = "none";
+    $("disabled").style.display = "none";
     $("signin").style.display = "none";
     $("app").className = "on";
     $("logout").style.display = "";
@@ -2642,6 +2677,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     });
   });
   $("toTokenGate").addEventListener("click", function () { showGate(""); });
+  $("toTokenFromOff").addEventListener("click", function () { showGate(""); });
   $("toSignin").addEventListener("click", function () { showSignin(""); });
   $("search").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { state.q = e.target.value.trim(); resetAndLoad(); }
@@ -2704,6 +2740,7 @@ export const WEBMAIL_HTML = `<!doctype html>
       afterNoSession();
     }).catch(function () {
       state.authBackend = "off";
+      state.discoveryFailed = true;
       afterNoSession();
     });
   }
@@ -2711,9 +2748,13 @@ export const WEBMAIL_HTML = `<!doctype html>
   // (native backend) or the token gate (sessions off / unreachable).
   function afterNoSession() {
     if (state.origin && state.token) { state.authMode = "token"; showApp(); resetAndLoad(); return; }
-    if (state.setupRequired) { showSetup(""); return; }
+    // setupRequired is only meaningful on an explicitly native backend (the server only
+    // sends it then); never show first run on any other answer.
+    if (state.authBackend === "native" && state.setupRequired) { showSetup(""); return; }
     if (state.authBackend === "native") { showSignin(""); return; }
-    showGate("");
+    // Discovery failed (network): do not claim sign-in is off; offer the token gate.
+    if (state.discoveryFailed) { showGate("Could not reach the server to check sign-in. Try again, or connect with an API token."); return; }
+    showDisabled();
   }
   boot();
 })();
