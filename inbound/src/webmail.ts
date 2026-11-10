@@ -24,222 +24,439 @@ export const WEBMAIL_HTML = `<!doctype html>
 <meta name="referrer" content="no-referrer">
 <title>Postern webmail</title>
 <style>
-  :root, html[data-theme="dark"] {
-    --bg: #14161a; --panel: #1c1f26; --panel-2: #232733; --line: #2e3340;
-    --fg: #e7e9ee; --muted: #99a0ad; --accent: #6ea8fe; --accent-dim: #2b3550;
-    --bad: #e06c75; --ok: #98c379;
+  /* Design tokens (#794). Every color, size and space in this page reads from here.
+     Light is the base palette; dark applies when the OS asks for it (theme "system",
+     the default) or when the user picks Dark. The two dark blocks below MUST stay
+     identical: webmail-tokens.test.ts asserts it and checks WCAG AA on both palettes. */
+  :root {
+    color-scheme: light;
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --fs-2xs: 11px; --fs-xs: 12px; --fs-sm: 13px; --fs-md: 15px; --fs-lg: 17px; --fs-xl: 20px; --fs-2xl: 24px;
+    --lh-tight: 1.3; --lh: 1.5;
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
+    --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-pill: 999px;
+    --dur: 120ms;
+    /* tokens:light */
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --line: #dde1e8; --line-strong: #7c8596;
+    --fg: #171a21; --muted: #545d6b; --accent: #2456d3; --accent-fg: #ffffff; --accent-dim: #e5ecfb;
+    --bad: #b42318; --bad-dim: #fdecea; --ok: #067647; --ok-dim: #e7f5ee; --star: #9a6700;
+    --focus: #2456d3; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.10);
+    --frame-bg: #ffffff; --frame-fg: #171a21; --frame-link: #2456d3;
   }
-  html[data-theme="light"] {
-    --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f0f2f5; --line: #d7dbe3;
-    --fg: #1c1f26; --muted: #5c6575; --accent: #2563eb; --accent-dim: #dbe7ff;
-    --bad: #b42318; --ok: #067647;
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      /* tokens:dark */
+      --bg: #111318; --panel: #181b22; --panel-2: #20242d; --line: #2b303b; --line-strong: #6b7486;
+    --fg: #e8eaef; --muted: #9aa3b2; --accent: #7fa8ff; --accent-fg: #0b1020; --accent-dim: #1f2a44;
+    --bad: #f28b82; --bad-dim: #3a1f22; --ok: #7fd1a0; --ok-dim: #173326; --star: #e5c07b;
+    --focus: #7fa8ff; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
+    --frame-bg: #181b22; --frame-fg: #e8eaef; --frame-link: #7fa8ff;
+    }
   }
-  html[data-density="compact"] .row-item { padding: 6px 10px; }
-  html[data-density="compact"] body { font-size: 13px; }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    /* tokens:dark */
+    --bg: #111318; --panel: #181b22; --panel-2: #20242d; --line: #2b303b; --line-strong: #6b7486;
+    --fg: #e8eaef; --muted: #9aa3b2; --accent: #7fa8ff; --accent-fg: #0b1020; --accent-dim: #1f2a44;
+    --bad: #f28b82; --bad-dim: #3a1f22; --ok: #7fd1a0; --ok-dim: #173326; --star: #e5c07b;
+    --focus: #7fa8ff; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
+    --frame-bg: #181b22; --frame-fg: #e8eaef; --frame-link: #7fa8ff;
+  }
+  @media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } }
+  html[data-density="compact"] .row-item { padding: var(--sp-1) var(--sp-3); }
+  html[data-density="compact"] body { font-size: var(--fs-sm); }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--fg);
-    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    font: var(--fs-md)/var(--lh) var(--font-sans);
     display: flex; flex-direction: column;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
+  h1, h2, h3 { line-height: var(--lh-tight); }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* --- Header (#795) --- */
   header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: var(--sp-3); min-height: 56px;
+    padding: var(--sp-2) var(--sp-4); background: var(--panel); border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
   }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .02em; }
-  header .grow { flex: 1; }
-  header .who { color: var(--muted); font-size: 13px; }
+  header h1 {
+    display: flex; align-items: center; gap: var(--sp-2); margin: 0;
+    font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.01em; white-space: nowrap;
+  }
+  header h1 .mark { width: 26px; height: 26px; color: var(--accent); flex-shrink: 0; }
+  header h1 .sub { color: var(--muted); font-weight: 500; }
+  header .grow { flex: 1; min-width: 0; }
+  header .who, header .identity {
+    font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  header .who { color: var(--muted); }
+  header .identity { color: var(--fg); font-weight: 600; }
+  .sendnote { color: var(--muted); font-size: var(--fs-xs); }
+  #railBtn { display: none; }
+
+  /* --- Buttons (#795): secondary is the default; primary, quiet, danger, link --- */
   button {
-    background: var(--accent-dim); color: var(--fg); border: 1px solid var(--line);
-    border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit;
+    display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
+    min-height: 36px; padding: 0 var(--sp-3);
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm); cursor: pointer; font: inherit; font-size: var(--fs-sm); font-weight: 550;
+    transition: background var(--dur), border-color var(--dur), color var(--dur);
   }
-  button:hover { border-color: var(--accent); }
-  button.link { background: none; border: none; color: var(--accent); padding: 0; }
-  input, select {
-    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
-    border-radius: 6px; padding: 8px 10px; font: inherit;
+  button:hover { background: var(--panel-2); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.btn-primary, button[type="submit"], #connect, #cmpSend, #composeBtn {
+    background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
   }
-  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button.btn-primary:hover, button[type="submit"]:hover, #connect:hover, #cmpSend:hover, #composeBtn:hover {
+    background: var(--accent); filter: brightness(1.08);
+  }
+  button.btn-danger { color: var(--bad); }
+  button.btn-danger:hover { background: var(--bad-dim); border-color: var(--bad); }
+  button.btn-quiet { background: none; border-color: transparent; }
+  button.btn-quiet:hover { background: var(--panel-2); }
+  button.link {
+    background: none; border: none; color: var(--accent); padding: 0 var(--sp-1);
+    min-height: 0; font-weight: 500;
+  }
+  button.link:hover { text-decoration: underline; background: none; }
+  header button.link { min-height: 36px; padding: 0 var(--sp-2); }
+  header button.link:hover { background: var(--panel-2); text-decoration: none; border-radius: var(--r-sm); }
 
-  /* Gate */
-  #gate { margin: auto; max-width: 460px; padding: 28px; }
-  #gate .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px;
+  input, select, textarea {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm); padding: var(--sp-2) var(--sp-3); font: inherit; font-size: var(--fs-md);
+    min-height: 38px;
   }
-  #gate h2 { margin: 0 0 4px; }
-  #gate p { color: var(--muted); margin: 6px 0 16px; font-size: 13px; }
-  #gate label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
-  #gate input { width: 100%; }
-  #gate .row { display: flex; gap: 8px; margin-top: 18px; }
-  #gate .row button { flex: 1; }
-  .err { color: var(--bad); font-size: 13px; min-height: 1.2em; margin-top: 10px; }
+  input::placeholder { color: var(--muted); opacity: 1; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-dim); }
+  input:disabled { background: var(--panel-2); color: var(--muted); }
 
-  /* App layout */
-  #app { flex: 1; display: none; min-height: 0; }
+  /* --- Gate + sign-in cards --- */
+  #gate, #signin { margin: auto; width: 100%; max-width: 440px; padding: var(--sp-5) var(--sp-4); }
+  #gate .card, #signin .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
+    padding: var(--sp-5); box-shadow: var(--shadow);
+  }
+  #gate h2, #signin h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-xl); }
+  #gate p, #signin p { color: var(--muted); margin: var(--sp-2) 0 var(--sp-4); font-size: var(--fs-sm); }
+  #gate label, #signin label {
+    display: block; font-size: var(--fs-sm); font-weight: 550; color: var(--fg); margin: var(--sp-3) 0 var(--sp-1);
+  }
+  #gate input, #signin input { width: 100%; }
+  #gate .row, #signin .row { display: flex; gap: var(--sp-2); margin-top: var(--sp-4); }
+  #gate .row button, #signin .row button { flex: 1; min-height: 40px; font-size: var(--fs-md); }
+  .err { color: var(--bad); font-size: var(--fs-sm); min-height: 1.2em; margin-top: var(--sp-2); }
+  .switch { margin: var(--sp-3) 0 0; font-size: var(--fs-sm); }
+  .switch button { font: inherit; }
+
+  /* --- App shell (#795): rail | list | reading. Below 1100px the rail is a drawer;
+     below 760px list and reading are stacked views switched by data-view. --- */
+  #app { flex: 1; display: none; min-height: 0; position: relative; }
   #app.on { display: flex; }
-  .sidebar { width: 360px; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
-  .toolbar { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .folders {
+    width: 208px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 2px; padding: var(--sp-3) var(--sp-2); overflow-y: auto;
+  }
+  .folders button {
+    display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2);
+    width: 100%; min-height: 36px; text-align: left; background: none; border: none;
+    border-radius: var(--r-sm); padding: 0 var(--sp-3); color: var(--fg);
+    font-size: var(--fs-md); font-weight: 500;
+  }
+  .folders button:hover { background: var(--panel-2); }
+  .folders button.active { background: var(--accent-dim); color: var(--accent); font-weight: 650; }
+  .folders .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .folders .fcount { color: var(--muted); font-size: var(--fs-xs); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .folders .fcount.unread { color: var(--accent); font-weight: 700; }
+  .folders .fgroup {
+    color: var(--muted); font-size: var(--fs-2xs); font-weight: 650; text-transform: uppercase;
+    letter-spacing: .06em; padding: var(--sp-4) var(--sp-3) var(--sp-1);
+  }
+  .scrim { display: none; }
+
+  .sidebar {
+    width: 380px; flex-shrink: 0; border-right: 1px solid var(--line); background: var(--bg);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .toolbar { display: flex; gap: var(--sp-2); padding: var(--sp-3); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .toolbar input { flex: 1; min-width: 120px; }
   .toolbar select { width: auto; }
   .toolbar .mode { min-width: 6.5rem; }
   .filters {
-    display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px;
+    display: flex; flex-wrap: wrap; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3);
     border-bottom: 1px solid var(--line); align-items: center;
   }
-  .filters label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
-  .filters input[type="date"] { padding: 4px 6px; font-size: 12px; }
+  .filters label { font-size: var(--fs-xs); color: var(--muted); display: flex; gap: var(--sp-1); align-items: center; }
+  .filters input { min-height: 30px; padding: var(--sp-1) var(--sp-2); font-size: var(--fs-xs); }
   .filters .chip {
-    font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line);
-    background: var(--panel-2); color: var(--fg); cursor: pointer;
+    min-height: 28px; font-size: var(--fs-xs); padding: 0 var(--sp-3); border-radius: var(--r-pill);
+    border: 1px solid var(--line-strong); background: var(--panel); color: var(--fg);
   }
   .filters .chip.on { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
-  .settings-panel {
-    position: fixed; top: 52px; right: 12px; width: 320px; z-index: 20;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.35); display: none;
-  }
-  .settings-panel.on { display: block; }
-  .settings-panel h2 { margin: 0 0 10px; font-size: 15px; }
-  .settings-panel label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
-  .settings-panel select { width: 100%; }
-  .settings-panel .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
-  .ac-wrap { position: relative; }
-  .ac-list {
-    position: absolute; left: 0; right: 0; top: 100%; z-index: 5;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
-    max-height: 160px; overflow-y: auto; display: none;
-  }
-  .ac-list.on { display: block; }
-  .ac-list button {
-    display: block; width: 100%; text-align: left; background: none; border: none;
-    border-radius: 0; padding: 6px 10px; color: var(--fg);
-  }
-  .ac-list button:hover { background: var(--accent-dim); }
   .list { overflow-y: auto; flex: 1; }
   .row-item {
-    padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
+    padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--line); cursor: pointer;
+    background: var(--bg); transition: background var(--dur);
   }
-  .row-item:hover { background: var(--panel); }
-  .row-item.sel { background: var(--accent-dim); }
-  .row-item .top { display: flex; justify-content: space-between; gap: 8px; }
+  .row-item:hover { background: var(--panel-2); }
+  .row-item.sel { background: var(--accent-dim); box-shadow: inset 3px 0 0 var(--accent); }
+  .row-item .top { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-2); }
   .row-item .from { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row-item .date { color: var(--muted); font-size: 12px; flex-shrink: 0; }
-  .row-item .subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row-item .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .tag { display: inline-block; font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); margin-right: 4px; }
-  .tag.trusted { color: var(--ok); }
-  .tag.untrusted { color: var(--bad); }
-  .tag.out { color: var(--accent); }
-  .more { padding: 12px; text-align: center; }
+  .row-item .date { color: var(--muted); font-size: var(--fs-xs); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .row-item .subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); margin-top: 2px; }
+  .row-item .meta { color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-1); display: flex; gap: var(--sp-1); align-items: center; flex-wrap: wrap; }
+  .row-item.unread .from, .row-item.unread .subject { font-weight: 700; }
+  .row-item .star { color: var(--muted); }
+  .row-item .star.on { color: var(--star); }
+  .tag {
+    display: inline-block; font-size: var(--fs-2xs); font-weight: 600; line-height: 18px; padding: 0 var(--sp-2);
+    border-radius: var(--r-pill); border: 1px solid var(--line);
+  }
+  .tag.trusted { color: var(--ok); background: var(--ok-dim); border-color: transparent; }
+  .tag.untrusted { color: var(--bad); background: var(--bad-dim); border-color: transparent; }
+  .tag.out { color: var(--accent); background: var(--accent-dim); border-color: transparent; }
+  .more { padding: var(--sp-3); text-align: center; }
+  .loading { color: var(--muted); padding: var(--sp-4); font-size: var(--fs-sm); }
+  .list > .err { padding: 0 var(--sp-4) var(--sp-4); }
 
-  .reading { flex: 1; overflow-y: auto; padding: 22px 28px; min-width: 0; }
-  .reading .empty { color: var(--muted); margin-top: 40px; text-align: center; }
-  .msg-head h2 { margin: 0 0 8px; font-size: 20px; }
-  .msg-head .kv { color: var(--muted); font-size: 13px; }
+  .reading-col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+  .reading-bar { display: none; }
+  .reading { flex: 1; overflow-y: auto; padding: var(--sp-5) var(--sp-6); min-width: 0; }
+  .reading > * { max-width: 920px; }
+  .reading .empty { color: var(--muted); margin: var(--sp-7) auto 0; text-align: center; }
+  .reading > .err { padding: var(--sp-2) 0; }
+  .msg-head h2 { margin: 0 0 var(--sp-3); font-size: var(--fs-2xl); font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
+  .msg-head .kv { color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .msg-head .kv b { color: var(--fg); font-weight: 600; }
+  .msg-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-4); }
   .msg-body-frame {
-    margin-top: 18px; padding-top: 18px; border: none; border-top: 1px solid var(--line);
-    width: 100%; min-height: 220px; background: var(--panel-2);
+    display: block; margin-top: var(--sp-4); border: 1px solid var(--line); border-radius: var(--r-md);
+    width: 100%; min-height: 360px; background: var(--frame-bg);
   }
   /* #60/#343: remote content is always blocked (tracking-pixel privacy); this
      banner is a non-actionable notice, not an opt-in (see renderBody). */
   .remote-banner {
-    margin-top: 18px; padding: 8px 12px; display: flex; align-items: center; gap: 10px;
+    margin-top: var(--sp-4); padding: var(--sp-2) var(--sp-3); display: flex; align-items: center; gap: var(--sp-2);
     flex-wrap: wrap; background: var(--panel-2); border: 1px solid var(--line);
-    border-radius: 6px; font-size: 13px; color: var(--muted);
+    border-radius: var(--r-md) var(--r-md) 0 0; font-size: var(--fs-sm); color: var(--muted);
   }
-  .remote-banner + .msg-body-frame { margin-top: 0; }
-  .attachments { margin-top: 18px; }
-  .attachments h3 { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
-  .attachments li { font-size: 13px; margin-bottom: 4px; }
-  .attachments .dl { font-size: 12px; padding: 2px 8px; margin-left: 6px; }
-  .thread { margin-top: 24px; }
-  .thread h3 { font-size: 13px; color: var(--muted); }
-  .thread .t-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; cursor: pointer; }
-  .thread .t-item:hover { border-color: var(--accent); }
-  .loading { color: var(--muted); padding: 12px; }
-  .compose label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  .remote-banner + .msg-body-frame { margin-top: 0; border-top: none; border-radius: 0 0 var(--r-md) var(--r-md); }
+  .attachments { margin-top: var(--sp-4); }
+  .attachments h3, .thread h3 {
+    font-size: var(--fs-xs); font-weight: 650; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 0 0 var(--sp-2);
+  }
+  .attachments ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+  .attachments li {
+    font-size: var(--fs-sm); display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+    padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md); overflow-wrap: anywhere;
+  }
+  .attachments .dl { min-height: 30px; flex-shrink: 0; }
+  .thread { margin-top: var(--sp-5); }
+  .thread .t-item {
+    padding: var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md);
+    margin-bottom: var(--sp-2); cursor: pointer; font-size: var(--fs-sm);
+  }
+  .thread .t-item:hover { border-color: var(--accent); background: var(--panel-2); }
+  .queue-note { color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-2); }
+
+  /* --- Compose --- */
+  .compose h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-xl); }
+  .compose label { display: block; font-size: var(--fs-sm); font-weight: 550; color: var(--fg); margin: var(--sp-3) 0 var(--sp-1); }
   .compose input, .compose textarea { width: 100%; }
+  .compose input[type="file"] { padding: var(--sp-2); font-size: var(--fs-sm); }
   .compose textarea { min-height: 180px; resize: vertical; }
   .compose-editor {
-    width: 100%; min-height: 220px; padding: 10px; overflow-y: auto;
-    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
-    border-radius: 6px;
+    width: 100%; min-height: 240px; padding: var(--sp-3); overflow-y: auto;
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
   }
+  .compose-editor:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-dim); }
   .compose-editor.plain { white-space: pre-wrap; font-family: inherit; }
-  .formatbar { display: flex; gap: 4px; margin: 6px 0; flex-wrap: wrap; }
-  .formatbar button { min-width: 34px; padding: 4px 8px; }
-  .compose-status { color: var(--muted); font-size: 12px; margin-left: auto; align-self: center; }
-  .draft-files { list-style: none; padding: 0; margin: 8px 0; }
-  .draft-files li { display: flex; gap: 8px; align-items: center; margin: 5px 0; }
-  .draft-files .progress { color: var(--muted); font-size: 12px; }
+  .formatbar { display: flex; gap: var(--sp-1); margin: var(--sp-2) 0; flex-wrap: wrap; }
+  .formatbar button { min-width: 36px; min-height: 30px; padding: 0 var(--sp-2); }
+  .compose-status { color: var(--muted); font-size: var(--fs-xs); margin-left: auto; align-self: center; }
+  .draft-files { list-style: none; padding: 0; margin: var(--sp-2) 0; }
+  .draft-files li { display: flex; gap: var(--sp-2); align-items: center; margin: var(--sp-1) 0; font-size: var(--fs-sm); }
+  .draft-files .progress { color: var(--muted); font-size: var(--fs-xs); }
   .quote-preview {
-    margin-top: 14px; padding: 10px; border-left: 3px solid var(--line);
-    color: var(--muted); white-space: pre-wrap; max-height: 180px; overflow: auto;
+    margin-top: var(--sp-3); padding: var(--sp-3); border-left: 3px solid var(--line-strong);
+    color: var(--muted); white-space: pre-wrap; max-height: 180px; overflow: auto; font-size: var(--fs-sm);
   }
-  .compose-actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
-  .compose-note { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
-  .sendnote { color: var(--muted); font-size: 12px; }
-  header .identity { color: var(--fg); font-size: 13px; font-weight: 600; }
+  .compose-actions { margin-top: var(--sp-4); display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; }
+  .compose-note { color: var(--muted); font-size: var(--fs-sm); margin: 0 0 var(--sp-3); }
 
+  /* --- Settings popover + autocomplete --- */
+  .settings-panel {
+    position: fixed; top: 60px; right: var(--sp-3); width: min(320px, calc(100vw - 24px)); z-index: 30;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
+    padding: var(--sp-4); box-shadow: var(--shadow); display: none;
+  }
+  .settings-panel.on { display: block; }
+  .settings-panel h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-md); }
+  .settings-panel label { display: block; font-size: var(--fs-sm); color: var(--muted); margin: var(--sp-3) 0 var(--sp-1); }
+  .settings-panel select { width: 100%; }
+  .settings-panel .note { color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-3); }
+  .settings-signout { display: none; width: 100%; margin-top: var(--sp-3); }
+  .ac-wrap { position: relative; }
+  .ac-list {
+    position: absolute; left: 0; right: 0; top: 100%; z-index: 5;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-sm);
+    box-shadow: var(--shadow); max-height: 160px; overflow-y: auto; display: none;
+  }
+  .ac-list.on { display: block; }
+  .ac-list button {
+    display: block; width: 100%; text-align: left; background: none; border: none;
+    border-radius: 0; padding: var(--sp-2) var(--sp-3); color: var(--fg); min-height: 0;
+  }
+  .ac-list button:hover { background: var(--accent-dim); }
 
-  /* Folder rail (#352) */
-  .folders {
-    width: 168px; border-right: 1px solid var(--line); background: var(--panel);
-    display: flex; flex-direction: column; padding: 8px 0; overflow-y: auto; flex-shrink: 0;
+  /* --- Components (#796) --- */
+  .avatar {
+    width: 36px; height: 36px; border-radius: var(--r-pill); flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--accent-dim); color: var(--accent); font-weight: 700; font-size: var(--fs-md);
   }
-  .folders button {
-    display: flex; justify-content: space-between; gap: 8px; width: 100%;
-    text-align: left; background: none; border: none; border-radius: 0;
-    padding: 8px 12px; color: var(--fg); font: inherit; cursor: pointer;
+  .row-item { display: flex; gap: var(--sp-3); align-items: flex-start; }
+  .row-item .avatar { width: 32px; height: 32px; font-size: var(--fs-sm); margin-top: 2px; }
+  .row-main { flex: 1; min-width: 0; }
+  .row-item .dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--accent); flex-shrink: 0; display: none; align-self: center; }
+  .row-item.unread .dot { display: inline-block; }
+  .row-item .top .from { flex: 1; min-width: 0; }
+  .row-item .top { justify-content: flex-start; }
+  .row-item:not(.unread) .from { font-weight: 500; }
+  .row-item .meta:empty { display: none; }
+  .row-item .att { display: inline-flex; align-items: center; gap: 2px; }
+  .ico { width: 14px; height: 14px; flex-shrink: 0; }
+  .toolbar #filtersBtn { min-height: 38px; }
+  .badge {
+    display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px;
+    padding: 0 5px; border-radius: var(--r-pill); background: var(--accent); color: var(--accent-fg);
+    font-size: var(--fs-2xs); font-weight: 700;
   }
-  .folders button:hover { background: var(--panel-2); }
-  .folders button.active { background: var(--accent-dim); color: var(--accent); }
-  .folders .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .folders .fcount { color: var(--muted); font-size: 12px; flex-shrink: 0; }
-  .folders .fcount.unread { color: var(--accent); font-weight: 600; }
-  /* Role queues (#425): their own group, never mixed into the personal folders. */
-  .folders .fgroup {
-    color: var(--muted); font-size: 11px; text-transform: uppercase;
-    letter-spacing: .06em; padding: 10px 10px 4px; border-top: 1px solid var(--line);
-    margin-top: 6px;
+  .badge:empty { display: none; }
+  .filters[hidden] { display: none; }
+  .filters .fhint { width: 100%; color: var(--muted); font-size: var(--fs-xs); }
+
+  .msg-head .sender { display: flex; gap: var(--sp-3); align-items: flex-start; margin-top: var(--sp-2); }
+  .msg-head .sender-main { flex: 1; min-width: 0; }
+  .msg-head .sender-line { overflow-wrap: anywhere; }
+  .msg-head .sender-name { font-weight: 650; }
+  .msg-head .sender-addr { color: var(--muted); font-size: var(--fs-sm); margin-left: var(--sp-1); }
+  .msg-head .sender-date { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; flex-shrink: 0; }
+  .msg-head .trust { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-top: var(--sp-3); font-size: var(--fs-sm); }
+  .msg-head details.auth { color: var(--muted); }
+  .msg-head details.auth summary { cursor: pointer; color: var(--accent); }
+  .msg-head details.auth span { margin-left: var(--sp-2); }
+
+  .empty-state { text-align: center; padding: var(--sp-7) var(--sp-4); color: var(--muted); }
+  .empty-state .es-ico { width: 40px; height: 40px; color: var(--line-strong); }
+  .empty-state .es-title { margin: var(--sp-3) 0 var(--sp-1); color: var(--fg); font-weight: 600; font-size: var(--fs-md); }
+  .empty-state .es-hint { margin: 0; font-size: var(--fs-sm); }
+  .reading > .empty-state { max-width: none; margin-top: 10vh; }
+
+  .skel { display: block; border-radius: var(--r-sm); background: var(--panel-2); position: relative; overflow: hidden; }
+  .skel::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, var(--line), transparent);
+    animation: skel 1.2s ease-in-out infinite;
   }
-  .queue-note { color: var(--muted); font-size: 12px; margin-top: 8px; }
-  .row-item.unread .from, .row-item.unread .subject { font-weight: 700; }
-  .row-item .star { color: var(--muted); margin-right: 4px; }
-  .row-item .star.on { color: #e5c07b; }
-  .msg-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  @keyframes skel { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+  @media (prefers-reduced-motion: reduce) { .skel::after { animation: none; } }
+  .skel-row { display: flex; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--line); }
+  .skel-row .skel-av { width: 32px; height: 32px; border-radius: var(--r-pill); flex-shrink: 0; }
+  .skel-row .skel-lines { flex: 1; display: flex; flex-direction: column; gap: var(--sp-2); padding-top: 2px; }
+  .skel-line { height: 10px; }
+  .loading.skel-list, .loading.skel-read { padding: 0; }
+  .skel-read { display: flex; flex-direction: column; gap: var(--sp-3); }
+  .skel-read .skel-title { height: 22px; width: 60%; }
+  .skel-read .skel-body { height: 280px; margin-top: var(--sp-3); }
+
+  .compose-head { display: flex; align-items: baseline; gap: var(--sp-3); }
+  .compose-head .compose-status { margin-left: auto; }
+  .compose .field-row { display: flex; align-items: flex-end; gap: var(--sp-2); }
+  .compose .field-row > .grow { flex: 1; min-width: 0; }
+  .compose .cc-toggle { min-height: 38px; white-space: nowrap; }
+  .file-pick { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); }
+  .compose .file-pick label.file-btn {
+    display: inline-flex; align-items: center; gap: var(--sp-2); margin: 0; min-height: 36px; padding: 0 var(--sp-3);
+    border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--panel);
+    cursor: pointer; font-weight: 550; font-size: var(--fs-sm);
+  }
+  .compose .file-pick label.file-btn:hover { background: var(--panel-2); }
+  .file-pick input:focus-visible + label.file-btn { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .file-pick .fhint { color: var(--muted); font-size: var(--fs-xs); }
+  .compose > .compose-actions {
+    position: sticky; bottom: 0; z-index: 2; background: var(--panel);
+    margin: var(--sp-4) calc(-1 * var(--sp-6)) 0; padding: var(--sp-3) var(--sp-6);
+    border-top: 1px solid var(--line);
+  }
+  .compose > .err:empty { display: none; }
+  @media (max-width: 1100px) { .compose > .compose-actions { margin: var(--sp-4) calc(-1 * var(--sp-5)) 0; padding: var(--sp-3) var(--sp-5); } }
+  @media (max-width: 760px) {
+    .compose > .compose-actions { margin: var(--sp-4) calc(-1 * var(--sp-4)) 0; padding: var(--sp-3) var(--sp-4); }
+    .msg-head .sender { flex-wrap: wrap; }
+    .msg-head .sender-date { width: 100%; padding-left: 48px; }
+  }
 
   /* Keyboard focus visibility (a11y foundation): a clear ring for keyboard users
      on every interactive control, without a persistent outline on mouse click. */
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .row-item:focus-visible { outline-offset: -2px; }
 
-  /* Sign-in card shares the gate look. */
-  #signin { margin: auto; max-width: 460px; padding: 28px; }
-  #signin .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px;
+  /* --- Responsive (#795) --- */
+  @media (max-width: 1100px) {
+    #railBtn { display: inline-flex; }
+    .folders {
+      position: absolute; top: 0; bottom: 0; left: 0; z-index: 25; width: 260px;
+      transform: translateX(-105%); transition: transform var(--dur) ease-out; box-shadow: var(--shadow);
+      visibility: hidden;
+    }
+    #app[data-rail="open"] .folders { transform: none; visibility: visible; }
+    #app[data-rail="open"] .scrim {
+      display: block; position: absolute; inset: 0; z-index: 24; background: rgba(0,0,0,.35);
+    }
+    .reading { padding: var(--sp-5); }
   }
-  #signin h2 { margin: 0 0 4px; }
-  #signin p { color: var(--muted); margin: 6px 0 16px; font-size: 13px; }
-  #signin label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
-  #signin input { width: 100%; }
-  #signin .row { display: flex; gap: 8px; margin-top: 18px; }
-  #signin .row button { flex: 1; }
-  .switch { margin: 14px 0 0; font-size: 13px; }
-  .switch button { font: inherit; }
+  @media (max-width: 760px) {
+    header { gap: var(--sp-1); padding: var(--sp-2); }
+    header h1 .sub, header .who, header .identity, .sendnote, #themeBtn, #logout { display: none !important; }
+    .settings-signout { display: flex; }
+    #composeBtn { padding: 0 var(--sp-3); }
+    .sidebar { width: 100%; border-right: none; }
+    .reading-col { display: none; }
+    #app[data-view="reading"] .sidebar { display: none; }
+    #app[data-view="reading"] .reading-col { display: flex; }
+    .reading-bar {
+      display: flex; align-items: center; padding: var(--sp-2); border-bottom: 1px solid var(--line);
+      background: var(--panel); flex-shrink: 0;
+    }
+    .reading { padding: var(--sp-4); }
+    .msg-head h2 { font-size: var(--fs-xl); }
+    .msg-body-frame { min-height: 55vh; }
+    .settings-panel { top: 56px; }
+    input, select, textarea { font-size: 16px; } /* iOS: no zoom on focus */
+  }
 </style>
 </head>
 <body>
 
 <header role="banner">
-  <h1>Postern webmail</h1>
+  <button id="railBtn" style="display:none" type="button" class="btn-quiet" aria-label="Folders" aria-controls="folders" aria-expanded="false">
+    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+  </button>
+  <h1><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect x="1" y="1" width="30" height="30" rx="8" fill="currentColor"/><path d="M10 25V14a6 6 0 0 1 12 0v11" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><path d="M7 25h18" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/></svg>Postern <span class="sub">webmail</span></h1>
   <span class="grow"></span>
   <span class="identity" id="identity"></span>
   <span class="who" id="who"></span>
   <span class="sendnote" id="sendNote" style="display:none"></span>
   <button id="composeBtn" style="display:none">Compose</button>
+  <button id="themeBtn" type="button" class="link" aria-label="Theme: match system" title="Theme: match system">Theme</button>
   <button id="settingsBtn" class="link" style="display:none">Settings</button>
   <button id="logout" class="link" style="display:none">Sign out</button>
 </header>
@@ -247,8 +464,9 @@ export const WEBMAIL_HTML = `<!doctype html>
   <h2>Settings</h2>
   <label for="themeSelect">Theme</label>
   <select id="themeSelect" aria-label="Theme">
-    <option value="dark">Dark</option>
+    <option value="system">Match system</option>
     <option value="light">Light</option>
+    <option value="dark">Dark</option>
   </select>
   <label for="densitySelect">Density</label>
   <select id="densitySelect" aria-label="Density">
@@ -256,6 +474,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     <option value="compact">Compact</option>
   </select>
   <p class="note" id="settingsSession">Session: not signed in.</p>
+  <button type="button" id="settingsSignout" class="settings-signout">Sign out</button>
   <p class="note">Remote images in message bodies are blocked by CSP (img-src 'self' data: only; no https:). There is no toggle that can enable them under the current policy.</p>
 </div>
 
@@ -306,14 +525,16 @@ export const WEBMAIL_HTML = `<!doctype html>
   <nav class="folders" id="folders" role="navigation" aria-label="Folders"></nav>
   <div class="sidebar" aria-label="Mailbox">
     <div class="toolbar">
-      <input id="search" type="search" placeholder="Search (press Enter)" aria-label="Search mail">
+      <input id="search" type="search" placeholder="Search mail" aria-label="Search mail">
       <select id="searchMode" class="mode" title="Search mode (applies when searching)" aria-label="Search mode">
         <option value="hybrid">Hybrid</option>
         <option value="fts">Keyword</option>
         <option value="semantic">Semantic</option>
       </select>
+      <button type="button" id="filtersBtn" class="btn-quiet" aria-expanded="false" aria-controls="filters">Filters <span class="badge" id="filtersCount"></span></button>
     </div>
-    <div class="filters" id="filters" aria-label="Search filters">
+    <div class="filters" id="filters" aria-label="Search filters" hidden>
+      <span class="fhint">Filters narrow a search. Type a query and press Enter.</span>
       <button type="button" class="chip" data-filter="unseen" id="chipUnseen">Unread</button>
       <button type="button" class="chip" data-filter="seen" id="chipSeen">Read</button>
       <button type="button" class="chip" data-filter="hasAtt" id="chipHasAtt">Has attachment</button>
@@ -324,9 +545,13 @@ export const WEBMAIL_HTML = `<!doctype html>
     </div>
     <div class="list" id="list" aria-label="Messages"></div>
   </div>
-  <div class="reading" id="reading" role="main" aria-label="Message">
-    <div class="empty">Select a message to read.</div>
-  </div>
+  <main class="reading-col" aria-label="Message">
+    <div class="reading-bar"><button type="button" id="backBtn" class="btn-quiet">&larr; Back to list</button></div>
+    <div class="reading" id="reading">
+      <div class="empty">Select a message to read.</div>
+    </div>
+  </main>
+  <div class="scrim" id="scrim"></div>
 </div>
 
 <script>
@@ -354,20 +579,38 @@ export const WEBMAIL_HTML = `<!doctype html>
 
   // --- session state ---------------------------------------------------------
   var SS = window.sessionStorage;
-  var LS = window.localStorage;
+  var LS = (function () { try { return window.localStorage; } catch (_) { return null; } })();
   var SEARCH_MODES = ["fts", "semantic", "hybrid"];
   function normalizeSearchMode(v) {
     return SEARCH_MODES.indexOf(v) >= 0 ? v : "hybrid";
   }
+  // Theme (#794): "system" (default, follows prefers-color-scheme), "light" or "dark".
+  // localStorage can throw (private mode, blocked storage); a pref is a convenience, so
+  // a failed read falls back to the default and a failed write is ignored.
+  var THEMES = ["system", "light", "dark"];
+  var THEME_LABEL = { system: "match system", light: "light", dark: "dark" };
+  function prefGet(k) { try { return LS.getItem(k); } catch (_) { return null; } }
+  function prefSet(k, v) { try { LS.setItem(k, v); } catch (_) {} }
+  function themePref() {
+    var t = prefGet("postern_theme");
+    return THEMES.indexOf(t) >= 0 ? t : "system";
+  }
+  var DARK_MQ = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
   function applyChromePrefs() {
-    var theme = LS.getItem("postern_theme") === "light" ? "light" : "dark";
-    var density = LS.getItem("postern_density") === "compact" ? "compact" : "comfortable";
+    var theme = themePref();
+    var density = prefGet("postern_density") === "compact" ? "compact" : "comfortable";
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.setAttribute("data-density", density);
     if ($("themeSelect")) $("themeSelect").value = theme;
     if ($("densitySelect")) $("densitySelect").value = density;
+    var tb = $("themeBtn");
+    if (tb) {
+      var label = "Theme: " + THEME_LABEL[theme];
+      tb.setAttribute("aria-label", label);
+      tb.setAttribute("title", label);
+    }
+    retintPlainFrames();
   }
-  applyChromePrefs();
   var state = {
     origin: SS.getItem("postern_origin") || "",
     token: SS.getItem("postern_token") || "",
@@ -763,6 +1006,42 @@ export const WEBMAIL_HTML = `<!doctype html>
 
   // Build the sandboxed body iframe + (when content was blocked) the opt-in banner.
   // Returns a container node; the iframe stays sandbox="" in every path.
+  // Frame palette (#794). Plain text follows the app theme; HTML mail is authored for a
+  // light canvas, so it always gets the light palette. Values are read from the page own
+  // tokens and constrained to a color grammar before they enter the srcdoc style, so no
+  // value can close the style element or add a declaration.
+  var FRAME_LIGHT = { bg: "#ffffff", fg: "#171a21", link: "#2456d3" };
+  function cssColor(v, fallback) {
+    v = String(v || "").trim();
+    return /^#[0-9a-fA-F]{3,8}$/.test(v) ? v : fallback;
+  }
+  function framePalette(light) {
+    if (light) return FRAME_LIGHT;
+    var cs = window.getComputedStyle(document.documentElement);
+    return {
+      bg: cssColor(cs.getPropertyValue("--frame-bg"), "#ffffff"),
+      fg: cssColor(cs.getPropertyValue("--frame-fg"), "#171a21"),
+      link: cssColor(cs.getPropertyValue("--frame-link"), "#2456d3")
+    };
+  }
+  function frameBaseStyle(light) {
+    var p = framePalette(light);
+    return "<style>html,body{margin:0}body{font:14px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;" +
+      "word-wrap:break-word;padding:16px;color:" + p.fg + ";background:" + p.bg +
+      (light ? "" : ";white-space:pre-wrap") +
+      "}a{color:" + p.link + "}img{max-width:100%;height:auto}</style>";
+  }
+  function retintPlainFrames() {
+    var frames = document.querySelectorAll("iframe.msg-body-frame[data-plain]");
+    Array.prototype.forEach.call(frames, function (f) {
+      if (typeof f._posternInner !== "string") return;
+      var doc = f.getAttribute("srcdoc") || "";
+      var start = doc.indexOf("<style>"), end = doc.indexOf("</style>");
+      if (start < 0 || end < start) return;
+      f.setAttribute("srcdoc", doc.slice(0, start) + frameBaseStyle(false) + doc.slice(end + 8));
+    });
+  }
+
   function renderBody(m) {
     var wrap = el("div", { class: "body-wrap" });
     var hasHtml = !!(m && m.bodyHtml);
@@ -770,10 +1049,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     // renders HTML mail on white), so use white + dark text for the HTML case to
     // avoid dark-on-dark unreadable bodies. Plain text keeps the app's dark theme.
     function baseStyle(light) {
-      return "<style>html,body{margin:0}body{font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;" +
-        "word-wrap:break-word;padding:10px" +
-        (light ? ";color:#1a1a1a;background:#ffffff" : ";color:#e7e9ee;background:#1c1f26;white-space:pre-wrap") +
-        "}a{color:#6ea8fe}img{max-width:100%;height:auto}</style>";
+      return frameBaseStyle(light);
     }
     // Defense in depth for the message iframe (#409). sandbox="" (no scripts, no
     // same-origin, no forms) is the primary isolation and the served-page CSP is
@@ -791,6 +1067,9 @@ export const WEBMAIL_HTML = `<!doctype html>
         '</head><body>' + inner + '</body></html>';
       var f = document.createElement("iframe");
       f.className = "msg-body-frame";
+      // Plain-text frames follow the app theme (#794); keep the inner so a theme change
+      // can rebuild the srcdoc with the new palette (retintPlainFrames).
+      if (!light) { f.setAttribute("data-plain", "1"); f._posternInner = inner; }
       f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
       f.setAttribute("referrerpolicy", "no-referrer");
       f.setAttribute("srcdoc", doc);
@@ -839,6 +1118,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("signin").style.display = "none";
     $("gate").style.display = "";
     $("logout").style.display = "none";
+    $("railBtn").style.display = "none";
     $("identity").textContent = "";
     $("who").textContent = "";
     // Served by the worker, the CSP is connect-src 'self', so the page's own origin is
@@ -857,6 +1137,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("gate").style.display = "none";
     $("signin").style.display = "";
     $("logout").style.display = "none";
+    $("railBtn").style.display = "none";
     $("identity").textContent = "";
     $("who").textContent = "";
     $("signinErr").textContent = msg || "";
@@ -869,6 +1150,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("signin").style.display = "none";
     $("app").className = "on";
     $("logout").style.display = "";
+    $("railBtn").style.display = "";
     $("settingsBtn").style.display = "";
     if (state.authMode === "session" && state.identity) {
       // Identity display (contract 1.5.1): show who the browser sends as. A send
@@ -966,6 +1248,20 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("filterFrom").value = state.filters.from || "";
     $("filterAfter").value = state.filters.after || "";
     $("filterBefore").value = state.filters.before || "";
+    ["chipUnseen", "chipSeen", "chipHasAtt"].forEach(function (id) {
+      $(id).setAttribute("aria-pressed", / on$/.test($(id).className) ? "true" : "false");
+    });
+    updateFilterCount();
+  }
+  function updateFilterCount() {
+    var f = state.filters, n = 0;
+    if (f.seen !== null) n++;
+    if (f.hasAttachment) n++;
+    if (f.from) n++;
+    if (f.after) n++;
+    if (f.before) n++;
+    $("filtersCount").textContent = n ? String(n) : "";
+    $("filtersBtn").setAttribute("aria-label", n ? "Filters, " + n + " active" : "Filters");
   }
 
   // BYO-token connect (operator / self-host path, contract 1.7).
@@ -1110,6 +1406,8 @@ export const WEBMAIL_HTML = `<!doctype html>
       ]);
       if (f.role) btn.setAttribute("title", f.role + " (shared queue)");
       btn.addEventListener("click", function () {
+        setRail(false);
+        setView("list");
         if (state.folder === f.id) return;
         state.folder = f.id;
         state.q = "";
@@ -1165,7 +1463,8 @@ export const WEBMAIL_HTML = `<!doctype html>
   }
 
   function loadMore(fallbackFts) {
-    var loading = el("div", { class: "loading", text: "Loading..." });
+    var loading = el("div", { class: "loading skel-list", role: "status" },
+      [el("span", { class: "vh", text: "Loading messages" })].concat(skeletonRows(state.items.length ? 2 : 6)));
     $("list").appendChild(loading);
     var mode = fallbackFts ? "fts" : state.searchMode;
     var req;
@@ -1230,7 +1529,10 @@ export const WEBMAIL_HTML = `<!doctype html>
         more.firstChild.addEventListener("click", function () { $("list").removeChild(more); loadMore(); });
         $("list").appendChild(more);
       } else if (state.items.length === 0) {
-        $("list").appendChild(el("div", { class: "loading", text: "No messages." }));
+        $("list").appendChild(state.q
+          ? emptyState("search", "No results for \\u201c" + state.q + "\\u201d", "Try Keyword mode, or clear the filters.")
+          : emptyState("inbox", state.folder === "inbox" ? "Your inbox is empty" : "No messages in " + folderLabel(state.folder),
+              state.folder === "inbox" ? "New mail shows up here." : ""));
       }
     }).catch(function (e) {
       try { $("list").removeChild(loading); } catch (_) {}
@@ -1258,7 +1560,13 @@ export const WEBMAIL_HTML = `<!doctype html>
       tags.push(el("span", { class: "tag out", text: "Draft" }));
     } else {
       if (m.direction === "outbound") tags.push(el("span", { class: "tag out", text: "Sent" }));
-      tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
+      // Trusted is the normal case, so it stays quiet in the list; only untrusted is loud.
+      // The reading pane always states the verdict.
+      if (!m.trusted && m.direction !== "outbound") tags.push(el("span", { class: "tag untrusted", text: "untrusted" }));
+    }
+    if (m.attachmentCount) {
+      tags.push(el("span", { class: "att", title: m.attachmentCount + " attachment" + (m.attachmentCount === 1 ? "" : "s") },
+        [icon("clip"), document.createTextNode(String(m.attachmentCount))]));
     }
     var who = m.direction === "outbound" ? ("To: " + (m.to || "")) : (m.from || "");
     var item = el("div", {
@@ -1268,20 +1576,103 @@ export const WEBMAIL_HTML = `<!doctype html>
       tabindex: "0",
       "aria-label": (m.subject || "(no subject)") + " from " + who
     }, [
-      el("div", { class: "top" }, [
-        el("div", { class: "from", text: who }),
-        el("div", { class: "date", text: fmtDate(m.date || m.receivedAt) })
-      ]),
-      el("div", { class: "subject", text: m.subject || "(no subject)" }),
-      el("div", { class: "meta" }, tags.concat(
-        m.attachmentCount ? [el("span", { text: m.attachmentCount + " attachment(s)" })] : []
-      ))
+      avatar(who),
+      el("div", { class: "row-main" }, [
+        el("div", { class: "top" }, [
+          el("span", { class: "dot", "aria-hidden": "true" }),
+          el("div", { class: "from", text: (m.direction === "outbound" ? "To: " : "") + parseAddr(m.direction === "outbound" ? m.to : m.from).name, title: who }),
+          el("div", { class: "date", text: fmtDate(m.date || m.receivedAt) })
+        ]),
+        el("div", { class: "subject", text: m.subject || "(no subject)" }),
+        el("div", { class: "meta" }, tags)
+      ])
     ]);
     item.addEventListener("click", function () { selectMessage(m.messageId, item); });
     item.addEventListener("keydown", function (e) {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMessage(m.messageId, item); }
     });
     $("list").appendChild(item);
+  }
+
+  // --- small presentational helpers (#796). All text goes in via text nodes. -----
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var ICONS = {
+    clip: "M20 11.5l-7.8 7.8a4.6 4.6 0 0 1-6.5-6.5l7.8-7.8a3 3 0 0 1 4.3 4.3l-7.6 7.6a1.5 1.5 0 0 1-2.1-2.1l7-7",
+    inbox: "M3 13l2.5-7h13L21 13v6H3zM3 13h5l1.5 2.5h5L16 13h5",
+    mail: "M3 6h18v12H3zM3 7l9 6 9-6",
+    search: "M10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13zM15.5 15.5L21 21"
+  };
+  function icon(name, cls, box) {
+    var svg = document.createElementNS(SVGNS, "svg");
+    svg.setAttribute("viewBox", box || "0 0 24 24");
+    svg.setAttribute("class", cls || "ico");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    var p = document.createElementNS(SVGNS, "path");
+    p.setAttribute("d", ICONS[name]);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "1.7");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(p);
+    return svg;
+  }
+  // "Name <addr>" -> { name, addr }; a bare address is its own name.
+  function parseAddr(s) {
+    var t = String(s || "").trim();
+    var m = t.match(/^"?([^"<]*?)"?\\s*<([^>]+)>$/);
+    if (m && m[1].trim()) return { name: m[1].trim(), addr: m[2].trim() };
+    return { name: t, addr: m ? m[2].trim() : t };
+  }
+  function initialOf(s) {
+    var m = parseAddr(String(s || "").replace(/^To:\\s*/i, "")).name.match(/[\\p{L}\\p{N}]/u);
+    return m ? m[0].toUpperCase() : "?";
+  }
+  function avatar(s) { return el("span", { class: "avatar", "aria-hidden": "true", text: initialOf(s) }); }
+  function fmtSize(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+  function emptyState(ico, title, hint) {
+    return el("div", { class: "empty-state" }, [
+      icon(ico, "es-ico"),
+      el("p", { class: "es-title", text: title }),
+      hint ? el("p", { class: "es-hint", text: hint }) : null
+    ]);
+  }
+  function skeletonRows(n) {
+    var out = [];
+    for (var i = 0; i < n; i++) {
+      out.push(el("div", { class: "skel-row", "aria-hidden": "true" }, [
+        el("span", { class: "skel skel-av" }),
+        el("span", { class: "skel-lines" }, [
+          el("span", { class: "skel skel-line", style: "width:" + (45 + (i * 17) % 35) + "%" }),
+          el("span", { class: "skel skel-line", style: "width:" + (70 + (i * 11) % 25) + "%" })
+        ])
+      ]));
+    }
+    return out;
+  }
+  function folderLabel(id) {
+    var f = state.folders.filter(function (x) { return x.id === id; })[0];
+    return (f && f.label) || (id.charAt(0).toUpperCase() + id.slice(1));
+  }
+
+  // --- narrow-screen views (#795) -------------------------------------------------
+  // Under 760px the list and the reading pane are one view at a time (CSS keys on
+  // data-view); under 1100px the folder rail is a drawer (data-rail). Wide screens
+  // ignore both attributes, so this is pure presentation state.
+  function setView(v) { $("app").setAttribute("data-view", v === "reading" ? "reading" : "list"); }
+  function setRail(open) {
+    $("app").setAttribute("data-rail", open ? "open" : "closed");
+    $("railBtn").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      var cur = $("folders").querySelector("button.active") || $("folders").querySelector("button");
+      if (cur) cur.focus();
+    }
   }
 
   // --- reading ---------------------------------------------------------------
@@ -1337,9 +1728,17 @@ export const WEBMAIL_HTML = `<!doctype html>
   }
 
   function renderLoadingReading() {
-    var r = $("reading"); clear(r); r.appendChild(el("div", { class: "loading", text: "Loading message..." }));
+    setView("reading");
+    var r = $("reading"); clear(r);
+    r.appendChild(el("div", { class: "loading skel-read", role: "status" }, [
+      el("span", { class: "vh", text: "Loading message" }),
+      el("span", { class: "skel skel-title", "aria-hidden": "true" }),
+      el("span", { class: "skel skel-line", "aria-hidden": "true", style: "width:40%" }),
+      el("span", { class: "skel skel-body", "aria-hidden": "true" })
+    ]));
   }
   function renderError(msg) {
+    setView("reading");
     var r = $("reading"); clear(r); r.appendChild(el("div", { class: "err", text: "Error: " + msg }));
   }
 
@@ -1355,6 +1754,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     var saveTimer = null;
     var saveChain = Promise.resolve();
     var closed = false;
+    setView("reading");
     var r = $("reading"); clear(r);
     var err = el("div", { class: "err", text: "" });
     var status = el("span", { class: "compose-status", text: updatedAt ? "Saved" : "Not saved yet" });
@@ -1393,27 +1793,50 @@ export const WEBMAIL_HTML = `<!doctype html>
       modeBtn.textContent = rich ? "Use plain text" : "Use rich text";
       scheduleSave();
     });
-    var fileInput = el("input", { id: "cmpFiles", type: "file", multiple: "multiple" });
+    var fileInput = el("input", { id: "cmpFiles", type: "file", multiple: "multiple", class: "vh" });
     var fileList = el("ul", { class: "draft-files", id: "cmpFileList" });
     var quoteBox = el("div", { class: "quote-preview" });
     quoteBox.style.display = "none";
-    var form = el("div", { class: "compose" }, [
-      el("h2", { text: mode === "replyAll" ? "Reply all" : mode === "reply" ? "Reply" : mode === "forward" ? "Forward" : "Compose" }),
-      el("p", { class: "compose-note", text: "Autosaves server-side; Send uses the same mailbox core as API clients." }),
-      err,
-      el("label", { for: "cmpTo", text: "To" }), wrapAutocomplete(toInput),
+    var ccFields = el("div", { class: "cc-fields", id: "cmpCcFields" }, [
       el("label", { for: "cmpCc", text: "Cc" }), wrapAutocomplete(ccInput),
-      el("label", { for: "cmpBcc", text: "Bcc" }), wrapAutocomplete(bccInput),
+      el("label", { for: "cmpBcc", text: "Bcc" }), wrapAutocomplete(bccInput)
+    ]);
+    var ccOpen = !!(ccInput.value || bccInput.value);
+    ccFields.style.display = ccOpen ? "" : "none";
+    var ccToggle = el("button", {
+      type: "button", class: "btn-quiet cc-toggle", text: "Cc / Bcc",
+      "aria-controls": "cmpCcFields", "aria-expanded": ccOpen ? "true" : "false"
+    });
+    ccToggle.addEventListener("click", function () {
+      var open = ccFields.style.display === "none";
+      ccFields.style.display = open ? "" : "none";
+      ccToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open && !ccInput.disabled) ccInput.focus();
+    });
+    var form = el("div", { class: "compose" }, [
+      el("div", { class: "compose-head" }, [
+        el("h2", { text: mode === "replyAll" ? "Reply all" : mode === "reply" ? "Reply" : mode === "forward" ? "Forward" : "New message" }),
+        status
+      ]),
+      el("p", { class: "compose-note", text: "Drafts save automatically while you type." }),
+      err,
+      el("label", { for: "cmpTo", text: "To" }),
+      el("div", { class: "field-row" }, [el("div", { class: "grow" }, [wrapAutocomplete(toInput)]), ccToggle]),
+      ccFields,
       el("label", { for: "cmpSub", text: "Subject" }), subInput,
       el("label", { for: "cmpBody", text: "Message" }),
       el("div", { class: "formatbar" }, [modeBtn]),
       formatbar, editor, quoteBox,
-      el("label", { for: "cmpFiles", text: "Attachments (20 files, 25 MiB total)" }), fileInput, fileList,
+      el("div", { class: "file-pick" }, [
+        fileInput,
+        el("label", { for: "cmpFiles", class: "file-btn" }, [icon("clip"), document.createTextNode("Attach files")]),
+        el("span", { class: "fhint", text: "Up to 20 files, 25 MiB in total" })
+      ]),
+      fileList,
       el("div", { class: "compose-actions" }, [
         el("button", { id: "cmpSend", text: "Send" }),
-        el("button", { id: "cmpCancel", text: "Close" }),
-        el("button", { id: "cmpDiscard", text: "Discard" }),
-        status
+        el("button", { id: "cmpCancel", text: "Save and close" }),
+        el("button", { id: "cmpDiscard", text: "Discard", class: "btn-danger" })
       ])
     ]);
     r.appendChild(form);
@@ -1595,7 +2018,7 @@ export const WEBMAIL_HTML = `<!doctype html>
           }).catch(function (e) { err.textContent = e.message; remove.disabled = false; });
         });
         fileList.appendChild(el("li", {}, [
-          el("span", { text: (a.filename || "attachment") + " (" + a.size + " bytes)" }), remove
+          el("span", { text: (a.filename || "attachment") + " (" + fmtSize(a.size) + ")" }), remove
         ]));
       });
     }
@@ -1719,23 +2142,45 @@ export const WEBMAIL_HTML = `<!doctype html>
 
   function renderReading(m) {
     var r = $("reading"); clear(r);
-    if (!m) { r.appendChild(el("div", { class: "empty", text: "Select a message to read." })); return; }
+    if (!m) {
+      setView("list");
+      r.appendChild(el("div", { class: "empty" }, [emptyState("mail", "Select a message to read.", "")]));
+      return;
+    }
+    setView("reading");
     state.selected = m;
 
+    var sender = parseAddr(m.from);
+    var when = m.date ? new Date(m.date) : null;
+    var trustKids = [
+      el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted sender" : "untrusted sender" })
+    ];
+    if (m.auth) {
+      trustKids.push(el("details", { class: "auth" }, [
+        el("summary", { text: "Authentication" }),
+        el("span", { text: "SPF " + (m.auth.spf || "none") + ", DKIM " + (m.auth.dkim || "none") + ", DMARC " + (m.auth.dmarc || "none") })
+      ]));
+    }
     var head = el("div", { class: "msg-head" }, [
       el("h2", { text: m.subject || "(no subject)" }),
-      kv("From", m.from),
-      kv("To", m.to),
-      m.cc ? kv("Cc", m.cc) : null,
-      m.bcc ? kv("Bcc", m.bcc) : null,
-      kv("Date", m.date ? new Date(m.date).toLocaleString() : ""),
-      el("div", { class: "kv" }, [
-        el("b", { text: "Trust: " }),
-        el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }),
-        document.createTextNode(
-          m.auth ? ("  spf=" + (m.auth.spf || "none") + " dkim=" + (m.auth.dkim || "none") + " dmarc=" + (m.auth.dmarc || "none")) : ""
-        )
-      ])
+      el("div", { class: "sender" }, [
+        avatar(m.from),
+        el("div", { class: "sender-main" }, [
+          el("div", { class: "sender-line" }, [
+            el("span", { class: "sender-name", text: sender.name || "(unknown sender)" }),
+            sender.addr && sender.addr !== sender.name ? el("span", { class: "sender-addr", text: "<" + sender.addr + ">" }) : null
+          ]),
+          kv("To", m.to),
+          m.cc ? kv("Cc", m.cc) : null,
+          m.bcc ? kv("Bcc", m.bcc) : null
+        ]),
+        el("div", {
+          class: "sender-date",
+          text: when && !isNaN(when.getTime()) ? when.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "",
+          title: m.date || ""
+        })
+      ]),
+      el("div", { class: "trust" }, trustKids)
     ]);
     var actions = [];
     // Role queue (#425): read plus mark-read ONLY. Starring, filing and deleting would
@@ -1766,8 +2211,8 @@ export const WEBMAIL_HTML = `<!doctype html>
       });
       actions.push(starBtn);
 
-      function moveTo(mailbox, label) {
-        var btn = el("button", { text: label });
+      function moveTo(mailbox, label, danger) {
+        var btn = el("button", { text: label, class: danger ? "btn-danger" : "" });
         btn.addEventListener("click", function () {
           btn.disabled = true;
           apiOrganize("/api/messages/move", { ids: [m.messageId], mailbox: mailbox }).then(function () {
@@ -1786,8 +2231,8 @@ export const WEBMAIL_HTML = `<!doctype html>
         actions.push(moveTo(null, "Restore"));
       } else {
         actions.push(moveTo("archive", "Archive"));
-        actions.push(moveTo("trash", "Trash"));
-        actions.push(moveTo("junk", "Junk"));
+        actions.push(moveTo("trash", "Trash", true));
+        actions.push(moveTo("junk", "Junk", true));
       }
     }
     if (state.sendCapable === true && !m.isDraft) {
@@ -1837,7 +2282,8 @@ export const WEBMAIL_HTML = `<!doctype html>
         var btn = el("button", { class: "dl", text: "Download" });
         btn.addEventListener("click", function () { downloadAttachment(m.messageId, i, name, btn); });
         ul.appendChild(el("li", {}, [
-          document.createTextNode(name + " (" + (a.mime || "?") + ", " + (a.size || 0) + " bytes) "),
+          el("span", {}, [icon("clip"), document.createTextNode(" " + name + " "),
+            el("span", { class: "sender-addr", text: (a.mime || "?") + ", " + fmtSize(a.size) })]),
           btn
         ]));
       });
@@ -1861,7 +2307,10 @@ export const WEBMAIL_HTML = `<!doctype html>
         box.appendChild(el("h3", { text: "Thread (" + msgs.length + partial + ")" }));
         msgs.forEach(function (tm) {
           var t = el("div", { class: "t-item" }, [
-            el("div", { text: (tm.from || "") + "  -  " + fmtDate(tm.date) }),
+            el("div", { class: "top" }, [
+              el("b", { text: parseAddr(tm.from).name }),
+              el("span", { class: "sender-addr", text: " " + fmtDate(tm.date) })
+            ]),
             el("div", { class: "subject", text: tm.subject || "(no subject)" })
           ]);
           t.addEventListener("click", function () { selectMessage(tm.messageId, null); });
@@ -1876,16 +2325,39 @@ export const WEBMAIL_HTML = `<!doctype html>
   $("token").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
   $("origin").addEventListener("keydown", function (e) { if (e.key === "Enter") $("token").focus(); });
   $("logout").addEventListener("click", logout);
+  $("settingsSignout").addEventListener("click", function () { $("settingsPanel").classList.remove("on"); logout(); });
+  $("railBtn").addEventListener("click", function () {
+    setRail($("app").getAttribute("data-rail") !== "open");
+  });
+  $("scrim").addEventListener("click", function () { setRail(false); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && $("app").getAttribute("data-rail") === "open") { setRail(false); $("railBtn").focus(); }
+  });
+  $("backBtn").addEventListener("click", function () {
+    setView("list");
+    var sel = $("list").querySelector(".row-item.sel");
+    if (sel) sel.focus();
+  });
   $("composeBtn").addEventListener("click", function () { renderComposeForm({}); });
   $("settingsBtn").addEventListener("click", function () {
     $("settingsPanel").classList.toggle("on");
   });
   $("themeSelect").addEventListener("change", function (e) {
-    LS.setItem("postern_theme", e.target.value === "light" ? "light" : "dark");
+    prefSet("postern_theme", THEMES.indexOf(e.target.value) >= 0 ? e.target.value : "system");
     applyChromePrefs();
   });
+  $("themeBtn").addEventListener("click", function () {
+    var next = THEMES[(THEMES.indexOf(themePref()) + 1) % THEMES.length];
+    prefSet("postern_theme", next);
+    applyChromePrefs();
+  });
+  if (DARK_MQ) {
+    var onScheme = function () { if (themePref() === "system") retintPlainFrames(); };
+    if (DARK_MQ.addEventListener) DARK_MQ.addEventListener("change", onScheme);
+    else if (DARK_MQ.addListener) DARK_MQ.addListener(onScheme);
+  }
   $("densitySelect").addEventListener("change", function (e) {
-    LS.setItem("postern_density", e.target.value === "compact" ? "compact" : "comfortable");
+    prefSet("postern_density", e.target.value === "compact" ? "compact" : "comfortable");
     applyChromePrefs();
   });
   $("signinForm").addEventListener("submit", function (e) { e.preventDefault(); signIn(); });
@@ -1918,17 +2390,24 @@ export const WEBMAIL_HTML = `<!doctype html>
     state.filters.from = $("filterFrom").value.trim();
     state.filters.after = $("filterAfter").value || "";
     state.filters.before = $("filterBefore").value || "";
+    updateFilterCount();
     if (state.q) resetAndLoad();
   }
   $("filterFrom").addEventListener("change", applyTextFilters);
   $("filterAfter").addEventListener("change", applyTextFilters);
   $("filterBefore").addEventListener("change", applyTextFilters);
+  $("filtersBtn").addEventListener("click", function () {
+    var open = $("filters").hasAttribute("hidden");
+    if (open) $("filters").removeAttribute("hidden"); else $("filters").setAttribute("hidden", "");
+    $("filtersBtn").setAttribute("aria-expanded", open ? "true" : "false");
+  });
   $("clearFilters").addEventListener("click", function () {
     state.filters = { from: "", after: "", before: "", seen: null, hasAttachment: null };
     syncFilterChips();
     if (state.q) resetAndLoad();
   });
   syncFilterChips();
+  applyChromePrefs();
   // --- boot: prefer a live native session, else BYO-token, else the right gate -----
   // GET /api/session (same-origin, cookie) tells us: a live session (restore it), or
   // the configured backend so we show the sign-in form (native) or token gate (off).
