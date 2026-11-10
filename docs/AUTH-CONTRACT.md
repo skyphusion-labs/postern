@@ -211,7 +211,7 @@ them verbatim; do not rename per component.
 | `LDAP_STARTTLS` | both | upgrade an `ldap://` conn before binding (section 6). |
 | `LDAP_TLS_CA` | both | PEM CA bundle to trust the directory cert; when set it is the ONLY trust anchor (an exact pin, NOT added to the system roots). The alternative to provisioning 636 + a chained cert (section 6): pin the directory's existing self-signed CA, no IdP mutation. Strict verification against a pinned root, never an insecure-skip. |
 | `LDAP_TLS_SERVER_NAME` | both | name verified against the cert SANs; set when `LDAP_URL` dials an IP but the cert names a host. Go: defaults to the `LDAP_URL` host; required with `LDAP_TLS_CA` when the dialed host is not on the cert (go-ldap's StartTLS does not derive it). Python: an extra accepted cert name in CA mode (ldap3 otherwise checks the dialed host). |
-| `LDAP_TLS_PIN_SHA256` | both | exact-leaf SHA-256 pin (hex, colons optional, any case), SAN-independent. THE mechanism for a cert whose SANs cannot verify (section 6a). A NON-secret public value (plain env, not a secret). Mutually exclusive with `LDAP_TLS_CA`. Under the hood: verification IS the exact-leaf hash check, run BEFORE any credential flows (Go: `InsecureSkipVerify` + `VerifyPeerCertificate`; Python: `CERT_NONE` channel + a pre-bind leaf-hash check) = stricter than a CA, not a bypass. Neither TLS knob set = the channel is encrypted but UNAUTHENTICATED; both doors keep working (back-compat) and the Python door logs a loud startup warning. |
+| `LDAP_TLS_PIN_SHA256` | both | exact-leaf SHA-256 pin (hex, colons optional, any case), SAN-independent. THE mechanism for a cert whose SANs cannot verify (section 6a). A NON-secret public value (plain env, not a secret). Mutually exclusive with `LDAP_TLS_CA`. Under the hood: verification IS the exact-leaf hash check, run BEFORE any credential flows (Go: `InsecureSkipVerify` + `VerifyConnection`; Python: `CERT_NONE` channel + a pre-bind leaf-hash check) = stricter than a CA, not a bypass. Neither TLS knob set = the channel is encrypted but UNAUTHENTICATED; both doors keep working (back-compat) and the Python door logs a loud startup warning. |
 | `LDAP_BIND_DN_TEMPLATE` | both | **direct-bind** DN template (REQUIRED for `ldap` mode): single `%s` = the short login. |
 | `LDAP_REQUIRE_GROUP` | both | the group DN the bound user must carry in `LDAP_GROUP_ATTR` on self-read = the authorization gate. Empty = no gate. Fail-closed. |
 | `LDAP_GROUP_ATTR` | both | the attribute listing the user's groups for the gate. Default **`memberOf`**. |
@@ -248,8 +248,12 @@ EXACT leaf by its SHA-256, which is SAN-independent.
    are mutually exclusive; setting both is a startup error).
 
 Under the pin the door sets `InsecureSkipVerify=true` and installs a
-`VerifyPeerCertificate` callback that constant-time-compares the presented
-leaf's SHA-256 to the pin. **`InsecureSkipVerify` here is an EXACT PIN, not a
+`VerifyConnection` callback that constant-time-compares the presented
+leaf's SHA-256 to the pin. `VerifyConnection` runs on every handshake,
+including a resumed session, so the pin cannot be skipped by resumption.
+`relay/auth_ldap_pin_wire_test.go` proves this on a real TLS handshake: a
+matching pin connects, a mismatched pin is refused, and the callback runs on
+a resumed session. **`InsecureSkipVerify` here is an EXACT PIN, not a
 bypass:** it trusts one specific certificate (stricter than CA verification,
 which trusts anything a CA signed) and is MITM-resistant -- a swapped cert fails
 the match. A gosec G402 or CodeQL `InsecureSkipVerify` finding at that call site

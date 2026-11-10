@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -37,13 +38,24 @@ func selfSignedDER(t *testing.T) []byte {
 	return der
 }
 
+// connState builds the ConnectionState a handshake would hand VerifyConnection for a
+// peer presenting the given leaf.
+func connState(t *testing.T, der []byte) tls.ConnectionState {
+	t.Helper()
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	return tls.ConnectionState{PeerCertificates: []*x509.Certificate{c}}
+}
+
 func fpHex(der []byte) string {
 	sum := sha256.Sum256(der)
 	return hex.EncodeToString(sum[:])
 }
 
 // A fingerprint pin builds a config that skips the built-in chain/hostname checks
-// (so our callback is the sole gate) and carries a VerifyPeerCertificate callback;
+// (so our callback is the sole gate) and carries a VerifyConnection callback;
 // it sets no RootCAs (SAN/CA-independent).
 func TestBuildLDAPTLSConfig_PinShape(t *testing.T) {
 	der := selfSignedDER(t)
@@ -57,8 +69,11 @@ func TestBuildLDAPTLSConfig_PinShape(t *testing.T) {
 	if !tc.InsecureSkipVerify {
 		t.Error("pin mode must set InsecureSkipVerify so the callback is the sole gate")
 	}
-	if tc.VerifyPeerCertificate == nil {
-		t.Error("pin mode must install a VerifyPeerCertificate callback")
+	if tc.VerifyConnection == nil {
+		t.Error("pin mode must install a VerifyConnection callback")
+	}
+	if tc.VerifyPeerCertificate != nil {
+		t.Error("pin mode must not use VerifyPeerCertificate (it is skipped on resumed sessions)")
 	}
 	if tc.RootCAs != nil {
 		t.Error("pin mode must not set RootCAs (it is SAN/CA-independent)")
@@ -73,14 +88,14 @@ func TestBuildLDAPTLSConfig_PinMatchAndMITM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig: %v", err)
 	}
-	if err := tc.VerifyPeerCertificate([][]byte{der}, nil); err != nil {
+	if err := tc.VerifyConnection(connState(t, der)); err != nil {
 		t.Errorf("matching leaf should verify, got %v", err)
 	}
 	other := selfSignedDER(t) // a different cert = a MITM swap
-	if err := tc.VerifyPeerCertificate([][]byte{other}, nil); err == nil {
+	if err := tc.VerifyConnection(connState(t, other)); err == nil {
 		t.Error("a swapped leaf must be REJECTED (MITM-resistant)")
 	}
-	if err := tc.VerifyPeerCertificate(nil, nil); err == nil {
+	if err := tc.VerifyConnection(tls.ConnectionState{}); err == nil {
 		t.Error("an empty peer chain must be rejected")
 	}
 }
@@ -101,7 +116,7 @@ func TestBuildLDAPTLSConfig_PinAcceptsColonsAndCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildLDAPTLSConfig with colon/upper/space pin: %v", err)
 	}
-	if err := tc.VerifyPeerCertificate([][]byte{der}, nil); err != nil {
+	if err := tc.VerifyConnection(connState(t, der)); err != nil {
 		t.Errorf("normalized pin should match the leaf, got %v", err)
 	}
 }
@@ -150,7 +165,7 @@ func TestNewLDAPAuth_CarriesPinnedTLSConf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newLDAPAuth: %v", err)
 	}
-	if a.tlsConf == nil || !a.tlsConf.InsecureSkipVerify || a.tlsConf.VerifyPeerCertificate == nil {
+	if a.tlsConf == nil || !a.tlsConf.InsecureSkipVerify || a.tlsConf.VerifyConnection == nil {
 		t.Fatal("expected newLDAPAuth to carry the pinned tls.Config (InsecureSkipVerify + callback)")
 	}
 }
