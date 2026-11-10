@@ -158,6 +158,30 @@ describe("#821 item 3: a row above the cap fails closed as a wrong password", ()
     }
   });
 
+  it("costs exactly the work of a wrong password: one derive at 100,000, none above (timing)", async () => {
+    // Build both rows BEFORE spying: building them derives too, and must not be counted.
+    const capped = await aboveCapRow();
+    const real = await hashSecret(PASSWORD);
+    const proto = Object.getPrototypeOf(crypto.subtle) as { deriveBits: (...a: unknown[]) => Promise<ArrayBuffer> };
+    const spy = vi.spyOn(proto, "deriveBits");
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    const counts = () => spy.mock.calls.map((c) => (c[0] as { iterations?: number }).iterations);
+    try {
+      // The over-cap path.
+      expect(await verifySecret(PASSWORD, capped, USER)).toBe(false);
+      const overCap = counts();
+      spy.mockClear();
+      // The comparison: a wrong password against a real row at the target.
+      expect(await verifySecret("not-the-password", real, USER)).toBe(false);
+      const wrong = counts();
+      expect(wrong).toEqual([CAP]);
+      expect(overCap).toEqual(wrong);
+    } finally {
+      spy.mockRestore();
+      quiet.mockRestore();
+    }
+  });
+
   it("sign-in answers byte-for-byte what a wrong password answers, and counts like one", async () => {
     const { env, raw } = realEnv();
     seed(raw, await aboveCapRow());

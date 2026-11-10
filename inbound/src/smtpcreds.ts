@@ -100,12 +100,16 @@ export async function verifySecret(secret: string, encoded: string, account = "?
   // named config error (never a 5xx that leaks the runtime message): every caller then
   // answers exactly as for a wrong password, so the account is not distinguishable.
   // Such a row can only have been minted outside the Worker; the fix is a password reset.
+  // TIMING: it must also COST what a wrong password costs, so run the same derive at the
+  // target against the dummy hash before refusing; an early return would answer in
+  // microseconds and expose the account by its speed.
   if (iterations > RUNTIME_PBKDF2_MAX_ITERATIONS) {
     console.error(
       "config error: credential for " + account + " is hashed at " + iterations +
         " PBKDF2 iterations, above the runtime cap of " + RUNTIME_PBKDF2_MAX_ITERATIONS +
         "; it cannot sign in until an operator resets its password",
     );
+    await verifySecret(secret, DUMMY_HASH);
     return false;
   }
   const salt = fromB64(parts[2]);
