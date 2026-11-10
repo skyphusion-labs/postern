@@ -588,6 +588,7 @@ none touches D1 directly (#25, #26).
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | GET/POST/DELETE | `/api/session` | webmail native session: POST signs in `{username,password}` -> `Set-Cookie` + identity + caps + CSRF token; GET is whoami/restore; DELETE signs out | webmail v2 (#352) |
 | POST | `/api/session/refresh` | explicit session extend (a sliding refresh also happens on any authed request) | webmail v2 (#352) |
+| POST | `/api/session/password` | self-service change password `{currentPassword, newPassword}`: cookie session + CSRF only (a Bearer is `403 E_SESSION_REQUIRED`), throttled on the sign-in keys, rotates this session and ends the others | #790 |
 | GET | `/api/session` | the COOKIE whoami. A Bearer holder cannot reach it; `GET /api/whoami` above is the token-reachable equivalent | webmail v2 (#352) |
 | POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
 | POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
@@ -606,7 +607,10 @@ none touches D1 directly (#25, #26).
 | DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope). A webmail session may delete only mail already in the trash: its own untrashed mail answers `409 E_NOT_IN_TRASH`, an unreadable or absent id answers one `404`, both under `identityScope` (see 10.9.1) | (#278/#352/#731/#745) |
 | POST | `/api/smtp-auth` | validate an SMTP submission login; returns the bound `from` (TRANSPORT-token gated) | M6 (#68) |
 | POST | `/api/admin/smtp-credentials` | mint / rotate a submission credential (returns the secret once) | M6 (#68) |
-| DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential | M6 (#68) |
+| DELETE | `/api/admin/smtp-credentials/{username}` | revoke a submission credential (an alias of the user delete; ends the user's sessions) | M6 (#68) / #790 |
+| GET/POST | `/api/admin/users` | list users (keyset `limit`/`cursor`, never a hash) or create one (never overwrites: `409 E_CONFLICT`; a generated password is returned once). See webmail-v2-contracts 1.10.4 | #790 |
+| GET/PATCH/DELETE | `/api/admin/users/{username}` | show, change `{disabled?, displayName?, from?}`, or delete a user. Disable, a `from` change and delete end the user's webmail sessions | #790 |
+| POST | `/api/admin/users/{username}/password` | operator reset `{password?}`: ends the user's sessions, clears the account lockout | #790 |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 | POST | `/api/admin/reproject` | refill `projected_size` after a `PROJECTION_VERSION` bump (one keyset page; body: `cursor?`, `limit?`, `dryRun?`, `countOnly?`) | #507 / #520 |
 | POST | `/api/admin/reconcile` | read-only orphan-vector audit (admin; spans the estate) | #134 |
@@ -968,8 +972,10 @@ POST /api/smtp-auth          Authorization: Bearer <POSTERN_TRANSPORT_TOKEN>
   relay is an infra seam, not an API client. `smtp_credentials` (migration `0004`) stores the secret
   only as a `pbkdf2$<iterations>$<salt>$<hash>` derivation (Web Crypto PBKDF2-HMAC-SHA256); an
   unknown user is verified against a dummy hash so timing does not reveal whether the username
-  exists. Operators mint / rotate / revoke credentials via the API-token-gated `POST` /
-  `DELETE /api/admin/smtp-credentials` (the secret is returned once and never logged).
+  exists. Operators manage these accounts through the `admin`-scoped `/api/admin/users` routes
+  (#790, webmail-v2-contracts 1.10.4) or the legacy `POST` / `DELETE /api/admin/smtp-credentials`
+  upsert (the secret is returned once and never logged). A hash below the current iteration
+  target is re-hashed on the next successful sign-in.
 
   The 2xx body is the only one a daemon parses; every other status is an INFRA failure, not a
   verdict on the credential. That split is load-bearing (#442): the worker answers an unexpected

@@ -28,6 +28,13 @@
         "password"
       ]
     },
+    "session-password": {
+      "body": [
+        "currentPassword",
+        "newPassword"
+      ],
+      "note": "self-service change password (#790, contract 1.10.5): cookie session + CSRF only, a Bearer is refused; throttled on the sign-in keys; rotates this session and ends the others"
+    },
     "send": {
       "body": [
         "to",
@@ -147,6 +154,36 @@
         "from",
         "password"
       ]
+    },
+    "admin-users-list": {
+      "query": [
+        "limit",
+        "cursor"
+      ],
+      "note": "human accounts (#790, contract 1.10.4): one keyset page ordered by username; never carries a hash"
+    },
+    "admin-users-create": {
+      "body": [
+        "username",
+        "from",
+        "displayName",
+        "password"
+      ],
+      "note": "create only, never overwrites (409 E_CONFLICT); a generated password is returned once"
+    },
+    "admin-user-password": {
+      "body": [
+        "password"
+      ],
+      "note": "operator reset: ends the user's sessions and clears the account lockout"
+    },
+    "admin-user-update": {
+      "body": [
+        "disabled",
+        "displayName",
+        "from"
+      ],
+      "note": "disable or a from change ends the user's sessions"
     },
     "admin-reindex": {
       "body": [

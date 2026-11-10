@@ -143,6 +143,24 @@ Override the origin (not the token) per invocation with `--api-url`:
 postern --api-url http://127.0.0.1:8787 ping
 ```
 
+### Manage users (operator)
+
+With `POSTERN_API_TOKEN` set to the `both` token, `postern admin users` manages the people
+who sign in to the webmail, IMAP and SMTP submission (one account, every door):
+
+```bash
+postern admin users list
+postern admin users create alice@example.com --name "Alice"      # prints a generated password ONCE
+printf "%s\n" "$NEW_PASSWORD" | postern admin users reset-password alice@example.com --password-stdin
+postern admin users disable alice@example.com                    # ends her sessions
+postern admin users enable alice@example.com
+postern admin users set-name alice@example.com "Alice A"
+postern admin users delete alice@example.com
+```
+
+A password is read from stdin, never from the command line, so it stays out of shell history
+and `ps`.
+
 ## Library usage
 
 ```python
