@@ -137,3 +137,94 @@ describe("in-Worker driver: auth verdicts from CF headers", () => {
     expect(await trustedOf(msg("ceo@skyphusion.org", auth))).toBe(0);
   });
 });
+
+// --- Review round 2: injection through attacker-chosen values in CF's own instance ---
+//
+// smtp.mailfrom (and the comment that echoes it) and smtp.helo are chosen by the SENDER,
+// yet sit inside the CF-written instance. They must never yield a method=result entry.
+
+const AUTH_DKIM_ATTACKER = "mx.cloudflare.net; dkim=pass header.d=attacker.example header.s=s1 header.b=AAAA; dmarc=fail header.from=skyphusion.org policy.dmarc=reject; ";
+
+function trustOfAr(ar: string, from = "CEO <ceo@skyphusion.org>", receivedSpf = "pass") {
+  const get = (n: string): string | null => (n === "authentication-results" ? ar : n === "received-spf" ? receivedSpf : null);
+  return headers.authFromHeaders(get);
+}
+
+describe("in-Worker driver: values the sender controls cannot inject a verdict", () => {
+  const cases: Record<string, string> = {
+    "quoted MAIL FROM local part with ;": AUTH_DKIM_ATTACKER +
+      'spf=pass (mx.cloudflare.net: domain of "x;dkim=pass header.d=skyphusion.org y"@attacker.example designates 192.0.2.1 as permitted sender) ' +
+      'smtp.mailfrom="x;dkim=pass header.d=skyphusion.org y"@attacker.example; arc=none smtp.remote-ip=192.0.2.1',
+    "quoted local part with ( inside": AUTH_DKIM_ATTACKER +
+      'spf=pass (mx.cloudflare.net: domain of "x(;dkim=pass header.d=skyphusion.org y"@attacker.example designates 192.0.2.1 as permitted sender) ' +
+      'smtp.mailfrom="x(;dkim=pass header.d=skyphusion.org y"@attacker.example; arc=none',
+    "quoted local part with ) inside": AUTH_DKIM_ATTACKER +
+      'spf=pass (mx.cloudflare.net: domain of "x);dkim=pass header.d=skyphusion.org y"@attacker.example designates 192.0.2.1 as permitted sender) ' +
+      'smtp.mailfrom="x);dkim=pass header.d=skyphusion.org y"@attacker.example; arc=none',
+    "quoted local part with a comma (cut leaves an open quote)": AUTH_DKIM_ATTACKER +
+      'spf=pass (mx.cloudflare.net: domain of "x;dkim=pass header.d=skyphusion.org,y"@attacker.example designates 192.0.2.1 as permitted sender) ' +
+      'smtp.mailfrom="x;dkim=pass header.d=skyphusion.org,y"@attacker.example; arc=none',
+    "unquoted HELO carrying ;": AUTH_DKIM_ATTACKER +
+      "spf=none smtp.helo=x;dkim=pass header.d=skyphusion.org; spf=pass smtp.mailfrom=b@attacker.example; arc=none",
+    "HELO injecting a dmarc pass": "mx.cloudflare.net; dkim=pass header.d=attacker.example; " +
+      "spf=none smtp.helo=x;dmarc=pass header.from=skyphusion.org; spf=pass smtp.mailfrom=b@attacker.example",
+    "HELO injecting an aligned SPF entry": "mx.cloudflare.net; dkim=none; dmarc=fail header.from=skyphusion.org; " +
+      "spf=none smtp.helo=x;spf=pass smtp.mailfrom=ceo@skyphusion.org; spf=pass smtp.mailfrom=b@attacker.example",
+  };
+  for (const [name, ar] of Object.entries(cases)) {
+    it(`stays untrusted: ${name}`, async () => {
+      const auth = trustOfAr(ar);
+      expect(auth.dkimDomains ?? []).not.toContain("skyphusion.org");
+      expect(auth.spfDomain === "skyphusion.org").toBe(false);
+      expect(auth.dmarc === "pass" && auth.dmarcFrom === "skyphusion.org").toBe(false);
+      expect(await trustedOf(msg("CEO <ceo@skyphusion.org>", auth))).toBe(0);
+    });
+  }
+});
+
+// The live CF shape the lead observed on an npm notice: CRLF+TAB folded, two dkim=pass,
+// dmarc=pass, then TWO spf= entries, the HELO one (spf=none) FIRST.
+const LIVE_NPM_AR_FOLDED = [
+  "mx.cloudflare.net;",
+  "dkim=pass header.d=npmjs.com header.s=i3w6c3fu7s7tgmqto35f7tqsbdtjmclz header.b=DuWYwQhY;",
+  "dkim=pass header.d=amazonses.com header.s=hsbnp7p3ensaochzwyq5wwmceodymuwv header.b=LzQcNswt;",
+  "dmarc=pass header.from=npmjs.com policy.dmarc=quarantine;",
+  "spf=none (mx.cloudflare.net: no SPF records found for postmaster@a84-221.smtp-out.us-west-2.amazonses.com) smtp.helo=a84-221.smtp-out.us-west-2.amazonses.com;",
+  "spf=pass (mx.cloudflare.net: domain of 010101a1c2127365-x@us-west-2-amazonses.npmjs.com designates 54.240.84.221 as permitted sender) smtp.mailfrom=010101a1c2127365-x@us-west-2-amazonses.npmjs.com;",
+  "arc=none smtp.remote-ip=54.240.84.221",
+].join("\r\n\t");
+
+describe("in-Worker driver: the live Cloudflare header shape", () => {
+  const npmEnv = () => makeFakeEnv({ TRUSTED_SENDER_DOMAINS: "npmjs.com" });
+  async function npmTrusted(auth: ParsedInbound["auth"]) {
+    const { env, ctx, settle, rows } = npmEnv();
+    await ingest(env, { messageId: "npm-" + Math.random().toString(36).slice(2) + "@x", from: "npm <support@npmjs.com>", to: "conrad@skyphusion.org", text: "b", auth }, ctx);
+    await settle();
+    return rows[0].trusted;
+  }
+  for (const [label, ar] of [["folded", LIVE_NPM_AR_FOLDED], ["unfolded", LIVE_NPM_AR_FOLDED.replace(/\r\n\t/g, " ")]] as const) {
+    it(`parses every leg (${label}) and trusts npm`, async () => {
+      const auth = trustOfAr(ar + ", evil; dkim=pass header.d=skyphusion.org", "npm <support@npmjs.com>");
+      expect(auth).toEqual({
+        spf: "pass", spfDomain: "us-west-2-amazonses.npmjs.com",
+        dkim: "pass", dkimDomains: ["npmjs.com", "amazonses.com"],
+        dmarc: "pass", dmarcFrom: "npmjs.com",
+      });
+      expect(await npmTrusted(auth)).toBe(1);
+      // Each leg alone carries trust: SPF (the leg that was dead), DKIM, DMARC.
+      expect(await npmTrusted({ spf: "pass", spfDomain: auth!.spfDomain, dkim: "none", dmarc: "none" })).toBe(1);
+      expect(await npmTrusted({ spf: "none", dkim: "pass", dkimDomains: auth!.dkimDomains, dmarc: "none" })).toBe(1);
+      expect(await npmTrusted({ spf: "none", dkim: "none", dmarc: "pass", dmarcFrom: "npmjs.com" })).toBe(1);
+    });
+  }
+});
+
+describe("in-Worker driver: a legitimate quoted MAIL FROM local part", () => {
+  it("keeps the SPF leg: the quoted local part is opaque, its domain is read", async () => {
+    const auth = trustOfAr("mx.cloudflare.net; dkim=none; dmarc=none; " +
+      'spf=pass (mx.cloudflare.net: domain of "a;b c"@bounce.skyphusion.org designates 192.0.2.7 as permitted sender) ' +
+      'smtp.mailfrom="a;b c"@bounce.skyphusion.org; arc=none', "alerts@skyphusion.org");
+    expect(auth).toMatchObject({ spf: "pass", spfDomain: "bounce.skyphusion.org" });
+    expect(await trustedOf(msg("alerts@skyphusion.org", auth))).toBe(1);
+  });
+});

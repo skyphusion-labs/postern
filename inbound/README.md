@@ -123,7 +123,12 @@ verdicts (postern-relay SMTP intake) is never trusted.
 
 The in-Worker driver reads the verdicts only from `message.headers`, and only the
 FIRST instance of `Authentication-Results` and `Received-SPF`: CF prepends its own,
-and any copy the sender wrote into the message sits below it and is ignored.
+and any copy the sender wrote into the message sits below it and is ignored. Inside
+CF's instance, the sender still chooses `smtp.helo` and `smtp.mailfrom`, so the parser
+neutralises quoted strings and comments before splitting, drops an unterminated one,
+reads `dkim=` only in the leading run and `dmarc=` only before the `spf=` entries, and
+takes SPF from the one `spf=` entry that carries `smtp.mailfrom` (CF writes the HELO
+entry first). Anything ambiguous reads as no verdict.
 
 The allowlist match is anchored (`== entry` or `endsWith("@" + entry)`), so
 `notskyphusion.org` does not match `skyphusion.org`.

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 // Imports follow the code: the transport-side helpers live in headers.ts (kept
 // out of index.ts so this suite need not import the worker entrypoint); the
 // storage-side pure helpers live in ingest.ts.
-import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer, parseAuthResults, firstHeaderInstance } from "./src/headers";
+import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer, parseAuthResults, firstHeaderInstance, authResultsText } from "./src/headers";
 import { isTrusted, domainsAlign, bareAddress, cleanBody, htmlToText, chunkText, sha256hex } from "./src/ingest";
 
 // These cover the pure ingestion helpers: auth-verdict parsing, the allowlist
@@ -136,10 +136,23 @@ describe("parseAuthResults / firstHeaderInstance", () => {
   it("reads every method, strips comments, and collects passing DKIM domains", () => {
     const r = parseAuthResults(
       "mx.cloudflare.net; dkim=pass header.d=esp.example header.s=a; dkim=pass header.d=Skyphusion.org header.s=b; " +
-      "dkim=fail header.d=x.example; spf=pass (mx.cloudflare.net: domain of b@bounce.skyphusion.org designates 1.2.3.4; as permitted) " +
-      "smtp.mailfrom=b@bounce.skyphusion.org; dmarc=pass (p=none) header.from=skyphusion.org",
+      "dkim=fail header.d=x.example; dmarc=pass (p=none) header.from=skyphusion.org; " +
+      "spf=none (no record; for helo) smtp.helo=mta.example; " +
+      "spf=pass (mx.cloudflare.net: domain of b@bounce.skyphusion.org designates 1.2.3.4; as permitted) smtp.mailfrom=b@bounce.skyphusion.org",
     );
     expect(r).toEqual({ spf: "pass", spfDomain: "bounce.skyphusion.org", dkim: "pass", dkimDomains: ["esp.example", "skyphusion.org"], dmarc: "pass", dmarcFrom: "skyphusion.org" });
+  });
+  it("ignores dkim/dmarc entries that come after the SPF entries (CF order)", () => {
+    const r = parseAuthResults("mx; dkim=none; spf=pass smtp.mailfrom=a@b.example; dkim=pass header.d=late.example; dmarc=pass header.from=late.example");
+    expect(r).toEqual({ spf: "pass", spfDomain: "b.example", dkim: "none", dmarc: "none" });
+  });
+  it("reads spf=none when two entries carry smtp.mailfrom", () => {
+    expect(parseAuthResults("mx; spf=pass smtp.mailfrom=a@x.example; spf=pass smtp.mailfrom=a@y.example").spf).toBe("none");
+  });
+  it("neutralises quoted strings and drops an unterminated quote or comment", () => {
+    expect(authResultsText('a; x="q;\\"r" ; (c;(n)) d')).toBe('a; x="" ;   d');
+    expect(authResultsText('a; spf=pass smtp.mailfrom="open;dkim=pass')).toBe("a; spf=pass smtp.mailfrom=");
+    expect(authResultsText("a; spf=pass (open;dkim=pass")).toBe("a; spf=pass ");
   });
   it("sets no spfDomain unless SPF passed", () => {
     expect(parseAuthResults("mx; spf=softfail smtp.mailfrom=a@b.example").spfDomain).toBeUndefined();
