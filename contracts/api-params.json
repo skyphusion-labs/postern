@@ -196,6 +196,30 @@
       ],
       "note": "disable or a from change ends the user's sessions"
     },
+    "admin-identities-list": {
+      "query": [
+        "limit",
+        "cursor",
+        "includeRevoked"
+      ],
+      "note": "runtime agent identities (#801): one keyset page ordered by createdAt; never carries a token or its hash; active only unless includeRevoked=1. Audited (identity.list)"
+    },
+    "admin-identities-mint": {
+      "body": [
+        "from",
+        "scopes",
+        "displayName",
+        "label"
+      ],
+      "note": "scopes from read|send|organize|mint; anything else is 400, never stripped. Returns the token ONCE (201); only its sha256 is stored. Authenticates on the next request, no deploy. Audited (identity.mint)"
+    },
+    "admin-audit": {
+      "query": [
+        "limit",
+        "cursor"
+      ],
+      "note": "the audit log (#801), newest first: actor, action, target, outcome, detail. Refusals are recorded too"
+    },
     "admin-reindex": {
       "body": [
         "cursor",
@@ -218,6 +242,23 @@
         "sample"
       ],
       "note": "read-only report, gated admin because it spans the whole estate"
+    },
+    "identities-list": {
+      "query": [
+        "limit",
+        "cursor",
+        "includeRevoked"
+      ],
+      "note": "the identities this caller minted, transitively. Audited"
+    },
+    "identities-mint": {
+      "body": [
+        "from",
+        "scopes",
+        "displayName",
+        "label"
+      ],
+      "note": "from is forced to the caller (a different one is 403); a scope the caller lacks is 403 E_SCOPE_EXCEEDS; at most 100 active children per minter (409 E_LIMIT). A static token is 403 E_IDENTITY_REQUIRED and uses /api/admin/identities"
     },
     "messages-list": {
       "query": [

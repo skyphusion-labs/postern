@@ -166,6 +166,12 @@ def _emitted() -> list[dict[str, Any]]:
     c.update_user("a@x.com", disabled=True, display_name="A", from_addr="a@x.com")
     c.reset_password("a@x.com", password="p" * 12)
     c.delete_user("a@x.com")
+    # #801 runtime agent identities, operator and delegated, plus the audit log.
+    for delegated in (False, True):
+        c.mint_identity(["read"], from_addr="a@x.com", display_name="A", label="l", delegated=delegated)
+        c.list_identities(limit=5, cursor="c1", include_revoked=True, delegated=delegated)
+        c.revoke_identity("idn_0", delegated=delegated)
+    c.list_audit(limit=5, cursor="9")
 
     out: list[dict[str, Any]] = []
     for req in t.requests:

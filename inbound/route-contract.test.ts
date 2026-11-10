@@ -31,7 +31,7 @@ type Row = {
   method: string;
   path: string;
   match: "exact" | "prefix";
-  scope: "read" | "send" | "delete" | "imap" | "organize" | "admin" | null;
+  scope: "read" | "send" | "delete" | "imap" | "organize" | "mint" | "admin" | null;
   auth: string;
   note?: string;
 };
@@ -166,7 +166,15 @@ describe("route contract: the manifest matches the real worker", () => {
         });
       }
 
-      if (row.scope !== "admin") {
+      if (row.scope === "mint") {
+        // #801: no STATIC scoped token carries `mint`. It is held by `both` and by a runtime
+        // agent identity the operator granted it explicitly, which this file cannot mint
+        // (the fake env has no identity table). agent-identities.test.ts proves the runtime
+        // positive against a real database; here, pin that no static scope reaches it.
+        it("is reachable by no static scoped token (mint is both or a runtime identity)", () => {
+          expect(granted, `${row.id}: a static token now satisfies mint`).toEqual([]);
+        });
+      } else if (row.scope !== "admin") {
         it("is granted to at least one scoped token, so it is reachable without `both`", () => {
           expect(granted.length, `${row.id} is reachable only with a both token`).toBeGreaterThan(0);
         });

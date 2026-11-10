@@ -909,6 +909,78 @@ class PosternClient:
         """DELETE /api/admin/users/{username}. Ends the user's sessions."""
         return self._json("DELETE", f"/api/admin/users/{_quote(username)}")
 
+    # --- runtime agent identities (#801) -------------------------------------
+    #
+    # docs/SEND-IDENTITIES.md section 10. With `delegated=False` (the default) these are
+    # the operator routes under /api/admin/identities and need the `both` token. With
+    # `delegated=True` they are the /api/identities routes for a RUNTIME identity that
+    # holds the opt-in `mint` scope: a child always acts as the caller's From and holds a
+    # subset of its scopes. A token is returned ONCE, by the mint; only its hash is stored.
+
+    def _identities_path(self, delegated: bool) -> str:
+        return "/api/identities" if delegated else "/api/admin/identities"
+
+    def mint_identity(
+        self,
+        scopes: list[str],
+        *,
+        from_addr: Optional[str] = None,
+        display_name: Optional[str] = None,
+        label: Optional[str] = None,
+        delegated: bool = False,
+    ) -> dict[str, Any]:
+        """POST /api/admin/identities (or /api/identities). Returns {id, token, ...}.
+
+        `scopes` is a subset of read, send, organize, mint. `from_addr` is required on the
+        operator route; on the delegated route it may be omitted (it is forced anyway).
+        """
+        body: dict[str, Any] = {"scopes": list(scopes)}
+        if from_addr is not None:
+            body["from"] = from_addr
+        if display_name is not None:
+            body["displayName"] = display_name
+        if label is not None:
+            body["label"] = label
+        return self._json("POST", self._identities_path(delegated), body=body)
+
+    def list_identities(
+        self,
+        *,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        include_revoked: bool = False,
+        delegated: bool = False,
+    ) -> dict[str, Any]:
+        """GET /api/admin/identities (or /api/identities). Returns {items, cursor}.
+
+        Never carries a token or its hash. Active identities only unless
+        `include_revoked`.
+        """
+        params: dict[str, str] = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        if include_revoked:
+            params["includeRevoked"] = "1"
+        return self._json("GET", self._identities_path(delegated), params=params or None)
+
+    def revoke_identity(self, identity_id: str, *, delegated: bool = False) -> dict[str, Any]:
+        """DELETE /api/admin/identities/{id} (or /api/identities/{id}).
+
+        Also revokes every identity it minted. Effective on the next request.
+        """
+        return self._json("DELETE", f"{self._identities_path(delegated)}/{_quote(identity_id)}")
+
+    def list_audit(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
+        """GET /api/admin/audit. The audit log, newest first: {items, cursor}."""
+        params: dict[str, str] = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        return self._json("GET", "/api/admin/audit", params=params or None)
+
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""
         try:

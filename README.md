@@ -189,6 +189,15 @@ read-only client, give it a `POSTERN_API_TOKEN_READ` value instead (see "Scoped
 tokens" in [DEPLOY.md](DEPLOY.md)); for several people or agents, one per-identity
 token each ([docs/SEND-IDENTITIES.md](docs/SEND-IDENTITIES.md)).
 
+**Agent identities at runtime:** an operator mints, lists and revokes per-agent
+credentials through the API, with no config edit and no redeploy:
+`POST /api/admin/identities {"from": "...", "scopes": ["read", "send"]}` returns the
+token once (only its hash is stored), and `DELETE /api/admin/identities/{id}` stops it
+on the very next request. Every mint, list and revoke is written to an audit log
+(`GET /api/admin/audit`). An agent granted the opt-in `mint` scope can mint narrower
+credentials for its own sub-agents, never broader than itself. See
+[docs/SEND-IDENTITIES.md section 10](docs/SEND-IDENTITIES.md#10-runtime-identities-mint-list-and-revoke-without-a-deploy-801).
+
 **MCP (Cursor / Claude Code):** add an MCP server entry with `command: npx`,
 `args: ["-y", "@skyphusion/postern-mcp"]`, and the env vars above in `env`. Send tools
 (`mailbox_send`, `mailbox_reply`) register only when `POSTERN_SEND_TOKEN` is also
@@ -219,7 +228,8 @@ AND humans, and an agent that cannot read the humans' mail does not deliver it. 
 asked to find last month's invoice has to be able to find it in the mailbox it was
 delivered to.
 
-Concretely, for a read-capable entry in `POSTERN_SEND_IDENTITIES`:
+Concretely, for a read-capable entry in `POSTERN_SEND_IDENTITIES` (a runtime identity
+minted through `POST /api/admin/identities` is the same row in this table):
 
 | Credential | Reads | Sends as | May change |
 |---|---|---|---|

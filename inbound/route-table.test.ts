@@ -68,6 +68,14 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   // handler serves; the bare "/api/admin/users/" (no username) is NOT claimed.
   if ((method === "GET" || method === "POST") && path === "/api/admin/users") return "admin";
   if (["GET", "POST", "PATCH", "DELETE"].includes(method) && /^\/api\/admin\/users\/.+$/.test(path)) return "admin";
+  // #801 adds runtime agent identities: operator mint/list/revoke and the audit log at
+  // `admin`, and delegated mint/list/revoke at the new `mint` scope. Same deliberate-act
+  // rule: only the methods the handlers serve, and the bare item prefix is NOT claimed.
+  if ((method === "GET" || method === "POST") && path === "/api/admin/identities") return "admin";
+  if (method === "DELETE" && /^\/api\/admin\/identities\/.+$/.test(path)) return "admin";
+  if (method === "GET" && path === "/api/admin/audit") return "admin";
+  if ((method === "GET" || method === "POST") && path === "/api/identities") return "mint";
+  if (method === "DELETE" && /^\/api\/identities\/.+$/.test(path)) return "mint";
   if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
   // #650 adds GET /api/whoami at `read` scope (the Bearer-reachable self-identity call).
   if (method === "GET" && path === "/api/whoami") return "read";
@@ -95,6 +103,9 @@ const CORPUS = [
   "/api/admin/reindex", "/api/admin/reconcile", "/api/admin/reproject",
   "/api/admin/users", "/api/admin/users/", "/api/admin/users/bob", "/api/admin/users/bob/password",
   "/api/admin/usersx", "/api/admin/users2/bob",
+  "/api/admin/identities", "/api/admin/identities/", "/api/admin/identities/idn_0123", "/api/admin/identitiesx",
+  "/api/admin/audit", "/api/admin/auditx",
+  "/api/identities", "/api/identities/", "/api/identities/idn_0123", "/api/identitiesx", "/api/identities2/idn_0123",
   // Pre-gate rows: they never reach the gate, and the table says so.
   "/health", "/", "/robots.txt", "/sitemap.xml", "/webmail", "/.well-known/mta-sts.txt", "/api/smtp-auth", "/api/session",
   "/api/session/refresh", "/api/session/password", "/api/setup", "/ingest",
