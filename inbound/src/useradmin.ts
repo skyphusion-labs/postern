@@ -187,11 +187,14 @@ function parseNewUser(env: Env, body: Record<string, unknown>, requirePassword: 
   const rawUser = optString(body, "username");
   if (!rawUser || !rawUser.trim()) throw new AdminError(400, "E_FIELD_MISSING", "username is required", "username");
   const username = normalizeUsername(rawUser);
-  const problem = usernameProblem(username);
-  if (problem) throw new AdminError(400, "E_VALIDATION_ERROR", problem, "username");
+  const domain = requireDomain(env);
+  const problem = usernameProblem(username, domain);
+  if (problem) throw new AdminError(400, "E_INVALID_USERNAME", problem, "username");
   const chosen = optString(body, "password");
   if (requirePassword && !chosen) throw new AdminError(400, "E_FIELD_MISSING", "password is required", "password");
-  const fromAddr = validFrom(env, optString(body, "from")?.trim() || username);
+  // A bare login binds to login@domain; an address binds to itself (contract 1.10.1).
+  const defaultFrom = username.includes("@") ? username : `${username}@${domain}`;
+  const fromAddr = validFrom(env, optString(body, "from")?.trim() || defaultFrom);
   const name = displayName(body) ?? null;
   if (chosen !== undefined) policy(chosen, username);
   return { username, fromAddr, displayName: name, password: chosen };
