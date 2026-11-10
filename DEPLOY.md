@@ -29,7 +29,9 @@ It deploys the Worker at `https://mail.example.com`, with a mailbox token it gen
 It turns on Email Sending and Email Routing, adds the DNS records they need (MX, SPF,
 DKIM, and DMARC if you have none), and routes every address on the domain to the Worker.
 Then it creates your first admin login through the user API (`POST /api/admin/users`),
-and turns on webmail sign-in (`WEBMAIL_AUTH_BACKEND=native`) for a new install.
+and turns on webmail sign-in (`WEBMAIL_AUTH_BACKEND=native`) for a new install. It does
+not need, and does not set, the first-run setup secret (see section 4, "First run in the
+browser"): it already holds the mailbox token, so it creates the admin directly.
 
 **DMARC.** If your domain has no DMARC record, the installer writes `v=DMARC1; p=none`
 (or your `--dmarc` choice) BEFORE it enables Email Sending. It has to come first:
@@ -227,12 +229,44 @@ The installer (section 1) turns it on for a new install and creates the first lo
 "WEBMAIL_SESSION_ABSOLUTE_SECONDS": "43200" // absolute cap (default 12 h)
 ```
 
-With `native`, users sign in with the username + secret you minted via
-`POST /api/admin/smtp-credentials`; the session grants read + send + delete
+With `native`, users sign in with a username and password you create through the user
+API (`POST /api/admin/users` with the `both` token, or `postern admin users create`
+from the Python CLI); the same login works for SMTP submission and IMAP. Unset stays
+`off` on every upgrade: a deploy that already has logins does not turn sign-in on by
+itself. The session grants read + send + delete
 (browse, compose, organize, and empty its own Trash), and sign-out revokes it
 instantly server-side. Directory
 (`ldap`/`system`) sign-in is designed but deferred, so those deployments keep using
 BYO-token webmail. Details: [webmail/README.md](webmail/README.md).
+
+#### First run in the browser (optional)
+
+A deploy with no users yet can create its first user from the webmail page, so nobody has
+to paste a token. It is armed only while ALL THREE hold:
+
+1. `WEBMAIL_AUTH_BACKEND` is explicitly `"native"` (unset or `"off"` disarms it),
+2. the Worker secret `POSTERN_SETUP_TOKEN` is set, at least 32 characters (a shorter
+   value is treated as unset), and
+3. there are zero users (a disabled user still counts, so setup never re-opens).
+
+```bash
+( umask 077; openssl rand -base64 33 | tr -d "\n" > setup-token.txt )   # 44 characters, mode 600
+npx wrangler secret put POSTERN_SETUP_TOKEN < setup-token.txt
+```
+
+`setup-token.txt` holds the value you type on the setup screen. Open `/webmail`: it shows the first-run form,
+which asks for the setup token, a username and a password. The first user is created and
+signed in, and setup closes for good (a second attempt answers `409 E_SETUP_COMPLETE`).
+**Then delete the secret**, once an unauthenticated `GET /api/session` reports
+`"setupRequired": false`:
+
+```bash
+npx wrangler secret delete POSTERN_SETUP_TOKEN
+rm setup-token.txt
+```
+
+The server refuses setup once a user exists even if the secret stays, but one less
+credential at rest is better. The installer (section 1) does not use this path.
 
 ### IMAP proxy
 
@@ -443,6 +477,28 @@ After the deploy the API answers at `https://mail.example.com`, and every client
 (the Python CLI, MCP, webmail, the IMAP proxy) points at that origin instead of
 the workers.dev URL. Leaving `workers_dev` at `false` means the workers.dev URL
 stops answering, which is the intended production posture.
+
+### A2b. Create the first user
+
+Sessions (webmail sign-in) and SMTP submission both need a user. Pick ONE way:
+
+- **With the mailbox token** (what the installer does). Use the `both` token from A2:
+  ```bash
+  printf "%s" "{\"username\":\"admin@example.com\",\"displayName\":\"Admin\"}" | \
+    curl -sS -X POST "https://mail.example.com/api/admin/users" \
+      -H "authorization: Bearer $POSTERN_API_TOKEN" -H "content-type: application/json" --data-binary @-
+  ```
+  The answer is `201` with the user and a generated password, shown ONCE (pass
+  `"password"` to choose one: 12 to 256 characters, not the username). A repeat answers
+  `409 E_CONFLICT` and changes nothing. A username is a login of `a-z 0-9 . _ -`
+  (1 to 64 characters), optionally `@example.com`; anything else is `400 E_INVALID_USERNAME`.
+  The CLI equivalent is `postern admin users create admin@example.com --name Admin`.
+- **In the browser**, with no token at hand: set `WEBMAIL_AUTH_BACKEND = "native"`, put
+  the `POSTERN_SETUP_TOKEN` secret, and follow section 4, "First run in the browser".
+  Delete the secret afterwards.
+
+To turn webmail sign-in on, set `WEBMAIL_AUTH_BACKEND = "native"` in the config `vars`
+and redeploy. Unset means `off`.
 
 ### A3. Wire inbound mail (for the receive leg)
 
