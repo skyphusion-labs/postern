@@ -155,7 +155,8 @@ first (it is not part of any test run).
    - `CHANGELOG.md` section `## vX.Y.Z`
    - `clients/python/pyproject.toml` `version`
    - `postern_client/__init__.py` `__version__`
-   - `inbound/package.json` `version`
+   - `inbound/package.json` `version` (and `inbound/package-lock.json`, top-level and `packages[""]`)
+   - `inbound/src/version.ts` `VERSION` (asserted by `inbound/version.test.ts` and `tag-preflight.sh`)
 2. **Then** cut the annotated tag and push:
 
 ```bash

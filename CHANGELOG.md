@@ -11,6 +11,24 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.7.1
+
+PATCH. Two security fixes; both are behaviour changes for self-hosters, so read them.
+
+### Inbound `trusted` now requires an aligned DMARC or DKIM pass (GHSA-2m2g-5f3x-822j)
+
+Before, mail was marked `trusted=1` when its header From domain was on `TRUSTED_SENDER_DOMAINS` and SPF or DKIM passed for ANY domain, or when no authentication data was present. The DMARC verdict was not consulted. Mail spoofing an allowlisted domain could be stored as trusted and shown as trusted to agents.
+
+Now `trusted=1` needs exactly one From address, on the allowlist, AND either DMARC pass with `header.from` equal to the From domain, or a first DKIM verdict of pass with an aligned `d=`. The receiving server's `Authentication-Results` are parsed strictly and fail closed. **An allowlisted domain that publishes no DMARC record and does not sign with an aligned DKIM key is no longer trusted, even when SPF passes**; publish DMARC or sign with DKIM to restore it. Mail arriving through the relay's SMTP intake carries no verdicts and is now always untrusted. See `inbound/README.md`.
+
+### Caller header names are validated on every transport (GHSA-v565-q4qw-mv89)
+
+Before, a send request's custom header NAMES were passed verbatim on the relay transport, so a caller holding a valid send token could add a second `From:` or a `Sender:` header. The Cloudflare transport was not affected.
+
+Now header names must be RFC 5322 field names (printable ASCII without a colon) of at most 76 characters, and the reserved set (address, routing, MIME and authentication headers, including `From`, `Sender`, `Reply-To`, `Message-ID`, `Content-*`, `Authentication-Results`, `ARC-*`, `DKIM-Signature`) is refused with HTTP 400 on every transport, in both the Worker and the Go relay. **A request that previously had a reserved header silently dropped is now refused.**
+
+Also: the From quote scan is linear, and From values over 2048 characters are untrusted.
+
 ## v1.7.0
 
 MINOR, and **one entry is a change to a DEFAULT that widens what an agent credential can
