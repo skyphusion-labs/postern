@@ -307,6 +307,13 @@
   .settings-panel select { width: 100%; }
   .settings-panel .note { color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-3); }
   .settings-signout { display: none; width: 100%; margin-top: var(--sp-3); }
+  .settings-panel { max-height: calc(100vh - 76px); overflow-y: auto; }
+  .settings-panel h3 { margin: var(--sp-4) 0 0; padding-top: var(--sp-3); border-top: 1px solid var(--line); font-size: var(--fs-sm); }
+  .settings-panel input { width: 100%; }
+  .settings-panel .hint { color: var(--muted); font-size: var(--fs-xs); margin: var(--sp-1) 0 0; }
+  .settings-panel form button[type="submit"] { width: 100%; margin-top: var(--sp-3); }
+  .settings-panel .note-ok { color: var(--ok); font-size: var(--fs-xs); margin: var(--sp-2) 0 0; }
+  .settings-panel .note-ok:empty, .settings-panel .err:empty { display: none; }
   .ac-wrap { position: relative; }
   .ac-list {
     position: absolute; left: 0; right: 0; top: 100%; z-index: 5;
@@ -500,6 +507,22 @@
     <option value="compact">Compact</option>
   </select>
   <p class="note" id="settingsSession">Session: not signed in.</p>
+  <!-- Change password (#819, contract 1.10.5): session mode only -->
+  <div id="pwSection" style="display:none">
+    <h3 id="pwTitle">Change password</h3>
+    <form id="pwForm" novalidate aria-labelledby="pwTitle">
+      <label for="pwCur">Current password</label>
+      <input id="pwCur" type="password" autocomplete="current-password">
+      <label for="pwNew">New password</label>
+      <input id="pwNew" type="password" autocomplete="new-password" aria-describedby="pwNewHint">
+      <p class="hint" id="pwNewHint">At least 12 characters. Your other devices will be signed out.</p>
+      <label for="pwNew2">Confirm new password</label>
+      <input id="pwNew2" type="password" autocomplete="new-password">
+      <button type="submit" id="pwSubmit">Change password</button>
+    </form>
+    <div class="err" id="pwErr" role="alert" aria-live="assertive"></div>
+    <p class="note-ok" id="pwNote" role="status"></p>
+  </div>
   <button type="button" id="settingsSignout" class="settings-signout">Sign out</button>
   <p class="note">Keyboard: <kbd>j</kbd> / <kbd>k</kbd> next and previous message, <kbd>/</kbd> search,
     <kbd>c</kbd> compose, arrow keys move in the list, <kbd>Esc</kbd> closes a panel or goes back.</p>
@@ -1307,10 +1330,13 @@
       $("who").textContent = state.identity.displayName || "";
       $("settingsSession").textContent = "Session: " + state.identity.from +
         (state.identity.displayName ? " (" + state.identity.displayName + ")" : "");
+      $("pwSection").style.display = "";
     } else {
       $("identity").textContent = "";
       $("who").textContent = state.origin;
       $("settingsSession").textContent = "Session: BYO token at " + (state.origin || "(same origin)");
+      // A token is not a person and has no password to change (contract 1.10.5).
+      $("pwSection").style.display = "none";
     }
     $("searchMode").value = state.searchMode;
     applyChromePrefs();
@@ -1533,6 +1559,63 @@
     }).catch(function () {
       $("suSubmit").disabled = false;
       $("suSubmit").textContent = "Create account and sign in";
+      err.textContent = "Could not reach the server. Try again.";
+    });
+  }
+
+  // Change password (#819, contract 1.10.5): POST /api/session/password, cookie session
+  // plus the CSRF header. On success the server ends every OTHER session of the account
+  // and rotates this one (new cookies, new csrfToken; #827), so this tab stays signed in.
+  function changePassword() {
+    var cur = $("pwCur").value, nw = $("pwNew").value, nw2 = $("pwNew2").value;
+    var err = $("pwErr"), note = $("pwNote");
+    err.textContent = ""; note.textContent = "";
+    if (!cur || !nw) { err.textContent = "Enter your current password and a new one."; return; }
+    if (nw.length < 12) { err.textContent = "The new password must be at least 12 characters."; focusFirst("pwNew"); return; }
+    if (nw === cur) { err.textContent = "The new password must be different from the current one."; focusFirst("pwNew"); return; }
+    if (nw !== nw2) { err.textContent = "The two new passwords do not match."; focusFirst("pwNew2"); return; }
+    $("pwSubmit").disabled = true;
+    $("pwSubmit").textContent = "Changing\u2026";
+    function done() { $("pwSubmit").disabled = false; $("pwSubmit").textContent = "Change password"; }
+    fetch("/api/session/password", {
+      method: "POST",
+      headers: { "content-type": "application/json", "accept": "application/json", "x-postern-csrf": csrfFromCookie() },
+      body: JSON.stringify({ currentPassword: cur, newPassword: nw }),
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      return r.json().catch(function () { return { ok: false }; }).then(function (b) { return { status: r.status, body: b || {} }; });
+    }).then(function (res) {
+      done();
+      var b = res.body, code = b.error || "";
+      if (res.status === 200 && b.ok) {
+        ["pwCur", "pwNew", "pwNew2"].forEach(function (id) { $(id).value = ""; });
+        state.csrfToken = b.csrfToken || csrfFromCookie();
+        if (b.identity) state.identity = b.identity;
+        note.textContent = "Password changed. Any other devices were signed out.";
+        return;
+      }
+      if (code === "E_REAUTH_REQUIRED") {
+        sessionReset(); setSettings(false);
+        showSignin("", "Sign in again, then change your password.");
+        return;
+      }
+      if (res.status === 401) {
+        // E_AUTH_FAILED means a wrong current password OR a session that is gone.
+        // Ask the server which, rather than guess.
+        return fetch("/api/session", { headers: { "accept": "application/json" }, credentials: "include", referrerPolicy: "no-referrer" })
+          .then(function (r) {
+            if (r.status === 200) { err.textContent = "The current password is not correct."; focusFirst("pwCur"); return; }
+            sessionReset(); setSettings(false);
+            showSignin("", "Your session ended. Sign in again.");
+          });
+      }
+      if (res.status === 429) { err.textContent = tooManyText(Number(b.retryAfter) || 0); return; }
+      if (res.status === 503) { err.textContent = "Password change is temporarily unavailable. Try again shortly."; return; }
+      if (res.status === 403) { err.textContent = "The request was refused for security reasons. Reload the page and try again."; return; }
+      if (code === "E_PASSWORD_POLICY") { err.textContent = b.message || "That password does not meet the policy."; focusFirst("pwNew"); return; }
+      err.textContent = b.message || "Could not change the password. Try again.";
+    }).catch(function () {
+      done();
       err.textContent = "Could not reach the server. Try again.";
     });
   }
@@ -2651,6 +2734,7 @@
   });
   $("signinForm").addEventListener("submit", function (e) { e.preventDefault(); signIn(); });
   $("setupForm").addEventListener("submit", function (e) { e.preventDefault(); setupSubmit(); });
+  $("pwForm").addEventListener("submit", function (e) { e.preventDefault(); changePassword(); });
   Array.prototype.forEach.call(document.querySelectorAll(".pw-toggle"), function (btn) {
     btn.addEventListener("click", function () {
       var id = btn.getAttribute("data-toggle-for");
