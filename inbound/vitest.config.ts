@@ -3,6 +3,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
+    // #821: give the whole suite the deployed Workers PBKDF2 iteration cap.
+    setupFiles: ['./test-setup/workers-pbkdf2-cap.ts'],
     coverage: {
       provider: 'istanbul',
       reporter: ['cobertura'],
