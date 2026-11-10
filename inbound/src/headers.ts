@@ -150,7 +150,8 @@ export function bareDomain(v: string): string | null {
   const labels = d.split(".");
   if (labels.length < 2) return null;
   for (const l of labels) {
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(l)) return null;
+    // Length first, so the (bounded) regex only ever sees a 1-63 char label.
+    if (l.length < 1 || l.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(l)) return null;
   }
   return d;
 }

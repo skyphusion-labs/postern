@@ -367,14 +367,43 @@ export function bareAddress(from: string): string {
   return (angle ? angle[1] : from).trim().toLowerCase();
 }
 
+/** Longest From value the trust check will parse; longer is never trusted. */
+export const MAX_FROM_LENGTH = 2048;
+
+/**
+ * `from` with every quoted-string removed (backslash escapes honoured), or null when a
+ * quote is unterminated. ONE linear pass: the From is attacker input, and a regex that
+ * restarts its scan at every quote is polynomial on `"` followed by many `\"`.
+ */
+export function stripQuotedStrings(from: string): string | null {
+  const out: string[] = [];
+  const n = from.length;
+  let start = 0;
+  let i = 0;
+  while (i < n) {
+    if (from[i] !== '"') { i++; continue; }
+    out.push(from.slice(start, i));
+    let j = i + 1;
+    while (j < n && from[j] !== '"') j += from[j] === "\\" ? 2 : 1;
+    if (j >= n) return null; // unterminated quoted-string
+    i = j + 1;
+    start = i;
+  }
+  out.push(from.slice(start));
+  return out.join("");
+}
+
 /**
  * The one address in a From value, or null when it does not hold exactly one usable
- * addr-spec. Quoted display names are removed first (they may contain "@" or ","), then
- * a value with more than one "@" or "<" is refused: `a@evil.example, CEO <ceo@ours>`
- * must not be read as ours.
+ * addr-spec. A value over MAX_FROM_LENGTH, or with an unterminated quote, is null.
+ * Quoted display names are removed first (they may contain "@" or ","), then a value
+ * with more than one "@" or "<" is refused: `a@evil.example, CEO <ceo@ours>` must not
+ * be read as ours.
  */
 export function singleFromAddress(from: string): string | null {
-  const unquoted = from.replace(/"(?:[^"\\]|\\.)*"/g, "");
+  if (from.length > MAX_FROM_LENGTH) return null;
+  const unquoted = stripQuotedStrings(from);
+  if (unquoted === null) return null;
   if ((unquoted.match(/@/g) ?? []).length !== 1) return null;
   if ((unquoted.match(/</g) ?? []).length > 1) return null;
   const addr = bareAddress(unquoted);
