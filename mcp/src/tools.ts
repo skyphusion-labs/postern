@@ -631,7 +631,8 @@ export const READ_TOOLS: ToolDef[] = [
 // v1.1 send tools (scope "send"). MUTATING: they actually send mail as the estate,
 // so they register ONLY when a send-scoped token is configured (see index.ts). The
 // worker owns From-enforcement, DKIM, threading, and storing the sent copy; these
-// tools forward a composed message and return the core messageId + threadId.
+// tools forward a composed message and return the core messageId, threadId, and the
+// From address the worker actually used. A bound identity overrides the caller's from.
 export const SEND_TOOLS: ToolDef[] = [
   {
     name: "mailbox_send",
@@ -640,7 +641,9 @@ export const SEND_TOOLS: ToolDef[] = [
       "Send a NEW email from the mailbox. MUTATING: this actually delivers mail to the " +
       "recipients as the estate, so use it deliberately. Provide 'to', 'subject', and at " +
       "least one of 'text' or 'html'. The server enforces the allowed From domain, signs " +
-      "(DKIM), threads, and stores the sent copy. Returns the new message id + thread id. " +
+      "(DKIM), threads, and stores the sent copy. A bound identity overrides the caller's from " +
+      "and the result's from is the address actually used (the same address stored on the sent copy), " +
+      "which can differ from the from you passed. Returns the new message id, thread id, and that from. " +
       "To answer an existing message, prefer mailbox_reply (it threads automatically).",
     inputSchema: {
       to: ADDRESSES.describe("recipient address, or a list of addresses"),
@@ -649,7 +652,10 @@ export const SEND_TOOLS: ToolDef[] = [
       html: z.string().optional().describe("HTML body (provide text and/or html)"),
       cc: ADDRESSES.optional().describe("cc address, or a list"),
       bcc: ADDRESSES.optional().describe("bcc address, or a list"),
-      from: z.string().optional().describe("optional From override; must be on the allowed From domain, else the server rejects it"),
+      from: z.string().optional().describe(
+        "optional From. A bound identity overrides this; the result reports the address actually used. " +
+        "On an unbound token it must be on the allowed From domain, or the server rejects it.",
+      ),
       reply_to: z.string().optional().describe("optional Reply-To address"),
       attachments: z.array(ATTACHMENT).optional().describe(
         "optional files to attach, each with base64 content (+ optional filename, mime_type). " +
@@ -671,7 +677,13 @@ export const SEND_TOOLS: ToolDef[] = [
         replyTo: a.reply_to,
         attachments: mapAttachments(a.attachments),
       });
-      return { sent: true, messageId: result.messageId, threadId: result.threadId, providerMessageId: result.providerMessageId ?? null };
+      return {
+        sent: true,
+        messageId: result.messageId,
+        threadId: result.threadId,
+        from: result.from ?? null,
+        providerMessageId: result.providerMessageId ?? null,
+      };
     },
   },
   {
@@ -684,14 +696,19 @@ export const SEND_TOOLS: ToolDef[] = [
       "In-Reply-To / References / thread, so the reply lands in the same conversation. " +
       "Use mode 'replyAll' to include the original recipients, quote_original to append " +
       "the quoted original, and attachments exactly as mailbox_send takes them. " +
-      "Returns the new message id + thread id (shared with the original).",
+      "A bound identity overrides the caller's from and the result's from is the address " +
+      "actually used. Returns the new message id, thread id, and that from (the thread is " +
+      "shared with the original).",
     inputSchema: {
       message_id: z.string().min(1).describe("the message id being replied to (as returned by search/list/get)"),
       text: z.string().optional().describe("plain-text body (provide text and/or html)"),
       html: z.string().optional().describe("HTML body (provide text and/or html)"),
       cc: ADDRESSES.optional().describe("cc address, or a list"),
       bcc: ADDRESSES.optional().describe("bcc address, or a list"),
-      from: z.string().optional().describe("optional From override; must be on the allowed From domain, else the server rejects it"),
+      from: z.string().optional().describe(
+        "optional From. A bound identity overrides this; the result reports the address actually used. " +
+        "On an unbound token it must be on the allowed From domain, or the server rejects it.",
+      ),
       mode: REPLY_MODE.optional().describe("'reply' (default, sender only) or 'replyAll' (the server derives the original To/Cc, excluding the sender)"),
       quote_original: z.boolean().optional().describe("append the server-built quote of the original message"),
       attachments: z.array(ATTACHMENT).optional().describe(
@@ -714,7 +731,13 @@ export const SEND_TOOLS: ToolDef[] = [
         quoteOriginal: a.quote_original,
         attachments: mapAttachments(a.attachments),
       });
-      return { sent: true, messageId: result.messageId, threadId: result.threadId, providerMessageId: result.providerMessageId ?? null };
+      return {
+        sent: true,
+        messageId: result.messageId,
+        threadId: result.threadId,
+        from: result.from ?? null,
+        providerMessageId: result.providerMessageId ?? null,
+      };
     },
   },
   // --- server-side drafts ---
@@ -834,7 +857,8 @@ export const SEND_TOOLS: ToolDef[] = [
       "The server dispatches, stores the sent copy, and only THEN discards the draft, so a " +
       "failure leaves the draft intact and retryable rather than half-sent. A reply or " +
       "forward draft threads against its source message automatically. Returns the sent " +
-      "message id and thread id.",
+      "message id and thread id. The result's from is the address actually used, which " +
+      "is the caller's bound identity.",
     inputSchema: {
       draft_id: z.string().min(1).describe("the draft id to send"),
     },
@@ -845,6 +869,7 @@ export const SEND_TOOLS: ToolDef[] = [
         draftId: a.draft_id,
         messageId: result.messageId,
         threadId: result.threadId,
+        from: result.from ?? null,
         providerMessageId: result.providerMessageId ?? null,
       };
     },

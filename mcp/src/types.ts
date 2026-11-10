@@ -170,10 +170,13 @@ export type Direction = "inbound" | "outbound";
 // and a lens needs a viewer (to=) -- the worker refuses both violations.
 export type ViewLens = "inbox" | "sent";
 
-// Result of a send/reply (POST /api/send, POST /api/reply). The worker wraps it
-// as `{ ok: true, ...SendResult }`; the client unwraps to this. threadId is the
-// thread the sent copy joined; providerMessageId is best-effort (provider/transport
-// dependent), so a caller threads/stores on the core messageId, never on it.
+// Result of a send/reply/forward/draft-send (POST /api/send, POST /api/reply,
+// POST /api/drafts/{id}/send). The worker wraps it as `{ ok: true, ...SendResult }`;
+// the client unwraps to this. threadId is the thread the sent copy joined;
+// providerMessageId is best-effort (provider/transport dependent), so a caller
+// threads/stores on the core messageId, never on it. `from` is the address the
+// worker actually used. A bound identity overrides the caller's from, so this
+// can differ from the address the caller passed.
 /**
  * A folder rail entry, mirroring the worker's `FolderSummary` (inbound store.ts).
  *
@@ -247,6 +250,11 @@ export interface FlagSet {
 export interface SendResult {
   messageId: string;
   threadId: string;
+  /**
+   * The From address the worker actually used. Absent only when an older worker
+   * omitted the field; this client does not invent one.
+   */
+  from?: string;
   providerMessageId?: string;
 }
 

@@ -572,6 +572,14 @@ store.put(direction: "outbound")`. The sent copy lands in the same store, so thr
 prefixes `Re:` (collapsing an existing prefix), and rebuilds `In-Reply-To` / `References` from
 **stored state, not caller input**, so a reply cannot be pointed at an arbitrary thread.
 
+`send()`, `reply()`, and a forward (`forwardMessageId` on `send`) return
+`{ messageId, threadId, from, providerMessageId? }`. `from` is the address actually used,
+after identity binding and the domain check, and it is the same address stored on the
+outbound copy. A registry token that passed a different `from` still sees its bound
+address here (#804). `POST /api/send`, `POST /send`, `POST /api/reply`, and
+`POST /api/drafts/{id}/send` all return that object (`{ ok: true, ... }`). An unbound
+token reports the address it honored (the caller `from`, or `DEFAULT_FROM`).
+
 ---
 
 ## 4. The one mailbox API
@@ -593,8 +601,8 @@ none touches D1 directly (#25, #26).
 | POST | `/api/session/refresh` | explicit session extend (a sliding refresh also happens on any authed request) | webmail v2 (#352) |
 | POST | `/api/session/password` | self-service change password `{currentPassword, newPassword}`: cookie session + CSRF only (a Bearer is `403 E_SESSION_REQUIRED`), throttled on the sign-in keys, rotates this session and ends the others | #790 |
 | GET | `/api/session` | the COOKIE whoami. A Bearer holder cannot reach it; `GET /api/whoami` above is the token-reachable equivalent | webmail v2 (#352) |
-| POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
-| POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
+| POST | `/api/send` | send (body = `SendRequest`). Response `from` is the address actually used, the same one stored on the sent copy (#804) | M2 (done) / #804 |
+| POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments. Response `from` is the address actually used (#804) | M2 / webmail v2 (#353) / #804 |
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean, for?: address}` (un)read; returns `{updated}` (READ-scoped, #seen). Under SESSION auth the viewer is FORCED to the bound identity and a mismatched `for` is `403 E_FORBIDDEN` (#410) | (#seen) |
 | POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
 | POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
@@ -604,7 +612,7 @@ none touches D1 directly (#25, #26).
 | GET/PUT/DELETE | `/api/drafts/{id}` | read, optimistic-concurrency replace, or discard own draft | webmail v2 (#352) |
 | GET/POST | `/api/drafts/{id}/attachments` | list or stage raw attachment bytes for an identity-owned draft | webmail v2 (#353) |
 | DELETE | `/api/drafts/{id}/attachments/{attachmentId}` | remove one staged attachment and its R2 bytes | webmail v2 (#353) |
-| POST | `/api/drafts/{id}/send` | load staged attachments, send through the one send core, then remove the draft and staging only after success | webmail v2 (#352/#353) |
+| POST | `/api/drafts/{id}/send` | load staged attachments, send through the one send core, then remove the draft and staging only after success. Response `from` is the address actually used (#804) | webmail v2 (#352/#353) / #804 |
 | GET/POST/PUT/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity; PUT is the autosave revision, mirroring `PUT /api/drafts/{id}` | webmail v2 (#352) |
 | POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it; `rawMime` decoding past **22 MiB** is `413 E_PAYLOAD_TOO_LARGE` BEFORE the MIME is parsed | webmail v2 (#352/#493) |
 | DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope). A webmail session may delete only mail already in the trash: its own untrashed mail answers `409 E_NOT_IN_TRASH`, an unreadable or absent id answers one `404`, both under `identityScope` (see 10.9.1) | (#278/#352/#731/#745) |

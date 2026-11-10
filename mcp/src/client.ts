@@ -557,9 +557,13 @@ export class PosternClient {
   }
 
   private asSendResult(body: Record<string, any>): SendResult {
+    // Relay `from` only when the worker sent a string. Defaulting a missing one
+    // to "" would tell the caller an address was used when the worker said nothing.
+    const from = typeof body.from === "string" && body.from !== "" ? body.from : undefined;
     return {
       messageId: String(body.messageId ?? ""),
       threadId: String(body.threadId ?? ""),
+      ...(from !== undefined ? { from } : {}),
       providerMessageId: body.providerMessageId ? String(body.providerMessageId) : undefined,
     };
   }

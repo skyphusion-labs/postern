@@ -109,9 +109,17 @@ in two ordered stages (`inbound/src/api.ts` -> `resolveToken`, `inbound/src/send
    entry's **caps** (`read` and/or `send`) **plus** the bound identity. A miss is an
    unknown token -> `401`.
 
-When a request to `POST /api/send` or `POST /api/reply` is authorized by a registry
+When a request to `POST /api/send`, `POST /send`, `POST /api/reply`, or
+`POST /api/drafts/{id}/send` (including a forward) is authorized by a registry
 token with the `send` cap, the worker **overrides** the outbound `From` to the bound
 identity, discarding any caller-supplied `from`. A token cannot send as anyone else.
+
+The success body reports that address as `from`
+(`{ ok, messageId, threadId, from, providerMessageId? }`). The stored outbound row's
+From is the same address. A caller that passed `from: someone-else@` reads its own
+bound address back, so the substitution is in the response and in the sent copy,
+not only in this document (#804). An unbound token reports the address it actually
+used as well (the caller `from` it honored, or `DEFAULT_FROM`).
 
 When a **read** is authorized by a registry token with the `read` cap (#544), the worker
 forces the viewer to the bound identity (and that identity's role queues), the same way
@@ -255,6 +263,6 @@ remove the old hash on the next deploy. To revoke: remove the hash and redeploy.
 | From-binding | `inbound/src/mailbox.ts` (`resolveFrom`, `send`, `reply`) |
 | Read viewer binding (#544) | `inbound/src/api.ts` (list/search/get + related) |
 | Env mirror | `inbound/src/env.d.ts` (`POSTERN_SEND_IDENTITIES`) |
-| Tests | `inbound/per-identity-send.test.ts`, `inbound/viewer-binding.test.ts`, `inbound/scopes.test.ts` |
+| Tests | `inbound/per-identity-send.test.ts`, `inbound/send-from-report.test.ts`, `inbound/viewer-binding.test.ts`, `inbound/scopes.test.ts` |
 | Scope table | `docs/AUTH-CONTRACT.md` section 7 |
 | MCP env + tools | `mcp/README.md` |

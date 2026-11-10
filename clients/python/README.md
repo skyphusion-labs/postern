@@ -173,7 +173,7 @@ client = from_env()
 client = PosternClient("https://postern.example", token)
 
 res = client.send("alice@example.com", "Hello", text="hi there")
-print(res["messageId"], res["threadId"])
+print(res["messageId"], res["threadId"], res["from"])
 
 page = client.list_messages(direction="inbound", limit=20)
 for summary in page["items"]:
@@ -233,8 +233,8 @@ API's parsed JSON, so the keys match the worker contract exactly.
 
 | method | endpoint | returns |
 |---|---|---|
-| `send` | `POST /api/send` | `{messageId, threadId, ...}` |
-| `reply` | `POST /api/reply` | `{messageId, threadId, ...}` |
+| `send` | `POST /api/send` | `{messageId, threadId, from, ...}` (`from` is the address the worker used) |
+| `reply` | `POST /api/reply` | `{messageId, threadId, from, ...}` (`from` is the address the worker used) |
 | `list_messages` | `GET /api/messages` | `{items: [summary], cursor}` |
 | `get_message` | `GET /api/messages/{id}` | message dict or `None`. A `None` does NOT prove absence under a scoped read; see `get_message_envelope` |
 | `get_message_envelope` | `GET /api/messages/{id}` | `{message, identity_scope}` -- use this when "is it really not there" matters. The two misses, withheld and absent, are deliberately the SAME answer |
@@ -257,7 +257,7 @@ that reports no scope it says so rather than guessing.
 | `delete_message` | `DELETE /api/messages/{id}` | `None` (raises on 403/404) |
 | `list_drafts` / `get_draft` | `GET /api/drafts[/{id}]` | `[draft]` / draft or `None` |
 | `create_draft` / `update_draft` | `POST /api/drafts`, `PUT /api/drafts/{id}` | `{id, draft}` / `{draft}` |
-| `delete_draft` / `send_draft` | `DELETE`, `POST /api/drafts/{id}/send` | `None` / `{messageId, ...}` |
+| `delete_draft` / `send_draft` | `DELETE`, `POST /api/drafts/{id}/send` | `None` / `{messageId, threadId, from, ...}` |
 | `list_draft_attachments` / `add_draft_attachment` / `delete_draft_attachment` | `/api/drafts/{id}/attachments[/{aid}]` | `[attachment]` / attachment / `None` |
 | `ping` | `GET /api/messages?limit=1` | `bool` |
 

@@ -48,14 +48,14 @@ flowchart LR
 
 | Tool | What it does | Wraps |
 |---|---|---|
-| `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`, and `attachments` (each `content` base64 + optional `filename`, `mime_type`). The worker caps attachment count and total size and rejects an oversize set with a clear error. With a per-identity token the worker stamps `From` to the bound identity; any caller `from` is discarded. | `POST /api/send` |
-| `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`, `mode` (`reply` default, or `replyAll` to include the original recipients, derived server-side from stored state), `quote_original`, and `attachments` (same shape and worker-enforced caps as `mailbox_send`; carried by `/api/reply` since #363). | `POST /api/reply` |
+| `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`, and `attachments` (each `content` base64 + optional `filename`, `mime_type`). The worker caps attachment count and total size and rejects an oversize set with a clear error. A bound identity overrides the caller's `from`. The result's `from` is the address actually used, the same address stored on the sent copy. | `POST /api/send` |
+| `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`, `mode` (`reply` default, or `replyAll` to include the original recipients, derived server-side from stored state), `quote_original`, and `attachments` (same shape and worker-enforced caps as `mailbox_send`; carried by `/api/reply` since #363). A bound identity overrides the caller's `from`. The result's `from` is the address actually used. | `POST /api/reply` |
 | `mailbox_drafts_list` | List the caller's own saved drafts. Each carries the `updatedAt` that an update must echo back. | `GET /api/drafts` |
 | `mailbox_draft_get` | Fetch one own draft by `draft_id`, including its current `updatedAt`. A draft that does not exist and one owned by another identity are deliberately the SAME answer (`found: false`). | `GET /api/drafts/{id}` |
 | `mailbox_draft_create` | Open a new draft. Sends nothing. Optional `to` / `cc` / `bcc` / `subject` / `body_text` / `body_html` / `in_reply_to` / `thread_id`, plus `compose_mode` (`new` default, or `reply` / `replyAll` / `forward` with `source_message_id`) so the eventual send threads against an existing message. | `POST /api/drafts` |
 | `mailbox_draft_update` | Update an own draft. **Read-modify-write:** pass `updated_at` exactly as the last read returned it; a stale or missing value is refused with `E_CONFLICT` rather than overwriting a concurrent edit. Any field you OMIT is CLEARED, so send the whole draft as you want it to end up. | `PUT /api/drafts/{id}` |
 | `mailbox_draft_delete` | Discard an own draft. Reports `deleted: false` when there was nothing to delete, which is not an error. | `DELETE /api/drafts/{id}` |
-| `mailbox_draft_send` | Send an own draft. **MUTATING.** The worker dispatches, stores the sent copy, and only THEN discards the draft, so a failure leaves it intact and retryable rather than half-sent. A reply/forward draft threads against its source automatically. | `POST /api/drafts/{id}/send` |
+| `mailbox_draft_send` | Send an own draft. **MUTATING.** The worker dispatches, stores the sent copy, and only THEN discards the draft, so a failure leaves it intact and retryable rather than half-sent. A reply/forward draft threads against its source automatically. The result's `from` is the address actually used, which is the caller's bound identity. | `POST /api/drafts/{id}/send` |
 
 ### Organize (scope `organize`, opt-in)
 
@@ -86,7 +86,8 @@ a missing grant from a broken route.
 Send tools are **MUTATING**: they deliver mail. They register only when a send token
 is present (see below). The server owns From-enforcement, DKIM signing, threading, and
 storing the sent copy; the tools forward a composed message and return the core
-`messageId` + `threadId`.
+`messageId`, `threadId`, and `from` (the address actually used). A bound identity
+overrides the caller's from.
 
 Each tool returns pretty-printed JSON. Errors come back as an MCP `isError` result
 with a clear message (never a thrown exception) -- including the worker's own reason
@@ -214,8 +215,10 @@ How it works (the MCP client implements none of it; the worker is authoritative)
 - The worker holds one config var `POSTERN_SEND_IDENTITIES` mapping the **sha256 hex
   of a raw token** to `{ from, displayName?, scopes? }` (hashes, never raw tokens; it
   holds no credential, so it is a readable var, not a secret -- #335).
-- **Send:** on `POST /api/send` / `/api/reply`, a registry token with the `send` cap
-  has outbound `From` overridden to the bound identity; any caller `from` is discarded.
+- **Send:** on `POST /api/send` / `/api/reply` (and draft send), a registry token with
+  the `send` cap has outbound `From` overridden to the bound identity; any caller
+  `from` is discarded. The tool result's `from` is that address, so the caller can
+  see which identity the mail went out as (#804).
 - **Read (#544):** on list/search/get, a registry token with the `read` cap is forced
   to that identity's mailbox (+ role queues). Estate static tokens stay estate-wide.
 - An unknown token is `401`; a token without the needed cap is `403`. A registry

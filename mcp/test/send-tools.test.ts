@@ -67,7 +67,7 @@ describe("mailbox_send handler", () => {
       from: undefined,
       replyTo: "me@x.com",
     });
-    expect(out).toEqual({ sent: true, messageId: "m1", threadId: "t1", providerMessageId: "p1" });
+    expect(out).toEqual({ sent: true, messageId: "m1", threadId: "t1", from: null, providerMessageId: "p1" });
   });
 
   it("rejects when neither text nor html is given (no empty send)", async () => {
