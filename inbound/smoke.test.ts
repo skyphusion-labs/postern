@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 // Imports follow the code: the transport-side helpers live in headers.ts (kept
 // out of index.ts so this suite need not import the worker entrypoint); the
 // storage-side pure helpers live in ingest.ts.
-import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer, parseAuthResults, firstHeaderInstance, authResultsText } from "./src/headers";
+import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer, parseAuthResults, firstHeaderInstance, authResultsText, bareDomain } from "./src/headers";
 import { isTrusted, domainsAlign, bareAddress, cleanBody, htmlToText, chunkText, sha256hex } from "./src/ingest";
 
 // These cover the pure ingestion helpers: auth-verdict parsing, the allowlist
@@ -178,12 +178,34 @@ describe("parseAuthResults / firstHeaderInstance", () => {
       "mx; dkim=pass header.d=ours.example header.s=; dmarc=pass header.from=ours.example",                            // empty value
       "mx; dkim=pass header.d = ours.example; dmarc=pass header.from=ours.example",                                    // spaced =
       "mx; dkim=great header.d=ours.example; dmarc=pass header.from=ours.example",                                     // unknown result
-      "mx; dkim=pass header.d=ours.example; bimi=pass header.d=ours.example; dmarc=pass header.from=ours.example",      // unknown method
+      "mx; dkim=pass header.d=ours.example; bimi=pass junk; dmarc=pass header.from=ours.example",                      // malformed unknown method
+      "mx; dkim=pass header.d=ours.example; bimi=pass header.d=a header.d=b; dmarc=pass header.from=ours.example",     // duplicate in unknown method
+      "mx; dkim=pass header.d=x@ours.example; dmarc=pass header.from=ours.example",                                    // local part in header.d
+      'mx; dkim=pass header.d=""@ours.example; dmarc=pass header.from=ours.example',                                   // blanked quote in header.d
+      "mx; dkim=none; dmarc=pass header.from=-ours.example",                                                           // leading hyphen label
+      "mx; dkim=none; dmarc=pass header.from=ours..example",                                                           // empty label
+      "mx; dkim=none; dmarc=pass header.from=localhost",                                                               // single label
       "mx; dkim=pass header.d=ours.example; dmarc=pass header.from=ours.example header.from=ours.example",             // duplicate in dmarc
       "mx; dkim=pass header.d=ours.example; dmarc=pass header.d=ours.example",                                         // key of another method
     ]) {
       expect(parseAuthResults(bad)).toEqual(NONE);
     }
+  });
+  it("skips a well-formed unknown-method entry and allows reason on dkim / dmarc", () => {
+    expect(parseAuthResults('mx; dkim=pass header.d=ours.example reason="good sig"; dmarc=pass reason=ok header.from=Ours.Example.; bimi=pass header.d=ours.example header.selector=s'))
+      .toEqual({ spf: "none", dkim: "pass", dkimDomains: ["ours.example"], dmarc: "pass", dmarcFrom: "ours.example" });
+    // An unknown entry ends the leading dkim run (conservative).
+    expect(parseAuthResults("mx; iprev=pass; dkim=pass header.d=ours.example").dkim).toBe("none");
+  });
+  it("bareDomain: LDH labels, punycode, one trailing dot, 253 max", () => {
+    expect(bareDomain("xn--bcher-kva.example")).toBe("xn--bcher-kva.example");
+    expect(bareDomain("A-1.Example.")).toBe("a-1.example");
+    for (const bad of ["", ".", "a", "a..b", "-a.b", "a-.b", "a.b.", "x@a.b", '""@a.b', "a_b.c", "a.b..", ("a".repeat(63) + ".").repeat(4) + "b"]) {
+      if (bad === "a.b.") continue; // one trailing dot is legal
+      expect(bareDomain(bad)).toBeNull();
+    }
+    expect(bareDomain("a".repeat(64) + ".b")).toBeNull();
+    expect(bareDomain(("a".repeat(62) + ".").repeat(4) + "b")).toBe(("a".repeat(62) + ".").repeat(4) + "b"); // 253
   });
   it("returns none for an empty instance", () => {
     expect(parseAuthResults("")).toEqual({ spf: "none", dkim: "none", dmarc: "none" });

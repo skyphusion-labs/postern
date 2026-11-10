@@ -131,9 +131,13 @@ wrote into the message sits below it and is ignored). Inside CF's instance it re
 NOTHING at or after the first `spf=`. In the text before that, a failing signature's
 selector or domain is still sender-chosen, so ANY unterminated or unbalanced quote or
 comment there voids the whole header (no verdict), and so does any `dkim=` or `dmarc=`
-entry outside a strict grammar (`method=result` then only known `key=value` tokens, each
-key at most once). The stored `spf` value is the `Received-SPF` verdict, kept for display
-only.
+entry outside a strict grammar: `method=result` then only known `key=value` tokens, each
+key at most once, with `header.d` and `header.from` BARE domains (LDH labels, no `@`, no
+quotes). An entry of a method trust does not read (`bimi=`, `iprev=`, ...) is skipped
+when it is well formed and voids the header when it is not; `reason=` is allowed on
+`dkim=`/`dmarc=` and never read. So one broken extra signature (a mailing list) does not
+cost an otherwise good DMARC pass. The stored `spf` value is the `Received-SPF` verdict,
+kept for display only.
 
 **Residual:** the design relies on CF ALWAYS prepending its own
 `Authentication-Results`. If CF ever delivered a message without one, a header the

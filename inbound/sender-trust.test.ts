@@ -346,3 +346,61 @@ describe("round 4: real shapes stay trusted under the strict grammar", () => {
     });
   }
 });
+
+// --- Review round 5: header.d / header.from must be BARE domains ---
+
+describe("round 5: a non-bare header.d or header.from voids the header", () => {
+  const cases: Record<string, string> = {
+    "quote opening at the start of header.d merges sig2": cfAr({
+      dkim: 'dkim=pass header.d="a.attacker.example header.s=s1 header.b=AAAA;\r\n\tdkim=fail header.d=b"@skyphusion.org header.s=s header.b=x',
+    }),
+    "header.d=x@skyphusion.org": cfAr({ dkim: "dkim=pass header.d=x@skyphusion.org header.s=s1 header.b=AAAA" }),
+    'header.d="x"@skyphusion.org': cfAr({ dkim: 'dkim=pass header.d="x"@skyphusion.org header.s=s1 header.b=AAAA' }),
+  };
+  for (const [name, ar] of Object.entries(cases)) {
+    it(`stays untrusted: ${name}`, async () => {
+      const auth = trustOfAr(ar);
+      expect(auth.dkimDomains ?? []).not.toContain("skyphusion.org");
+      expect(await trustedOf(msg("CEO <ceo@skyphusion.org>", auth))).toBe(0);
+    });
+  }
+  it("a non-bare header.from voids too (no DMARC verdict survives)", async () => {
+    const auth = trustOfAr("mx.cloudflare.net; dkim=none; dmarc=pass header.from=ceo@skyphusion.org; spf=none smtp.helo=x");
+    expect(auth).toMatchObject({ dkim: "none", dmarc: "none" });
+    expect(await trustedOf(msg("CEO <ceo@skyphusion.org>", auth))).toBe(0);
+  });
+});
+
+// --- Review round 5: availability, safe once header.d / header.from are bare ---
+
+function npmWith(insert: { afterDkim?: string; afterDmarc?: string }): string {
+  const lines = LIVE_NPM_AR_FOLDED.split("\r\n\t");
+  const dmarcAt = lines.findIndex((l) => l.startsWith("dmarc="));
+  if (insert.afterDmarc) lines.splice(dmarcAt + 1, 0, insert.afterDmarc);
+  if (insert.afterDkim) lines.splice(dmarcAt, 0, insert.afterDkim);
+  return lines.join("\r\n\t");
+}
+
+describe("round 5: well-formed entries CF may add do not void a good header", () => {
+  async function npmTrusted(auth: ParsedInbound["auth"]) {
+    const { env, ctx, settle, rows } = makeFakeEnv({ TRUSTED_SENDER_DOMAINS: "npmjs.com" });
+    await ingest(env, { messageId: "n5-" + Math.random().toString(36).slice(2) + "@x", from: "npm <support@npmjs.com>", to: "conrad@skyphusion.org", text: "b", auth }, ctx);
+    await settle();
+    return rows[0].trusted;
+  }
+  it("an unknown METHOD entry (bimi=) is skipped, npm stays trusted", async () => {
+    const auth = trustOfAr(npmWith({ afterDmarc: "bimi=pass header.d=npmjs.com header.selector=default;" }), "npm <support@npmjs.com>");
+    expect(auth).toMatchObject({ dkim: "pass", dmarc: "pass", dmarcFrom: "npmjs.com" });
+    expect(await npmTrusted(auth)).toBe(1);
+  });
+  it("a second signature carrying reason=\"...\" does not void the DMARC pass", async () => {
+    const auth = trustOfAr(npmWith({ afterDkim: 'dkim=fail reason="signature verification failed" header.d=lists.example header.s=l1 header.b=ZZZZ;' }), "npm <support@npmjs.com>");
+    expect(auth).toMatchObject({ dmarc: "pass", dmarcFrom: "npmjs.com" });
+    expect(await npmTrusted({ spf: "none", dkim: "none", dmarc: auth.dmarc, dmarcFrom: auth.dmarcFrom })).toBe(1);
+    expect(await npmTrusted(auth)).toBe(1);
+  });
+  it("a MALFORMED unknown-method entry still voids", async () => {
+    const auth = trustOfAr(npmWith({ afterDmarc: "bimi=pass junk;" }), "npm <support@npmjs.com>");
+    expect(auth).toMatchObject({ dkim: "none", dmarc: "none" });
+  });
+});

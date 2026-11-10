@@ -136,12 +136,23 @@ export function authResultsText(region: string): string | null {
   return out;
 }
 
-/** Domain part of `local@domain` or a bare domain, lower-cased; "" when unusable. */
-function domainOf(v: string): string {
-  const d = v.trim().toLowerCase();
-  const at = d.lastIndexOf("@");
-  const dom = at >= 0 ? d.slice(at + 1) : d;
-  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(dom) ? dom : "";
+/**
+ * A BARE domain (header.d / header.from), lower-cased with one optional trailing dot
+ * removed, or null. LDH labels (letters, digits, hyphen; no leading or trailing hyphen;
+ * 1-63 chars), at least two, dot-separated, 253 chars or less. Punycode (xn--) is LDH.
+ * No "@", no quotes, no local part: CF writes these as bare domains, so anything else
+ * is sender text that a balanced quote merged in (round 5) and must void the header.
+ */
+export function bareDomain(v: string): string | null {
+  let d = v.toLowerCase();
+  if (d.endsWith(".")) d = d.slice(0, -1);
+  if (d.length === 0 || d.length > 253) return null;
+  const labels = d.split(".");
+  if (labels.length < 2) return null;
+  for (const l of labels) {
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(l)) return null;
+  }
+  return d;
 }
 
 const NO_VERDICT: AuthVerdicts = { spf: "none", dkim: "none", dmarc: "none" };
@@ -152,35 +163,50 @@ const NO_VERDICT: AuthVerdicts = { spf: "none", dkim: "none", dmarc: "none" };
 const ENTRY_GRAMMAR: Record<string, { results: Set<string>; keys: Set<string> }> = {
   dkim: {
     results: new Set(["pass", "fail", "neutral", "none", "policy", "temperror", "permerror"]),
-    keys: new Set(["header.d", "header.i", "header.s", "header.b", "header.a"]),
+    keys: new Set(["header.d", "header.i", "header.s", "header.b", "header.a", "reason"]),
   },
   dmarc: {
     results: new Set(["pass", "fail", "none", "bestguesspass", "temperror", "permerror"]),
-    keys: new Set(["header.from", "policy.dmarc"]),
+    keys: new Set(["header.from", "policy.dmarc", "reason"]),
   },
 };
 
-/** One `method=result key=value ...` entry, or null when it breaks the strict grammar:
- *  unknown method or result, a token that is not `key=value`, a key outside the
- *  method's set, an empty value, or a key that appears TWICE. A duplicate is the
- *  signature of a balanced quote or comment that spans two entries and merges the
- *  second's text into the first (round 4), so it must void, never override. */
-function parseEntry(part: string): { method: string; result: string; props: Record<string, string> } | null {
+/** Keys whose value must be a bare domain; a failing value voids the header. */
+const DOMAIN_KEYS = new Set(["header.d", "header.from"]);
+
+/** One `method=result key=value ...` entry, "skip" for a well-formed entry of a method
+ *  trust does not read, or null when it breaks the strict grammar: a token that is not
+ *  `key=value`, an empty value, a key that appears TWICE, and for dkim / dmarc also an
+ *  unknown result, a key outside the method's set, or a header.d / header.from that is
+ *  not a bare domain. A duplicate or a non-bare domain is the signature of a balanced
+ *  quote or comment that spans entries and merges text (rounds 4 and 5): void, never
+ *  override. `reason` (RFC 8601) is allowed and never read. An unknown method is safe to
+ *  skip because sender text cannot hold ";", so only CF can create an entry. */
+function parseEntry(part: string): { method: string; result: string; props: Record<string, string> } | "skip" | null {
   const tokens = part.split(/\s+/).filter(Boolean);
   const head = (tokens.shift() ?? "").match(/^([a-z0-9_-]+)=([a-z]+)$/i);
   if (!head) return null;
   const method = head[1].toLowerCase();
   const result = head[2].toLowerCase();
   const grammar = ENTRY_GRAMMAR[method];
-  if (!grammar || !grammar.results.has(result)) return null;
+  if (grammar && !grammar.results.has(result)) return null;
   const props: Record<string, string> = {};
   for (const t of tokens) {
     const eq = t.indexOf("=");
     if (eq <= 0 || eq === t.length - 1) return null;
     const key = t.slice(0, eq).toLowerCase();
-    if (!grammar.keys.has(key) || key in props) return null;
-    props[key] = t.slice(eq + 1);
+    if (!/^[a-z0-9_-]+(\.[a-z0-9_-]+)?$/.test(key) || key in props) return null;
+    if (grammar && !grammar.keys.has(key)) return null;
+    const value = t.slice(eq + 1);
+    if (grammar && DOMAIN_KEYS.has(key)) {
+      const d = bareDomain(value);
+      if (d === null) return null;
+      props[key] = d;
+    } else {
+      props[key] = value;
+    }
   }
+  if (!grammar) return "skip";
   return { method, result, props };
 }
 
@@ -226,23 +252,21 @@ export function parseAuthResults(instance: string): AuthVerdicts {
     if (!part) continue;
     const entry = parseEntry(part);
     if (!entry) return { ...NO_VERDICT };
+    if (entry === "skip") {
+      dkimRun = false; // conservative: an unknown entry ends the leading dkim run
+      continue;
+    }
     const { method, result, props } = entry;
     if (method !== "dkim") dkimRun = false;
     if (method === "dkim") {
       if (!dkimRun) continue;
       if (!dkimSeen) out.dkim = result;
       dkimSeen = true;
-      if (result === "pass" && props["header.d"]) {
-        const d = domainOf(props["header.d"]);
-        if (d) dkimDomains.push(d);
-      }
+      if (result === "pass" && props["header.d"]) dkimDomains.push(props["header.d"]);
     } else if (method === "dmarc" && !dmarcSeen) {
       dmarcSeen = true;
       out.dmarc = result;
-      if (props["header.from"]) {
-        const d = domainOf(props["header.from"]);
-        if (d) out.dmarcFrom = d;
-      }
+      if (props["header.from"]) out.dmarcFrom = props["header.from"];
     }
   }
   if (dkimDomains.length) out.dkimDomains = dkimDomains;
