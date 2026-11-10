@@ -5,7 +5,7 @@ import { handleApi } from "./api";
 import { send, reply, type SendRequest, type ReplyRequest, type SendResult } from "./mailbox";
 import * as store from "./store";
 import type { StoredMessage, StoredMessageSummary, ListQuery, SearchQuery, Page, SearchHit } from "./store";
-import { toArrayBuffer, extractSpfResult, extractDkimResult, extractDmarcResult, chooseFrom } from "./headers";
+import { toArrayBuffer, authFromHeaders, chooseFrom } from "./headers";
 
 // The in-Worker inbound transport driver (issue #21): the one surviving email()
 // handler. It forwards, parses the MIME via postal-mime, extracts the CF auth
@@ -43,7 +43,11 @@ export default {
       return parsed.headers.find((h) => h.key.toLowerCase() === name)?.value ?? "";
     };
 
-    const authResults = getHeader("authentication-results");
+    // Auth verdicts: ONLY from message.headers (what CF hands the Worker), never from
+    // the parsed MIME, and only the FIRST instance of each header, the one CF prepended.
+    // A sender can write its own Authentication-Results / Received-SPF into the message;
+    // those sit below CF's and are never read (see authFromHeaders).
+    const auth = authFromHeaders((name) => message.headers.get(name));
 
     // Coerce postal-mime attachments to the contract shape, dropping any whose
     // content can't be read into an ArrayBuffer.
@@ -81,11 +85,7 @@ export default {
       text: parsed.text ?? undefined,
       html: parsed.html ?? undefined,
       attachments,
-      auth: {
-        spf: extractSpfResult(getHeader("received-spf")),
-        dkim: extractDkimResult(authResults),
-        dmarc: extractDmarcResult(authResults),
-      },
+      auth,
       // Envelope fidelity v2 (#189): raw decoded headers + the wire byte size CF
       // reports. Absent headers stay undefined so the store keeps to_addr/NULLs.
       toHeader: getHeader("to") || undefined,

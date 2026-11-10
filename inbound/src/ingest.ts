@@ -26,8 +26,13 @@ export interface ParsedInbound {
   text?: string;
   html?: string;
   attachments?: { filename?: string; mimeType?: string; content: ArrayBuffer }[];
-  /** SPF/DKIM/DMARC verdicts; an SMTP transport may omit them. */
-  auth?: { spf?: string; dkim?: string; dmarc?: string };
+  /**
+   * SPF/DKIM/DMARC verdicts plus the authenticated domains trust aligns against the
+   * header From (see isTrusted). An SMTP transport may omit them; then nothing is
+   * trusted. `dkimDomains` is the `d=` of each passing signature, `dmarcFrom` the
+   * header.from DMARC evaluated. `spf` is stored for display only, never for trust.
+   */
+  auth?: { spf?: string; dkim?: string; dmarc?: string; dkimDomains?: string[]; dmarcFrom?: string };
   // --- M8 envelope fidelity v2 (#189). All optional and wire-compatible: an older
   //     transport omits them and the store falls back to `to` / NULLs. `to` KEEPS
   //     its v1 meaning (THE delivered-to envelope recipient), so every existing
@@ -72,9 +77,14 @@ export async function ingest(
   const spf = (parsed.auth?.spf ?? "none").toLowerCase();
   const dkim = (parsed.auth?.dkim ?? "none").toLowerCase();
   const dmarc = (parsed.auth?.dmarc ?? "none").toLowerCase();
-  // CF Email Routing strips transport-level auth headers; fall back to
-  // allowlist-only trust when neither verdict is available.
-  const trusted = isTrusted(fromAddr, spf, dkim, env.TRUSTED_SENDER_DOMAINS);
+  // Trust needs an authenticated identity ALIGNED with the header From (isTrusted).
+  const trusted = isTrusted(fromAddr, {
+    spf,
+    dkim,
+    dmarc,
+    dkimDomains: parsed.auth?.dkimDomains,
+    dmarcFrom: parsed.auth?.dmarcFrom,
+  }, env.TRUSTED_SENDER_DOMAINS);
 
   // Clean body: prefer plain text, strip quoted lines and sig block.
   const rawBody = parsed.text ?? htmlToText(parsed.html ?? "");
@@ -357,34 +367,100 @@ export function bareAddress(from: string): string {
   return (angle ? angle[1] : from).trim().toLowerCase();
 }
 
+/** Longest From value the trust check will parse; longer is never trusted. */
+export const MAX_FROM_LENGTH = 2048;
+
 /**
- * Allowlist trust decision. `allowlistEnv` is `env.TRUSTED_SENDER_DOMAINS`, read on the
- * INGEST path, so an ABSENT value must not throw (#473): a clean-install operator who
- * prunes a var whose shipped value is empty anyway would otherwise fail EVERY inbound
- * message, and as a TRANSIENT INFRA FAULT rather than a config message (the in-Worker
- * email() handler lets the throw escape and CF retries; /ingest answers 500, which the
- * relay maps to SMTP 451, so the sending MTA retries forever).
- *
- * Absent therefore reads exactly like the shipped "": an empty allowlist, so nothing is
- * trusted, which is the fail-closed direction. Same guard as store.vectorizeAllowlist()
- * (VECTORIZE_FOR) and the FORWARD_FOR read in index.ts; Env still declares the var
- * REQUIRED, as it does for every sibling comma-list var, and every read guards.
+ * `from` with every quoted-string removed (backslash escapes honoured), or null when a
+ * quote is unterminated. ONE linear pass: the From is attacker input, and a regex that
+ * restarts its scan at every quote is polynomial on `"` followed by many `\"`.
  */
-export function isTrusted(from: string, spf: string, dkim: string, allowlistEnv: string | undefined): boolean {
+export function stripQuotedStrings(from: string): string | null {
+  const out: string[] = [];
+  const n = from.length;
+  let start = 0;
+  let i = 0;
+  while (i < n) {
+    if (from[i] !== '"') { i++; continue; }
+    out.push(from.slice(start, i));
+    let j = i + 1;
+    while (j < n && from[j] !== '"') j += from[j] === "\\" ? 2 : 1;
+    if (j >= n) return null; // unterminated quoted-string
+    i = j + 1;
+    start = i;
+  }
+  out.push(from.slice(start));
+  return out.join("");
+}
+
+/**
+ * The one address in a From value, or null when it does not hold exactly one usable
+ * addr-spec. A value over MAX_FROM_LENGTH, or with an unterminated quote, is null.
+ * Quoted display names are removed first (they may contain "@" or ","), then a value
+ * with more than one "@" or "<" is refused: `a@evil.example, CEO <ceo@ours>` must not
+ * be read as ours.
+ */
+export function singleFromAddress(from: string): string | null {
+  if (from.length > MAX_FROM_LENGTH) return null;
+  const unquoted = stripQuotedStrings(from);
+  if (unquoted === null) return null;
+  if ((unquoted.match(/@/g) ?? []).length !== 1) return null;
+  if ((unquoted.match(/</g) ?? []).length > 1) return null;
+  const addr = bareAddress(unquoted);
+  return /^[^\s@<>,;:"()[\]]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(addr) ? addr : null;
+}
+
+/** An authenticated domain aligns with the From domain when they are equal or one is a
+ *  subdomain of the other. Each relation needs DNS control under the From domain or
+ *  under a parent that holds it, so no public suffix list is needed. Siblings
+ *  (a.example.com vs b.example.com) do not align here; DMARC pass covers them. */
+export function domainsAlign(authDomain: string | undefined, fromDomain: string): boolean {
+  const a = (authDomain ?? "").trim().toLowerCase();
+  if (!a) return false;
+  return a === fromDomain || fromDomain.endsWith("." + a) || a.endsWith("." + fromDomain);
+}
+
+export interface TrustAuth {
+  spf: string;
+  dkim: string;
+  dmarc: string;
+  dkimDomains?: string[];
+  dmarcFrom?: string;
+}
+
+/**
+ * Sender trust decision. `trusted` says the header From holds exactly one address, it
+ * is on TRUSTED_SENDER_DOMAINS, AND one of these passed for that From domain:
+ *
+ *  - DMARC pass whose header.from IS the From domain, or
+ *  - the FIRST DKIM verdict is pass and a passing d= aligns with the From domain.
+ *
+ * SPF is NOT a trust leg. The SPF entries in CF's Authentication-Results (and
+ * Received-SPF) echo the HELO and MAIL FROM the sender chose, unescaped, so they cannot
+ * be parsed unambiguously (see parseAuthResults). DMARC pass already covers an aligned
+ * SPF pass for any domain that publishes DMARC. Cost, by design: an allowlisted domain
+ * with no DMARC record and no aligned DKIM signature is never trusted.
+ *
+ * Also never trusted: a pass for an unrelated domain, bare verdict strings with no
+ * domain, and spf=none && dkim=none.
+ *
+ * `allowlistEnv` is `env.TRUSTED_SENDER_DOMAINS`, read on the INGEST path, so an
+ * ABSENT value must not throw (#473): absent reads exactly like the shipped "", an
+ * empty allowlist, so nothing is trusted (fail closed).
+ */
+export function isTrusted(from: string, auth: TrustAuth, allowlistEnv: string | undefined): boolean {
   const domains = (allowlistEnv ?? "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
-  const fromLower = bareAddress(from);
-  const onAllowlist = domains.some((d) => fromLower === d || fromLower.endsWith("@" + d));
+  const addr = singleFromAddress(from);
+  if (!addr) return false;
+  const onAllowlist = domains.some((d) => addr === d || addr.endsWith("@" + d));
   if (!onAllowlist) return false;
-  // Auth verdicts available: require at least SPF pass/neutral OR DKIM pass.
-  // If CF stripped both headers (spf=none AND dkim=none), allowlist alone is
-  // sufficient -- CF's own MX infrastructure already handles inbound filtering.
-  const spfOk = spf === "pass" || spf === "neutral";
-  const dkimOk = dkim === "pass";
-  const noAuthData = spf === "none" && dkim === "none";
-  return spfOk || dkimOk || noAuthData;
+  const fromDomain = addr.slice(addr.lastIndexOf("@") + 1);
+  const dmarcOk = auth.dmarc === "pass" && (auth.dmarcFrom ?? "").trim().toLowerCase() === fromDomain;
+  const dkimOk = auth.dkim === "pass" && (auth.dkimDomains ?? []).some((d) => domainsAlign(d, fromDomain));
+  return dmarcOk || dkimOk;
 }
 
 // --- Body cleaning ---

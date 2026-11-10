@@ -63,7 +63,7 @@ secrets set with `wrangler secret put`, never vars; see
 
 | Var | Effect | Empty (`""`) means |
 |-----|--------|--------------------|
-| `TRUSTED_SENDER_DOMAINS` | domains/addresses eligible for `trusted=1` (must also pass SPF or DKIM, or have both stripped by CF) | nothing is ever trusted |
+| `TRUSTED_SENDER_DOMAINS` | domains/addresses eligible for `trusted=1` (must also pass DMARC, or DKIM aligned with the header From; SPF alone never trusts) | nothing is ever trusted |
 | `FORWARD_TO` | destination for transparent forwarding | forwarding disabled (store-only) |
 | `FORWARD_FOR` | recipients whose mail is forwarded to `FORWARD_TO` | forward everything (not recommended once crew share the domain) |
 | `VECTORIZE_FOR` | recipients whose mail is embedded into Vectorize (opt-in) | index everything |
@@ -104,18 +104,48 @@ operate an established instance, deploy it by pushing a tag, not from your lapto
 ## Trust model
 
 `trusted` (stored per message) is a coarse "is this from us / a known service"
-flag, not a spam verdict. `isTrusted()` requires the sender to be on
-`TRUSTED_SENDER_DOMAINS` AND one of:
+flag, not a spam verdict. It is set only when the RFC 5322 header From holds exactly
+one address, that address is on `TRUSTED_SENDER_DOMAINS`, AND one of these passed for
+the From domain:
 
-- SPF `pass`/`neutral`, OR
-- DKIM `pass`, OR
-- both SPF and DKIM reporting `none` (CF Email Routing strips transport auth
-  headers, so absence of a verdict is expected; CF's own MX already filters
-  inbound, so allowlist alone suffices in that case).
+- DMARC `pass` whose `header.from` is the From domain, OR
+- DKIM: the FIRST DKIM verdict is `pass` and a passing `d=` aligns with the From domain
+  ("aligns" = equal, or one domain is a subdomain of the other).
 
-An allowlisted sender whose auth actively **fails** (a spoof attempt) is **not**
-trusted. The domain match is anchored (`== domain` or `endsWith("@" + domain)`),
-so `notskyphusion.org` does not match `skyphusion.org`.
+**SPF is not a trust leg.** An allowlisted domain that publishes NO DMARC record and
+whose mail carries no aligned DKIM signature is **not trusted**, even when SPF passes.
+Why: in CF's `Authentication-Results` (and in `Received-SPF`) the SPF entries echo the
+HELO name and the MAIL FROM address, both chosen by the sender, unescaped. Text like that
+can imitate the header's own structure (a fake `dkim=`, `dmarc=` or `spf=` entry), so it
+cannot be parsed safely. DMARC pass already covers an aligned SPF pass for any domain
+that publishes DMARC. To make such a domain trusted, publish DMARC or sign with DKIM.
+
+Also never trusted: a pass for an unrelated domain (a DKIM `d=` can be any domain the
+sender signs with), bare verdict strings with no domain, and a message with no auth data
+(`spf=none`, `dkim=none`). So mail that reaches the store through a transport that
+carries no verdicts (postern-relay SMTP intake) is never trusted.
+
+The in-Worker driver reads the verdicts only from `message.headers`, and only the
+FIRST instance of `Authentication-Results` (CF prepends its own; any copy the sender
+wrote into the message sits below it and is ignored). Inside CF's instance it reads
+NOTHING at or after the first `spf=`. In the text before that, a failing signature's
+selector or domain is still sender-chosen, so ANY unterminated or unbalanced quote or
+comment there voids the whole header (no verdict), and so does any `dkim=` or `dmarc=`
+entry outside a strict grammar: `method=result` then only known `key=value` tokens, each
+key at most once, with `header.d` and `header.from` BARE domains (LDH labels, no `@`, no
+quotes). An entry of a method trust does not read (`bimi=`, `iprev=`, ...) is skipped
+when it is well formed and voids the header when it is not; `reason=` is allowed on
+`dkim=`/`dmarc=` and never read. So one broken extra signature (a mailing list) does not
+cost an otherwise good DMARC pass. The stored `spf` value is the `Received-SPF` verdict,
+kept for display only.
+
+**Residual:** the design relies on CF ALWAYS prepending its own
+`Authentication-Results`. If CF ever delivered a message without one, a header the
+sender wrote would become the first instance and be read as CF's. Only validating CF's
+`ARC-Seal` would remove that reliance; it is not built.
+
+The allowlist match is anchored (`== entry` or `endsWith("@" + entry)`), so
+`notskyphusion.org` does not match `skyphusion.org`.
 
 ## Vectorize cost bound
 

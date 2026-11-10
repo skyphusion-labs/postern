@@ -1929,8 +1929,8 @@ async function handleIngest(request: Request, env: Env, ctx: ExecutionContext): 
 // Validate + normalize an /ingest JSON body into a ParsedInbound. from + to are
 // required (E_FIELD_MISSING); attachment `content` is standard base64 over JSON
 // and is decoded to an ArrayBuffer (malformed base64 = E_VALIDATION_ERROR). auth
-// is optional -- an absent/partial verdict set defaults to none, i.e. ingest()'s
-// allowlist-only trust path (an SMTP transport gets no implicit pass).
+// is optional -- an absent/partial verdict set defaults to none, and ingest() then
+// stores the message untrusted (trust needs an aligned verdict; no implicit pass).
 function parseIngestBody(raw: unknown): ParsedInbound {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be a JSON object");
@@ -1965,6 +1965,12 @@ function parseIngestBody(raw: unknown): ParsedInbound {
       spf: typeof a.spf === "string" ? a.spf : undefined,
       dkim: typeof a.dkim === "string" ? a.dkim : undefined,
       dmarc: typeof a.dmarc === "string" ? a.dmarc : undefined,
+      // Authenticated domains for alignment with the header From (isTrusted). Without
+      // them a verdict string alone never makes a message trusted.
+      dmarcFrom: typeof a.dmarcFrom === "string" ? a.dmarcFrom : undefined,
+      dkimDomains: Array.isArray(a.dkimDomains)
+        ? a.dkimDomains.filter((d): d is string => typeof d === "string").slice(0, 16)
+        : undefined,
     };
   }
 

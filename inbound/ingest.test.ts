@@ -80,7 +80,7 @@ describe("ingest", () => {
 
   it("marks an allowlisted sender with a passing verdict as trusted", async () => {
     const { env, ctx, settle, rows } = makeFakeEnv();
-    await ingest(env, baseMsg({ auth: { spf: "pass", dkim: "pass", dmarc: "pass" } }), ctx);
+    await ingest(env, baseMsg({ from: "alice@example.com", auth: { spf: "pass", dkim: "pass", dmarc: "pass", dmarcFrom: "example.com" } }), ctx);
     await settle();
     expect(rows[0].trusted).toBe(1);
   });

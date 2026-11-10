@@ -51,7 +51,8 @@ The SMTP `DATA` handler parses the MIME with `enmime`, normalizes it into a
 - attachment bytes are **base64-encoded** into `attachments[].content` (the
   locked v1 decision: bytes over JSON);
 - the relay supplies **no** auth verdicts (`auth` is omitted), because plain SMTP
-  carries none; core applies its allowlist-only trust path for stripped intake.
+  carries none; core stores such mail untrusted (trust needs a verdict aligned
+  with the header From).
 
 Forwarding (`FORWARD_TO` / `FORWARD_FOR`) is **not** the relay's job: that lives
 in the in-Worker `email()` driver, which has the live `message.forward()`.

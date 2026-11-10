@@ -173,8 +173,11 @@ describe("POST /ingest with TRUSTED_SENDER_DOMAINS absent (#473)", () => {
   it("still trusts the SAME sender when the var IS set (positive control)", async () => {
     // Without this, a guard that broke the trust decision outright would pass the case
     // above: only the allowlist value differs between the two.
+    // The sender carries an aligned DMARC pass: since trust needs one, a body with no
+    // auth block is never trusted, so it could not serve as the control.
     const { env, ctx, settle } = makeFakeEnv({ POSTERN_TRANSPORT_TOKEN: TT, TRUSTED_SENDER_DOMAINS: "example.com" });
-    const res = await handleApi(ingestReq(message("allowlisted@example.com"), { token: TT }), env, ctx);
+    const body = { ...message("allowlisted@example.com"), auth: { spf: "none", dkim: "none", dmarc: "pass", dmarcFrom: "example.com" } };
+    const res = await handleApi(ingestReq(body, { token: TT }), env, ctx);
     expect(res.status).toBe(200);
     await settle();
 
