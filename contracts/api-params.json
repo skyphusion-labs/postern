@@ -196,6 +196,30 @@
       ],
       "note": "disable or a from change ends the user's sessions"
     },
+    "admin-identities-list": {
+      "query": [
+        "limit",
+        "cursor",
+        "includeRevoked"
+      ],
+      "note": "runtime agent identities (#801): one keyset page ordered by createdAt; never carries a token or its hash; active only unless includeRevoked=1. Audited (identity.list)"
+    },
+    "admin-identities-mint": {
+      "body": [
+        "from",
+        "scopes",
+        "displayName",
+        "label"
+      ],
+      "note": "scopes from read|send|organize; anything else (delete, imap, admin, both, a typo) is 400, never stripped. Returns the token ONCE (201); it is never retrievable again and only its sha256 is stored. Authenticates on the next request, no deploy. Audited (identity.mint)"
+    },
+    "admin-audit": {
+      "query": [
+        "limit",
+        "cursor"
+      ],
+      "note": "the audit log (#801), newest first: actor, action, target, outcome, detail. Refusals are recorded too"
+    },
     "admin-reindex": {
       "body": [
         "cursor",
