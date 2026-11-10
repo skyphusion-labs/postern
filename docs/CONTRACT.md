@@ -462,7 +462,12 @@ interface ParsedInbound {
   text?: string;
   html?: string;               // core derives body_text from text, else stripped html
   attachments?: { filename?: string; mimeType?: string; content: ArrayBuffer }[];
-  auth?: { spf?: string; dkim?: string; dmarc?: string }; // SMTP transport may omit
+  auth?: {                     // SMTP transport may omit
+    spf?: string; dkim?: string; dmarc?: string;
+    spfDomain?: string;         // domain SPF passed for (smtp.mailfrom)
+    dkimDomains?: string[];     // d= of each passing DKIM signature
+    dmarcFrom?: string;         // header.from DMARC was evaluated for
+  };
 }
 
 // core/ingest.ts
@@ -490,10 +495,13 @@ trust verdict, D1 insert, R2 attachments, opt-in Vectorize), but as a pure funct
   so the sending MTA retries rather than bouncing the message. A driver MUST NOT read the
   error `message` as machine-readable; the `error` code is the contract.
 
-When `ParsedInbound.auth` is **absent or partial**, the missing verdicts default to `none`, which
-is the allowlist-only trust path: a sender is trusted iff it is on `TRUSTED_SENDER_DOMAINS` (since
-`spf=none && dkim=none` is treated as "CF stripped the headers, lean on the MX allowlist"). An
-SMTP transport that omits `auth` therefore gets allowlist-only trust, never an implicit pass.
+`trusted` needs the header From on `TRUSTED_SENDER_DOMAINS` AND an authenticated identity
+aligned with the From domain: DMARC `pass` with `dmarcFrom` equal to the From domain, or SPF
+`pass` with an aligned `spfDomain`, or DKIM `pass` with an aligned entry in `dkimDomains`
+(aligned = equal, or one is a subdomain of the other). When `ParsedInbound.auth` is **absent
+or partial**, the missing verdicts default to `none` and nothing is trusted: an SMTP transport
+that omits `auth` stores its mail untrusted, never an implicit pass. The in-Worker driver
+reads only the first (CF-prepended) instance of `Authentication-Results` / `Received-SPF`.
 
 **Forwarding** (`FORWARD_TO` / `FORWARD_FOR`) stays, but only in the in-Worker driver: it
 needs the live `message.forward()` on the `ForwardableEmailMessage`, which an out-of-Worker

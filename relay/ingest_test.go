@@ -106,7 +106,7 @@ func TestBuildParsedInbound_BasicHeaders(t *testing.T) {
 	if strings.TrimSpace(p.Text) != "the body" {
 		t.Errorf("Text = %q", p.Text)
 	}
-	// The relay never invents auth verdicts (core does allowlist-only trust).
+	// The relay never invents auth verdicts (core stores such mail untrusted).
 	if p.Auth != nil {
 		t.Errorf("Auth = %#v, want nil (relay supplies no verdicts)", p.Auth)
 	}

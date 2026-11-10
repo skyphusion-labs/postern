@@ -49,7 +49,8 @@ interface Env {
   AI?: Ai;
   /**
    * Comma-separated list of trusted sender domains/addresses.
-   * Only senders on this list that also pass SPF or DKIM get trusted=1.
+   * Only senders on this list with an authenticated identity ALIGNED to the header
+   * From domain (DMARC pass, or aligned SPF or DKIM pass) get trusted=1 (isTrusted).
    * Example: "skyphusion.org,example.net,github.com,healthchecks.io"
    *
    * Declared REQUIRED like every sibling comma-list var (FORWARD_FOR, VECTORIZE_FOR,

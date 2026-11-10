@@ -60,8 +60,8 @@ describe("ingest stores the header From end-to-end", () => {
 
   it("computes trust on the header-From domain, not the envelope bounce domain", async () => {
     // TRUSTED_SENDER_DOMAINS in the fake env is "skyphusion.org,example.com". A message
-    // whose header From is an allowlisted domain is trusted even though the real message
-    // arrived via a different (bounce) envelope sender.
+    // whose header From is an allowlisted domain is trusted when DMARC passed for THAT
+    // domain, even though it arrived via a different (bounce) envelope sender.
     const { env, ctx, settle } = makeFakeEnv();
     await ingest(
       env,
@@ -70,7 +70,7 @@ describe("ingest stores the header From end-to-end", () => {
         from: '"Alerts" <alerts@skyphusion.org>',
         to: "conrad@skyphusion.org",
         text: "system alert",
-        auth: { spf: "pass", dkim: "none", dmarc: "pass" },
+        auth: { spf: "pass", spfDomain: "bounces.vendor.example", dkim: "none", dmarc: "pass", dmarcFrom: "skyphusion.org" },
       },
       ctx,
     );

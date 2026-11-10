@@ -46,3 +46,113 @@ export function extractDmarcResult(authResults: string): string {
   const m = authResults.match(/dmarc=(pass|fail|none|bestguesspass|temperror|permerror)/i);
   return m ? m[1].toLowerCase() : "none";
 }
+
+// --- Sender-trust inputs (aligned identities from the CF verdict) ---
+
+/** The verdicts plus the authenticated domains needed to check alignment with the
+ *  header From. Mirrors ParsedInbound.auth (ingest.ts). */
+export interface AuthVerdicts {
+  spf: string;
+  dkim: string;
+  dmarc: string;
+  /** Domain SPF evaluated (smtp.mailfrom), set only when SPF passed. */
+  spfDomain?: string;
+  /** `header.d` of every DKIM signature that passed. */
+  dkimDomains?: string[];
+  /** The `header.from` domain DMARC was evaluated for. */
+  dmarcFrom?: string;
+}
+
+/**
+ * The FIRST instance of a header that `Headers.get()` joined. Repeats are joined in
+ * header order with ", " (Fetch spec; same in workerd). CF prepends its own trace
+ * headers, so the first instance is the one CF wrote; any copy the SENDER put in the
+ * message sits below it and must never be read. Cutting at the first comma can only
+ * shorten CF's own instance (CF verdicts carry no comma outside comments), which drops
+ * evidence and so fails toward NOT trusted; it can never pull in sender text.
+ */
+export function firstHeaderInstance(joined: string | null | undefined): string {
+  const v = joined ?? "";
+  const i = v.indexOf(",");
+  return (i < 0 ? v : v.slice(0, i)).trim();
+}
+
+/** Remove RFC 5322 comments `( ... )`, nested to a bounded depth. Linear per pass. */
+function stripComments(s: string): string {
+  for (let i = 0; i < 8; i++) {
+    const next = s.replace(/\([^()]*\)/g, " ");
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
+/** Domain part of `local@domain` or a bare domain, lower-cased; "" when unusable. */
+function domainOf(v: string): string {
+  const d = v.replace(/^"|"$/g, "").trim().toLowerCase();
+  const at = d.lastIndexOf("@");
+  const dom = at >= 0 ? d.slice(at + 1) : d;
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(dom) ? dom : "";
+}
+
+/**
+ * Parse ONE Authentication-Results instance (RFC 8601): `authserv-id; method=result
+ * prop=value ...; ...`. Returns the first verdict per method and the authenticated
+ * domains used for alignment.
+ */
+export function parseAuthResults(instance: string): AuthVerdicts {
+  const out: AuthVerdicts = { spf: "none", dkim: "none", dmarc: "none" };
+  const parts = stripComments(instance).split(";").map((p) => p.trim());
+  parts.shift(); // authserv-id
+  const seen = new Set<string>();
+  const dkimDomains: string[] = [];
+  for (const part of parts) {
+    const m = part.match(/^([a-z0-9_-]+)\s*=\s*([a-z]+)(.*)$/i);
+    if (!m) continue;
+    const method = m[1].toLowerCase();
+    const result = m[2].toLowerCase();
+    const props: Record<string, string> = {};
+    for (const p of m[3].matchAll(/([a-z0-9_-]+\.[a-z0-9_-]+)\s*=\s*("[^"]*"|[^\s;]+)/gi)) {
+      props[p[1].toLowerCase()] = p[2];
+    }
+    if (method === "dkim") {
+      if (!seen.has("dkim")) out.dkim = result;
+      if (result === "pass" && props["header.d"]) {
+        const d = domainOf(props["header.d"]);
+        if (d) dkimDomains.push(d);
+      }
+    } else if (method === "spf" && !seen.has("spf")) {
+      out.spf = result;
+      if (result === "pass" && props["smtp.mailfrom"]) {
+        const d = domainOf(props["smtp.mailfrom"]);
+        if (d) out.spfDomain = d;
+      }
+    } else if (method === "dmarc" && !seen.has("dmarc")) {
+      out.dmarc = result;
+      if (props["header.from"]) {
+        const d = domainOf(props["header.from"]);
+        if (d) out.dmarcFrom = d;
+      }
+    }
+    seen.add(method);
+  }
+  if (dkimDomains.length) out.dkimDomains = dkimDomains;
+  return out;
+}
+
+/**
+ * The in-Worker driver's auth block, read ONLY from the headers CF hands the Worker
+ * (`message.headers`), never from the parsed MIME, and only from the FIRST instance of
+ * each header (the one CF prepended). The SPF verdict comes from Received-SPF when CF
+ * wrote one, else from the Authentication-Results `spf=` entry.
+ */
+export function authFromHeaders(get: (name: string) => string | null): AuthVerdicts {
+  const ar = parseAuthResults(firstHeaderInstance(get("authentication-results")));
+  const receivedSpf = firstHeaderInstance(get("received-spf"));
+  const spf = receivedSpf ? extractSpfResult(receivedSpf) : ar.spf;
+  const out: AuthVerdicts = { spf, dkim: ar.dkim, dmarc: ar.dmarc };
+  if (spf === "pass" && ar.spf === "pass" && ar.spfDomain) out.spfDomain = ar.spfDomain;
+  if (ar.dkimDomains) out.dkimDomains = ar.dkimDomains;
+  if (ar.dmarcFrom) out.dmarcFrom = ar.dmarcFrom;
+  return out;
+}

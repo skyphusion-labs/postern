@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 // Imports follow the code: the transport-side helpers live in headers.ts (kept
 // out of index.ts so this suite need not import the worker entrypoint); the
 // storage-side pure helpers live in ingest.ts.
-import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer } from "./src/headers";
-import { isTrusted, bareAddress, cleanBody, htmlToText, chunkText, sha256hex } from "./src/ingest";
+import { extractSpfResult, extractDkimResult, extractDmarcResult, toArrayBuffer, parseAuthResults, firstHeaderInstance } from "./src/headers";
+import { isTrusted, domainsAlign, bareAddress, cleanBody, htmlToText, chunkText, sha256hex } from "./src/ingest";
 
 // These cover the pure ingestion helpers: auth-verdict parsing, the allowlist
 // trust decision (the security-sensitive bit), body cleaning, chunking (the
@@ -49,61 +49,107 @@ describe("extractDmarcResult", () => {
 
 describe("isTrusted", () => {
   const allow = "skyphusion.org,example.net,github.com";
+  const none = { spf: "none", dkim: "none", dmarc: "none" };
 
-  it("trusts an allowlisted domain that passes SPF", () => {
-    expect(isTrusted("alerts@skyphusion.org", "pass", "none", allow)).toBe(true);
+  it("trusts an allowlisted From whose domain SPF passed for (aligned envelope)", () => {
+    expect(isTrusted("alerts@skyphusion.org", { ...none, spf: "pass", spfDomain: "skyphusion.org" }, allow)).toBe(true);
   });
 
-  it("trusts an allowlisted domain that passes DKIM even if SPF did not", () => {
-    expect(isTrusted("bot@github.com", "fail", "pass", allow)).toBe(true);
+  it("trusts an aligned DKIM pass even if SPF did not pass", () => {
+    expect(isTrusted("bot@github.com", { ...none, spf: "fail", dkim: "pass", dkimDomains: ["github.com"] }, allow)).toBe(true);
+  });
+
+  it("trusts DMARC pass for the From domain", () => {
+    expect(isTrusted("bot@github.com", { ...none, dmarc: "pass", dmarcFrom: "github.com" }, allow)).toBe(true);
   });
 
   it("does NOT trust a sender off the allowlist regardless of auth", () => {
-    expect(isTrusted("evil@example.com", "pass", "pass", allow)).toBe(false);
+    expect(isTrusted("evil@example.com", { spf: "pass", spfDomain: "example.com", dkim: "pass", dkimDomains: ["example.com"], dmarc: "pass", dmarcFrom: "example.com" }, allow)).toBe(false);
   });
 
   it("does NOT trust an allowlisted domain that fails both SPF and DKIM", () => {
-    // spoof attempt: on the allowlist but auth actively failed (not stripped)
-    expect(isTrusted("spoof@skyphusion.org", "fail", "fail", allow)).toBe(false);
-    expect(isTrusted("spoof@skyphusion.org", "softfail", "fail", allow)).toBe(false);
+    expect(isTrusted("spoof@skyphusion.org", { ...none, spf: "fail", dkim: "fail" }, allow)).toBe(false);
+    expect(isTrusted("spoof@skyphusion.org", { ...none, spf: "softfail", dkim: "fail" }, allow)).toBe(false);
   });
 
-  it("trusts an allowlisted domain when CF stripped both auth headers (none/none)", () => {
-    // CF Email Routing removes transport auth headers; allowlist alone suffices.
-    expect(isTrusted("cron@skyphusion.org", "none", "none", allow)).toBe(true);
+  it("does NOT trust an allowlisted From with no auth data (none/none)", () => {
+    expect(isTrusted("cron@skyphusion.org", none, allow)).toBe(false);
+  });
+
+  it("does NOT trust a pass for a domain that does not align with the From", () => {
+    expect(isTrusted("ceo@skyphusion.org", { ...none, spf: "pass", spfDomain: "attacker.example" }, allow)).toBe(false);
+    expect(isTrusted("ceo@skyphusion.org", { ...none, dkim: "pass", dkimDomains: ["attacker.example"] }, allow)).toBe(false);
+    expect(isTrusted("ceo@skyphusion.org", { ...none, dmarc: "pass", dmarcFrom: "attacker.example" }, allow)).toBe(false);
+    // A lookalike suffix is not a subdomain.
+    expect(isTrusted("ceo@skyphusion.org", { ...none, dkim: "pass", dkimDomains: ["notskyphusion.org"] }, allow)).toBe(false);
   });
 
   it("matches a full address allowlist entry, not just a bare domain", () => {
-    expect(isTrusted("ci@skyphusion.org", "none", "none", "ci@skyphusion.org")).toBe(true);
+    expect(isTrusted("ci@skyphusion.org", { ...none, dkim: "pass", dkimDomains: ["skyphusion.org"] }, "ci@skyphusion.org")).toBe(true);
+    expect(isTrusted("other@skyphusion.org", { ...none, dkim: "pass", dkimDomains: ["skyphusion.org"] }, "ci@skyphusion.org")).toBe(false);
   });
 
-  it("is case-insensitive on the sender and the allowlist", () => {
-    expect(isTrusted("Alerts@SkyPhusion.ORG", "pass", "none", "SKYPHUSION.ORG")).toBe(true);
+  it("is case-insensitive on the sender, the allowlist and the auth domains", () => {
+    expect(isTrusted("Alerts@SkyPhusion.ORG", { ...none, spf: "pass", spfDomain: "SKYPHUSION.org" }, "SKYPHUSION.ORG")).toBe(true);
   });
 
   it("does not treat a lookalike domain suffix as on-allowlist", () => {
-    // notskyphusion.org must not match skyphusion.org
-    expect(isTrusted("x@notskyphusion.org", "pass", "pass", "skyphusion.org")).toBe(false);
+    expect(isTrusted("x@notskyphusion.org", { ...none, dkim: "pass", dkimDomains: ["notskyphusion.org"] }, "skyphusion.org")).toBe(false);
   });
 
   it("returns false for an empty allowlist", () => {
-    expect(isTrusted("anyone@skyphusion.org", "pass", "pass", "")).toBe(false);
+    expect(isTrusted("anyone@skyphusion.org", { ...none, dmarc: "pass", dmarcFrom: "skyphusion.org" }, "")).toBe(false);
   });
 
   it("parses the bare address from a display-name From before matching", () => {
-    // `from` is now the raw From header (#from-fidelity), so trust must extract the
-    // angle address. A display-name-bearing allowlisted sender is trusted...
-    expect(isTrusted('"Cloudflare" <alerts@skyphusion.org>', "pass", "none", allow)).toBe(true);
-    // ...and an off-allowlist sender is not, even wrapped in a friendly name.
-    expect(isTrusted('"Skyphusion Support" <x@evil.example>', "pass", "pass", allow)).toBe(false);
+    const ok = { ...none, dkim: "pass", dkimDomains: ["skyphusion.org"] };
+    expect(isTrusted('"Cloudflare" <alerts@skyphusion.org>', ok, allow)).toBe(true);
+    expect(isTrusted('"Doe, Jane @ HQ" <alerts@skyphusion.org>', ok, allow)).toBe(true);
+    expect(isTrusted('"Skyphusion Support" <x@evil.example>', { ...none, dkim: "pass", dkimDomains: ["evil.example"] }, allow)).toBe(false);
+  });
+
+  it("refuses a From that holds more than one address", () => {
+    const ok = { ...none, dkim: "pass", dkimDomains: ["skyphusion.org"] };
+    expect(isTrusted("x@evil.example, CEO <ceo@skyphusion.org>", ok, allow)).toBe(false);
+    expect(isTrusted("Evil <x@evil.example>, <ceo@skyphusion.org>", ok, allow)).toBe(false);
   });
 
   it("returns false when TRUSTED_SENDER_DOMAINS is absent, instead of throwing (#473)", () => {
-    // An operator who omits the var from their own wrangler config used to hit
-    // `undefined.split` here, on the INGEST path, so EVERY inbound message failed.
-    // Absent must read exactly like the shipped "": empty allowlist, nothing trusted.
-    expect(isTrusted("anyone@skyphusion.org", "pass", "pass", undefined)).toBe(false);
-    expect(isTrusted("cron@skyphusion.org", "none", "none", undefined)).toBe(false);
+    expect(isTrusted("anyone@skyphusion.org", { ...none, dmarc: "pass", dmarcFrom: "skyphusion.org" }, undefined)).toBe(false);
+    expect(isTrusted("cron@skyphusion.org", none, undefined)).toBe(false);
+  });
+});
+
+describe("domainsAlign", () => {
+  it("aligns equal domains and either-direction subdomains, not siblings or lookalikes", () => {
+    expect(domainsAlign("skyphusion.org", "skyphusion.org")).toBe(true);
+    expect(domainsAlign("cloudflare.com", "notify.cloudflare.com")).toBe(true);
+    expect(domainsAlign("bounce.notify.cloudflare.com", "notify.cloudflare.com")).toBe(true);
+    expect(domainsAlign("a.example.com", "b.example.com")).toBe(false);
+    expect(domainsAlign("notskyphusion.org", "skyphusion.org")).toBe(false);
+    expect(domainsAlign(undefined, "skyphusion.org")).toBe(false);
+    expect(domainsAlign("", "skyphusion.org")).toBe(false);
+  });
+});
+
+describe("parseAuthResults / firstHeaderInstance", () => {
+  it("reads every method, strips comments, and collects passing DKIM domains", () => {
+    const r = parseAuthResults(
+      "mx.cloudflare.net; dkim=pass header.d=esp.example header.s=a; dkim=pass header.d=Skyphusion.org header.s=b; " +
+      "dkim=fail header.d=x.example; spf=pass (mx.cloudflare.net: domain of b@bounce.skyphusion.org designates 1.2.3.4; as permitted) " +
+      "smtp.mailfrom=b@bounce.skyphusion.org; dmarc=pass (p=none) header.from=skyphusion.org",
+    );
+    expect(r).toEqual({ spf: "pass", spfDomain: "bounce.skyphusion.org", dkim: "pass", dkimDomains: ["esp.example", "skyphusion.org"], dmarc: "pass", dmarcFrom: "skyphusion.org" });
+  });
+  it("sets no spfDomain unless SPF passed", () => {
+    expect(parseAuthResults("mx; spf=softfail smtp.mailfrom=a@b.example").spfDomain).toBeUndefined();
+  });
+  it("returns none for an empty instance", () => {
+    expect(parseAuthResults("")).toEqual({ spf: "none", dkim: "none", dmarc: "none" });
+  });
+  it("keeps only the first instance of a joined header", () => {
+    expect(firstHeaderInstance("mx.cloudflare.net; dkim=none, evil; dkim=pass header.d=skyphusion.org")).toBe("mx.cloudflare.net; dkim=none");
+    expect(firstHeaderInstance(null)).toBe("");
   });
 });
 

@@ -63,7 +63,7 @@ secrets set with `wrangler secret put`, never vars; see
 
 | Var | Effect | Empty (`""`) means |
 |-----|--------|--------------------|
-| `TRUSTED_SENDER_DOMAINS` | domains/addresses eligible for `trusted=1` (must also pass SPF or DKIM, or have both stripped by CF) | nothing is ever trusted |
+| `TRUSTED_SENDER_DOMAINS` | domains/addresses eligible for `trusted=1` (must also pass DMARC, or SPF/DKIM aligned with the header From) | nothing is ever trusted |
 | `FORWARD_TO` | destination for transparent forwarding | forwarding disabled (store-only) |
 | `FORWARD_FOR` | recipients whose mail is forwarded to `FORWARD_TO` | forward everything (not recommended once crew share the domain) |
 | `VECTORIZE_FOR` | recipients whose mail is embedded into Vectorize (opt-in) | index everything |
@@ -104,18 +104,29 @@ operate an established instance, deploy it by pushing a tag, not from your lapto
 ## Trust model
 
 `trusted` (stored per message) is a coarse "is this from us / a known service"
-flag, not a spam verdict. `isTrusted()` requires the sender to be on
-`TRUSTED_SENDER_DOMAINS` AND one of:
+flag, not a spam verdict. It is set only when the RFC 5322 header From holds exactly
+one address, that address is on `TRUSTED_SENDER_DOMAINS`, AND an authenticated
+identity ALIGNED with the From domain passed:
 
-- SPF `pass`/`neutral`, OR
-- DKIM `pass`, OR
-- both SPF and DKIM reporting `none` (CF Email Routing strips transport auth
-  headers, so absence of a verdict is expected; CF's own MX already filters
-  inbound, so allowlist alone suffices in that case).
+- DMARC `pass` whose `header.from` is the From domain, OR
+- SPF `pass` whose `smtp.mailfrom` domain aligns with the From domain, OR
+- DKIM `pass` for a `d=` that aligns with the From domain.
 
-An allowlisted sender whose auth actively **fails** (a spoof attempt) is **not**
-trusted. The domain match is anchored (`== domain` or `endsWith("@" + domain)`),
-so `notskyphusion.org` does not match `skyphusion.org`.
+"Aligns" means equal, or one domain is a subdomain of the other. Sibling subdomains
+need DMARC pass (CF evaluates DMARC with the organizational domain).
+
+Nothing else is trusted: not SPF `neutral`, not a pass for an unrelated domain (SPF
+checks the envelope sender, which the sender chooses; a DKIM `d=` can be any domain
+the sender signs with), and not a message with no auth data (`spf=none`,
+`dkim=none`). So mail that reaches the store through a transport that carries no
+verdicts (postern-relay SMTP intake) is never trusted.
+
+The in-Worker driver reads the verdicts only from `message.headers`, and only the
+FIRST instance of `Authentication-Results` and `Received-SPF`: CF prepends its own,
+and any copy the sender wrote into the message sits below it and is ignored.
+
+The allowlist match is anchored (`== entry` or `endsWith("@" + entry)`), so
+`notskyphusion.org` does not match `skyphusion.org`.
 
 ## Vectorize cost bound
 

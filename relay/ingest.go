@@ -50,9 +50,9 @@ type InboundAttach struct {
 	Content  string `json:"content"` // base64 of the raw bytes
 }
 
-// InboundAuth mirrors ParsedInbound.auth. The relay receives plain SMTP with no
-// CF auth verdicts, so these are normally absent; core falls back to its
-// allowlist-only trust path when the auth block is omitted.
+// InboundAuth mirrors ParsedInbound.auth (verdicts only; core also accepts the
+// aligned domains). The relay receives plain SMTP with no CF auth verdicts, so
+// these are normally absent, and core stores such mail untrusted.
 type InboundAuth struct {
 	SPF   string `json:"spf,omitempty"`
 	DKIM  string `json:"dkim,omitempty"`
@@ -64,8 +64,8 @@ type InboundAuth struct {
 //   - recipient (To) comes from the FIRST envelope RCPT TO (the real
 //     delivered-to), not the headers.
 //   - From prefers the header From, falling back to the envelope MAIL FROM.
-//   - the relay does not invent auth verdicts: it leaves Auth nil so core
-//     applies its allowlist-only trust logic for header-stripped intake.
+//   - the relay does not invent auth verdicts: it leaves Auth nil, so core
+//     stores the message untrusted (trust needs an aligned verdict).
 //   - rawSize is the RFC822 wire byte size as received (len of the raw DATA
 //     stream), carried so core can serve RFC822.SIZE honestly (CONTRACT 10.4).
 //   - the envelope-fidelity headers (To/Cc/Sender/Reply-To) are carried RAW and
