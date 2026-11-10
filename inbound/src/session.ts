@@ -558,7 +558,7 @@ async function handleChangePassword(request: Request, env: Env, url: URL): Promi
   // The session resolved, so the account existed and was enabled a moment ago; a
   // vanished row here is a race and reads as a plain rejection.
   const cred = await lookup(env, resolved.username);
-  const ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash) : false;
+  const ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash, cred.username) : false;
   if (!cred || !ok) {
     try {
       await recordFailure(env, keys, gate);
