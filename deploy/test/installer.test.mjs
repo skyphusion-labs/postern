@@ -546,6 +546,28 @@ describe("D-AUTH-3: unset WEBMAIL_AUTH_BACKEND means OFF", () => {
   });
 });
 
+describe("rollback --restore-db and the first admin", () => {
+  test("an admin created after the bookmark is re-created by the next run after a restore", async () => {
+    const c = setup();
+    c.m.dns.length = 0;
+    // Install with the admin step failing, so the admin is created during the upgrade.
+    const real = c.deps.http;
+    c.deps.http = async (url, init) => (url.endsWith("/api/admin/users") ? { ok: false, status: 503, json: async () => ({ ok: false, error: "E_UNAVAILABLE" }) } : real(url, init));
+    await assert.rejects(install(c.deps, c.opts));
+    c.deps.http = real;
+    writeFileSync(join(c.repoRoot, "inbound", "migrations", "0099_new_index.sql"), "CREATE INDEX IF NOT EXISTS idx_x ON messages(id);\n");
+    writeFileSync(join(c.repoRoot, "inbound", "src", "index.ts"), "export default { v: 5 };\n");
+    await install(c.deps, c.opts, "upgrade");
+    assert.ok(c.m.admins["admin@acme-mail.test"]);
+    await rollback(c.deps, { ...c.opts, restoreDb: true });
+    delete c.m.admins["admin@acme-mail.test"]; // what the D1 restore does to the users table
+    const st = JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.json"), "utf8"));
+    assert.equal(st.admin, undefined, "state still claims an admin the restore removed");
+    await install(c.deps, c.opts);
+    assert.ok(c.m.admins["admin@acme-mail.test"], "the next run did not re-create the admin");
+  });
+});
+
 describe("upgrade record survives a failed upgrade", () => {
   test("the D1 bookmark is saved before the migration, even when the run stops later", async () => {
     const c = setup();

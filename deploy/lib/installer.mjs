@@ -636,6 +636,7 @@ async function ensureFirstAdmin(ctx, pf) {
     throw new Error(`creating the first admin failed: HTTP ${res.status} ${body.error || ""}${body.message ? `: ${body.message}` : ""}`.trim());
   }
   state.admin = opts.admin;
+  if (ctx.upgradeEntry?.d1Bookmark) ctx.upgradeEntry.adminCreatedAfterBookmark = true;
   saveState(opts, state);
   rep.created(`first admin ${opts.admin} (password in ${ctx.paths.creds})`);
 }
@@ -752,6 +753,10 @@ export async function rollback(deps, opts) {
     const d = await ctx.wrangler(["d1", "time-travel", "restore", opts.d1Name, "--bookmark", last.d1Bookmark, "-c", ctx.paths.config]);
     if (d.code !== 0) throw new Error(`D1 restore failed:\n${tail(d)}`);
     ctx.rep.updated(`D1 ${opts.d1Name} restored to bookmark ${last.d1Bookmark}`);
+    // The store is now as it was before the upgrade, so a user created after the
+    // bookmark is gone. Forget that the admin exists; the next run re-creates it
+    // (create-only: 409 if it survived the restore).
+    if (ctx.state.admin && last.adminCreatedAfterBookmark) delete ctx.state.admin;
   }
   ctx.state.history.pop();
   saveState(opts, ctx.state);
