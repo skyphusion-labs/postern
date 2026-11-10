@@ -412,19 +412,39 @@ ONCE in that response. It is never stored or logged in plaintext.
 
 #### 1.10.2 The stored hash: per-row parameters, upgrade on sign-in
 
-The hash stays `pbkdf2$<iterations>$<saltB64>$<hashB64>` (PBKDF2-HMAC-SHA256, 16-byte
-salt, 32-byte output). The iteration count lives in EACH row, so the target can rise
-without a schema change and an old row still verifies at its own count.
+Each row names its own parameters, so the target can change without a schema change
+and an old row still verifies at its own parameters:
+
+| encoding | KDF | role |
+|---|---|---|
+| `pbkdf2-sha512$<iterations>$<saltB64>$<hashB64>` | PBKDF2-HMAC-SHA512, 16-byte salt, 64-byte output | **the target: 100,000 iterations** (#821) |
+| `pbkdf2$<iterations>$<saltB64>$<hashB64>` | PBKDF2-HMAC-SHA256, 16-byte salt, 32-byte output | legacy (#68); verifies, then upgrades |
+
+**Why 100,000 and SHA-512 (#821).** The deployed Cloudflare Workers runtime refuses a
+PBKDF2 iteration count above 100,000 ("iteration counts above 100000 are not
+supported"). Local `wrangler dev` and Node accept more, so only the edge shows it. The
+former target (SHA-256 at 210,000) could therefore not create or verify any credential in
+production. At the 100,000 ceiling, SHA-512 costs an attacker more per guess on GPU
+hardware than SHA-256 does, so the target is the strongest PBKDF2 the runtime allows.
+No other KDF is in Web Crypto on Workers.
+
+**A row the runtime cannot verify.** A row whose iteration count is above 100,000 (a
+legacy 210,000 row, created on a runtime without the cap) cannot be verified on Workers.
+It is refused WITHOUT being counted as a failed guess (it is a data condition, not a
+wrong password, so it never locks the user out), it answers the infra-failure shape
+(`503 E_AUTH_UNAVAILABLE` at sign-in; a non-2xx at `/api/smtp-auth`, which the relay
+maps to a transient failure, not a 535), and it is logged by username so the operator
+can reset it (`POST /api/admin/users/{u}/password`). The server never creates such a row.
 
 **Upgrade on sign-in.** After a successful password verify (sign-in, change password),
-if the row's iteration count is below the current target (210,000 today), the server
+if the row is not at the target (another KDF, or fewer iterations), the server
 re-hashes the same password at the target and writes it with a conditional update
 (`WHERE username = ? AND secret_hash = <the hash just verified>`), so a concurrent reset
 always wins. The upgrade never changes the answer to the caller; if the write fails,
 the sign-in still succeeds and the next one retries.
 
 Every compare is constant-time. An unknown, disabled or deleted user is verified
-against a dummy hash at the target count, so it costs the same work and returns the
+against a dummy hash at the TARGET parameters, so it costs the same work and returns the
 same error as a wrong password.
 
 #### 1.10.3 Sessions follow the account
@@ -469,6 +489,7 @@ The user object, in every answer that has one (it NEVER carries a hash or a pass
 | GET | `/api/admin/users` | query `limit` (1 to 500, default 100), `cursor` | `200 { ok, users: [user...], nextCursor: string \| null }`, ordered by username | 400 bad limit/cursor |
 | GET | `/api/admin/users/{username}` | | `200 { ok, user }` | 404 |
 | POST | `/api/admin/users` | `{ username, from?, displayName?, password? }` | `201 { ok, user, password? }` (`password` only when generated) | 400 validation / policy / sender, 409 `E_CONFLICT` (exists: never overwritten) |
+<!-- sessionsEnded on the admin routes counts every session of that user that was ended. -->
 | PATCH | `/api/admin/users/{username}` | any of `{ disabled: bool, displayName: string \| null, from }` | `200 { ok, user, sessionsEnded: n }` | 400, 404 |
 | POST | `/api/admin/users/{username}/password` | `{ password? }` | `200 { ok, user, password?, sessionsEnded: n }` | 400 policy, 404 |
 | DELETE | `/api/admin/users/{username}` | | `200 { ok, deleted: "<username>", sessionsEnded: n }` | 404 |
@@ -508,7 +529,8 @@ POST /api/session/password       (same-origin; session cookie; X-Postern-CSRF)
 200 Set-Cookie: __Host-postern_session=<NEW id>; ...
     Set-Cookie: __Host-postern_csrf=<NEW token>; ...
   { "ok": true, "identity": {...}, "capabilities": [...], "expiresAt": "...",
-    "csrfToken": "<NEW token>", "sessionsEnded": n }
+    "csrfToken": "<NEW token>", "sessionsEnded": n }   (n = OTHER sessions ended; the
+                                                         caller's own rotation is not counted)
 
 400 E_VALIDATION_ERROR | E_FIELD_MISSING | E_PASSWORD_POLICY
 401 E_AUTH_FAILED          (no valid session, OR currentPassword is wrong)
