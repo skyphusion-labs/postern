@@ -8,8 +8,8 @@
 // zone, plus one account-level read):
 //   - Email Routing Rules: Edit  (zone)   -- create/update the catch-all rule
 //   - Workers Scripts: Read      (account) -- look up the Worker's owner_worker_tag
-// The Dashboard path (DEPLOY.md section 3) remains the documented default;
-// this script is the opt-in path for operators who want it scripted.
+// The installer (deploy/postern.mjs) does this as one of its steps and is the
+// documented default; this script is the standalone form (DEPLOY.md Appendix A3).
 //
 // Usage:
 //   CF_API_TOKEN=<token> CF_ACCOUNT_ID=<id> CF_ZONE_ID=<id> \
@@ -88,7 +88,7 @@ async function main() {
   console.log(`catch-all Email Routing rule now routes to Worker "${workerName}".`);
   console.log(
     "Remove any conflicting per-address 'Forward to email' rules in the Dashboard " +
-      "so every address reaches the Worker (DEPLOY.md section 3).",
+      "so every address reaches the Worker (DEPLOY.md Appendix A3).",
   );
 }
 
