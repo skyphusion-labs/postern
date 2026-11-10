@@ -62,6 +62,13 @@ export interface ReplyRequest {
 export interface SendResult {
   messageId: string;
   threadId: string;
+  /**
+   * The From address this send actually used, after identity binding (#804).
+   * A registry token's bound address wins over any caller-supplied from, and
+   * this is that address: the same string stored on the outbound copy. Callers
+   * thread on messageId. They learn which identity the mail went out as here.
+   */
+  from: string;
   providerMessageId?: string;
 }
 
@@ -627,7 +634,10 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
   // very first message (its thread_id == its own id, which resolveThreadId also
   // returns). forcedThreadId is asserted only as a safety net for the reply path.
   const threadId = d.forcedThreadId ?? put.threadId;
-  return { messageId, threadId, providerMessageId };
+  // `from` is the address resolveFrom settled on, the same string store.put
+  // wrote to from_addr above. Reporting it is how a caller sees a substitution
+  // a bound identity made (#804), instead of echoing the from they asked for.
+  return { messageId, threadId, from: d.from.email, providerMessageId };
 }
 
 function validateHeaders(headers: Record<string, string> | undefined): Record<string, string> {

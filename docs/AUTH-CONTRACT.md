@@ -324,8 +324,9 @@ the whole estate. A 403 at the gate is the better answer, because a wrong answer
 worse than no answer: the caller has no second source to check it against.
 
 The caller this serves is one that has to interpret an empty read page, and that caller is
-read-capable by definition. A send token's own open question is which From the server will
-force on it, which belongs to the send response (#632 F13), not here. If a future
+read-capable by definition. A send token learns which From the server used by reading
+`from` on the send, reply, forward, and draft-send response (#804, #632 F13). This
+route does not answer that. If a future
 non-read scope genuinely needs a self-identity call, it needs a projection that can say
 "you cannot read", not a widening of this one.
 

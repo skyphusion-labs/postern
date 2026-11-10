@@ -207,7 +207,11 @@ class PosternClient:
         attachments: Optional[Sequence[OutboundAttachment]] = None,
         forward_message_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        """POST /api/send. Returns the SendResult ({messageId, threadId, ...}).
+        """POST /api/send. Returns the SendResult ({messageId, threadId, from, ...}).
+
+        `from` is the address the worker actually used. A bound identity overrides
+        `from_addr`, so read this field rather than assuming the address you passed.
+        The same address is stored on the sent copy.
 
         `attachments` are base64-encoded over JSON (the worker contract);
         `forward_message_id` quotes a stored message as a forward, with the
@@ -248,6 +252,9 @@ class PosternClient:
         attachments: Optional[Sequence[OutboundAttachment]] = None,
     ) -> dict[str, Any]:
         """POST /api/reply to a stored message. Returns the SendResult.
+
+        `from` in the result is the address the worker actually used. A bound
+        identity overrides `from_addr`.
 
         `mode` is reply|replyAll (replyAll derives the original To/Cc
         server-side, excluding the sender); `quote_original` appends a
@@ -787,6 +794,9 @@ class PosternClient:
 
     def send_draft(self, draft_id: str) -> dict[str, Any]:
         """POST /api/drafts/{id}/send. Returns the SendResult.
+
+        `from` in the result is the address the worker actually used (the
+        caller's bound identity; drafts require one).
 
         The worker sends (or replies, for a reply/replyAll draft) with the
         staged attachments and only then deletes the draft, so a failure leaves
