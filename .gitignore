@@ -46,3 +46,6 @@ relay/dist/
 imap/smoke/
 .playwright-mcp/
 inbound/wrangler.demo.jsonc
+
+# Self-host installer state (ids, generated credentials; mode 600)
+.postern/
