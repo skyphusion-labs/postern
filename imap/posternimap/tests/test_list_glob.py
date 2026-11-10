@@ -5,11 +5,14 @@ the engine. The risk is a subtle semantic difference in how ``*`` and ``%``
 treat the hierarchy delimiter, which IMAP (RFC 3501 6.3.8) defines differently
 from shell globbing. The old matcher stays here as a reference oracle, and a
 seeded corpus of pattern/name pairs asserts identical verdicts inside the
-existing length and wildcard bounds.
+existing length and wildcard bounds. An exhaustive small-alphabet walk
+sits beside it: the seeded corpus missed ``%`` absorbing the hierarchy
+delimiter when a backtrack rewound a literal.
 """
 
 from __future__ import annotations
 
+import itertools
 import random
 import re
 import time
@@ -227,6 +230,28 @@ def _corpus() -> List[_Pair]:
     return _handcrafted_pairs() + _random_pairs(_CORPUS_SEED, _CORPUS_RANDOM_PAIRS)
 
 
+# Length 6 is 5,444,233 pairs and took 15.1s locally, past the ~10s trial
+# budget, so the pin is 5 (485,212 pairs). Patterns are every string over
+# ``a / * %`` up to that length with at most 4 wildcards; names are every
+# string over ``a b /`` up to the same length.
+_EXHAUSTIVE_MAX_LEN = 5
+
+
+def _exhaustive_alphabet(max_len: int) -> Tuple[List[str], List[str]]:
+    """Patterns over ``a/*%``, names over ``ab/``, lengths 0 through max_len."""
+    patterns: List[str] = []
+    for n in range(max_len + 1):
+        for prod in itertools.product("a/*%", repeat=n):
+            pattern = "".join(prod)
+            if pattern.count("*") + pattern.count("%") <= 4:
+                patterns.append(pattern)
+    names: List[str] = []
+    for n in range(max_len + 1):
+        for prod in itertools.product("ab/", repeat=n):
+            names.append("".join(prod))
+    return patterns, names
+
+
 @unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
 class LinearGlobMatchTest(unittest.TestCase):
     _match: Callable[[str, str, str], bool]
@@ -289,6 +314,35 @@ class LinearGlobMatchTest(unittest.TestCase):
                 if len(disagreements) >= 10:
                     break
         self.assertEqual(disagreements, [], "\n".join(disagreements))
+
+    def test_exhaustive_small_alphabet_agrees_with_regex_oracle(self) -> None:
+        """Every short pattern and name, delimiter ``/``.
+
+        ``%/`` against ``/a/`` is a ``%`` that absorbs a hierarchy delimiter
+        on backtrack. A seeded corpus did not draw it. This walks the whole
+        cross product instead.
+        """
+        # (4**6 - 1) / 3 = 1365 strings of length <= 5, minus 2**5 = 32
+        # patterns that are five wildcards. (3**6 - 1) / 2 = 364 names.
+        patterns, names = _exhaustive_alphabet(_EXHAUSTIVE_MAX_LEN)
+        self.assertEqual(len(patterns), 1333)
+        self.assertEqual(len(names), 364)
+        mismatches = 0
+        first = ""
+        match = self._match
+        compared = len(patterns) * len(names)
+        for pattern in patterns:
+            want_match = _old_wildcard_matcher(pattern, "/").fullmatch
+            for name in names:
+                if match(pattern, name, "/") != (want_match(name) is not None):
+                    mismatches += 1
+                    if not first:
+                        first = "pattern=%r name=%r" % (pattern, name)
+        self.assertEqual(
+            mismatches,
+            0,
+            "%d mismatches in %d pairs; first %s" % (mismatches, compared, first),
+        )
 
     def test_pathological_glob_finishes_in_well_under_a_second(self) -> None:
         # Beyond the old bounds, calling the matcher directly. Many * and %

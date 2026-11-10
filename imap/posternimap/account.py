@@ -185,7 +185,13 @@ def _wildcard_match(pattern: str, name: str, delim: str = "/") -> bool:
         ):
             i += 1
             j += 1
-        elif pct_i != -1 and not _is_hierarchy_delimiter(name[j], delim):
+        # On this retry ``%`` absorbs name[pct_j], the first character the
+        # anchor has not yet consumed. name[j] is where the match failed,
+        # which may be a later literal. ``%/`` against ``/a/`` matches the
+        # first ``/`` as the literal, then the retry must refuse to pull
+        # that ``/`` into ``%``. A refused absorption falls through to the
+        # ``*`` anchor, or fails (RFC 3501 6.3.8).
+        elif pct_i != -1 and not _is_hierarchy_delimiter(name[pct_j], delim):
             pct_j += 1
             j = pct_j
             i = pct_i + 1
