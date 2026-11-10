@@ -11,7 +11,9 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
-## Unreleased
+## v1.9.1
+
+PATCH. A write-scope fix for registry and runtime agent identities. Upgrade to pick it up; no config change is needed.
 
 ### Fixed
 
