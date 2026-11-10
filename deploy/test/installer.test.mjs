@@ -278,9 +278,47 @@ describe("refusals: each is named, and none of them writes anything", () => {
 
   test("a Sending DKIM record that collides is refused at that record, nothing overwritten", async () => {
     const c = setup();
+    c.m.sendingAutoDns = false;
     c.m.dns.push({ id: "k", type: "TXT", name: "cf-bounce._domainkey.acme-mail.test", content: "v=DKIM1; p=SOMEONEELSE" });
     await assert.rejects(install(c.deps, c.opts), /a different DKIM key already sits at cf-bounce\._domainkey\.acme-mail\.test/);
     assert.equal(c.m.dns.filter((r) => r.name === "cf-bounce._domainkey.acme-mail.test").length, 1);
+  });
+
+  test("with Cloudflare auto-adding records on Sending enable, nothing is duplicated and --dmarc still wins", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    const byName = (n) => c.m.dns.filter((r) => r.name === n);
+    assert.equal(byName("cf-bounce._domainkey.acme-mail.test").length, 1);
+    assert.equal(byName("cf-bounce.acme-mail.test").filter((r) => r.type === "TXT").length, 1);
+    assert.deepEqual(byName("_dmarc.acme-mail.test").map((r) => r.content), ["v=DMARC1; p=none"]);
+  });
+
+  test("records the Sending API wants but did not auto-add are created by the installer", async () => {
+    const c = setup();
+    c.m.sendingAutoDns = false;
+    await install(c.deps, c.opts);
+    assert.ok(c.m.dns.some((r) => r.name === "cf-bounce._domainkey.acme-mail.test" && r.comment === "postern installer"));
+  });
+
+  test("a DKIM key stored as chunked TXT matches the same key reported as one string", async () => {
+    const c = setup();
+    c.m.sendingAutoDns = false;
+    // The real zone shape: auto-created by Email Sending, chunked at 255 bytes.
+    c.m.sendingDns[0] = { type: "TXT", name: "cf-bounce._domainkey.acme-mail.test", content: '"v=DKIM1; h=sha256; k=rsa; p=AAAABBBBCCCCDDDD"' };
+    c.m.dns.push({ id: "k", type: "TXT", name: "cf-bounce._domainkey.acme-mail.test", content: '"v=DKIM1; h=sha256; k=rsa; p=AAAABBBB" "CCCCDDDD"' });
+    await install(c.deps, c.opts);
+    assert.equal(c.m.dns.filter((r) => r.name === "cf-bounce._domainkey.acme-mail.test").length, 1);
+    assert.match(c.out.join("\n"), /= unchanged DNS TXT cf-bounce\._domainkey\.acme-mail\.test/);
+  });
+
+  test("DMARC follows --dmarc, not the Sending API's p=reject", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    assert.deepEqual(c.m.dns.filter((r) => r.name === "_dmarc.acme-mail.test").map((r) => r.content), ["v=DMARC1; p=none"]);
+    assert.match(c.out.join("\n"), /recommends p=reject/);
+    const d = setup({ args: ["--dmarc", "reject"] });
+    await install(d.deps, d.opts);
+    assert.deepEqual(d.m.dns.filter((r) => r.name === "_dmarc.acme-mail.test").map((r) => r.content), ["v=DMARC1; p=reject"]);
   });
 
   test("an existing DMARC policy is kept, not replaced", async () => {

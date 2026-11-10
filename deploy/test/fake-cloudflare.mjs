@@ -32,6 +32,8 @@ export function newAccount(domain = "acme-mail.test") {
       { type: "TXT", name: `cf-bounce._domainkey.${domain}`, content: "v=DKIM1; h=sha256; k=rsa; p=FAKEKEY" },
       { type: "MX", name: `cf-bounce.${domain}`, content: "route.mx.cloudflare.net", priority: 10 },
       { type: "TXT", name: `cf-bounce.${domain}`, content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+      // the real API lists this too (measured 2026-11-10)
+      { type: "TXT", name: `_dmarc.${domain}`, content: '"v=DMARC1; p=reject;"' },
     ],
     scripts: {},
     d1: [],
@@ -126,6 +128,15 @@ export function fakeFetch(m) {
       if (method === "POST") {
         const s = { tag: `sub-${uuid(m)}`, name: body.name, enabled: true };
         m.sendingSubs.push(s);
+        // The real API (measured 2026-11-10): it adds its own records, locked, and a
+        // _dmarc p=reject when the domain has no DMARC yet.
+        if (m.sendingAutoDns !== false) {
+          for (const w of m.sendingDns) {
+            const isDmarc = w.name.startsWith("_dmarc.");
+            if (isDmarc && m.dns.some((r) => r.type === "TXT" && r.name === w.name)) continue;
+            m.dns.push({ id: `auto-${uuid(m)}`, ...w, content: isDmarc ? "v=DMARC1; p=reject;" : w.content, meta: { read_only: !isDmarc } });
+          }
+        }
         return ok(s);
       }
     }
@@ -200,6 +211,9 @@ export function fakeExec(m) {
       const out = args[args.indexOf("--outdir") + 1];
       mkdirSync(out, { recursive: true });
       writeFileSync(join(out, "index.js"), readFileSync(cfg.main));
+      // the real wrangler's run-to-run noise: a timestamped README and a varying map
+      writeFileSync(join(out, "README.md"), `generated at ${new Date().toISOString()} ${Math.random()}`);
+      writeFileSync(join(out, "index.js.map"), JSON.stringify({ version: 3, sources: [`/tmp/${Math.random()}`] }));
       return { code: 0, stdout: "--dry-run: exiting now.", stderr: "" };
     }
     if (args[0] === "deploy") {

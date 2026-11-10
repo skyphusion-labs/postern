@@ -103,7 +103,13 @@ function reporter(log) {
 // DNS helpers
 
 const norm = (s) => String(s || "").replace(/\.$/, "").toLowerCase();
-const unquote = (s) => String(s || "").replace(/^"|"$/g, "");
+// TXT content as one string. Cloudflare stores a long TXT (a 2048-bit DKIM key) as
+// several quoted 255-byte chunks, "abc" "def", while the Email Sending API reports the
+// same record as one quoted string; both mean "abcdef" (measured 2026-11-10).
+const unquote = (s) => {
+  const t = String(s || "").trim();
+  return /^".*"$/s.test(t) ? t.slice(1, -1).replace(/"\s+"/g, "") : t;
+};
 
 function spfIncludes(txt) {
   return new Set(unquote(txt).split(/\s+/).filter((t) => /^(\+)?include:/.test(t)).map((t) => t.replace(/^\+/, "")));
@@ -121,7 +127,7 @@ function dnsSatisfied(records, want) {
     const missing = [...spfIncludes(want.content)].filter((i) => !have.has(i));
     return missing.length ? { ok: false, conflict: `SPF at ${want.name} lacks ${missing.join(", ")}` } : { ok: true };
   }
-  const hit = same.find((r) => unquote(r.content) === unquote(want.content) || norm(r.content) === norm(want.content));
+  const hit = same.find((r) => (want.type === "TXT" ? unquote(r.content) === unquote(want.content) : norm(r.content) === norm(want.content)));
   if (hit) return { ok: true };
   if (["CNAME"].includes(want.type) && same.length) return { ok: false, conflict: `${want.type} ${want.name} already points elsewhere` };
   if (want.type === "TXT" && /^v=DKIM1/i.test(unquote(want.content)) && same.some((r) => /^v=DKIM1/i.test(unquote(r.content)))) {
@@ -375,6 +381,11 @@ function tail(r) {
   return `${r.stdout || ""}${r.stderr || ""}`.split("\n").slice(-15).join("\n");
 }
 
+// Only what ships is hashed. wrangler --dry-run also writes a README.md stamped
+// with the build time and a source map that differs run to run while index.js is
+// byte-identical (measured 2026-11-10), so hashing every file redeploys every run.
+const NOT_SHIPPED = /(^README\.md$|\.map$)/;
+
 function hashTree(dir) {
   const h = createHash("sha256");
   const walk = (d) => {
@@ -382,7 +393,7 @@ function hashTree(dir) {
     for (const e of readdirSync(d, { withFileTypes: true }).sort((x, y) => (x.name < y.name ? -1 : 1))) {
       const p = join(d, e.name);
       if (e.isDirectory()) walk(p);
-      else if (e.isFile()) { h.update(e.name); h.update(readFileSync(p)); }
+      else if (e.isFile() && !NOT_SHIPPED.test(e.name)) { h.update(e.name); h.update(readFileSync(p)); }
     }
   };
   if (existsSync(dir)) walk(dir);
@@ -482,7 +493,10 @@ async function ensureSending(ctx, pf) {
     rep.unchanged(`Email Sending for ${opts.domain}`);
   }
   const dns = (await cf.call("read Email Sending DNS", P.sending, "GET", `/zones/${z}/email/sending/subdomains/${sub.tag}/dns`)).result || [];
-  await ensureDnsRecords(ctx, pf, dns, "Email Sending");
+  // The Sending API also lists a _dmarc record (p=reject). DMARC is the operator's
+  // policy for the WHOLE domain, so it is decided once, by --dmarc, in ensureDmarc.
+  const dmarcName = `_dmarc.${opts.domain}`;
+  await ensureDnsRecords(ctx, pf, dns.filter((w) => norm(w.name) !== norm(dmarcName)), "Email Sending");
 }
 
 async function ensureRouting(ctx, pf) {
@@ -518,6 +532,9 @@ async function ensureDmarc(ctx, pf) {
   const have = records.find((r) => r.type === "TXT" && norm(r.name) === norm(name) && /^v=DMARC1/i.test(unquote(r.content)));
   if (have) return rep.kept(`DNS TXT ${name} (your existing DMARC policy is left as it is)`);
   await ensureDnsRecords(ctx, pf, [{ type: "TXT", name, content: `v=DMARC1; p=${opts.dmarcPolicy}` }], "DMARC");
+  if (opts.dmarcPolicy !== "reject") {
+    ctx.log(`  note: Cloudflare Email Sending recommends p=reject. If only Postern sends as ${opts.domain}, use --dmarc reject (a new install only; an existing DMARC is never changed).`);
+  }
 }
 
 // FIRST ADMIN. The user-management API belongs to the AUTH lane; this is the one
@@ -630,9 +647,12 @@ export async function install(deps, opts, mode = "install") {
     await ensureMigrations(ctx, pf);
     await ensureWorker(ctx, pf);
   }
+  // DMARC FIRST: enabling Email Sending makes Cloudflare write _dmarc p=reject
+  // itself when the domain has none (measured 2026-11-10), which would pre-empt
+  // the operator's --dmarc choice.
+  await ensureDmarc(ctx, pf);
   await ensureSending(ctx, pf);
   await ensureRouting(ctx, pf);
-  await ensureDmarc(ctx, pf);
   if (!opts.dryRun && ctx.state.deploy) await ensureFirstAdmin(ctx, pf);
   else if (opts.dryRun) ctx.rep.would(`create the first admin ${opts.admin}`);
 
