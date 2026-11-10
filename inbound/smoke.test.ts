@@ -162,6 +162,28 @@ describe("parseAuthResults / firstHeaderInstance", () => {
     expect(authResultsText('a; (open "q)')).toBeNull();
     expect(authResultsText("a; (open")).toBeNull();
     expect(authResultsText("a; stray)")).toBeNull();
+    expect(authResultsText('a; "open')).toBeNull();
+    // Drop-the-rest would leave a well-formed, aligned prefix here; it must void instead.
+    expect(parseAuthResults('mx; dkim=pass header.d=ours.example; dmarc=pass header.from=ours.example; "open'))
+      .toEqual({ spf: "none", dkim: "none", dmarc: "none" });
+  });
+  it("voids the whole instance when an entry breaks the strict grammar", () => {
+    const ok = "mx; dkim=pass header.d=ours.example header.s=s1 header.b=AbC=; dmarc=pass header.from=ours.example policy.dmarc=reject";
+    expect(parseAuthResults(ok)).toEqual({ spf: "none", dkim: "pass", dkimDomains: ["ours.example"], dmarc: "pass", dmarcFrom: "ours.example" });
+    const NONE = { spf: "none", dkim: "none", dmarc: "none" };
+    for (const bad of [
+      "mx; dkim=pass header.d=attacker.example header.s=q header.d=ours.example; dmarc=pass header.from=ours.example", // duplicate key
+      "mx; dkim=pass header.d=ours.example header.x=1; dmarc=pass header.from=ours.example",                          // unknown key
+      "mx; dkim=pass header.d=ours.example junk; dmarc=pass header.from=ours.example",                                 // bare token
+      "mx; dkim=pass header.d=ours.example header.s=; dmarc=pass header.from=ours.example",                            // empty value
+      "mx; dkim=pass header.d = ours.example; dmarc=pass header.from=ours.example",                                    // spaced =
+      "mx; dkim=great header.d=ours.example; dmarc=pass header.from=ours.example",                                     // unknown result
+      "mx; dkim=pass header.d=ours.example; bimi=pass header.d=ours.example; dmarc=pass header.from=ours.example",      // unknown method
+      "mx; dkim=pass header.d=ours.example; dmarc=pass header.from=ours.example header.from=ours.example",             // duplicate in dmarc
+      "mx; dkim=pass header.d=ours.example; dmarc=pass header.d=ours.example",                                         // key of another method
+    ]) {
+      expect(parseAuthResults(bad)).toEqual(NONE);
+    }
   });
   it("returns none for an empty instance", () => {
     expect(parseAuthResults("")).toEqual({ spf: "none", dkim: "none", dmarc: "none" });

@@ -146,6 +146,44 @@ function domainOf(v: string): string {
 
 const NO_VERDICT: AuthVerdicts = { spf: "none", dkim: "none", dmarc: "none" };
 
+/** Per method: the results and the property keys an entry may carry. Taken from the
+ *  CF shapes observed live (npm via SES, github.com) plus the RFC 8601 / 6376 DKIM keys
+ *  CF may emit (header.i, header.a). Anything outside this grammar voids the header. */
+const ENTRY_GRAMMAR: Record<string, { results: Set<string>; keys: Set<string> }> = {
+  dkim: {
+    results: new Set(["pass", "fail", "neutral", "none", "policy", "temperror", "permerror"]),
+    keys: new Set(["header.d", "header.i", "header.s", "header.b", "header.a"]),
+  },
+  dmarc: {
+    results: new Set(["pass", "fail", "none", "bestguesspass", "temperror", "permerror"]),
+    keys: new Set(["header.from", "policy.dmarc"]),
+  },
+};
+
+/** One `method=result key=value ...` entry, or null when it breaks the strict grammar:
+ *  unknown method or result, a token that is not `key=value`, a key outside the
+ *  method's set, an empty value, or a key that appears TWICE. A duplicate is the
+ *  signature of a balanced quote or comment that spans two entries and merges the
+ *  second's text into the first (round 4), so it must void, never override. */
+function parseEntry(part: string): { method: string; result: string; props: Record<string, string> } | null {
+  const tokens = part.split(/\s+/).filter(Boolean);
+  const head = (tokens.shift() ?? "").match(/^([a-z0-9_-]+)=([a-z]+)$/i);
+  if (!head) return null;
+  const method = head[1].toLowerCase();
+  const result = head[2].toLowerCase();
+  const grammar = ENTRY_GRAMMAR[method];
+  if (!grammar || !grammar.results.has(result)) return null;
+  const props: Record<string, string> = {};
+  for (const t of tokens) {
+    const eq = t.indexOf("=");
+    if (eq <= 0 || eq === t.length - 1) return null;
+    const key = t.slice(0, eq).toLowerCase();
+    if (!grammar.keys.has(key) || key in props) return null;
+    props[key] = t.slice(eq + 1);
+  }
+  return { method, result, props };
+}
+
 /**
  * Parse ONE Authentication-Results instance (RFC 8601) for the two legs trust uses:
  * DKIM and DMARC. Fail closed by construction:
@@ -158,12 +196,19 @@ const NO_VERDICT: AuthVerdicts = { spf: "none", dkim: "none", dmarc: "none" };
  *     in the RAW text, so a sender who plants `spf=` earlier only truncates evidence.
  *     The SPF leg is therefore not read from AR at all; DMARC pass covers an aligned
  *     SPF pass for any domain that publishes DMARC.
- *  2. The region before the cut can still hold sender text (a failing signature's
- *     `header.s` / `header.d`). It cannot hold ";" (DKIM tag syntax), so it can only
- *     hide CF structure, never create a part, provided quotes and comments scan cleanly.
- *     ANY anomaly there (authResultsText returns null) voids the whole instance.
+ *  2. The region before the cut can still hold sender text (a signature's `header.s` /
+ *     `header.d`). It cannot hold ";" (DKIM tag syntax), so it cannot start an entry, but
+ *     a balanced quote or comment can SPAN entries. So the region must scan cleanly
+ *     (authResultsText), and every entry must fit the strict grammar (parseEntry); any
+ *     violation, including a repeated key, voids the whole instance.
  *  3. `dkim` is the FIRST DKIM verdict; `dkimDomains` lists the `header.d` of every
  *     passing signature in the leading dkim run; only the first `dmarc=` counts.
+ *
+ * RESIDUAL (accepted, tracked): this trusts the FIRST instance because CF prepends its
+ * own Authentication-Results to every message it routes (observed live). If CF ever
+ * delivered a message without one, a sender-supplied instance would become the first
+ * and be read as CF's. An authserv-id check cannot help (it is forgeable); only
+ * validating CF's ARC-Seal would remove this reliance. Not built.
  */
 export function parseAuthResults(instance: string): AuthVerdicts {
   const cut = instance.search(/spf\s*=/i);
@@ -178,14 +223,10 @@ export function parseAuthResults(instance: string): AuthVerdicts {
   let dkimSeen = false;
   let dmarcSeen = false;
   for (const part of parts) {
-    const m = part.match(/^([a-z0-9_-]+)\s*=\s*([a-z]+)(.*)$/is);
-    if (!m) continue;
-    const method = m[1].toLowerCase();
-    const result = m[2].toLowerCase();
-    const props: Record<string, string> = {};
-    for (const p of m[3].matchAll(/([a-z0-9_-]+\.[a-z0-9_-]+)\s*=\s*((?:""|[^\s;"])+)/gi)) {
-      props[p[1].toLowerCase()] = p[2];
-    }
+    if (!part) continue;
+    const entry = parseEntry(part);
+    if (!entry) return { ...NO_VERDICT };
+    const { method, result, props } = entry;
     if (method !== "dkim") dkimRun = false;
     if (method === "dkim") {
       if (!dkimRun) continue;

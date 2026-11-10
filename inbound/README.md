@@ -130,8 +130,15 @@ FIRST instance of `Authentication-Results` (CF prepends its own; any copy the se
 wrote into the message sits below it and is ignored). Inside CF's instance it reads
 NOTHING at or after the first `spf=`. In the text before that, a failing signature's
 selector or domain is still sender-chosen, so ANY unterminated or unbalanced quote or
-comment there voids the whole header (no verdict). The stored `spf` value is the
-`Received-SPF` verdict, kept for display only.
+comment there voids the whole header (no verdict), and so does any `dkim=` or `dmarc=`
+entry outside a strict grammar (`method=result` then only known `key=value` tokens, each
+key at most once). The stored `spf` value is the `Received-SPF` verdict, kept for display
+only.
+
+**Residual:** the design relies on CF ALWAYS prepending its own
+`Authentication-Results`. If CF ever delivered a message without one, a header the
+sender wrote would become the first instance and be read as CF's. Only validating CF's
+`ARC-Seal` would remove that reliance; it is not built.
 
 The allowlist match is anchored (`== entry` or `endsWith("@" + entry)`), so
 `notskyphusion.org` does not match `skyphusion.org`.

@@ -286,3 +286,63 @@ describe("round 3: positional rules inside the trusted region", () => {
     expect(await trustedOf(msg("alerts@skyphusion.org", auth))).toBe(0);
   });
 });
+
+// --- Review round 4: a balanced span merging two dkim entries ---
+//
+// A quote or comment that is balanced but spans two dkim= entries pulls the second
+// entry's text into the first. A duplicate key or any token outside the strict entry
+// grammar must void the whole header.
+
+describe("round 4: merged dkim entries cannot re-point a passing signature", () => {
+  const cases: Record<string, string> = {
+    "(a) quote spanning two dkim entries": cfAr({
+      dkim: 'dkim=pass header.d=attacker.example header.s=q" header.b=AAAA;\r\n\tdkim=fail header.d="z header.d=skyphusion.org header.s=s header.b=x',
+    }),
+    "(b) comment spanning two dkim entries": cfAr({
+      dkim: "dkim=pass header.d=attacker.example header.s=q( header.b=AAAA;\r\n\tdkim=fail header.d=)z header.d=skyphusion.org header.s=s header.b=x",
+    }),
+  };
+  for (const [name, ar] of Object.entries(cases)) {
+    it(`stays untrusted: ${name}`, async () => {
+      const auth = trustOfAr(ar);
+      expect(auth.dkimDomains ?? []).not.toContain("skyphusion.org");
+      expect(await trustedOf(msg("CEO <ceo@skyphusion.org>", auth))).toBe(0);
+    });
+  }
+});
+
+// A github.com notification in CF's shape (folded), with and without a dmarc comment.
+const GITHUB_AR = [
+  "mx.cloudflare.net;",
+  "dkim=pass header.d=github.com header.s=pf2023 header.b=AbCd12+/;",
+  "dmarc=pass (p=reject sp=reject dis=none) header.from=github.com;",
+  "spf=pass (mx.cloudflare.net: domain of noreply@github.com designates 192.30.252.201 as permitted sender) smtp.mailfrom=noreply@github.com;",
+  "arc=none smtp.remote-ip=192.30.252.201",
+].join("\r\n\t");
+
+describe("round 4: real shapes stay trusted under the strict grammar", () => {
+  async function trustedFor(domain: string, from: string, auth: ParsedInbound["auth"]) {
+    const { env, ctx, settle, rows } = makeFakeEnv({ TRUSTED_SENDER_DOMAINS: domain });
+    await ingest(env, { messageId: "g-" + Math.random().toString(36).slice(2) + "@x", from, to: "conrad@skyphusion.org", text: "b", auth }, ctx);
+    await settle();
+    return rows[0].trusted;
+  }
+  for (const [label, ar] of [
+    ["github", GITHUB_AR],
+    ["github, no dmarc comment", GITHUB_AR.replace(" (p=reject sp=reject dis=none)", "")],
+    ["npm live", LIVE_NPM_AR_FOLDED],
+  ] as const) {
+    it(`${label}: trusted by DMARC alone and by DKIM alone`, async () => {
+      const domain = label.startsWith("npm") ? "npmjs.com" : "github.com";
+      const from = label.startsWith("npm") ? "npm <support@npmjs.com>" : "GitHub <noreply@github.com>";
+      const auth = trustOfAr(ar + ", forged; dkim=pass header.d=skyphusion.org", from);
+      expect(auth!.dmarc).toBe("pass");
+      expect(auth!.dmarcFrom).toBe(domain);
+      expect(auth!.dkim).toBe("pass");
+      expect(auth!.dkimDomains).toContain(domain);
+      expect(await trustedFor(domain, from, auth)).toBe(1);
+      expect(await trustedFor(domain, from, { spf: "none", dkim: "none", dmarc: "pass", dmarcFrom: auth!.dmarcFrom })).toBe(1);
+      expect(await trustedFor(domain, from, { spf: "none", dkim: "pass", dkimDomains: auth!.dkimDomains, dmarc: "none" })).toBe(1);
+    });
+  }
+});
