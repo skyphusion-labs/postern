@@ -175,17 +175,48 @@ async function list(url: URL, env: Env): Promise<Response> {
   return json({ ok: true, users: page.users, nextCursor: page.nextCursor });
 }
 
-async function create(request: Request, env: Env): Promise<Response> {
-  const body = await readBody(request);
+/** A validated new user, shared by the admin create and the first-run setup. */
+export interface NewUser {
+  username: string;
+  fromAddr: string;
+  displayName: string | null;
+  password: string | undefined;
+}
+
+function parseNewUser(env: Env, body: Record<string, unknown>, requirePassword: boolean): NewUser {
   const rawUser = optString(body, "username");
   if (!rawUser || !rawUser.trim()) throw new AdminError(400, "E_FIELD_MISSING", "username is required", "username");
   const username = normalizeUsername(rawUser);
   const problem = usernameProblem(username);
   if (problem) throw new AdminError(400, "E_VALIDATION_ERROR", problem, "username");
+  const chosen = optString(body, "password");
+  if (requirePassword && !chosen) throw new AdminError(400, "E_FIELD_MISSING", "password is required", "password");
   const fromAddr = validFrom(env, optString(body, "from")?.trim() || username);
   const name = displayName(body) ?? null;
-  const chosen = optString(body, "password");
   if (chosen !== undefined) policy(chosen, username);
+  return { username, fromAddr, displayName: name, password: chosen };
+}
+
+/**
+ * The contract 1.10.1 checks for a new user, for a caller outside this module (the
+ * first-run setup). Returns the user, or the refusal as a Response.
+ */
+export function validateNewUser(
+  env: Env,
+  body: Record<string, unknown>,
+  requirePassword: boolean,
+): { user: NewUser } | { refusal: Response } {
+  try {
+    return { user: parseNewUser(env, body, requirePassword) };
+  } catch (err) {
+    if (err instanceof AdminError) return { refusal: fail(err) };
+    throw err;
+  }
+}
+
+async function create(request: Request, env: Env): Promise<Response> {
+  const body = await readBody(request);
+  const { username, fromAddr, displayName: name, password: chosen } = parseNewUser(env, body, false);
   const password = chosen ?? generateSecret();
 
   const created = await createUser(env, { username, fromAddr, displayName: name }, await hashSecret(password), now());

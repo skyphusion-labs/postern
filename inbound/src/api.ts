@@ -30,6 +30,7 @@ import {
 import { serveWebmail } from "./webmail";
 import { authenticate } from "./smtpcreds";
 import { handleCredentialDelete, handleCredentialUpsert, handleUserAdmin } from "./useradmin";
+import { handleSetup } from "./setup";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
@@ -41,7 +42,7 @@ import {
   resolveSession,
   verifyCsrf,
   sessionCookieValue,
-  webmailAuthBackend,
+  webmailAuthSetting,
 } from "./session";
 import { roleMap, rolesForViewer } from "./roles";
 import { readBodyCapped, readBytesCapped, PayloadTooLargeError } from "./body";
@@ -177,6 +178,17 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return preGateErrorResponse(err, "session", "session unavailable");
     }
     if (sres) return sres;
+  }
+
+  // First-run setup (#791, contract 1.10.7): creates the first user of an empty deploy
+  // and signs them in. Pre-gate like /api/session: it carries its own auth (the
+  // POSTERN_SETUP_TOKEN secret) and answers 404 unless armed.
+  if (path === "/api/setup") {
+    try {
+      return await handleSetup(request, env);
+    } catch (err) {
+      return preGateErrorResponse(err, "setup", "setup unavailable");
+    }
   }
 
   // The out-of-Worker inbound driver (CONTRACT section 2, #22/#29): POST /ingest
@@ -2019,7 +2031,10 @@ interface AuthResolution extends TokenResolution {
 // only when no Authorization header is present (Bearer wins, contract 1.8). Gated on
 // the native backend so flipping WEBMAIL_AUTH_BACKEND to off is an instant kill-switch.
 async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolution | null> {
-  if (webmailAuthBackend(env) !== "native") return null;
+  // An explicit `off` ignores the cookie; otherwise a valid session row is itself proof
+  // a user existed, and resolveSession re-checks that user (contract 1.10.6), so the
+  // cookie path needs no "any user?" read.
+  if (webmailAuthSetting(env) === "off") return null;
   const rawId = sessionCookieValue(request);
   if (!rawId) return null;
   const session = await resolveSession(env, rawId);

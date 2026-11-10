@@ -226,6 +226,37 @@ export async function createUser(
   return (res.meta?.changes ?? 0) > 0;
 }
 
+/**
+ * Does ANY account row exist (enabled or not)? The default-backend rule and the
+ * first-run gate both key on this (contract 1.10.6/1.10.7): a disabled user is still
+ * a row, so disabling everyone never re-opens setup. One indexed read.
+ */
+export async function anyUser(env: Env): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT 1 AS one FROM smtp_credentials LIMIT 1").first<{ one: number }>();
+  return row !== null;
+}
+
+/**
+ * Create the FIRST user, atomically: the insert happens only while the table is still
+ * empty, so two racing first-run requests produce exactly one user (contract 1.10.7).
+ * Returns false when any row already exists.
+ */
+export async function createFirstUser(
+  env: Env,
+  user: { username: string; fromAddr: string; displayName: string | null },
+  secretHash: string,
+  now: string,
+): Promise<boolean> {
+  const res = await env.DB.prepare(
+    `INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, display_name, created_at, updated_at)
+     SELECT ?, ?, ?, 0, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM smtp_credentials)`,
+  )
+    .bind(normalizeUsername(user.username), user.fromAddr, secretHash, user.displayName, now, now)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
 /** Change any of disabled / displayName / from. Returns the updated user, or null. */
 export async function updateUser(
   env: Env,

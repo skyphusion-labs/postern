@@ -224,7 +224,7 @@ Concretely, for a read-capable entry in `POSTERN_SEND_IDENTITIES`:
 | Credential | Reads | Sends as | May change |
 |---|---|---|---|
 | agent (registry token, `scopes` includes `read`) | **every address in the deployment** | its own bound address | **only its own mail** |
-| human with a cookie SESSION (`WEBMAIL_AUTH_BACKEND = "native"`) | its own address, plus any role queue it is on | its own address | only its own mail |
+| human with a cookie SESSION (native sign-in: on once any user exists, unless `WEBMAIL_AUTH_BACKEND = "off"`) | its own address, plus any role queue it is on | its own address | only its own mail |
 | human in DEFAULT BYO-token webmail, pasting a read-capable registry token | **every address in the deployment**, because the worker sees a registry Bearer and not a person | that token's bound address | only that address's mail |
 | static `POSTERN_API_TOKEN` / `_READ` | every address (unchanged, always did) | un-bound | per slot |
 
@@ -232,8 +232,9 @@ One boundary did NOT move, and one is narrower than it looks. Both are deliberat
 
 - **The widening follows the CREDENTIAL, not the person.** A cookie SESSION is scoped
   exactly as it was, to that person plus any role queue they are on. But sessions exist
-  only under `WEBMAIL_AUTH_BACKEND = "native"`, and **unset is the default**: default
-  webmail is BYO-token and sends an `Authorization: Bearer`. So a human who pastes a
+  only when native sign-in is on (unset `WEBMAIL_AUTH_BACKEND` turns it on once any user
+  exists; `"off"` turns it off), and BYO-token webmail sends an `Authorization: Bearer`
+  either way. So a human who pastes a
   read-capable registry token into webmail reads the estate, because the worker sees a
   registry Bearer and has no way to know a browser is on the other end. Being in a browser
   is not what scopes you; the credential is.

@@ -424,8 +424,9 @@ human-vs-agent two-tier default.
 
 **Webmail sessions (the third door).** Webmail can authenticate humans with a
 cookie session minted from the worker-native `smtp_credentials` store
-(`POST /api/session`; `WEBMAIL_AUTH_BACKEND` unset = OFF, `native` = explicit
-operator opt-in). Sessions carry the caps `read`/`send`/`delete`, never admin; a
+(`POST /api/session`; `WEBMAIL_AUTH_BACKEND` explicit `off` always wins, `native` is
+on, and unset means on once any user exists or first-run setup is armed, #791; see
+webmail-v2-contracts 1.10.6). Sessions carry the caps `read`/`send`/`delete`, never admin; a
 Bearer token always wins over a cookie on the same request; state-changing
 session requests are CSRF-gated. Since #409 the mint carries the same
 brute-force posture the two doors above do (`relay/throttle.go`,
