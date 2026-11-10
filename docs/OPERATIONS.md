@@ -127,7 +127,7 @@ Then finish the store and the worker:
   tokens), then `npm run deploy`.
 - **Vectorize (optional):** if you use semantic search, rebuild the index with
   `POST /api/admin/reindex` (admin-scoped token).
-- **Verify:** run `inbound/smoke.mjs` (DEPLOY.md section 4). A green run means the
+- **Verify:** run `inbound/smoke.mjs` (DEPLOY.md section 2). A green run means the
   store reads, sends, threads, and searches again.
 
 This drill was validated locally: a scoped `--no-schema` export loaded into a
@@ -212,7 +212,7 @@ closing a projection window. A green walk with residual `notCurrent` is not done
 - **Email Routing disabled or misrouted.** Inbound delivery just stops; the send
   probe stays green while no new mail arrives. Watch the inbound arrival rate and
   keep an inbound canary (4.3). Confirm the routing rule still points every
-  address at the worker (DEPLOY.md section 3).
+  address at the worker (the installer does this; by hand, DEPLOY.md Appendix A3).
 - **Quota exhaustion.** D1 storage/rows, R2 storage, and Workers request limits
   are all finite; outbound send needs the Workers Paid plan. Watch
   `wrangler d1 info` and the dashboard analytics; a store that stops accepting

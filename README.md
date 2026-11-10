@@ -65,7 +65,7 @@ POSTERN_API_TOKEN=a5fb2da1a13ab468adc1d147272126a4a977f3db44ace5c961ce87d26e0055
 ```
 
 Run your own in about 10 minutes: follow [DEPLOY.md](DEPLOY.md). No Cloudflare account
-yet? DEPLOY.md section 0 runs the whole mailbox locally under `wrangler dev` first.
+yet? DEPLOY.md section 6 runs the whole mailbox locally under `wrangler dev` first.
 
 Six surfaces in one repo (one store, one API):
 

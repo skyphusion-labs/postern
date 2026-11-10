@@ -60,6 +60,14 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
   });
 }
 
+// An unset or "off" WEBMAIL_AUTH_BACKEND shows the "not enabled" notice first (#798);
+// the BYO-token gate is one click away from it.
+async function openTokenGate(page: Page) {
+  await expect(page.locator("#disabled")).toBeVisible();
+  await page.locator("#toTokenFromOff").click();
+  await expect(page.locator("#gate")).toBeVisible();
+}
+
 async function installMocks(page: Page, mode: "token" | "session") {
   await page.route("https://postern.test/**", async (route) => {
     const req = route.request();
@@ -176,6 +184,7 @@ test.describe("webmail critical journeys (#355)", () => {
     // work, so a new user should not have to retype the URL they are already on.
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
 
     await expect(page.locator("#gate")).toBeVisible();
     await expect(page.locator("#origin")).toHaveValue("https://postern.test");
@@ -189,6 +198,7 @@ test.describe("webmail critical journeys (#355)", () => {
   test("BYO token: connect, list, open sandboxed HTML body", async ({ page }) => {
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
 
     await expect(page.locator("#gate")).toBeVisible();
     await page.locator("#origin").fill("https://postern.test");
@@ -241,6 +251,7 @@ test.describe("webmail critical journeys (#355)", () => {
     });
 
     await page.goto("https://postern.test/webmail");
+    if (mode === "token") await openTokenGate(page);
     if (mode === "token") {
       await page.locator("#origin").fill("https://postern.test");
       await page.locator("#token").fill("read-token");
@@ -272,6 +283,7 @@ test.describe("webmail critical journeys (#355)", () => {
   test("compose opens when send token is present", async ({ page }) => {
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#origin").fill("https://postern.test");
     await page.locator("#token").fill("read-token");
     await page.locator("#sendToken").fill("send-token");
@@ -401,6 +413,7 @@ test.describe("webmail critical journeys (#355)", () => {
       fulfillJson(route, { ...SAMPLE_MESSAGE, message: { ...SAMPLE_MESSAGE.message, bodyHtml: null } }));
     await page.emulateMedia({ colorScheme: "dark" });
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#token").fill("read-token");
     await page.locator("#connect").click();
     await page.getByText("Hello from Alice").click();
@@ -433,6 +446,7 @@ test.describe("webmail critical journeys (#355)", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await installMocks(page, "token");
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#token").fill("read-token");
     await page.locator("#connect").click();
 
@@ -468,6 +482,7 @@ test.describe("webmail critical journeys (#355)", () => {
     await installMocks(page, "token");
     await page.route("https://postern.test/api/search**", (route) => fulfillJson(route, { ok: true, items: [], cursor: null }));
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#token").fill("read-token");
     await page.locator("#sendToken").fill("send-token");
     await page.locator("#connect").click();
@@ -508,6 +523,7 @@ test.describe("webmail critical journeys (#355)", () => {
     await page.route("https://postern.test/api/messages?**", (route) =>
       fulfillJson(route, { ok: true, items: [SAMPLE_LIST.items[0], second], cursor: null }));
     await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
     await page.locator("#token").fill("read-token");
     await page.locator("#connect").click();
     await expect(page.locator(".row-item")).toHaveCount(2);
@@ -560,5 +576,150 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#search")).toBeFocused();
     await page.keyboard.type("jk");
     await expect(page.locator("#search")).toHaveValue("jk");
+  });
+
+  // First run, mocked to the #793 contract (docs/design/webmail-v2-contracts.md 1.10.6 and 1.10.7):
+  // GET /api/session 401 carries setupRequired; POST /api/setup answers 201 with a session.
+  test("first run: setupRequired shows setup; client checks, a wrong token, then 201 signs in (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
+      ? fulfillJson(route, { ok: false, authBackend: "native", setupRequired: true }, 401)
+      : route.fallback());
+    const posts: Array<Record<string, unknown>> = [];
+    await page.route("https://postern.test/api/setup", async (route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      posts.push(body);
+      if (body.setupToken !== "right-token-right-token-right-token") {
+        await fulfillJson(route, { ok: false, error: "E_AUTH_FAILED" }, 401);
+        return;
+      }
+      await fulfillJson(route, {
+        ok: true, setup: true,
+        user: { username: "alice@example.com", from: "alice@example.com", displayName: "Alice", disabled: false },
+        identity: { from: "alice@example.com", displayName: "Alice" },
+        capabilities: ["read", "send", "delete", "organize"],
+        expiresAt: "2026-11-11T00:00:00Z", csrfToken: "setup-csrf",
+      }, 201);
+    });
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#setup")).toBeVisible();
+    await expect(page.locator("#signin")).toBeHidden();
+    await expect(page.locator("#gate")).toBeHidden();
+    await expect(page.locator("#suToken")).toBeFocused();
+
+    await page.locator("#suToken").fill("wrong-token");
+    await page.locator("#suUser").fill("Alice@Example.com");
+    await page.locator("#suName").fill("Alice");
+    await page.locator("#suPass").fill("short");
+    await page.locator("#suPass2").fill("short");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#setupErr")).toHaveText("The password must be at least 12 characters.");
+    await page.locator("#suPass").fill("a long enough passphrase");
+    await page.locator("#suPass2").fill("a long enough passphrase!");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#setupErr")).toHaveText("The two passwords do not match.");
+    expect(posts).toHaveLength(0); // obvious slips never reach the server
+
+    await page.locator("#suPass2").fill("a long enough passphrase");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#setupErr")).toHaveText("That setup token is not correct.");
+    await expect(page.locator("#suToken")).toBeFocused();
+
+    await page.locator("#suToken").fill("right-token-right-token-right-token");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#app")).toBeVisible();
+    await expect(page.locator("#identity")).toHaveText("Sending as alice@example.com");
+    expect(posts).toHaveLength(2);
+    // Exactly the contract fields; the username is normalized; no "from" (it defaults server-side).
+    expect(posts[1]).toEqual({
+      setupToken: "right-token-right-token-right-token", username: "alice@example.com",
+      password: "a long enough passphrase", displayName: "Alice",
+    });
+    // The secret fields are cleared once used.
+    await expect(page.locator("#suToken")).toHaveValue("");
+    await expect(page.locator("#suPass")).toHaveValue("");
+  });
+
+  test("first run already completed (409) falls back to sign-in with a note (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
+      ? fulfillJson(route, { ok: false, authBackend: "native", setupRequired: true }, 401)
+      : route.fallback());
+    await page.route("https://postern.test/api/setup", (route) =>
+      fulfillJson(route, { ok: false, error: "E_SETUP_COMPLETE" }, 409));
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#suToken").fill("any-token");
+    await page.locator("#suUser").fill("bob@example.com");
+    await page.locator("#suPass").fill("another long passphrase");
+    await page.locator("#suPass2").fill("another long passphrase");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#signin")).toBeVisible();
+    await expect(page.locator("#signinNote")).toHaveText("This mailbox is already set up. Sign in with your account.");
+    await expect(page.locator("#signinErr")).toHaveText("");
+  });
+
+  test("sign-in: throttled answer names the wait; show password toggles (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
+      ? fulfillJson(route, { ok: false, authBackend: "native", setupRequired: false }, 401)
+      : fulfillJson(route, { ok: false, error: "E_RATE_LIMITED", retryAfter: 120 }, 429));
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#signin")).toBeVisible();
+    await expect(page.locator("#setup")).toBeHidden();
+    await page.locator("#siUser").fill("alice@example.com");
+    await page.locator("#siPass").fill("whatever-it-is");
+    const toggle = page.locator('.pw-toggle[data-toggle-for="siPass"]');
+    await toggle.click();
+    await expect(page.locator("#siPass")).toHaveAttribute("type", "text");
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await toggle.click();
+    await expect(page.locator("#siPass")).toHaveAttribute("type", "password");
+    await page.locator("#siSubmit").click();
+    await expect(page.locator("#signinErr")).toHaveText("Too many attempts. Try again in 2 minutes.");
+    await expect(page.locator("#siSubmit")).toHaveText("Sign in");
+    await expect(page.locator("#siSubmit")).toBeEnabled();
+  });
+
+  test("sign-in off: a plain not-enabled notice, no form; the token gate is one click away (#798)", async ({ page }) => {
+    await installMocks(page, "token");  // GET /api/session -> 401 { authBackend: "off" }
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#disabled")).toBeVisible();
+    await expect(page.locator("#disabledTitle")).toHaveText("Webmail sign-in is not enabled on this server");
+    await expect(page.locator("#signin")).toBeHidden();
+    await expect(page.locator("#setup")).toBeHidden();
+    await expect(page.locator("#gate")).toBeHidden();
+    // Nothing to type: no visible text or password field on the notice.
+    await expect(page.locator("input:visible")).toHaveCount(0);
+    await page.locator("#toTokenFromOff").click();
+    await expect(page.locator("#gate")).toBeVisible();
+  });
+
+  test("first run, backend unset: the not-enabled page, no sign-in form, no setup form (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    // An unset WEBMAIL_AUTH_BACKEND resolves to off (lead ruling, #793 amended). The server never
+    // answers setupRequired:true unless the backend is explicitly native, so neither does this mock.
+    await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
+      ? fulfillJson(route, { ok: false, authBackend: "off", setupRequired: false }, 401)
+      : route.fallback());
+    let setupCalls = 0;
+    await page.route("https://postern.test/api/setup", (route) => { setupCalls++; return fulfillJson(route, { ok: false, error: "E_NOT_FOUND" }, 404); });
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#disabled")).toBeVisible();
+    await expect(page.locator("#disabledTitle")).toHaveText("Webmail sign-in is not enabled on this server");
+    // No sign-in form and no setup form: neither card is shown, and none of their fields are reachable.
+    await expect(page.locator("#signin")).toBeHidden();
+    await expect(page.locator("#setup")).toBeHidden();
+    for (const id of ["#siUser", "#siPass", "#suToken", "#suUser", "#suPass"]) await expect(page.locator(id)).toBeHidden();
+    await expect(page.locator("input[type=password]:visible")).toHaveCount(0);
+    expect(setupCalls).toBe(0);
+  });
+
+  test("discovery unreachable is not reported as off: token gate with a reachability note (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.abort("connectionrefused"));
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#gate")).toBeVisible();
+    await expect(page.locator("#disabled")).toBeHidden();
+    await expect(page.locator("#gateErr")).toHaveText("Could not reach the server to check sign-in. Try again, or connect with an API token.");
   });
 });
