@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import shutil
 import socket
 import ssl
 import tempfile
@@ -149,6 +150,7 @@ class LDAPDirectoryTLSWireTest(unittest.TestCase):
         if not HAVE_DEPS:
             self.fail("ldap3/cryptography missing under CI: install the [ldap,tls] extras")
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.ca_key = _key()
         self.ca = _cert(self.ca_key, "postern wire test CA", ca=True)
         self.ca_path = os.path.join(self.tmp, "ca.pem")
