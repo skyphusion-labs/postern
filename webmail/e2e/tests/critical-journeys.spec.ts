@@ -501,4 +501,64 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#cmpCc")).toBeFocused();
     await expect(page.locator("#cmpSend")).toBeVisible();
   });
+
+  test("keyboard and landmarks: skip link, arrow keys, j/k, focus ring, one main (#797)", async ({ page }) => {
+    await installMocks(page, "token");
+    const second = { ...SAMPLE_LIST.items[0], messageId: "msg-2@example.com", subject: "Second note", from: "bob@example.com", seen: true };
+    await page.route("https://postern.test/api/messages?**", (route) =>
+      fulfillJson(route, { ok: true, items: [SAMPLE_LIST.items[0], second], cursor: null }));
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+    await expect(page.locator(".row-item")).toHaveCount(2);
+
+    // Landmarks: exactly one banner, one nav, one main, and a labelled list region.
+    await expect(page.getByRole("banner")).toHaveCount(1);
+    await expect(page.getByRole("navigation", { name: "Folders" })).toHaveCount(1);
+    await expect(page.getByRole("main")).toHaveCount(1);
+    await expect(page.getByRole("region", { name: "Message list" })).toHaveCount(1);
+    // The active folder is marked for assistive tech.
+    await expect(page.locator('#folders button[data-folder="inbox"]')).toHaveAttribute("aria-current", "page");
+    // The load is announced.
+    await expect(page.locator("#announce")).toHaveText("2 messages in Inbox.");
+
+    // First Tab lands on the skip link, which takes focus to the list.
+    // After Connect, focus is moved off the hidden gate into the list, not stranded.
+    await expect(page.locator("#list")).toBeFocused();
+    // On a fresh load of a restored mailbox, the first Tab reaches the skip link.
+    await page.reload();
+    await expect(page.locator(".row-item")).toHaveCount(2);
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#skipLink")).toBeFocused();
+    await page.keyboard.press("Enter");
+    const rows = page.locator(".row-item");
+    await expect(rows.nth(0)).toBeFocused();
+    // A keyboard focus ring is drawn (2px solid), not suppressed.
+    const ring = await rows.nth(0).evaluate((n) => { const c = getComputedStyle(n); return c.outlineStyle + " " + c.outlineWidth; });
+    expect(ring).toBe("solid 2px");
+
+    await page.keyboard.press("ArrowDown");
+    await expect(rows.nth(1)).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(rows.nth(0)).toBeFocused();
+
+    // j opens the next message and marks it current; k goes back.
+    await page.keyboard.press("j");
+    await expect(rows.nth(0)).toHaveAttribute("aria-current", "true");
+    await expect(page.locator("#reading h2")).toHaveText("Hello from Alice");
+    await page.keyboard.press("j");
+    await expect(rows.nth(1)).toHaveAttribute("aria-current", "true");
+    await expect(rows.nth(0)).not.toHaveAttribute("aria-current", "true");
+    await page.keyboard.press("k");
+    await expect(rows.nth(0)).toHaveAttribute("aria-current", "true");
+
+    // The body frame has an accessible name.
+    await expect(page.locator("#reading iframe")).toHaveAttribute("title", "Message body");
+
+    // "/" goes to search; typing there is not hijacked by the j/k shortcuts.
+    await page.keyboard.press("/");
+    await expect(page.locator("#search")).toBeFocused();
+    await page.keyboard.type("jk");
+    await expect(page.locator("#search")).toHaveValue("jk");
+  });
 });
