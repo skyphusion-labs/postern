@@ -11,6 +11,17 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+### Fixed
+
+- **Write scope binds to the bound identity.** An identity's write scope
+  (flags, move, seen) now binds to its bound address whatever its other
+  caps; previously a token without `read` could organize outside its own
+  address. Applies to runtime agent identities and
+  `POSTERN_SEND_IDENTITIES` entries alike. Static tokens and webmail
+  sessions are unchanged.
+
 ## v1.9.0
 
 MINOR. Native webmail sign-in and human user management, a one-command
