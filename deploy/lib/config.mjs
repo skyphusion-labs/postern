@@ -56,7 +56,6 @@ export function installerVars(opts) {
     DEFAULT_FROM: `noreply@${opts.domain}`,
     DEFAULT_FROM_NAME: opts.fromName,
     ALLOWED_FROM_DOMAIN: opts.domain,
-    WEBMAIL_AUTH_BACKEND: "native",
   };
 }
 

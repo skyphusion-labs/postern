@@ -184,7 +184,7 @@ describe("install", () => {
     down = false;
     await install(c.deps, c.opts);
     assert.ok(c.m.admins["admin@acme-mail.test"]);
-    const posts = c.m.requests.filter((r) => r.path.endsWith("/api/admin/smtp-credentials"));
+    const posts = c.m.requests.filter((r) => r.path.endsWith("/api/admin/users"));
     assert.equal(posts.length, 1);
   });
 
@@ -453,35 +453,109 @@ describe("lead rulings: placeholder defaults, prefix, status, AUTH seam", () => 
     assert.equal(wranglerWrites(c.m).length, wr);
   });
 
-  test("the admin call sends `password` (and the `secret` alias); 409 E_CONFLICT counts as done", async () => {
+  test("first admin goes through POST /api/admin/users (#810): password only, no smtp-credentials", async () => {
     const c = setup();
-    const real = c.deps.http;
-    let seen;
-    c.deps.http = async (url, init) => {
-      if (url.endsWith("/api/admin/smtp-credentials")) {
-        seen = JSON.parse(init.body);
-        return { ok: false, status: 409, json: async () => ({ ok: false, error: "E_CONFLICT" }) };
-      }
-      return real(url, init);
-    };
     await install(c.deps, c.opts);
-    assert.ok(seen.password && seen.password === seen.secret);
+    const calls = c.m.requests.filter((r) => r.path.startsWith("https://") && r.path.includes("/api/admin/"));
+    assert.deepEqual(calls.map((r) => r.path), ["https://mail.acme-mail.test/api/admin/users"]);
+    const body = JSON.parse(calls[0].body);
+    assert.deepEqual(Object.keys(body).sort(), ["from", "password", "username"]);
+  });
+
+  test("409 E_CONFLICT is done: recorded, reported as kept, the password is not claimed as changed", async () => {
+    const c = setup();
+    c.m.admins["admin@acme-mail.test"] = "set-by-someone-else";
+    await install(c.deps, c.opts);
+    assert.equal(c.m.admins["admin@acme-mail.test"], "set-by-someone-else", "the installer overwrote an existing user");
+    assert.match(c.out.join("\n"), /- kept      first admin admin@acme-mail\.test already exists; its password was not changed/);
     const st = JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.json"), "utf8"));
     assert.equal(st.admin, "admin@acme-mail.test");
   });
 
-  test("a password the server minted replaces ours in the credentials file", async () => {
+  test("a run that dies after the 201 resumes to 409 and the stored password is the real one", async () => {
     const c = setup();
     const real = c.deps.http;
     c.deps.http = async (url, init) => {
-      if (url.endsWith("/api/admin/smtp-credentials")) {
-        return { ok: true, status: 201, json: async () => ({ ok: true, username: "admin@acme-mail.test", password: "server-minted-pw-0123456789" }) };
-      }
-      return real(url, init);
+      const r = await real(url, init);
+      if (url.endsWith("/api/admin/users")) throw new Error("socket hang up");
+      return r;
     };
+    await assert.rejects(install(c.deps, c.opts), /socket hang up/);
+    c.deps.http = real;
     await install(c.deps, c.opts);
     const body = readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.credentials.env"), "utf8");
-    assert.match(body, /^POSTERN_ADMIN_PASSWORD=server-minted-pw-0123456789$/m);
-    assert.ok(!c.out.join("\n").includes("server-minted-pw"), "the minted password was printed");
+    assert.equal(/^POSTERN_ADMIN_PASSWORD=(.*)$/m.exec(body)[1], c.m.admins["admin@acme-mail.test"]);
+  });
+
+  test("a Worker without the user API stops with a named reason", async () => {
+    const c = setup();
+    const real = c.deps.http;
+    c.deps.http = async (url, init) => (url.endsWith("/api/admin/users") ? { ok: false, status: 404, json: async () => ({ ok: false }) } : real(url, init));
+    await assert.rejects(install(c.deps, c.opts), /has no user API \(POST \/api\/admin\/users answered 404\)/);
+  });
+
+  test("a host this machine cannot resolve yet is named as a DNS cache, not a dead Worker", async () => {
+    const c = setup();
+    const real = c.deps.http;
+    c.deps.http = async (url, init) => {
+      if (url.endsWith("/health")) { const e = new TypeError("fetch failed"); e.cause = { code: "ENOTFOUND" }; throw e; }
+      return real(url, init);
+    };
+    await assert.rejects(install(c.deps, c.opts), /cannot resolve mail\.acme-mail\.test yet \(ENOTFOUND\).*negative TTL/s);
+  });
+});
+
+describe("D-AUTH-3: unset WEBMAIL_AUTH_BACKEND means OFF", () => {
+  test("a new install writes WEBMAIL_AUTH_BACKEND=native explicitly", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    assert.equal(c.m.scripts.postern.vars.WEBMAIL_AUTH_BACKEND, "native");
+  });
+
+  test("upgrade over a Worker whose config has no WEBMAIL_AUTH_BACKEND leaves it absent", async () => {
+    const c = setup();
+    c.m.scripts.postern = { versions: ["v0"], secrets: new Map([["POSTERN_API_TOKEN", "old"]]), live: "v0", vars: { ALLOWED_FROM_DOMAIN: "acme-mail.test" } };
+    c.m.d1.push({ uuid: "d1-old", name: "postern" });
+    c.m.migrations["d1-old"] = [];
+    c.opts.adopt = true;
+    await install(c.deps, c.opts).catch(() => {}); // the admin step may stop; vars are what this asserts
+    assert.ok(!("WEBMAIL_AUTH_BACKEND" in c.m.scripts.postern.vars), "an adopted install gained native sign-in");
+    writeFileSync(join(c.repoRoot, "inbound", "src", "index.ts"), "export default { v: 9 };\n");
+    await install(c.deps, c.opts, "upgrade").catch(() => {});
+    assert.ok(!("WEBMAIL_AUTH_BACKEND" in c.m.scripts.postern.vars), "upgrade added WEBMAIL_AUTH_BACKEND");
+  });
+
+  test("an operator's explicit value is kept across adopt and upgrade", async () => {
+    const c = setup();
+    c.m.scripts.postern = { versions: ["v0"], secrets: new Map([["POSTERN_API_TOKEN", "old"]]), live: "v0", vars: { WEBMAIL_AUTH_BACKEND: "off" } };
+    c.opts.adopt = true;
+    await install(c.deps, c.opts).catch(() => {});
+    assert.equal(c.m.scripts.postern.vars.WEBMAIL_AUTH_BACKEND, "off");
+  });
+
+  test("upgrade of an install made by this installer keeps native, and never re-adds a removed one", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    const p = join(c.opts.stateDir, "postern.acme-mail.test.json");
+    const st = JSON.parse(readFileSync(p, "utf8"));
+    delete st.vars.WEBMAIL_AUTH_BACKEND; // the operator turned it back to default (off)
+    writeFileSync(p, JSON.stringify(st));
+    writeFileSync(join(c.repoRoot, "inbound", "src", "index.ts"), "export default { v: 8 };\n");
+    await install(c.deps, c.opts, "upgrade");
+    assert.ok(!("WEBMAIL_AUTH_BACKEND" in c.m.scripts.postern.vars));
+  });
+});
+
+describe("upgrade record survives a failed upgrade", () => {
+  test("the D1 bookmark is saved before the migration, even when the run stops later", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    writeFileSync(join(c.repoRoot, "inbound", "migrations", "0099_new_index.sql"), "CREATE INDEX IF NOT EXISTS idx_x ON messages(id);\n");
+    c.m.faults.push({ method: "POST", re: /\/email\/sending\/subdomains$/, times: 1 });
+    c.m.sendingSubs.length = 0; // force the Sending step to write, so the fault fires after the migration
+    await assert.rejects(install(c.deps, c.opts, "upgrade"));
+    const st = JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.json"), "utf8"));
+    assert.ok(st.history.at(-1)?.d1Bookmark, "a failed upgrade lost its D1 bookmark");
+    assert.equal(st.history.at(-1).complete, false);
   });
 });

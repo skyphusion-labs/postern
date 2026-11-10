@@ -24,7 +24,7 @@ const P = {
   zone: "Zone: Zone Read",
   dns: "Zone: DNS Edit",
   routing: "Zone: Email Routing Rules Edit",
-  sending: "Zone: Email Sending Edit",
+  sending: "Account: Email Sending Edit",
   workers: "Account: Workers Scripts Edit",
   d1: "Account: D1 Edit",
   r2: "Account: Workers R2 Storage Edit",
@@ -294,6 +294,23 @@ async function preflight(ctx) {
 // ---------------------------------------------------------------------------
 // APPLY steps
 
+// D-AUTH-3: an unset WEBMAIL_AUTH_BACKEND means OFF. A NEW install turns native
+// sign-in on explicitly (that is what the first admin is for). An existing Worker
+// keeps exactly what it has: upgrade never adds the var, and --adopt carries the
+// live value over (or its absence). The decision is stored once, in state.vars.
+async function decideAuthBackend(ctx, pf) {
+  const { state, opts } = ctx;
+  if (state.authBackendDecided) return;
+  if (!pf.script) {
+    if (state.vars.WEBMAIL_AUTH_BACKEND === undefined) state.vars.WEBMAIL_AUTH_BACKEND = "native";
+  } else if (state.vars.WEBMAIL_AUTH_BACKEND === undefined && !(opts.vars || {}).WEBMAIL_AUTH_BACKEND) {
+    const live = (pf.script.result?.bindings || []).find((b) => b.name === "WEBMAIL_AUTH_BACKEND" && b.type === "plain_text");
+    if (live) state.vars.WEBMAIL_AUTH_BACKEND = live.text;
+  }
+  state.authBackendDecided = true;
+  saveState(opts, state);
+}
+
 async function ensureD1(ctx, pf) {
   const { cf, opts, state, rep } = ctx;
   if (pf.db) {
@@ -370,11 +387,24 @@ async function ensureMigrations(ctx, pf) {
 
   if (applied.length && ctx.mode === "upgrade") {
     const bm = await ctx.cf.call("record a D1 Time Travel bookmark", P.d1, "GET", `/accounts/${pf.accountId}/d1/database/${state.d1Id}/time_travel/bookmark`);
-    ctx.upgradeRecord.d1Bookmark = bm.result?.bookmark || null;
+    // Saved BEFORE the migration runs: a later failure in this run must not lose the
+    // way back (measured: an upgrade that stopped at the health check lost it).
+    recordUpgrade(ctx, { d1Bookmark: bm.result?.bookmark || null });
   }
   const r = await ctx.wrangler(["d1", "migrations", "apply", "DB", "--remote", "-c", ctx.paths.config]);
   if (r.code !== 0) throw new Error(`applying D1 migrations failed:\n${tail(r)}`);
   rep.created(`D1 migrations ${pending.join(", ")}`);
+}
+
+// The upgrade's rollback record lives in state.history from its first write on.
+function recordUpgrade(ctx, fields) {
+  const { state, opts } = ctx;
+  if (!ctx.upgradeEntry) {
+    ctx.upgradeEntry = { at: new Date().toISOString(), appVersion: ctx.appVersion, complete: false };
+    state.history.push(ctx.upgradeEntry);
+  }
+  Object.assign(ctx.upgradeEntry, fields);
+  saveState(opts, state);
 }
 
 function tail(r) {
@@ -426,7 +456,7 @@ async function ensureWorker(ctx, pf) {
   if (current && !needToken) return rep.unchanged(`Worker ${opts.name} (version ${state.deploy.versionId})`);
   if (opts.dryRun) return rep.would(`deploy Worker ${opts.name} on https://${opts.hostname}`);
 
-  if (ctx.mode === "upgrade" && live.length) ctx.upgradeRecord.fromVersionId = live[0];
+  if (ctx.mode === "upgrade" && live.length) recordUpgrade(ctx, { fromVersionId: live[0] });
 
   const args = ["deploy", "-c", paths.config, "--message", `postern installer ${ctx.mode}`];
   let secretsFile = null;
@@ -489,6 +519,9 @@ async function ensureSending(ctx, pf) {
     if (opts.dryRun) return rep.would(`enable Email Sending for ${opts.domain} and add its DKIM / SPF / bounce records`);
     sub = (await cf.call("enable Email Sending", P.sending, "POST", `/zones/${z}/email/sending/subdomains`, { name: opts.domain })).result;
     rep.created(`Email Sending for ${opts.domain}`);
+    // Measured 2026-11-10: a send in the first seconds after enabling is refused with
+    // E_SENDER_DOMAIN_NOT_AVAILABLE; it was accepted about a minute later.
+    ctx.log(`  note: Cloudflare can take about a minute before it accepts the first send from ${opts.domain}.`);
   } else {
     rep.unchanged(`Email Sending for ${opts.domain}`);
   }
@@ -537,10 +570,36 @@ async function ensureDmarc(ctx, pf) {
   }
 }
 
-// FIRST ADMIN. The user-management API belongs to the AUTH lane; this is the one
-// call site, kept behind a single function so it moves with that contract.
-// Today it calls POST /api/admin/smtp-credentials, which is create-OR-ROTATE, so
-// it runs once per install (recorded in state) with a password generated here.
+// FIRST ADMIN, through the AUTH lane's user API (#810, contract 1.10):
+// POST /api/admin/users {username, from, password} with the estate token.
+// 201 = created. 409 E_CONFLICT = the user already exists, which is "done" for a
+// re-run; the route never overwrites, so a re-run cannot rotate the password.
+// The password is generated here and written to the credentials file BEFORE the
+// call, so a run that dies after the 201 still holds the right password.
+async function waitForHealth(ctx, base) {
+  let last = "";
+  for (let i = 0; i < ctx.healthTries; i++) {
+    try {
+      const h = await ctx.http(`${base}/health`, { method: "GET" });
+      if (h.ok) return;
+      last = `HTTP ${h.status}`;
+    } catch (e) {
+      last = e?.cause?.code || e?.code || e?.message || String(e);
+    }
+    await ctx.sleep(ctx.healthDelayMs);
+  }
+  if (/ENOTFOUND|EAI_AGAIN/.test(last)) {
+    // Measured 2026-11-10: the Worker answered, but this machine's resolver had cached
+    // "no such host" from a lookup made while the record was being created.
+    throw new Error(
+      `${base}: this machine cannot resolve ${ctx.opts.hostname} yet (${last}). The record exists in ` +
+        `Cloudflare; your resolver is likely holding a cached "no such host" from a moment ago, for up ` +
+        `to the zone's negative TTL (often 30 minutes). Re-run the same command later to finish.`,
+    );
+  }
+  throw new Error(`${base}/health did not answer yet (${last || "no response"}; a new certificate can take a few minutes). Re-run the same command to finish.`);
+}
+
 async function ensureFirstAdmin(ctx, pf) {
   const { opts, state, rep } = ctx;
   if (state.admin === opts.admin) return rep.unchanged(`first admin ${opts.admin}`);
@@ -553,33 +612,28 @@ async function ensureFirstAdmin(ctx, pf) {
     saveCreds(opts, creds);
   }
   const base = `https://${opts.hostname}`;
-  // A new custom domain needs a moment for its certificate; wait for /health.
-  let up = false;
-  for (let i = 0; i < ctx.healthTries; i++) {
-    try {
-      const h = await ctx.http(`${base}/health`, { method: "GET" });
-      if (h.ok) { up = true; break; }
-    } catch { /* not up yet */ }
-    await ctx.sleep(ctx.healthDelayMs);
-  }
-  if (!up) throw new Error(`${base}/health did not answer yet (new certificates can take a few minutes). Re-run the same command to finish.`);
-  const res = await ctx.http(`${base}/api/admin/smtp-credentials`, {
+  await waitForHealth(ctx, base);
+  const res = await ctx.http(`${base}/api/admin/users`, {
     method: "POST",
     headers: { authorization: `Bearer ${creds.POSTERN_API_TOKEN}`, "content-type": "application/json" },
-    // `password` is the canonical field in the AUTH contract (G7); `secret` is the
-    // name today's route reads. Sending both works before and after the alias lands.
-    body: JSON.stringify({ username: opts.admin, from: opts.admin, password: creds.POSTERN_ADMIN_PASSWORD, secret: creds.POSTERN_ADMIN_PASSWORD }),
+    body: JSON.stringify({ username: opts.admin, from: opts.admin, password: creds.POSTERN_ADMIN_PASSWORD }),
   });
   let body = {};
   try { body = await res.json(); } catch { body = {}; }
-  // 409 E_CONFLICT (the user exists) is the AUTH contract's "already done".
-  const done = res.status === 409 && body.error === "E_CONFLICT";
-  if (!done && (!res.ok || body.ok !== true)) throw new Error(`creating the first admin failed: HTTP ${res.status} ${body.error || ""}`.trim());
-  // If the server minted its own password (it ignored ours), keep the one that works.
-  const minted = body.password || body.secret;
-  if (minted && minted !== creds.POSTERN_ADMIN_PASSWORD) {
-    creds.POSTERN_ADMIN_PASSWORD = minted;
-    saveCreds(opts, creds);
+  if (res.status === 404) {
+    throw new Error(`the deployed Postern has no user API (POST /api/admin/users answered 404). Install from a release that has it (#810), then re-run.`);
+  }
+  if (res.status === 409 && body.error === "E_CONFLICT") {
+    state.admin = opts.admin;
+    saveState(opts, state);
+    rep.kept(
+      `first admin ${opts.admin} already exists; its password was not changed. If an earlier run of ` +
+        `this installer created it, the password in ${ctx.paths.creds} is its password.`,
+    );
+    return;
+  }
+  if (res.status !== 201 || body.ok !== true) {
+    throw new Error(`creating the first admin failed: HTTP ${res.status} ${body.error || ""}${body.message ? `: ${body.message}` : ""}`.trim());
   }
   state.admin = opts.admin;
   saveState(opts, state);
@@ -643,6 +697,7 @@ export async function install(deps, opts, mode = "install") {
     ctx.rep.would(`apply all D1 migrations`);
     ctx.rep.would(`deploy Worker ${opts.name} on https://${opts.hostname}`);
   } else {
+    await decideAuthBackend(ctx, pf);
     writeConfig(ctx);
     await ensureMigrations(ctx, pf);
     await ensureWorker(ctx, pf);
@@ -656,8 +711,8 @@ export async function install(deps, opts, mode = "install") {
   if (!opts.dryRun && ctx.state.deploy) await ensureFirstAdmin(ctx, pf);
   else if (opts.dryRun) ctx.rep.would(`create the first admin ${opts.admin}`);
 
-  if (mode === "upgrade" && !opts.dryRun && (ctx.upgradeRecord.fromVersionId || ctx.upgradeRecord.d1Bookmark)) {
-    ctx.state.history.push({ at: new Date().toISOString(), appVersion: deps.appVersion, toVersionId: ctx.state.deploy.versionId, ...ctx.upgradeRecord });
+  if (ctx.upgradeEntry) {
+    Object.assign(ctx.upgradeEntry, { toVersionId: ctx.state.deploy.versionId, complete: true });
     saveState(opts, ctx.state);
   }
 

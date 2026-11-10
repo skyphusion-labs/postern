@@ -150,7 +150,7 @@ export function fakeFetch(m) {
     if ((mm = new RegExp(`^${a}/workers/scripts/([^/]+)/(settings|deployments|secrets)$`).exec(p)) && method === "GET") {
       const s = m.scripts[mm[1]];
       if (!s) return fail(404, 10007, "This Worker does not exist on your account.");
-      if (mm[2] === "settings") return ok({ bindings: [] });
+      if (mm[2] === "settings") return ok({ bindings: Object.entries(s.vars || {}).map(([name, text]) => ({ name, type: "plain_text", text })) });
       if (mm[2] === "secrets") return ok([...s.secrets.keys()].map((name) => ({ name, type: "secret_text" })));
       return ok({ deployments: [{ id: "dep", versions: [{ version_id: s.live, percentage: 100 }] }] });
     }
@@ -262,11 +262,13 @@ export function fakeHttp(m) {
     const s = dom && m.scripts[dom.service];
     if (!s || !s.live) throw new Error("connection refused");
     if (u.pathname === "/health") return json(200, { ok: true });
-    if (u.pathname === "/api/admin/smtp-credentials" && init.method === "POST") {
+    // #810 contract: create only, never overwrite.
+    if (u.pathname === "/api/admin/users" && init.method === "POST") {
       if (init.headers?.authorization !== `Bearer ${s.secrets.get("POSTERN_API_TOKEN")}`) return json(401, { ok: false, error: "E_UNAUTHORIZED" });
       const b = JSON.parse(init.body);
-      m.admins[b.username] = b.secret;
-      return json(200, { ok: true, username: b.username, from: b.from, secret: b.secret });
+      if (m.admins[b.username]) return json(409, { ok: false, error: "E_CONFLICT", message: "a user with that username already exists" });
+      m.admins[b.username] = b.password;
+      return json(201, { ok: true, user: { username: b.username, from: b.from } });
     }
     return json(404, { ok: false });
   };

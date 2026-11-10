@@ -23,7 +23,7 @@ In this order, and each step only if the live state needs it:
 
 1. D1 database `postern` and R2 bucket `postern-attachments`.
 2. Renders your real wrangler config from `inbound/wrangler.jsonc` into the state dir
-   (your ids, `ALLOWED_FROM_DOMAIN`, `DEFAULT_FROM=noreply@<domain>`, native webmail sign-in,
+   (your ids, `ALLOWED_FROM_DOMAIN`, `DEFAULT_FROM=noreply@<domain>`,
    a Custom Domain at `mail.<domain>`). The committed template is never edited.
 3. Applies the D1 migrations that are not yet applied.
 4. Deploys the Worker, with a generated `POSTERN_API_TOKEN` uploaded in the same step,
@@ -33,7 +33,14 @@ In this order, and each step only if the live state needs it:
    rule pointed at the Worker.
 7. A DMARC record (`p=none` by default; `--dmarc quarantine|reject`) ONLY if the domain
    has none. An existing DMARC policy is never touched.
-8. The first admin login (`admin@<domain>`; `--admin` to change), so webmail works at once.
+8. The first admin login (`admin@<domain>`; `--admin` to change), through the user API
+   (`POST /api/admin/users`). It only creates; if that user already exists, it is left
+   exactly as it is.
+
+**Webmail sign-in.** An unset `WEBMAIL_AUTH_BACKEND` means sign-in is OFF. A NEW install
+sets `WEBMAIL_AUTH_BACKEND=native`, so the first admin can sign in at once. An existing
+Worker keeps what it has: `upgrade` never adds the var, and `--adopt` carries the live
+value (or its absence) over. Change it with `--var WEBMAIL_AUTH_BACKEND=...`.
 
 Every line of output says `created`, `updated`, `unchanged` or `kept`, and names the
 resource. Secrets go to `.postern/postern.<domain>.credentials.env` (mode 600). The output
@@ -65,17 +72,26 @@ duplicate anything.
 Create a Cloudflare API token (My Profile, or the account's API Tokens page) scoped to your
 account and the one zone, with:
 
-| Scope   | Permission                 |
-|---------|----------------------------|
-| Zone    | Zone: Read                 |
-| Zone    | DNS: Edit                  |
-| Zone    | Email Routing Rules: Edit  |
-| Zone    | Email Sending: Edit        |
-| Account | Workers Scripts: Edit      |
-| Account | D1: Edit                   |
-| Account | Workers R2 Storage: Edit   |
+| Scope   | Permission                   |
+|---------|------------------------------|
+| Zone    | Zone: Read                   |
+| Zone    | DNS: Edit                    |
+| Zone    | Email Routing Rules: Edit    |
+| Zone    | Workers Routes: Edit         |
+| Zone    | Zone Settings: Edit          |
+| Account | Workers Scripts: Edit        |
+| Account | D1: Edit                     |
+| Account | Workers R2 Storage: Edit     |
+| Account | Email Sending: Edit          |
+| Account | Email Routing Addresses: Edit|
+| Account | Account Settings: Read       |
 
-The installer probes each one with a read before it writes anything. Outbound mail needs
+A token with exactly this set was measured (2026-11-10) on a full install, its re-runs,
+an upgrade that applied a migration, and the teardown. A smaller set may work; that has not been measured. Email Sending
+is an ACCOUNT permission, even though it is enabled per domain. Scope the zone
+permissions to your mail domain only.
+
+The installer probes its permissions with reads before it writes anything. Outbound mail needs
 the Workers Paid plan; that is a billing choice, so the installer leaves it to you.
 
 ## Names, and running beside other Workers
@@ -84,6 +100,17 @@ The Worker, D1 database and R2 bucket are named from `--name` (default `postern`
 is `<name>-attachments`). `--prefix <p>` puts `<p>` in front of all three. Use it to stand a
 test install up in an account that already runs other things. The installer never writes an
 account resource under any other name.
+
+## What to expect on a new domain
+
+Measured on a fresh throwaway zone (2026-11-10): the install itself took 22 seconds.
+Cloudflare then took about a minute before it accepted the first send from the newly
+enabled domain (`E_SENDER_DOMAIN_NOT_AVAILABLE` until then). After that, a message sent to
+an address on the domain was stored as inbound about 2 seconds later.
+
+Enabling Email Sending makes Cloudflare add its own DKIM, SPF and bounce records
+(locked), and a `_dmarc` record with `p=reject` if the domain has none. The installer
+writes your `--dmarc` choice first, so the policy is yours.
 
 ## Upgrade and rollback
 
