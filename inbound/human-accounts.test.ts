@@ -128,6 +128,16 @@ describe("#790 admin user management (both token)", () => {
     expect(s.body.identity).toEqual({ from: "bob@skyphusion.org", displayName: "Bob" });
   });
 
+  it("accepts the bounds of the username rule, and binds a bare login to login@domain", async () => {
+    const { env } = realEnv();
+    for (const username of ["x".repeat(64), "a.b_c-d@skyphusion.org", "-lead", "7"]) {
+      const res = await call(env, "POST", "/api/admin/users", { token: ADMIN, body: { username, password: PASSWORD } });
+      expect([username, res.status]).toEqual([username, 201]);
+    }
+    const bare = await call(env, "POST", "/api/admin/users", { token: ADMIN, body: { username: "Carol" } });
+    expect(await bare.json()).toMatchObject({ user: { username: "carol", from: "carol@skyphusion.org" } });
+  });
+
   it("does not return a password it did not generate", async () => {
     const { env } = realEnv();
     const res = await call(env, "POST", "/api/admin/users", { token: ADMIN, body: { username: USER, password: PASSWORD } });
@@ -148,9 +158,14 @@ describe("#790 admin user management (both token)", () => {
   it("validates username, password policy and sender domain before writing anything", async () => {
     const { env, raw } = realEnv();
     const cases: Array<[unknown, number, string]> = [
-      [{ username: "bad user@skyphusion.org" }, 400, "E_VALIDATION_ERROR"],
-      [{ username: "-lead@skyphusion.org" }, 400, "E_VALIDATION_ERROR"],
-      [{ username: "x".repeat(255) }, 400, "E_VALIDATION_ERROR"],
+      [{ username: "bad user@skyphusion.org" }, 400, "E_INVALID_USERNAME"],
+      [{ username: ".lead@skyphusion.org" }, 400, "E_INVALID_USERNAME"],
+      [{ username: "trail.@skyphusion.org" }, 400, "E_INVALID_USERNAME"],
+      [{ username: "a..b" }, 400, "E_INVALID_USERNAME"],
+      [{ username: "x".repeat(65) }, 400, "E_INVALID_USERNAME"],
+      [{ username: "alice+tag@skyphusion.org" }, 400, "E_INVALID_USERNAME"],
+      [{ username: "alice@other.example" }, 400, "E_INVALID_USERNAME"],
+      [{ username: "a@b@skyphusion.org" }, 400, "E_INVALID_USERNAME"],
       [{ username: USER, password: "short" }, 400, "E_PASSWORD_POLICY"],
       [{ username: USER, password: USER.toUpperCase() }, 400, "E_PASSWORD_POLICY"],
       [{ username: USER, password: "y".repeat(257) }, 400, "E_PASSWORD_POLICY"],
