@@ -919,6 +919,64 @@ class PosternClient:
         """DELETE /api/admin/users/{username}. Ends the user's sessions."""
         return self._json("DELETE", f"/api/admin/users/{_quote(username)}")
 
+    # --- runtime agent identities (#801) -------------------------------------
+    #
+    # docs/SEND-IDENTITIES.md section 10. Operator routes: they need the `both` token. A
+    # token is returned ONCE, by the mint, and is never retrievable again.
+
+    def mint_identity(
+        self,
+        from_addr: str,
+        scopes: list[str],
+        *,
+        display_name: Optional[str] = None,
+        label: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """POST /api/admin/identities. Returns {id, token, ...}; keep the token now.
+
+        `scopes` is a non-empty subset of read, send, organize.
+        """
+        body: dict[str, Any] = {"from": from_addr, "scopes": list(scopes)}
+        if display_name is not None:
+            body["displayName"] = display_name
+        if label is not None:
+            body["label"] = label
+        return self._json("POST", "/api/admin/identities", body=body)
+
+    def list_identities(
+        self,
+        *,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        include_revoked: bool = False,
+    ) -> dict[str, Any]:
+        """GET /api/admin/identities. Returns {items, cursor}.
+
+        Never carries a token or its hash. Active identities only unless
+        `include_revoked`.
+        """
+        params: dict[str, str] = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        if include_revoked:
+            params["includeRevoked"] = "1"
+        return self._json("GET", "/api/admin/identities", params=params or None)
+
+    def revoke_identity(self, identity_id: str) -> dict[str, Any]:
+        """DELETE /api/admin/identities/{id}. Effective on the next request."""
+        return self._json("DELETE", f"/api/admin/identities/{_quote(identity_id)}")
+
+    def list_audit(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
+        """GET /api/admin/audit. The audit log, newest first: {items, cursor}."""
+        params: dict[str, str] = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        return self._json("GET", "/api/admin/audit", params=params or None)
+
     def ping(self) -> bool:
         """Validate the token by hitting an authed endpoint; True if accepted."""
         try:

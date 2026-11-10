@@ -212,7 +212,7 @@ describe("install", () => {
 
 describe("refusals: each is named, and none of them writes anything", () => {
   test("missing token permission names the permission", async () => {
-    for (const [perm, label] of [["dns", "DNS Edit"], ["routing", "Email Routing Rules Edit"], ["sending", "Email Sending Edit"], ["workers", "Workers Scripts Edit"], ["d1", "D1 Edit"], ["r2", "Workers R2 Storage Edit"]]) {
+    for (const [perm, label] of [["dns", "DNS Edit"], ["routing", "Email Routing Rules Edit"], ["settings", "Zone Settings Edit"], ["sending", "Email Sending Edit"], ["workers", "Workers Scripts Edit"], ["d1", "D1 Edit"], ["r2", "Workers R2 Storage Edit"]]) {
       const c = setup();
       c.m.denied.add(perm);
       await expectRefusal(c, new RegExp(`lacks the "[^"]*${label}" permission`));

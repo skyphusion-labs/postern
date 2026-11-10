@@ -4,6 +4,7 @@
 //   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs install --domain example.com
 //   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs upgrade --domain example.com
 //   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs rollback --domain example.com [--restore-db]
+//   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs routing --domain example.com
 //   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs uninstall --domain example.com [--delete-data --confirm-delete example.com]
 //
 // Add --dry-run to any command to see what it would change and change nothing.
@@ -13,12 +14,18 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cfClient } from "./lib/cf.mjs";
+import { CfError, cfClient } from "./lib/cf.mjs";
 import { EXIT, Refused, install, rollback, uninstall } from "./lib/installer.mjs";
+import { checkRouting, formatRoutingReport } from "./lib/routing.mjs";
 
-const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|uninstall> --domain <domain> [options]
+const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|routing|uninstall> --domain <domain> [options]
 
-  status is a read-only report: what exists, what install or upgrade would change.
+  status is a read-only report: what exists, what install or upgrade would change. It
+  starts with the routing report.
+  routing is a read-only Email Routing reachability report: every rule on the zone, and
+  every address that does NOT reach the Worker. Exit 0 when every address reaches it,
+  1 when one does not (or a reading could not be made), 3 when the token cannot read it.
+  Token: Zone Read, Email Routing Rules Read, Zone Settings Read.
   uninstall removes what this installer recorded creating. It keeps your mail (D1, R2)
   unless you pass --delete-data --confirm-delete <domain>, and it never turns Email
   Routing off (that deletes the zone's MX, SPF and DKIM records).
@@ -68,7 +75,7 @@ export function parseArgs(argv) {
     else if (a === "--confirm-delete") o.confirmDelete = val().toLowerCase();
     else throw new Error(`unknown option ${a}`);
   }
-  if (!["install", "upgrade", "status", "rollback", "uninstall"].includes(cmd)) throw new Error(cmd ? `unknown command ${cmd}` : "no command");
+  if (!["install", "upgrade", "status", "rollback", "routing", "uninstall"].includes(cmd)) throw new Error(cmd ? `unknown command ${cmd}` : "no command");
   if (!o.domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(o.domain)) throw new Error("--domain is required (for example --domain example.com)");
   o.name = `${o.prefix ?? ""}${o.name ?? "postern"}`;
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(o.name)) throw new Error("--name must be lower-case letters, digits and dashes");
@@ -78,7 +85,7 @@ export function parseArgs(argv) {
   if (!o.admin.endsWith(`@${o.domain}`)) throw new Error("--admin must be an address on --domain");
   o.dmarcPolicy ??= "none";
   if (!["none", "quarantine", "reject"].includes(o.dmarcPolicy)) throw new Error("--dmarc must be none, quarantine or reject");
-  if (cmd === "status") o.dryRun = true;
+  if (cmd === "status" || cmd === "routing") o.dryRun = true;
   o.stateDir = resolve(o.stateDir ?? ".postern");
   o.d1Name = o.name;
   o.bucket = `${o.name}-attachments`;
@@ -99,6 +106,20 @@ export function realExec(cmd, args, { cwd, env = {}, input } = {}) {
   });
 }
 
+// The reachability report (#802). Read-only; prints names and addresses, never the token.
+export async function printRouting(cf, opts, log) {
+  try {
+    const rep = await checkRouting(cf, { domain: opts.domain, name: opts.name });
+    for (const line of formatRoutingReport(rep)) log(line);
+    log(`@event routing ${JSON.stringify({ ok: rep.ok, examined: rep.examined, disabled: rep.disabled, missed: rep.missedAddresses })}`);
+    return rep.ok ? EXIT.OK : EXIT.FAILED;
+  } catch (e) {
+    if (!(e instanceof CfError)) throw e;
+    log(`routing report: refused: ${e.message}`);
+    return EXIT.REFUSED;
+  }
+}
+
 async function main(argv) {
   let opts;
   try {
@@ -111,6 +132,12 @@ async function main(argv) {
   if (!token) {
     console.error("refused:\n  - set CLOUDFLARE_API_TOKEN to an API token for YOUR Cloudflare account (permissions: DEPLOY.md)");
     return EXIT.REFUSED;
+  }
+  const cf = cfClient({ token });
+  if (opts.cmd === "routing" || opts.cmd === "status") {
+    const code = await printRouting(cf, opts, (s) => console.log(s));
+    if (opts.cmd === "routing") return code;
+    console.log("");
   }
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const appVersion = /VERSION\s*=\s*"([^"]+)"/.exec(readFileSync(join(repoRoot, "inbound", "src", "version.ts"), "utf8"))?.[1];
@@ -125,7 +152,7 @@ async function main(argv) {
   }
 
   const deps = {
-    cf: cfClient({ token }),
+    cf,
     token,
     exec: realExec,
     http: (url, init) => fetch(url, init),

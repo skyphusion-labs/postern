@@ -10,6 +10,7 @@ export CLOUDFLARE_API_TOKEN=...            # see "The token" below; never printe
 node deploy/postern.mjs install --domain example.com --dry-run   # the plan, no changes
 node deploy/postern.mjs install --domain example.com
 node deploy/postern.mjs status  --domain example.com             # read-only report, any time
+node deploy/postern.mjs routing --domain example.com             # does every address reach the Worker?
 node deploy/postern.mjs uninstall --domain example.com           # remove it; your mail is kept
 ```
 
@@ -94,6 +95,33 @@ permissions to your mail domain only.
 
 The installer probes its permissions with reads before it writes anything. Outbound mail needs
 the Workers Paid plan; that is a billing choice, so the installer leaves it to you.
+
+## Is my mail reaching Postern? (the routing report)
+
+`node deploy/postern.mjs routing --domain example.com` is read-only. It lists every Email
+Routing rule on the zone and names each address that does NOT land on the Worker
+(`--name`, default `postern`). A per-address rule beats the catch-all, so one forwarding
+rule removes that address from Postern while deploys, health checks and smoke tests all stay
+green. The report prints how many rules it examined, so a clean result is a count, not a
+bare OK:
+
+```
+Email Routing on example.com -> Worker postern: enabled, 3 rule(s) examined (1 disabled, ignored)
+  ok   rule "agent" agent@example.com -> worker postern
+  off  rule "old forward" old@example.com -> forward x@elsewhere.example
+  ok   catch-all "catch-all" (every unmatched address) -> worker postern
+result: all 2 enabled rule(s) land on Worker postern; no address is routed around it.
+```
+
+It exits 0 when every address reaches the Worker, and 1 when one does not. It also exits 1
+when it could not make a reading: if the token cannot see whether Routing is enabled, the
+report says `NOT MEASURED` and never reads as clean. It exits 3 when the token cannot read
+the rules at all. It needs only **Zone: Read**, **Email Routing Rules: Read** and **Zone
+Settings: Read**. The settings read (is Routing enabled?) takes Zone Settings, not an
+Email Routing permission. `status` prints the same report first. It never changes a rule:
+fix one in the dashboard or with your own IaC, then run it again. The `routing-report`
+workflow runs it from GitHub Actions (on demand, and weekly when the repo variable
+`ROUTING_REPORT_DOMAIN` is set).
 
 ## Names, and running beside other Workers
 

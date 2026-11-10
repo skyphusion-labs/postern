@@ -26,6 +26,9 @@ const P = {
   zone: "Zone: Zone Read",
   dns: "Zone: DNS Edit",
   routing: "Zone: Email Routing Rules Edit",
+  // GET /email/routing and POST /email/routing/dns take Zone Settings, not an Email Routing
+  // permission (Cloudflare API reference; measured 2026-11-10, #802).
+  settings: "Zone: Zone Settings Edit",
   sending: "Account: Email Sending Edit",
   workers: "Account: Workers Scripts Edit",
   d1: "Account: D1 Edit",
@@ -212,7 +215,7 @@ async function preflight(ctx) {
     }
   };
   const dnsAll = await probe("read DNS records", P.dns, `/zones/${z}/dns_records?per_page=1`);
-  const routing = await probe("read Email Routing settings", P.routing, `/zones/${z}/email/routing`);
+  const routing = await probe("read Email Routing settings", P.settings, `/zones/${z}/email/routing`);
   const catchAll = await probe("read the catch-all rule", P.routing, `/zones/${z}/email/routing/rules/catch_all`, { allow404: true });
   await probe("read Email Sending domains", P.sending, `/zones/${z}/email/sending/subdomains`);
   await probe("list Worker scripts", P.workers, `/accounts/${a}/workers/scripts`);
@@ -552,13 +555,13 @@ async function ensureSending(ctx, pf) {
 async function ensureRouting(ctx, pf) {
   const { cf, opts, rep } = ctx;
   const z = pf.zone.id;
-  const cur = (await cf.call("read Email Routing settings", P.routing, "GET", `/zones/${z}/email/routing`)).result || {};
+  const cur = (await cf.call("read Email Routing settings", P.settings, "GET", `/zones/${z}/email/routing`)).result || {};
   if (cur.enabled) {
     rep.unchanged(`Email Routing on ${opts.domain}`);
   } else if (opts.dryRun) {
     rep.would(`enable Email Routing on ${opts.domain} (adds and locks its MX and SPF records)`);
   } else {
-    await cf.call("enable Email Routing", P.routing, "POST", `/zones/${z}/email/routing/dns`, {});
+    await cf.call("enable Email Routing", P.settings, "POST", `/zones/${z}/email/routing/dns`, {});
     rep.created(`Email Routing on ${opts.domain} (MX and SPF records added by Cloudflare)`);
   }
 
