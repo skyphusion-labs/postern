@@ -386,6 +386,27 @@
     .msg-head .sender-date { width: 100%; padding-left: 48px; }
   }
 
+  /* --- Accessibility (#797) --- */
+  .skip {
+    position: absolute; left: var(--sp-2); top: -60px; z-index: 50; text-decoration: none;
+    background: var(--accent); color: var(--accent-fg); padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--r-sm); font-weight: 650; font-size: var(--fs-sm);
+  }
+  .skip:focus { top: var(--sp-2); }
+  .list:focus { outline: none; }
+  .msg-head h2:focus { outline: none; }
+  .toast {
+    position: fixed; left: 50%; bottom: var(--sp-4); transform: translateX(-50%); z-index: 40;
+    max-width: calc(100vw - 32px); padding: var(--sp-2) var(--sp-4); border-radius: var(--r-md);
+    background: var(--fg); color: var(--bg); box-shadow: var(--shadow); font-size: var(--fs-sm); font-weight: 550;
+  }
+  .toast.bad { background: var(--bad-dim); color: var(--bad); border: 1px solid var(--bad); }
+  .toast[hidden] { display: none; }
+  .settings-panel kbd {
+    font: var(--fs-2xs)/1 var(--font-mono); padding: 2px 5px; border: 1px solid var(--line-strong);
+    border-radius: 4px; background: var(--panel-2); color: var(--fg);
+  }
+
   /* Keyboard focus visibility (a11y foundation): a clear ring for keyboard users
      on every interactive control, without a persistent outline on mouse click. */
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -427,6 +448,7 @@
 </style>
 </head>
 <body>
+<a class="skip" href="#list" id="skipLink">Skip to messages</a>
 
 <header role="banner">
   <button id="railBtn" style="display:none" type="button" class="btn-quiet" aria-label="Folders" aria-controls="folders" aria-expanded="false">
@@ -439,7 +461,7 @@
   <span class="sendnote" id="sendNote" style="display:none"></span>
   <button id="composeBtn" style="display:none">Compose</button>
   <button id="themeBtn" type="button" class="link" aria-label="Theme: match system" title="Theme: match system">Theme</button>
-  <button id="settingsBtn" class="link" style="display:none">Settings</button>
+  <button id="settingsBtn" class="link" style="display:none" aria-controls="settingsPanel" aria-expanded="false">Settings</button>
   <button id="logout" class="link" style="display:none">Sign out</button>
 </header>
 <div id="settingsPanel" class="settings-panel" role="dialog" aria-label="Settings">
@@ -457,13 +479,15 @@
   </select>
   <p class="note" id="settingsSession">Session: not signed in.</p>
   <button type="button" id="settingsSignout" class="settings-signout">Sign out</button>
+  <p class="note">Keyboard: <kbd>j</kbd> / <kbd>k</kbd> next and previous message, <kbd>/</kbd> search,
+    <kbd>c</kbd> compose, arrow keys move in the list, <kbd>Esc</kbd> closes a panel or goes back.</p>
   <p class="note">Remote images in message bodies are blocked by CSP (img-src 'self' data: only; no https:). There is no toggle that can enable them under the current policy.</p>
 </div>
 
 <!-- BYO-token gate (operator / self-host path, contract 1.7) -->
-<div id="gate">
+<div id="gate" role="region" aria-labelledby="gateTitle">
   <div class="card">
-    <h2>Connect to your mailbox</h2>
+    <h2 id="gateTitle">Connect to your mailbox</h2>
     <p>Paste a read-scoped API token to browse mail. Optionally add a send-scoped token
        (or a dual-cap identity token with read+send) to compose and reply. A dual-cap
        token may be pasted once in the read field; send falls back to it when the send
@@ -484,9 +508,9 @@
 </div>
 
 <!-- Native sign-in (session cookie mode, #351) -->
-<div id="signin" style="display:none">
+<div id="signin" style="display:none" role="region" aria-labelledby="signinTitle">
   <div class="card">
-    <h2>Sign in to your mailbox</h2>
+    <h2 id="signinTitle">Sign in to your mailbox</h2>
     <p>Enter your Postern mailbox username and password.</p>
     <form id="signinForm">
       <label for="siUser">Username</label>
@@ -505,7 +529,7 @@
 <!-- App -->
 <div id="app">
   <nav class="folders" id="folders" role="navigation" aria-label="Folders"></nav>
-  <div class="sidebar" aria-label="Mailbox">
+  <section class="sidebar" aria-label="Message list">
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search mail" aria-label="Search mail">
       <select id="searchMode" class="mode" title="Search mode (applies when searching)" aria-label="Search mode">
@@ -525,8 +549,8 @@
       <label>Before <input id="filterBefore" type="date" aria-label="Before date"></label>
       <button type="button" class="link" id="clearFilters">Clear filters</button>
     </div>
-    <div class="list" id="list" aria-label="Messages"></div>
-  </div>
+    <div class="list" id="list" aria-label="Messages" tabindex="-1"></div>
+  </section>
   <main class="reading-col" aria-label="Message">
     <div class="reading-bar"><button type="button" id="backBtn" class="btn-quiet">&larr; Back to list</button></div>
     <div class="reading" id="reading">
@@ -535,6 +559,9 @@
   </main>
   <div class="scrim" id="scrim"></div>
 </div>
+
+<div id="announce" class="vh" aria-live="polite" aria-atomic="true"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
 <script>
 "use strict";
@@ -868,7 +895,7 @@
       // Revoke on the next tick so the download has started.
       setTimeout(function () { URL.revokeObjectURL(obj); }, 0);
     }).catch(function (e) {
-      if (e.message !== "unauthorized") alert("Download failed: " + e.message);
+      if (e.message !== "unauthorized") toast("Download failed: " + e.message, true);
     }).then(function () {
       if (btn) { btn.disabled = false; btn.textContent = label; }
     });
@@ -1053,6 +1080,7 @@
       // can rebuild the srcdoc with the new palette (retintPlainFrames).
       if (!light) { f.setAttribute("data-plain", "1"); f._posternInner = inner; }
       f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
+      f.setAttribute("title", "Message body");
       f.setAttribute("referrerpolicy", "no-referrer");
       f.setAttribute("srcdoc", doc);
       return f;
@@ -1133,6 +1161,9 @@
     $("app").className = "on";
     $("logout").style.display = "";
     $("railBtn").style.display = "";
+    // The gate or sign-in card that held focus is now hidden; do not strand focus there (#797).
+    var ae = document.activeElement;
+    if (ae && ae.closest && ae.closest("#gate, #signin")) $("list").focus();
     $("settingsBtn").style.display = "";
     if (state.authMode === "session" && state.identity) {
       // Identity display (contract 1.5.1): show who the browser sends as. A send
@@ -1503,6 +1534,11 @@
       state.items = state.items.concat(rows);
       state.cursor = body.cursor || null;
       rows.forEach(appendRow);
+      if (!state.cursor || rows.length) {
+        announce(state.items.length === 0 ? (state.q ? "No results." : "No messages.")
+          : state.items.length + (state.items.length === 1 ? " message" : " messages") +
+            (state.q ? " found." : " in " + folderLabel(state.folder) + "."));
+      }
       if (fallbackFts) {
         $("list").appendChild(el("div", { class: "loading", text: "Semantic search unavailable; showing keyword results." }));
       }
@@ -1571,7 +1607,15 @@
     ]);
     item.addEventListener("click", function () { selectMessage(m.messageId, item); });
     item.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMessage(m.messageId, item); }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMessage(m.messageId, item); return; }
+      var rows = listRows(), i = rows.indexOf(item), to = null;
+      if (e.key === "ArrowDown") to = rows[i + 1];
+      else if (e.key === "ArrowUp") to = rows[i - 1];
+      else if (e.key === "Home") to = rows[0];
+      else if (e.key === "End") to = rows[rows.length - 1];
+      else return;
+      e.preventDefault();
+      focusRow(to);
     });
     $("list").appendChild(item);
   }
@@ -1643,6 +1687,33 @@
     return (f && f.label) || (id.charAt(0).toUpperCase() + id.slice(1));
   }
 
+  // --- announcements (#797) ---------------------------------------------------
+  // announce(): polite screen-reader text. toast(): a short visible notice that also
+  // reads out; errors use it in place of window.alert, which blocks the page.
+  function announce(msg) {
+    var a = $("announce");
+    a.textContent = "";
+    setTimeout(function () { a.textContent = msg; }, 30);
+  }
+  var toastTimer = null;
+  function toast(msg, bad) {
+    var t = $("toast");
+    t.className = "toast" + (bad ? " bad" : "");
+    t.setAttribute("role", bad ? "alert" : "status");
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, bad ? 6000 : 3500);
+  }
+  var NARROW_MQ = window.matchMedia ? window.matchMedia("(max-width: 760px)") : null;
+  function listRows() { return Array.prototype.slice.call($("list").querySelectorAll(".row-item")); }
+  function rowFor(id) {
+    var rows = listRows();
+    for (var i = 0; i < rows.length; i++) if (rows[i].getAttribute("data-id") === id) return rows[i];
+    return null;
+  }
+  function focusRow(row) { if (row) { row.focus(); row.scrollIntoView({ block: "nearest" }); } }
+
   // --- narrow-screen views (#795) -------------------------------------------------
   // Under 760px the list and the reading pane are one view at a time (CSS keys on
   // data-view); under 1100px the folder rail is a drawer (data-rail). Wide screens
@@ -1660,8 +1731,9 @@
   // --- reading ---------------------------------------------------------------
   function selectMessage(id, item) {
     var prev = $("list").querySelector(".row-item.sel");
-    if (prev) prev.classList.remove("sel");
-    if (item) item.classList.add("sel");
+    if (prev) { prev.classList.remove("sel"); prev.removeAttribute("aria-current"); }
+    item = item || rowFor(id);
+    if (item) { item.classList.add("sel"); item.setAttribute("aria-current", "true"); }
     // Drafts have no /api/messages/:id body; keep the list summary in the pane.
     var draft = state.items.find(function (x) { return x.messageId === id && x.isDraft; });
     if (draft) {
@@ -1746,7 +1818,7 @@
     var subInput = el("input", { id: "cmpSub", type: "text", value: draft.subject || opts.subject || "" });
     var editor = el("div", {
       id: "cmpBody", class: "compose-editor" + (rich ? "" : " plain"),
-      contenteditable: "true", role: "textbox", "aria-multiline": "true"
+      contenteditable: "true", role: "textbox", "aria-multiline": "true", "aria-label": "Message body"
     });
     var initialText = draft.bodyText || opts.text || "";
     if (rich && draft.bodyHtml) editor.appendChild(safeComposeFragment(draft.bodyHtml));
@@ -2187,7 +2259,7 @@
           if (sel) sel.classList.add("sel");
         }).catch(function (e) {
           if (e.code === 401) { logout(); return; }
-          alert("Flag update failed: " + e.message);
+          toast("Star update failed: " + e.message, true);
           starBtn.disabled = false;
         });
       });
@@ -2198,12 +2270,13 @@
         btn.addEventListener("click", function () {
           btn.disabled = true;
           apiOrganize("/api/messages/move", { ids: [m.messageId], mailbox: mailbox }).then(function () {
+            toast(mailbox ? "Moved to " + label + "." : "Restored.");
             state.selected = null;
             resetAndLoad();
             renderReading(null);
           }).catch(function (e) {
             if (e.code === 401) { logout(); return; }
-            alert("Move failed: " + e.message);
+            toast("Move failed: " + e.message, true);
             btn.disabled = false;
           });
         });
@@ -2252,6 +2325,12 @@
       }));
     }
     r.appendChild(head);
+    // At phone width the list (and the focused row) just disappeared, so move focus to
+    // the message heading; otherwise keyboard and screen-reader users are left nowhere.
+    if (NARROW_MQ && NARROW_MQ.matches) {
+      var h = head.querySelector("h2");
+      if (h) { h.setAttribute("tabindex", "-1"); h.focus(); }
+    }
 
     // Body: rendered inside a sandboxed iframe (sandbox="" = no scripts, no
     // same-origin), so stored content cannot execute or reach the token/API.
@@ -2321,8 +2400,43 @@
     if (sel) sel.focus();
   });
   $("composeBtn").addEventListener("click", function () { renderComposeForm({}); });
+  function setSettings(open) {
+    $("settingsPanel").classList.toggle("on", open);
+    $("settingsBtn").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) $("themeSelect").focus();
+  }
   $("settingsBtn").addEventListener("click", function () {
-    $("settingsPanel").classList.toggle("on");
+    setSettings(!$("settingsPanel").classList.contains("on"));
+  });
+  $("skipLink").addEventListener("click", function (e) {
+    e.preventDefault();
+    var target = $("list").querySelector(".row-item.sel") || $("list").querySelector(".row-item");
+    if (target) focusRow(target); else $("list").focus();
+  });
+  // Single-key shortcuts (#797). Never while typing, never with a modifier, and only
+  // once the mailbox is showing.
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      if ($("settingsPanel").classList.contains("on")) { setSettings(false); $("settingsBtn").focus(); return; }
+      if (NARROW_MQ && NARROW_MQ.matches && $("app").getAttribute("data-view") === "reading" &&
+          $("app").getAttribute("data-rail") !== "open") { $("backBtn").click(); return; }
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey || !$("app").classList.contains("on")) return;
+    var t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    if (e.key === "/") { e.preventDefault(); $("search").focus(); return; }
+    if (e.key === "c" && $("composeBtn").style.display !== "none") { e.preventDefault(); $("composeBtn").click(); return; }
+    if (e.key === "j" || e.key === "k") {
+      var rows = listRows();
+      if (!rows.length) return;
+      var cur = rows.indexOf($("list").querySelector(".row-item.sel"));
+      var next = e.key === "j" ? Math.min(cur + 1, rows.length - 1) : Math.max(cur - 1, 0);
+      if (cur < 0) next = 0;
+      e.preventDefault();
+      focusRow(rows[next]);
+      rows[next].click();
+    }
   });
   $("themeSelect").addEventListener("change", function (e) {
     prefSet("postern_theme", THEMES.indexOf(e.target.value) >= 0 ? e.target.value : "system");
