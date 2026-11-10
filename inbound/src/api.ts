@@ -35,7 +35,6 @@ import {
   IdentityStoreUnavailable,
   handleAdminIdentities,
   handleAudit,
-  handleSelfIdentities,
   resolveRuntimeIdentity,
 } from "./agentidentities";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
@@ -417,10 +416,9 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     }
 
     // --- runtime agent identities (#801) ---
-    // Operator mint / list / revoke under `admin`, the audit log, and delegated minting
-    // under the opt-in `mint` scope. Each handler serves ONLY the methods its routes.ts
-    // rows declare and returns null otherwise, because a method with no row has no scope
-    // gate in front of it.
+    // Operator mint / list / revoke and the audit log, all under `admin`. Each handler
+    // serves ONLY the methods its routes.ts rows declare and returns null otherwise,
+    // because a method with no row has no scope gate in front of it.
     if (path === "/api/admin/identities" || path.startsWith("/api/admin/identities/")) {
       const ires = await handleAdminIdentities(request, env, url);
       if (ires) return ires;
@@ -428,10 +426,6 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (path === "/api/admin/audit") {
       const ares = await handleAudit(request, env, url);
       if (ares) return ares;
-    }
-    if (path === "/api/identities" || path.startsWith("/api/identities/")) {
-      const sres = await handleSelfIdentities(request, env, url, resolution);
-      if (sres) return sres;
     }
 
     // --- admin: human user management (#790, contract 1.10.4) ---

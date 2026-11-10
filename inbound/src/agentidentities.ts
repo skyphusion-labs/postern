@@ -2,23 +2,22 @@
 //
 // POSTERN_SEND_IDENTITIES (sendidentity.ts) is operator CONFIG: adding or removing an
 // agent credential there needs a deploy, so it cannot be revoked in an incident. This
-// module is the runtime half. An operator (`both`) mints, lists and revokes identities
-// with the same read / send / organize caps the registry grants, and the resolver in
-// api.ts consults this table AFTER the static tokens and the env registry, so every
-// existing deploy keeps resolving exactly as before.
+// module is the runtime half, on the smtp-credentials precedent (#68): an operator (a
+// static `both` token, the only holder of `admin`) mints, lists and revokes identities
+// with the same read / send / organize caps the registry grants. The resolver in api.ts
+// consults this table AFTER the static tokens and the env registry, so every existing
+// deploy keeps resolving exactly as before.
 //
 // Properties, each pinned by inbound/agent-identities.test.ts:
 //   - The store holds the sha256 HASH of a token, never the token. The token is in the
-//     mint response once and nowhere else.
+//     mint response once and is not retrievable again from any route.
+//   - No response carries token_hash: not the list, not the audit log, not whoami.
 //   - Every identity has a stable `id` (never reused; rows are never deleted) that
 //     #740's audit trail attributes entries to.
 //   - Revocation takes effect on the NEXT request: resolution reads D1 every time and
-//     there is no cache to expire. Revoking an identity also revokes every identity it
-//     minted, transitively.
-//   - Delegated minting is OPT-IN through the `mint` cap, which only a runtime identity
-//     can hold (the env registry never grants it, and a webmail session never carries
-//     it). A delegated mint can never be broader than the minter: the child's From is
-//     the minter's From, and the child's caps must be a subset of the minter's caps.
+//     there is no cache to expire.
+//   - A runtime identity never holds `admin`: its caps are a subset of read, send and
+//     organize, and an unknown or admin-level cap is refused at mint (400), not stripped.
 //   - Every mint, list and revoke writes one audit_log row, refusals included. A
 //     successful mint or revoke and its audit row land in ONE D1 batch, so the action
 //     cannot happen without its record.
@@ -29,19 +28,15 @@ import { allowedFromDomain } from "./fromdomain";
 import { displayNameProblem } from "./smtpcreds";
 import { readBodyCapped, PayloadTooLargeError } from "./body";
 
-/** What a runtime identity may hold: the registry caps plus the opt-in `mint`. */
-export type RuntimeCap = IdentityCap | "mint";
-export const RUNTIME_CAPS: readonly RuntimeCap[] = ["read", "send", "organize", "mint"];
+/** What a runtime identity may hold: exactly the registry caps. Never delete or admin. */
+export const RUNTIME_CAPS: readonly IdentityCap[] = ["read", "send", "organize"];
 
 /** One resolved runtime identity: what the gate needs, plus the stable id. */
 export interface RuntimeHit {
   id: string;
   identity: BoundIdentity;
-  caps: RuntimeCap[];
+  caps: IdentityCap[];
 }
-
-/** Who performed an audited action. `operator` is a static `both` token (it has no id). */
-export type Actor = { kind: "operator" } | { kind: "identity"; id: string; from: string; caps: string[] };
 
 /**
  * The identity store could not be read. Thrown by the resolver so the gate answers 503
@@ -56,8 +51,6 @@ const MAX_BODY_BYTES = 4 * 1024;
 const LABEL_MAX = 100;
 const LIST_DEFAULT = 100;
 const LIST_MAX = 500;
-/** Active identities one identity may have minted at once (a leaked `mint` token cannot fill D1). */
-export const MAX_ACTIVE_CHILDREN = 100;
 const EMAIL_RE = /^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$/;
 const ID_RE = /^idn_[0-9a-f]{24}$/;
 
@@ -99,7 +92,7 @@ function generateId(): string {
 }
 
 /** Parse a stored scopes column. Unknown strings are dropped, so a bad row can only narrow. */
-function parseCaps(raw: unknown): RuntimeCap[] {
+function parseCaps(raw: unknown): IdentityCap[] {
   let parsed: unknown;
   try {
     parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
@@ -107,10 +100,10 @@ function parseCaps(raw: unknown): RuntimeCap[] {
     return [];
   }
   if (!Array.isArray(parsed)) return [];
-  const out: RuntimeCap[] = [];
+  const out: IdentityCap[] = [];
   for (const item of parsed) {
-    if ((RUNTIME_CAPS as readonly unknown[]).includes(item) && !out.includes(item as RuntimeCap)) {
-      out.push(item as RuntimeCap);
+    if ((RUNTIME_CAPS as readonly unknown[]).includes(item) && !out.includes(item as IdentityCap)) {
+      out.push(item as IdentityCap);
     }
   }
   return out;
@@ -124,10 +117,8 @@ interface IdentityRow {
   display_name: string | null;
   label: string | null;
   scopes: string;
-  parent_id: string | null;
   created_at: string;
   revoked_at: string | null;
-  revoked_by: string | null;
 }
 
 /**
@@ -172,39 +163,30 @@ interface AuditEntry {
   detail?: Record<string, unknown>;
 }
 
-function auditStatement(env: Env, actor: Actor, at: string, entry: AuditEntry, onlyIfIdentityExists?: string) {
-  const values = [
+// Every writer today is the operator (a static `both` token, which carries no id).
+// actor_kind / actor_id exist so #740 can record an agent identity as the actor.
+function auditStatement(env: Env, at: string, entry: AuditEntry) {
+  return env.DB.prepare(
+    "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
+      "VALUES (?, 'operator', NULL, ?, ?, ?, ?, ?)",
+  ).bind(
     at,
-    actor.kind,
-    actor.kind === "identity" ? actor.id : null,
     entry.action,
     entry.targetId ? "identity" : null,
     entry.targetId ?? null,
     entry.outcome,
     entry.detail ? JSON.stringify(entry.detail) : null,
-  ];
-  if (onlyIfIdentityExists) {
-    // Conditional on the row the same batch just inserted, so a mint that did not
-    // happen (its parent was revoked between check and insert) records no "ok" row.
-    return env.DB.prepare(
-      "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
-        "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM agent_identities WHERE id = ?)",
-    ).bind(...values, onlyIfIdentityExists);
-  }
-  return env.DB.prepare(
-    "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).bind(...values);
+  );
 }
 
 /**
  * Record a refusal. Best effort BY DESIGN: the refusal already happened and its answer
  * is the same either way, so a failed write is logged and the refusal is still returned
- * (failing it would turn a 403 into a 500 and tell the caller less, not more).
+ * (failing it would turn a 400 into a 500 and tell the caller less, not more).
  */
-async function auditRefusal(env: Env, actor: Actor, entry: Omit<AuditEntry, "outcome">, err: IdentityError) {
+async function auditRefusal(env: Env, entry: Omit<AuditEntry, "outcome">, err: IdentityError) {
   try {
-    await auditStatement(env, actor, new Date().toISOString(), {
+    await auditStatement(env, new Date().toISOString(), {
       ...entry,
       outcome: "refused",
       detail: { ...(entry.detail ?? {}), error: err.code },
@@ -244,12 +226,12 @@ function requireDomain(env: Env): string {
 }
 
 /** Requested caps: a non-empty array of known cap names. Anything else is a 400, never a strip. */
-function requestedCaps(body: Record<string, unknown>): RuntimeCap[] {
+function requestedCaps(body: Record<string, unknown>): IdentityCap[] {
   const raw = body.scopes;
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new IdentityError(400, "E_VALIDATION_ERROR", `scopes must be a non-empty array of ${RUNTIME_CAPS.join(", ")}`, "scopes");
   }
-  const out: RuntimeCap[] = [];
+  const out: IdentityCap[] = [];
   for (const item of raw) {
     if (typeof item !== "string" || !(RUNTIME_CAPS as readonly string[]).includes(item)) {
       throw new IdentityError(
@@ -259,7 +241,7 @@ function requestedCaps(body: Record<string, unknown>): RuntimeCap[] {
         "scopes",
       );
     }
-    if (!out.includes(item as RuntimeCap)) out.push(item as RuntimeCap);
+    if (!out.includes(item as IdentityCap)) out.push(item as IdentityCap);
   }
   return out;
 }
@@ -328,7 +310,12 @@ function pathId(raw: string): string {
   return id;
 }
 
-/** The wire projection of a row. Never carries the hash; the token is never stored. */
+// The column list every read of a row uses. token_hash is deliberately NOT in it: the
+// one statement that reads the hash is the resolver's WHERE clause, so no handler ever
+// holds a hash it could leak into a response.
+const COLUMNS = "id, from_addr, display_name, label, scopes, created_at, revoked_at";
+
+/** The wire projection of a row. Never the hash; the token is never stored at all. */
 function project(row: IdentityRow) {
   return {
     id: row.id,
@@ -336,88 +323,41 @@ function project(row: IdentityRow) {
     displayName: row.display_name,
     label: row.label,
     scopes: parseCaps(row.scopes),
-    parentId: row.parent_id,
     createdAt: row.created_at,
     revokedAt: row.revoked_at,
-    revokedBy: row.revoked_by,
   };
 }
 
-// The subtree BELOW an identity (not the identity itself). Rows are only ever created
-// under an existing parent with a fresh random id, so the parent graph cannot cycle.
-const SUBTREE =
-  "WITH RECURSIVE sub(id) AS (SELECT id FROM agent_identities WHERE parent_id = ? " +
-  "UNION SELECT a.id FROM agent_identities a JOIN sub ON a.parent_id = sub.id) ";
-
-const COLUMNS = "id, from_addr, display_name, label, scopes, parent_id, created_at, revoked_at, revoked_by";
-
 // --- the three operations ---
 
-async function mint(request: Request, env: Env, actor: Actor): Promise<Response> {
+async function mint(request: Request, env: Env): Promise<Response> {
   const body = await readBody(request);
   const domain = requireDomain(env);
   const caps = requestedCaps(body);
   const displayName = optText(body, "displayName");
   const label = optText(body, "label");
-
-  let from: string;
-  let parentId: string | null = null;
-  if (actor.kind === "operator") {
-    const raw = body.from;
-    if (typeof raw !== "string") throw new IdentityError(400, "E_FIELD_MISSING", "from is required", "from");
-    from = raw.trim().toLowerCase();
-    if (!EMAIL_RE.test(from) || from.split("@")[1] !== domain) {
-      throw new IdentityError(400, "E_SENDER_NOT_ALLOWED", `from must be a valid address on @${domain}`, "from");
-    }
-  } else {
-    // Delegated: never broader than the minter. Same From, caps a subset.
-    from = actor.from;
-    if (body.from !== undefined && body.from !== null) {
-      if (typeof body.from !== "string" || body.from.trim().toLowerCase() !== actor.from) {
-        throw new IdentityError(403, "E_FORBIDDEN", "a delegated identity always sends and reads as its minter; from must be omitted or equal it", "from");
-      }
-    }
-    const wider = caps.filter((c) => !actor.caps.includes(c));
-    if (wider.length > 0) {
-      throw new IdentityError(403, "E_SCOPE_EXCEEDS", `cannot grant scopes this credential does not hold: ${wider.join(", ")}`, "scopes");
-    }
-    parentId = actor.id;
-    const active = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM agent_identities WHERE parent_id = ? AND revoked_at IS NULL",
-    )
-      .bind(actor.id)
-      .first<{ n: number }>();
-    if ((active?.n ?? 0) >= MAX_ACTIVE_CHILDREN) {
-      throw new IdentityError(409, "E_LIMIT", `at most ${MAX_ACTIVE_CHILDREN} active identities per minter; revoke one first`);
-    }
+  const raw = body.from;
+  if (typeof raw !== "string") throw new IdentityError(400, "E_FIELD_MISSING", "from is required", "from");
+  const from = raw.trim().toLowerCase();
+  if (!EMAIL_RE.test(from) || from.split("@")[1] !== domain) {
+    throw new IdentityError(400, "E_SENDER_NOT_ALLOWED", `from must be a valid address on @${domain}`, "from");
   }
 
   const token = generateToken();
   const tokenHash = await sha256Hex(token);
   const id = generateId();
   const now = new Date().toISOString();
-  const values = [id, tokenHash, from, displayName, label, JSON.stringify(caps), parentId, now];
-  // A delegated insert is conditional on the minter still being active, so a revoke that
-  // lands between the gate and this write cannot leave a live child under a dead parent.
-  const insert = parentId
-    ? env.DB.prepare(
-        `INSERT INTO agent_identities (id, token_hash, from_addr, display_name, label, scopes, parent_id, created_at) ` +
-          "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM agent_identities WHERE id = ? AND revoked_at IS NULL)",
-      ).bind(...values, parentId)
-    : env.DB.prepare(
-        `INSERT INTO agent_identities (id, token_hash, from_addr, display_name, label, scopes, parent_id, created_at) ` +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      ).bind(...values);
-  const audit = auditStatement(env, actor, now, {
+  const insert = env.DB.prepare(
+    "INSERT INTO agent_identities (id, token_hash, from_addr, display_name, label, scopes, created_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).bind(id, tokenHash, from, displayName, label, JSON.stringify(caps), now);
+  const audit = auditStatement(env, now, {
     action: "identity.mint",
     targetId: id,
     outcome: "ok",
-    detail: { from, scopes: caps, parentId },
-  }, id);
-  const results = await env.DB.batch([insert, audit]);
-  if ((results[0]?.meta?.changes ?? 0) === 0) {
-    throw new IdentityError(401, "unauthorized", "the minting identity was revoked");
-  }
+    detail: { from, scopes: caps },
+  });
+  await env.DB.batch([insert, audit]);
   return json(
     {
       ok: true,
@@ -427,33 +367,26 @@ async function mint(request: Request, env: Env, actor: Actor): Promise<Response>
       displayName,
       label,
       scopes: caps,
-      parentId,
       createdAt: now,
-      note: "the token is shown once; only its hash is stored",
+      note: "the token is shown once and cannot be retrieved again; only its hash is stored",
     },
     201,
   );
 }
 
-async function list(url: URL, env: Env, actor: Actor): Promise<Response> {
+async function list(url: URL, env: Env): Promise<Response> {
   const limit = parseLimit(url);
   const includeRevoked = parseIncludeRevoked(url);
   const cursor = decodeCursor(url);
   const where: string[] = [];
   const binds: unknown[] = [];
-  let prefix = "";
-  if (actor.kind === "identity") {
-    prefix = SUBTREE;
-    binds.push(actor.id);
-    where.push("id IN (SELECT id FROM sub)");
-  }
   if (!includeRevoked) where.push("revoked_at IS NULL");
   if (cursor) {
     where.push("(created_at > ? OR (created_at = ? AND id > ?))");
     binds.push(cursor.createdAt, cursor.createdAt, cursor.id);
   }
   const sql =
-    `${prefix}SELECT ${COLUMNS} FROM agent_identities` +
+    `SELECT ${COLUMNS} FROM agent_identities` +
     (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
     " ORDER BY created_at, id LIMIT ?";
   binds.push(limit + 1);
@@ -461,10 +394,10 @@ async function list(url: URL, env: Env, actor: Actor): Promise<Response> {
   const rows = results ?? [];
   const page = rows.slice(0, limit);
   const next = rows.length > limit ? encodeCursor(page[page.length - 1]) : null;
-  // The list is audited as well: who enumerated which credentials is part of the record.
+  // The list is audited as well: who enumerated the credentials is part of the record.
   // Written BEFORE answering, and a failed write fails the request, because an
   // unrecorded enumeration is exactly what the log exists to rule out.
-  await auditStatement(env, actor, new Date().toISOString(), {
+  await auditStatement(env, new Date().toISOString(), {
     action: "identity.list",
     outcome: "ok",
     detail: { returned: page.length, includeRevoked },
@@ -472,51 +405,36 @@ async function list(url: URL, env: Env, actor: Actor): Promise<Response> {
   return json({ ok: true, items: page.map(project), cursor: next });
 }
 
-async function revoke(env: Env, actor: Actor, rawId: string): Promise<Response> {
+async function revoke(env: Env, rawId: string): Promise<Response> {
   const id = pathId(rawId);
   const row = await env.DB.prepare(`SELECT ${COLUMNS} FROM agent_identities WHERE id = ?`).bind(id).first<IdentityRow>();
-  // An identity may revoke itself or anything below it. Anything else is 404, the same
-  // answer as an id that does not exist, so the route is not an oracle for other ids.
-  let visible = Boolean(row);
-  if (row && actor.kind === "identity" && id !== actor.id) {
-    const hit = await env.DB.prepare(`${SUBTREE}SELECT 1 AS hit FROM sub WHERE id = ?`).bind(actor.id, id).first();
-    visible = Boolean(hit);
-  }
-  if (!row || !visible) throw new IdentityError(404, "E_NOT_FOUND", "no such identity");
-
-  const below = await env.DB.prepare(`${SUBTREE}SELECT a.id FROM agent_identities a JOIN sub ON a.id = sub.id WHERE a.revoked_at IS NULL`)
-    .bind(id)
-    .all<{ id: string }>();
-  const cascade = (below.results ?? []).map((r) => r.id);
+  if (!row) throw new IdentityError(404, "E_NOT_FOUND", "no such identity");
   const now = new Date().toISOString();
-  const by = actor.kind === "operator" ? "operator" : actor.id;
   const update = env.DB.prepare(
-    "WITH RECURSIVE sub(id) AS (SELECT ? UNION SELECT a.id FROM agent_identities a JOIN sub ON a.parent_id = sub.id) " +
-      "UPDATE agent_identities SET revoked_at = ?, revoked_by = ? WHERE id IN (SELECT id FROM sub) AND revoked_at IS NULL",
-  ).bind(id, now, by);
-  const audit = auditStatement(env, actor, now, {
+    "UPDATE agent_identities SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+  ).bind(now, id);
+  const audit = auditStatement(env, now, {
     action: "identity.revoke",
     targetId: id,
     outcome: "ok",
-    detail: { alreadyRevoked: row.revoked_at !== null, cascade },
+    detail: { alreadyRevoked: row.revoked_at !== null },
   });
   const results = await env.DB.batch([update, audit]);
   const revoked = results[0]?.meta?.changes ?? 0;
-  return json({ ok: true, id, revoked, alreadyRevoked: row.revoked_at !== null, cascade });
+  return json({ ok: true, id, revoked, alreadyRevoked: row.revoked_at !== null });
 }
 
 // --- route handlers ---
 
 const ADMIN_ITEM = /^\/api\/admin\/identities\/([^/]+)$/;
-const SELF_ITEM = /^\/api\/identities\/([^/]+)$/;
 
-async function run(env: Env, actor: Actor, action: AuditEntry["action"], targetId: string | null, fn: () => Promise<Response>) {
+async function run(env: Env, action: AuditEntry["action"], targetId: string | null, fn: () => Promise<Response>) {
   try {
     return await fn();
   } catch (err) {
     if (err instanceof IdentityError) {
       // Only a well-formed id is recorded as the target; a junk path segment is not data.
-      await auditRefusal(env, actor, { action, targetId: targetId && ID_RE.test(targetId) ? targetId : null }, err);
+      await auditRefusal(env, { action, targetId: targetId && ID_RE.test(targetId) ? targetId : null }, err);
       return fail(err);
     }
     throw err;
@@ -524,54 +442,21 @@ async function run(env: Env, actor: Actor, action: AuditEntry["action"], targetI
 }
 
 /**
- * /api/admin/identities[/{id}] for a static `both` token. Returns null for a method or
- * path this does not serve, which falls through to 404. That matters: a method with no
- * row in routes.ts has no scope gate in front of it, so serving it here would be a door.
+ * /api/admin/identities[/{id}], reached only past the `admin` scope gate. Returns null
+ * for a method or path this does not serve, which falls through to 404. That matters: a
+ * method with no row in routes.ts has no scope gate in front of it, so serving it here
+ * would be a door.
  */
 export async function handleAdminIdentities(request: Request, env: Env, url: URL): Promise<Response | null> {
-  const actor: Actor = { kind: "operator" };
   const path = url.pathname;
   if (path === "/api/admin/identities") {
-    if (request.method === "POST") return run(env, actor, "identity.mint", null, () => mint(request, env, actor));
-    if (request.method === "GET") return run(env, actor, "identity.list", null, () => list(url, env, actor));
+    if (request.method === "POST") return run(env, "identity.mint", null, () => mint(request, env));
+    if (request.method === "GET") return run(env, "identity.list", null, () => list(url, env));
     return null;
   }
   const m = ADMIN_ITEM.exec(path);
-  if (m && request.method === "DELETE") return run(env, actor, "identity.revoke", m[1], () => revoke(env, actor, m[1]));
+  if (m && request.method === "DELETE") return run(env, "identity.revoke", m[1], () => revoke(env, m[1]));
   return null;
-}
-
-/**
- * /api/identities[/{id}]: delegated minting, for a RUNTIME identity holding `mint`. The
- * gate has already demanded the `mint` scope; this decides WHO the caller is. A static
- * `both` token passes the gate but has no identity to delegate from, so it is pointed at
- * the admin routes rather than silently minting an operator identity here.
- */
-export async function handleSelfIdentities(
-  request: Request,
-  env: Env,
-  url: URL,
-  caller: { identityId?: string; identity?: BoundIdentity; caps?: string[] },
-): Promise<Response | null> {
-  const path = url.pathname;
-  const isCollection = path === "/api/identities";
-  const m = SELF_ITEM.exec(path);
-  const served = (isCollection && (request.method === "POST" || request.method === "GET")) || (m && request.method === "DELETE");
-  if (!served) return null;
-  if (!caller.identityId || !caller.identity || !caller.caps) {
-    return fail(
-      new IdentityError(
-        403,
-        "E_IDENTITY_REQUIRED",
-        "delegated minting needs a runtime agent identity holding the mint scope; an operator token uses /api/admin/identities",
-      ),
-    );
-  }
-  const actor: Actor = { kind: "identity", id: caller.identityId, from: caller.identity.from, caps: [...caller.caps] };
-  if (isCollection && request.method === "POST") return run(env, actor, "identity.mint", null, () => mint(request, env, actor));
-  if (isCollection) return run(env, actor, "identity.list", null, () => list(url, env, actor));
-  const rawId = (m as RegExpExecArray)[1];
-  return run(env, actor, "identity.revoke", rawId, () => revoke(env, actor, rawId));
 }
 
 /** GET /api/admin/audit: the audit log, newest first, one keyset page (operator only). */

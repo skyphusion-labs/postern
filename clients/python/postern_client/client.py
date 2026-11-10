@@ -911,37 +911,27 @@ class PosternClient:
 
     # --- runtime agent identities (#801) -------------------------------------
     #
-    # docs/SEND-IDENTITIES.md section 10. With `delegated=False` (the default) these are
-    # the operator routes under /api/admin/identities and need the `both` token. With
-    # `delegated=True` they are the /api/identities routes for a RUNTIME identity that
-    # holds the opt-in `mint` scope: a child always acts as the caller's From and holds a
-    # subset of its scopes. A token is returned ONCE, by the mint; only its hash is stored.
-
-    def _identities_path(self, delegated: bool) -> str:
-        return "/api/identities" if delegated else "/api/admin/identities"
+    # docs/SEND-IDENTITIES.md section 10. Operator routes: they need the `both` token. A
+    # token is returned ONCE, by the mint, and is never retrievable again.
 
     def mint_identity(
         self,
+        from_addr: str,
         scopes: list[str],
         *,
-        from_addr: Optional[str] = None,
         display_name: Optional[str] = None,
         label: Optional[str] = None,
-        delegated: bool = False,
     ) -> dict[str, Any]:
-        """POST /api/admin/identities (or /api/identities). Returns {id, token, ...}.
+        """POST /api/admin/identities. Returns {id, token, ...}; keep the token now.
 
-        `scopes` is a subset of read, send, organize, mint. `from_addr` is required on the
-        operator route; on the delegated route it may be omitted (it is forced anyway).
+        `scopes` is a non-empty subset of read, send, organize.
         """
-        body: dict[str, Any] = {"scopes": list(scopes)}
-        if from_addr is not None:
-            body["from"] = from_addr
+        body: dict[str, Any] = {"from": from_addr, "scopes": list(scopes)}
         if display_name is not None:
             body["displayName"] = display_name
         if label is not None:
             body["label"] = label
-        return self._json("POST", self._identities_path(delegated), body=body)
+        return self._json("POST", "/api/admin/identities", body=body)
 
     def list_identities(
         self,
@@ -949,9 +939,8 @@ class PosternClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
         include_revoked: bool = False,
-        delegated: bool = False,
     ) -> dict[str, Any]:
-        """GET /api/admin/identities (or /api/identities). Returns {items, cursor}.
+        """GET /api/admin/identities. Returns {items, cursor}.
 
         Never carries a token or its hash. Active identities only unless
         `include_revoked`.
@@ -963,14 +952,11 @@ class PosternClient:
             params["cursor"] = cursor
         if include_revoked:
             params["includeRevoked"] = "1"
-        return self._json("GET", self._identities_path(delegated), params=params or None)
+        return self._json("GET", "/api/admin/identities", params=params or None)
 
-    def revoke_identity(self, identity_id: str, *, delegated: bool = False) -> dict[str, Any]:
-        """DELETE /api/admin/identities/{id} (or /api/identities/{id}).
-
-        Also revokes every identity it minted. Effective on the next request.
-        """
-        return self._json("DELETE", f"{self._identities_path(delegated)}/{_quote(identity_id)}")
+    def revoke_identity(self, identity_id: str) -> dict[str, Any]:
+        """DELETE /api/admin/identities/{id}. Effective on the next request."""
+        return self._json("DELETE", f"/api/admin/identities/{_quote(identity_id)}")
 
     def list_audit(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
         """GET /api/admin/audit. The audit log, newest first: {items, cursor}."""

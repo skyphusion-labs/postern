@@ -267,9 +267,10 @@ A runtime identity (section 10) needs no deploy for either.
 
 The registry var above is operator CONFIG, so adding or removing an entry needs a
 deploy, and a credential that needs a deploy to revoke cannot be revoked in an
-incident. Runtime identities are the API half. They carry the same `read` / `send` /
-`organize` caps with the same meaning (sections 4 and 8 apply unchanged), are stored
-in D1 (migration `0016_agent_identities.sql`), and take effect on the next request.
+incident. Runtime identities are the API half, on the same shape as the SMTP
+credentials (`/api/admin/smtp-credentials`, #68). They carry the same `read` / `send` /
+`organize` caps with the same meaning (sections 4 and 8 apply unchanged), are stored in
+D1 (migration `0016_agent_identities.sql`), and take effect on the next request.
 
 ### 10.1 Resolution order
 
@@ -288,8 +289,8 @@ revocation and throws away a live credential.
 ### 10.2 Operator routes (a `both` token)
 
 ```bash
-# Mint. scopes is a non-empty subset of read, send, organize, mint. Anything else
-# (delete, admin, both, imap, a typo) is 400 E_VALIDATION_ERROR, never stripped.
+# Mint. scopes is a non-empty subset of read, send, organize. Anything else
+# (delete, imap, admin, both, a typo) is 400 E_VALIDATION_ERROR, never stripped.
 curl -sS -X POST "$POSTERN_API_URL/api/admin/identities" \
   -H "Authorization: Bearer $POSTERN_API_TOKEN" -H 'content-type: application/json' \
   -d '{"from":"invoices@example.com","scopes":["read","send"],"displayName":"Invoice agent","label":"invoices"}'
@@ -298,16 +299,17 @@ curl -sS -X POST "$POSTERN_API_URL/api/admin/identities" \
 # List (active only; add includeRevoked=1 for revoked rows). Keyset limit/cursor.
 curl -sS "$POSTERN_API_URL/api/admin/identities?limit=100" -H "Authorization: Bearer $POSTERN_API_TOKEN"
 
-# Revoke. Also revokes every identity this one minted, transitively. Idempotent.
+# Revoke. Idempotent; the row is kept with revokedAt.
 curl -sS -X DELETE "$POSTERN_API_URL/api/admin/identities/idn_..." -H "Authorization: Bearer $POSTERN_API_TOKEN"
 
 # The audit log, newest first. Keyset limit/cursor.
 curl -sS "$POSTERN_API_URL/api/admin/audit?limit=50" -H "Authorization: Bearer $POSTERN_API_TOKEN"
 ```
 
-- **The token is returned ONCE**, by the mint call. The table stores only its sha256
-  hash (the same hash rule as section 5), so neither a list, the audit log, nor a
-  read of the database can recover it. A lost token is revoked and re-minted.
+- **The token is returned EXACTLY ONCE**, by the mint call, and no route returns it
+  again. The table stores only its sha256 hash (the same rule as section 5). No
+  response carries the hash either: not the list, not the audit log, not whoami. A
+  lost token is revoked and re-minted.
 - Tokens start with `pstn_`, so a secret scanner can match a leaked one.
 - `from` must be on `ALLOWED_FROM_DOMAIN`. A row whose From leaves the domain later
   (the operator changed it) stops resolving (401), the same rule as section 6.
@@ -315,54 +317,26 @@ curl -sS "$POSTERN_API_URL/api/admin/audit?limit=50" -H "Authorization: Bearer $
   never deleted, revocation sets `revokedAt`. Other records attribute to this id;
   #740's audit trail is the first. `GET /api/whoami` reports it as `identityId` for a
   runtime identity, and `null` for anything else.
+- **A runtime identity never holds `admin`.** It cannot reach any `/api/admin/*` route,
+  so it cannot mint, list or revoke credentials, including ones narrower than itself.
+  Only a static `both` token can.
 
-### 10.3 Delegated minting: the opt-in `mint` cap
+### 10.3 The audit log
 
-An identity minted with `mint` in its scopes may mint, list and revoke identities
-BELOW itself, with no operator in the loop. This is for an agent that hands a
-narrower credential to a sub-agent or a single job. It is OFF unless the operator
-grants it, and only a runtime identity can hold it: the registry var ignores `mint`
-(an entry that lists it gets the rest of its scopes and not `mint`), no static scoped
-token satisfies it, and a webmail session never carries it.
+Every mint, list and revoke writes one `audit_log` row: when, the actor, the action
+(`identity.mint`, `identity.list`, `identity.revoke`), the target id, the outcome (`ok`
+or `refused`) and a JSON detail (the From and scopes granted, or the error code of a
+refusal). A successful mint or revoke and its row are written in ONE D1 batch, so the
+action cannot land without its record. A list writes its row before it answers, and
+fails if it cannot. A refusal's row is best effort: the refusal is returned either way.
 
-```bash
-# As the minting agent ($AGENT_TOKEN holds mint):
-curl -sS -X POST "$POSTERN_API_URL/api/identities" -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H 'content-type: application/json' -d '{"scopes":["read"],"label":"nightly-digest"}'
-curl -sS "$POSTERN_API_URL/api/identities" -H "Authorization: Bearer $AGENT_TOKEN"
-curl -sS -X DELETE "$POSTERN_API_URL/api/identities/idn_..." -H "Authorization: Bearer $AGENT_TOKEN"
-```
+Every actor today is `operator` (a static `both` token, which carries no id, so the
+log cannot tell two `both` tokens apart). The table is generic on purpose: #740 adds
+agent actions on another identity's mail to the same log, with the agent's id as the
+actor, rather than starting a second one.
 
-**A delegated mint is never broader than its minter:**
+### 10.4 Rotation and revocation
 
-- the child's From IS the minter's From; a different `from` is `403 E_FORBIDDEN`;
-- the child's scopes must be a subset of the minter's; one it lacks is
-  `403 E_SCOPE_EXCEEDS`, and nothing is minted;
-- a minter has at most 100 ACTIVE children (`409 E_LIMIT`), so a leaked `mint` token
-  cannot fill the database;
-- the caller lists and revokes only itself and its subtree; any other id is `404`,
-  the same answer as an id that does not exist;
-- revoking any identity revokes its whole subtree in one statement, and a mint that
-  races its minter's revoke creates nothing.
-
-A static `both` token at `/api/identities` gets `403 E_IDENTITY_REQUIRED`: it has no
-identity to delegate from, so it uses the admin routes.
-
-### 10.4 The audit log
-
-Every mint, list and revoke writes one `audit_log` row: when, the actor (`operator`
-or `identity` plus its id), the action (`identity.mint`, `identity.list`,
-`identity.revoke`), the target id, the outcome (`ok` or `refused`) and a JSON detail
-(scopes granted, the cascade on a revoke, the error code on a refusal). A successful
-mint or revoke and its row are written in ONE D1 batch, so the action cannot land
-without its record. A list writes its row before it answers, and fails if it cannot.
-A refusal's row is best effort: the refusal is returned either way. The table is
-generic on purpose; #740 adds agent actions on another identity's mail to the same
-log rather than starting a second one.
-
-### 10.5 Rotation and revocation
-
-To rotate a runtime identity: mint the new one, hand it over, then revoke the old
-one. No deploy at any step. To revoke in an incident: `DELETE` it; the next request
-with that token, or any token it minted, is 401.
-
+To rotate a runtime identity: mint the new one, hand it over, then revoke the old one.
+No deploy at any step. To revoke in an incident: `DELETE` it; the next request with
+that token is 401.

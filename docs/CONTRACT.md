@@ -614,11 +614,9 @@ none touches D1 directly (#25, #26).
 | GET/POST | `/api/admin/users` | list users (keyset `limit`/`cursor`, never a hash) or create one (never overwrites: `409 E_CONFLICT`; a generated password is returned once). See webmail-v2-contracts 1.10.4 | #790 |
 | GET/PATCH/DELETE | `/api/admin/users/{username}` | show, change `{disabled?, displayName?, from?}`, or delete a user. Disable, a `from` change and delete end the user's webmail sessions | #790 |
 | POST | `/api/admin/users/{username}/password` | operator reset `{password?}`: ends the user's sessions, clears the account lockout | #790 |
-| GET/POST | `/api/admin/identities` | list runtime agent identities (keyset `limit`/`cursor`, `includeRevoked=1`; never a token or hash) or mint one `{from, scopes, displayName?, label?}` (`201`, the token is returned ONCE). Scopes: `read`, `send`, `organize`, `mint`. See SEND-IDENTITIES.md section 10 | #801 |
-| DELETE | `/api/admin/identities/{id}` | revoke an identity and, transitively, every identity it minted; the next request with any of their tokens is `401`. Idempotent | #801 |
+| GET/POST | `/api/admin/identities` | list runtime agent identities (keyset `limit`/`cursor`, `includeRevoked=1`; never a token or hash) or mint one `{from, scopes, displayName?, label?}` (`201`, the token is returned ONCE and never again). Scopes: `read`, `send`, `organize`; anything else is `400`. A runtime identity never reaches `/api/admin/*`. See SEND-IDENTITIES.md section 10 | #801 |
+| DELETE | `/api/admin/identities/{id}` | revoke an identity; the next request with its token is `401`. Idempotent | #801 |
 | GET | `/api/admin/audit` | the audit log, newest first (keyset `limit`/`cursor`): actor, action, target, outcome, detail; refusals included | #801 |
-| GET/POST | `/api/identities` | DELEGATED (`mint` scope, a runtime identity only): list the caller's subtree, or mint a child that sends and reads as the caller and holds a SUBSET of its scopes (`403 E_SCOPE_EXCEEDS` otherwise) | #801 |
-| DELETE | `/api/identities/{id}` | revoke the caller or an identity below it; any other id is `404` | #801 |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 | POST | `/api/admin/reproject` | refill `projected_size` after a `PROJECTION_VERSION` bump (one keyset page; body: `cursor?`, `limit?`, `dryRun?`, `countOnly?`) | #507 / #520 |
 | POST | `/api/admin/reconcile` | read-only orphan-vector audit (admin; spans the estate) | #134 |

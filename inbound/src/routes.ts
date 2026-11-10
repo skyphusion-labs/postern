@@ -31,7 +31,7 @@
 import type { Scope } from "./sendidentity";
 
 /** The scope a route/method demands. `admin` is satisfied ONLY by a `both` token. */
-export type RouteScope = "read" | "send" | "delete" | "imap" | "organize" | "mint" | "admin";
+export type RouteScope = "read" | "send" | "delete" | "imap" | "organize" | "admin";
 
 /**
  * Every value of `RouteScope`, as DATA.
@@ -45,7 +45,7 @@ export type RouteScope = "read" | "send" | "delete" | "imap" | "organize" | "min
  * SUMMARY_FIELDS cannot drift from StoredMessageSummary: a scope added to `RouteScope`
  * and not here fails `npm run typecheck`, and so does a name here the union lacks.
  */
-export const ROUTE_SCOPES = ["read", "send", "delete", "imap", "organize", "mint", "admin"] as const;
+export const ROUTE_SCOPES = ["read", "send", "delete", "imap", "organize", "admin"] as const;
 
 type ExactlyNever<T extends never> = T;
 type _NoRouteScopeMissing = ExactlyNever<Exclude<RouteScope, (typeof ROUTE_SCOPES)[number]>>;
@@ -213,16 +213,17 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "admin-user-delete", method: "DELETE", path: "/api/admin/users/", match: "prefix", scope: "admin",
     auth: "bearer", requireChild: true, template: "/api/admin/users/{username}" },
   // Runtime agent identities (#801): mint, list, revoke, and the audit log they write.
-  // Operator-minted here; the delegated rows below are `mint`-scoped.
+  // Operator only, on the smtp-credentials precedent: a runtime identity never holds
+  // `admin`, so it cannot mint, list or revoke credentials.
   { id: "admin-identities-list", method: "GET", path: "/api/admin/identities", match: "exact", scope: "admin",
     auth: "bearer", query: ["limit", "cursor", "includeRevoked"],
     note: "runtime agent identities (#801): one keyset page ordered by createdAt; never carries a token or its hash; active only unless includeRevoked=1. Audited (identity.list)" },
   { id: "admin-identities-mint", method: "POST", path: "/api/admin/identities", match: "exact", scope: "admin",
     auth: "bearer", body: ["from", "scopes", "displayName", "label"],
-    note: "scopes from read|send|organize|mint; anything else is 400, never stripped. Returns the token ONCE (201); only its sha256 is stored. Authenticates on the next request, no deploy. Audited (identity.mint)" },
+    note: "scopes from read|send|organize; anything else (delete, imap, admin, both, a typo) is 400, never stripped. Returns the token ONCE (201); it is never retrievable again and only its sha256 is stored. Authenticates on the next request, no deploy. Audited (identity.mint)" },
   { id: "admin-identity-revoke", method: "DELETE", path: "/api/admin/identities/", match: "prefix", scope: "admin",
     auth: "bearer", requireChild: true, template: "/api/admin/identities/{id}",
-    note: "revokes the identity AND every identity it minted, transitively; the next request with any of their tokens is 401. Idempotent. Audited (identity.revoke)" },
+    note: "the next request with its token is 401; no deploy. Idempotent; the row is kept with revokedAt and its id is never reused. Audited (identity.revoke)" },
   { id: "admin-audit", method: "GET", path: "/api/admin/audit", match: "exact", scope: "admin", auth: "bearer",
     query: ["limit", "cursor"],
     note: "the audit log (#801), newest first: actor, action, target, outcome, detail. Refusals are recorded too" },
@@ -236,20 +237,6 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "admin-reconcile", method: "POST", path: "/api/admin/reconcile", match: "exact", scope: "admin",
     auth: "bearer", body: ["limit", "sample"],
     note: "read-only report, gated admin because it spans the whole estate" },
-
-  // --- delegated minting (#801): a runtime identity holding the opt-in `mint` cap ---
-  // The caller mints, lists and revokes only below ITSELF: a child sends and reads as the
-  // caller's From and holds a subset of the caller's caps, so a delegated mint can never
-  // be broader than the credential that made it.
-  { id: "identities-list", method: "GET", path: "/api/identities", match: "exact", scope: "mint", auth: "bearer",
-    query: ["limit", "cursor", "includeRevoked"],
-    note: "the identities this caller minted, transitively. Audited" },
-  { id: "identities-mint", method: "POST", path: "/api/identities", match: "exact", scope: "mint", auth: "bearer",
-    body: ["from", "scopes", "displayName", "label"],
-    note: "from is forced to the caller (a different one is 403); a scope the caller lacks is 403 E_SCOPE_EXCEEDS; at most 100 active children per minter (409 E_LIMIT). A static token is 403 E_IDENTITY_REQUIRED and uses /api/admin/identities" },
-  { id: "identity-revoke", method: "DELETE", path: "/api/identities/", match: "prefix", scope: "mint", auth: "bearer",
-    requireChild: true, template: "/api/identities/{id}",
-    note: "itself or any identity below it; any other id is 404, the same as one that does not exist. Cascades like the admin revoke" },
 
   // --- hard delete: its own scope, and it MUST be matched before the read prefix ---
   { id: "message-delete", method: "DELETE", path: "/api/messages/", match: "prefix", scope: "delete",
@@ -365,7 +352,5 @@ export function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (need === "delete") return have === "delete";
   if (need === "imap") return have === "imap";
   if (need === "organize") return have === "organize" || have === "imap";
-  // mint (#801): no static scoped token carries it. It is held only by a RUNTIME agent
-  // identity granted it explicitly (checked by caps membership, not here) and by `both`.
-  return false; // mint and admin: only `both`
+  return false; // admin: only `both`
 }

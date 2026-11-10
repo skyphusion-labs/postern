@@ -194,8 +194,7 @@ credentials through the API, with no config edit and no redeploy:
 `POST /api/admin/identities {"from": "...", "scopes": ["read", "send"]}` returns the
 token once (only its hash is stored), and `DELETE /api/admin/identities/{id}` stops it
 on the very next request. Every mint, list and revoke is written to an audit log
-(`GET /api/admin/audit`). An agent granted the opt-in `mint` scope can mint narrower
-credentials for its own sub-agents, never broader than itself. See
+(`GET /api/admin/audit`). See
 [docs/SEND-IDENTITIES.md section 10](docs/SEND-IDENTITIES.md#10-runtime-identities-mint-list-and-revoke-without-a-deploy-801).
 
 **MCP (Cursor / Claude Code):** add an MCP server entry with `command: npx`,

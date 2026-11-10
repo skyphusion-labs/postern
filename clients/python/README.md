@@ -259,7 +259,7 @@ that reports no scope it says so rather than guessing.
 | `create_draft` / `update_draft` | `POST /api/drafts`, `PUT /api/drafts/{id}` | `{id, draft}` / `{draft}` |
 | `delete_draft` / `send_draft` | `DELETE`, `POST /api/drafts/{id}/send` | `None` / `{messageId, ...}` |
 | `list_draft_attachments` / `add_draft_attachment` / `delete_draft_attachment` | `/api/drafts/{id}/attachments[/{aid}]` | `[attachment]` / attachment / `None` |
-| `mint_identity` / `list_identities` / `revoke_identity` | `/api/admin/identities[/{id}]`, or `/api/identities[/{id}]` with `delegated=True` | `{id, token, ...}` (the token ONCE) / `{items, cursor}` / `{revoked, cascade}` (#801) |
+| `mint_identity` / `list_identities` / `revoke_identity` | `/api/admin/identities[/{id}]` | `{id, token, ...}` (the token ONCE, never again) / `{items, cursor}` / `{revoked, alreadyRevoked}` (#801) |
 | `list_audit` | `GET /api/admin/audit` | `{items, cursor}`, newest first (#801) |
 | `ping` | `GET /api/messages?limit=1` | `bool` |
 
@@ -270,9 +270,8 @@ identity (a per-identity send credential,
 [SEND-IDENTITIES](../../docs/SEND-IDENTITIES.md)); a static operator token is
 refused with `E_IDENTITY_REQUIRED` because no owner can be derived from it.
 
-Runtime agent identities (#801): the operator methods need the `both` token; with
-`delegated=True` they need a runtime identity holding the opt-in `mint` scope, which
-mints only below itself (same From, a subset of its scopes). See
+Runtime agent identities (#801): `mint_identity`, `list_identities`,
+`revoke_identity` and `list_audit` need the `both` token. See
 [SEND-IDENTITIES section 10](../../docs/SEND-IDENTITIES.md).
 
 ## Tests

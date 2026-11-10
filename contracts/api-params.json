@@ -211,7 +211,7 @@
         "displayName",
         "label"
       ],
-      "note": "scopes from read|send|organize|mint; anything else is 400, never stripped. Returns the token ONCE (201); only its sha256 is stored. Authenticates on the next request, no deploy. Audited (identity.mint)"
+      "note": "scopes from read|send|organize; anything else (delete, imap, admin, both, a typo) is 400, never stripped. Returns the token ONCE (201); it is never retrievable again and only its sha256 is stored. Authenticates on the next request, no deploy. Audited (identity.mint)"
     },
     "admin-audit": {
       "query": [
@@ -242,23 +242,6 @@
         "sample"
       ],
       "note": "read-only report, gated admin because it spans the whole estate"
-    },
-    "identities-list": {
-      "query": [
-        "limit",
-        "cursor",
-        "includeRevoked"
-      ],
-      "note": "the identities this caller minted, transitively. Audited"
-    },
-    "identities-mint": {
-      "body": [
-        "from",
-        "scopes",
-        "displayName",
-        "label"
-      ],
-      "note": "from is forced to the caller (a different one is 403); a scope the caller lacks is 403 E_SCOPE_EXCEEDS; at most 100 active children per minter (409 E_LIMIT). A static token is 403 E_IDENTITY_REQUIRED and uses /api/admin/identities"
     },
     "messages-list": {
       "query": [

@@ -249,8 +249,7 @@ CREATE TABLE IF NOT EXISTS mailbox_uid_counter (
 
 -- Runtime agent identities (#801, migration 0016). sha256 token HASH only, never the
 -- token; `id` is stable and never reused; revocation sets revoked_at (rows are never
--- deleted); parent_id names the identity that minted this one under the opt-in `mint`
--- cap, NULL = operator-minted. See inbound/src/agentidentities.ts.
+-- deleted). Operator-minted only. See inbound/src/agentidentities.ts.
 CREATE TABLE IF NOT EXISTS agent_identities (
   id           TEXT PRIMARY KEY,
   token_hash   TEXT NOT NULL UNIQUE,
@@ -258,12 +257,9 @@ CREATE TABLE IF NOT EXISTS agent_identities (
   display_name TEXT,
   label        TEXT,
   scopes       TEXT NOT NULL,
-  parent_id    TEXT,
   created_at   TEXT NOT NULL,
-  revoked_at   TEXT,
-  revoked_by   TEXT
+  revoked_at   TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_agent_identities_parent ON agent_identities(parent_id);
 CREATE INDEX IF NOT EXISTS idx_agent_identities_created ON agent_identities(created_at, id);
 
 -- Generic audit log (#801, migration 0016): one row per action with actor, target and
