@@ -10,10 +10,12 @@
 //
 // Secrets: the Cloudflare token is never printed. The generated mailbox token and
 // the first admin's password are written to a mode-600 file whose PATH is printed,
-// never its contents.
+// never its contents. "Never printed" does not rest on wrangler's behaviour either:
+// every log line and every error message leaves through ctx.redact (#831), which
+// replaces the token and every secret this installer generated or stored.
 
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CfError } from "./cf.mjs";
 import { renderConfig } from "./config.mjs";
@@ -84,6 +86,16 @@ function saveCreds(opts, creds) {
 
 export const randomSecret = () => randomBytes(32).toString("hex");
 
+export const REDACTED = "[redacted]";
+// Replace every known secret value in `text`. Values shorter than 8 characters are
+// skipped: none of ours is that short, and replacing a short common string would
+// garble the output without protecting anything.
+export function redactText(text, secrets) {
+  let s = String(text ?? "");
+  for (const v of secrets) if (typeof v === "string" && v.length >= 8) s = s.split(v).join(REDACTED);
+  return s;
+}
+
 // ---------------------------------------------------------------------------
 // the change log: every line says what happened to which named resource
 
@@ -96,6 +108,7 @@ function reporter(log) {
     unchanged: (what) => log(`= unchanged ${what}`),
     kept: (what) => log(`- kept      ${what}`),
     would: (what) => { changes.push(["would", what]); log(`? would     ${what}`); },
+    removed: (what) => { changes.push(["removed", what]); log(`x removed   ${what}`); },
   };
 }
 
@@ -511,13 +524,16 @@ async function ensureDnsRecords(ctx, pf, wants, label) {
 }
 
 async function ensureSending(ctx, pf) {
-  const { cf, opts, rep } = ctx;
+  const { cf, opts, rep, state } = ctx;
   const z = pf.zone.id;
   const subs = (await cf.call("read Email Sending domains", P.sending, "GET", `/zones/${z}/email/sending/subdomains`)).result || [];
   let sub = subs.find((s) => norm(s.name) === norm(opts.domain));
   if (!sub) {
     if (opts.dryRun) return rep.would(`enable Email Sending for ${opts.domain} and add its DKIM / SPF / bounce records`);
     sub = (await cf.call("enable Email Sending", P.sending, "POST", `/zones/${z}/email/sending/subdomains`, { name: opts.domain })).result;
+    // Recorded so that uninstall removes Sending only when THIS installer enabled it.
+    state.owned.sending = sub.tag;
+    saveState(opts, state);
     rep.created(`Email Sending for ${opts.domain}`);
     // Measured 2026-11-10: a send in the first seconds after enabling is refused with
     // E_SENDER_DOMAIN_NOT_AVAILABLE; it was accepted about a minute later.
@@ -649,9 +665,19 @@ async function ensureFirstAdmin(ctx, pf) {
 function makeCtx(deps, opts, mode) {
   const paths = statePaths(opts);
   const state = loadState(opts);
-  const rep = reporter(deps.log);
+  // Every secret this run knows: the Cloudflare token, each one it generates, and each
+  // SECRET value in the credentials file (read at print time, since a run writes it
+  // midway). The file also holds the API URL and the admin login, which are not secret.
+  const generated = [];
+  const gen = deps.randomSecret || randomSecret;
+  const storedSecrets = () => Object.entries(loadCreds(opts)).filter(([k]) => /TOKEN|PASSWORD|SECRET/.test(k)).map(([, v]) => v);
+  const redact = (text) => redactText(text, [deps.token, ...generated, ...storedSecrets()]);
+  const log = (s) => deps.log(redact(s));
+  const rep = reporter(log);
   const ctx = {
     ...deps,
+    log,
+    redact,
     opts,
     mode,
     state,
@@ -661,7 +687,7 @@ function makeCtx(deps, opts, mode) {
     upgradeRecord: {},
     healthTries: deps.healthTries ?? 30,
     healthDelayMs: deps.healthDelayMs ?? 10000,
-    randomSecret: deps.randomSecret || randomSecret,
+    randomSecret: () => { const v = gen(); generated.push(v); return v; },
   };
   ctx.wrangler = (args) =>
     deps.exec(join(deps.repoRoot, "inbound", "node_modules", ".bin", "wrangler"), args, {
@@ -677,9 +703,25 @@ function writeConfig(ctx) {
   writeFileSync(ctx.paths.config, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
 }
 
+// Every error leaves through here, redacted: a wrangler failure's tail() can carry
+// whatever wrangler printed, and a refusal can quote API text.
+async function guarded(ctx, fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e && typeof e.message === "string") e.message = ctx.redact(e.message);
+    if (e && Array.isArray(e.reasons)) e.reasons = e.reasons.map(ctx.redact);
+    throw e;
+  }
+}
+
 export async function install(deps, opts, mode = "install") {
   const ctx = makeCtx(deps, opts, mode);
-  const { log } = deps;
+  return guarded(ctx, () => installRun(ctx, opts, mode));
+}
+
+async function installRun(ctx, opts, mode) {
+  const { log } = ctx;
   if (mode === "upgrade" && !ctx.state.deploy) {
     throw new Refused([`no install recorded in ${ctx.paths.state}; run install first (upgrade only moves an existing install forward)`]);
   }
@@ -738,6 +780,11 @@ export async function install(deps, opts, mode = "install") {
 
 export async function rollback(deps, opts) {
   const ctx = makeCtx(deps, opts, "rollback");
+  return guarded(ctx, () => rollbackRun(ctx, opts));
+}
+
+async function rollbackRun(ctx, opts) {
+  const deps = ctx;
   const last = ctx.state.history[ctx.state.history.length - 1];
   if (!last) throw new Refused([`no upgrade recorded in ${ctx.paths.state}; there is nothing to roll back to`]);
   if (!last.fromVersionId && !opts.restoreDb) {
@@ -770,4 +817,134 @@ export async function rollback(deps, opts) {
   ctx.state.history.pop();
   saveState(opts, ctx.state);
   return { changes: ctx.rep.changes };
+}
+
+// ---------------------------------------------------------------------------
+// UNINSTALL (#831). Removes only what this installer's state file records, in reverse
+// order of install, data last.
+//
+// Email Routing is NEVER disabled. Disabling it makes Cloudflare DELETE the zone's MX,
+// SPF and DKIM records (measured in pt1110), which takes away mail the operator may
+// still want to receive somewhere else. Uninstall points the catch-all away from the
+// Worker (disabled, drop) and says so; turning Routing off is left to the operator.
+//
+// Mail is kept by default. --delete-data deletes D1 and R2 only with
+// --confirm-delete <domain> typed out, and only after `wrangler d1 export` has written
+// a non-empty .sql file next to the state file.
+export async function uninstall(deps, opts) {
+  const ctx = makeCtx(deps, opts, "uninstall");
+  return guarded(ctx, () => uninstallRun(ctx, opts));
+}
+
+async function uninstallRun(ctx, opts) {
+  const { cf, state, rep, log, paths } = ctx;
+  const owned = state.owned || {};
+  if (!state.accountId || !state.zoneId || !Object.keys(owned).length) {
+    throw new Refused([`no install recorded in ${paths.state}. Uninstall removes only what this installer recorded creating, and nothing is recorded.`]);
+  }
+  if (opts.deleteData && opts.confirmDelete !== opts.domain) {
+    throw new Refused([`--delete-data deletes every stored message and attachment. Confirm it by also passing --confirm-delete ${opts.domain} (the domain, typed out).`]);
+  }
+  const zones = await cf.list("look up the zone", P.zone, `/zones?name=${encodeURIComponent(opts.domain)}`);
+  const zone = zones.find((z) => norm(z.name) === norm(opts.domain));
+  if (!zone || zone.id !== state.zoneId || zone.account?.id !== state.accountId) {
+    throw new Refused([`the state file records zone ${state.zoneId} in account ${state.accountId}, and ${opts.domain} is not that zone for this token. Nothing was changed.`]);
+  }
+  const z = state.zoneId;
+  const a = state.accountId;
+  const dry = opts.dryRun;
+  log(`postern uninstall: ${opts.domain}, Worker ${opts.name}${dry ? " (dry run: nothing will change)" : ""}`);
+
+  // 1. Routing: the catch-all stops pointing at the Worker. Routing itself stays on.
+  const ca = (await cf.call("read the catch-all rule", P.routing, "GET", `/zones/${z}/email/routing/rules/catch_all`, undefined, { allow404: true }))?.result;
+  const ours = ca && (ca.actions || []).some((x) => x.type === "worker" && (x.value || []).includes(opts.name));
+  if (ours) {
+    if (dry) rep.would(`disable the catch-all rule (it sends every address to Worker ${opts.name})`);
+    else {
+      await cf.call("disable the catch-all rule", P.routing, "PUT", `/zones/${z}/email/routing/rules/catch_all`, {
+        actions: [{ type: "drop" }], matchers: [{ type: "all" }], enabled: false, name: "catch-all (postern uninstalled)",
+      });
+      rep.updated(`catch-all rule: disabled (it sent every address to Worker ${opts.name})`);
+    }
+  } else rep.unchanged(`catch-all rule (it does not point at Worker ${opts.name})`);
+  rep.kept(`Email Routing on ${opts.domain} stays enabled: turning it off makes Cloudflare delete the zone's MX, SPF and DKIM records. Turn it off yourself if you mean to stop receiving mail for ${opts.domain}.`);
+
+  // 2. The Worker's custom domain, then the Worker.
+  if (owned.worker) {
+    const doms = await cf.list("list Worker custom domains", P.workers, `/accounts/${a}/workers/domains?hostname=${encodeURIComponent(state.hostname || opts.hostname)}`);
+    for (const d of doms.filter((d) => d.service === opts.name)) {
+      if (dry) { rep.would(`detach custom domain ${d.hostname} from Worker ${opts.name}`); continue; }
+      await cf.call(`detach custom domain ${d.hostname}`, P.workers, "DELETE", `/accounts/${a}/workers/domains/${d.id}`);
+      rep.removed(`custom domain ${d.hostname}`);
+    }
+    const script = await cf.call("read the Worker", P.workers, "GET", `/accounts/${a}/workers/scripts/${opts.name}/settings`, undefined, { allow404: true });
+    if (!script) rep.unchanged(`Worker ${opts.name} (already gone)`);
+    else if (dry) rep.would(`delete Worker ${opts.name}`);
+    else {
+      await cf.call("delete the Worker", P.workers, "DELETE", `/accounts/${a}/workers/scripts/${opts.name}?force=true`);
+      rep.removed(`Worker ${opts.name}`);
+    }
+    if (!dry) { delete owned.worker; delete state.deploy; saveState(opts, state); }
+  }
+
+  // 3. Email Sending, only if this installer enabled it. Cloudflare's DELETE removes the
+  //    Sending DNS records it added (API reference; not measured here).
+  if (owned.sending) {
+    if (dry) rep.would(`disable Email Sending for ${opts.domain} (Cloudflare removes its Sending DNS records)`);
+    else {
+      await cf.call("disable Email Sending", P.sending, "DELETE", `/zones/${z}/email/sending/subdomains/${owned.sending}`, undefined, { allow404: true });
+      delete owned.sending;
+      saveState(opts, state);
+      rep.removed(`Email Sending for ${opts.domain}`);
+    }
+  } else rep.kept(`Email Sending for ${opts.domain}: this installer did not record enabling it, so it is left as it is`);
+
+  // 4. Data: kept unless asked, exported before it is deleted.
+  if (!opts.deleteData) {
+    if (owned.d1 || owned.bucket) {
+      rep.kept(`D1 ${opts.d1Name} and R2 ${opts.bucket}: your mail is kept. To delete it, re-run with --delete-data --confirm-delete ${opts.domain} (D1 is exported to a file first).`);
+    }
+  } else {
+    if (owned.d1 && state.d1Id) {
+      const file = join(opts.stateDir, `${opts.name}.${opts.domain}.export-${new Date().toISOString().replace(/[:.]/g, "-")}.sql`);
+      if (dry) rep.would(`export D1 ${opts.d1Name} to ${file}, then delete it`);
+      else {
+        writeConfig(ctx);
+        const r = await ctx.wrangler(["d1", "export", opts.d1Name, "--remote", "--output", file, "--skip-confirmation", "-c", paths.config]);
+        if (r.code !== 0) throw new Error(`exporting D1 failed, so it was NOT deleted:\n${tail(r)}`);
+        let size = 0;
+        try { size = statSync(file).size; } catch { size = 0; }
+        if (!size) throw new Error(`the D1 export at ${file} is missing or empty, so D1 was NOT deleted`);
+        chmodSync(file, 0o600);
+        log(`  exported D1 ${opts.d1Name} to ${file} (${size} bytes)`);
+        await cf.call("delete the D1 database", P.d1, "DELETE", `/accounts/${a}/d1/database/${state.d1Id}`);
+        delete owned.d1;
+        delete state.d1Id;
+        saveState(opts, state);
+        rep.removed(`D1 database ${opts.d1Name} (export kept at ${file})`);
+      }
+    }
+    if (owned.bucket) {
+      if (dry) rep.would(`delete R2 bucket ${opts.bucket} (only if it is empty)`);
+      else {
+        try {
+          await cf.call("delete the R2 bucket", P.r2, "DELETE", `/accounts/${a}/r2/buckets/${opts.bucket}`);
+          delete owned.bucket;
+          saveState(opts, state);
+          rep.removed(`R2 bucket ${opts.bucket}`);
+        } catch (e) {
+          if (!(e instanceof CfError) || e.permissionDenied) throw e;
+          rep.kept(`R2 bucket ${opts.bucket}: Cloudflare deletes only an empty bucket (${e.message}). Empty it, then re-run.`);
+        }
+      }
+    }
+  }
+
+  const left = Object.keys(owned);
+  if (!dry && !left.length) { state.uninstalledAt = new Date().toISOString(); saveState(opts, state); }
+  const n = rep.changes.filter((c) => c[0] !== "would").length;
+  log("");
+  log(dry ? `dry run: ${rep.changes.length} change(s) would be made.` : `done: ${n} change(s) made.${left.length ? ` Still recorded: ${left.join(", ")}.` : ""}`);
+  if (!dry) log(`credentials: ${paths.creds} still holds the mailbox token and admin password. Delete it yourself when you no longer need it.`);
+  return { changes: rep.changes, state };
 }

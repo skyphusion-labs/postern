@@ -79,7 +79,7 @@ export function fakeFetch(m) {
     const fault = m.faults.find((f) => f.method === method && f.re.test(path) && f.times > 0);
     if (fault) {
       fault.times--;
-      return fail(fault.status || 500, 10500, "injected fault");
+      return fail(fault.status || 500, 10500, fault.message ?? "injected fault");
     }
     const perm = permOf(path);
     if (m.denied.has(perm)) return fail(403, 10000, "Authentication error");
@@ -146,6 +146,13 @@ export function fakeFetch(m) {
         return ok(s);
       }
     }
+    if ((mm = new RegExp(`^${z}/email/sending/subdomains/([^/]+)$`).exec(p)) && method === "DELETE") {
+      // API reference: disables sending and removes its DNS records.
+      if (!m.sendingSubs.some((s) => s.tag === mm[1])) return fail(404, 1000, "no such subdomain");
+      m.sendingSubs = m.sendingSubs.filter((s) => s.tag !== mm[1]);
+      m.dns = m.dns.filter((r) => !String(r.id).startsWith("auto-") || r.name.startsWith("_dmarc."));
+      return ok(null);
+    }
     if ((mm = new RegExp(`^${z}/email/sending/subdomains/([^/]+)/dns$`).exec(p)) && method === "GET") {
       return m.sendingSubs.some((s) => s.tag === mm[1]) ? ok(m.sendingDns) : fail(404, 1000, "no such subdomain");
     }
@@ -159,6 +166,18 @@ export function fakeFetch(m) {
       if (mm[2] === "settings") return ok({ bindings: Object.entries(s.vars || {}).map(([name, text]) => ({ name, type: "plain_text", text })) });
       if (mm[2] === "secrets") return ok([...s.secrets.keys()].map((name) => ({ name, type: "secret_text" })));
       return ok({ deployments: [{ id: "dep", versions: [{ version_id: s.live, percentage: 100 }] }] });
+    }
+    if ((mm = new RegExp(`^${a}/workers/scripts/([^/]+)$`).exec(p)) && method === "DELETE") {
+      if (!m.scripts[mm[1]]) return fail(404, 10007, "This Worker does not exist on your account.");
+      delete m.scripts[mm[1]];
+      return ok(null);
+    }
+    if ((mm = new RegExp(`^${a}/workers/domains/([^/]+)$`).exec(p)) && method === "DELETE") {
+      const d = m.domains.find((x) => x.id === mm[1]);
+      if (!d) return fail(404, 100116, "domain not found");
+      m.domains = m.domains.filter((x) => x !== d);
+      m.dns = m.dns.filter((r) => !(r.name === d.hostname && r.type === "AAAA"));
+      return ok(null);
     }
     if (p === `${a}/workers/domains` && method === "GET") {
       const h = q.get("hostname");
@@ -176,6 +195,11 @@ export function fakeFetch(m) {
         return ok(d);
       }
     }
+    if ((mm = new RegExp(`^${a}/d1/database/([^/]+)$`).exec(p)) && method === "DELETE") {
+      if (!m.d1.some((d) => d.uuid === mm[1])) return fail(404, 7404, "database not found");
+      m.d1 = m.d1.filter((d) => d.uuid !== mm[1]);
+      return ok(null);
+    }
     if ((mm = new RegExp(`^${a}/d1/database/([^/]+)/query$`).exec(p)) && method === "POST") {
       const applied = m.migrations[mm[1]];
       if (!applied) return fail(400, 7500, "no such table: d1_migrations: SQLITE_ERROR");
@@ -189,6 +213,12 @@ export function fakeFetch(m) {
     if (p === `${a}/r2/buckets` && method === "POST") {
       m.r2.push({ name: body.name });
       return ok({ name: body.name });
+    }
+    if ((mm = new RegExp(`^${a}/r2/buckets/([^/]+)$`).exec(p)) && method === "DELETE") {
+      if (!m.r2.some((x) => x.name === mm[1])) return fail(404, 10006, "The specified bucket does not exist.");
+      if ((m.r2Objects?.[mm[1]] ?? 0) > 0) return fail(409, 10008, "The bucket you tried to delete is not empty.");
+      m.r2 = m.r2.filter((x) => x.name !== mm[1]);
+      return ok(null);
     }
     if ((mm = new RegExp(`^${a}/r2/buckets/([^/]+)$`).exec(p)) && method === "GET") {
       const b = m.r2.find((x) => x.name === mm[1]);
@@ -208,7 +238,7 @@ export function fakeExec(m) {
     const fault = m.wranglerFaults.find((f) => f.re.test(args.join(" ")) && f.times > 0);
     if (fault) {
       fault.times--;
-      return { code: 1, stdout: "", stderr: "✘ [ERROR] injected wrangler fault" };
+      return { code: 1, stdout: fault.stdout ?? "", stderr: fault.stderr ?? "✘ [ERROR] injected wrangler fault" };
     }
     const cfgPath = args[args.indexOf("-c") + 1];
     const cfg = args.includes("-c") ? JSON.parse(readFileSync(cfgPath, "utf8")) : null;
@@ -232,7 +262,7 @@ export function fakeExec(m) {
       s.vars = cfg.vars;
       for (const r of cfg.routes || []) {
         if (r.custom_domain && !m.domains.some((d) => d.hostname === r.pattern)) {
-          m.domains.push({ hostname: r.pattern, service: cfg.name });
+          m.domains.push({ id: `dom-${id}`, hostname: r.pattern, service: cfg.name });
           m.dns.push({ id: `cd-${id}`, type: "AAAA", name: r.pattern, content: "100::" });
         }
       }
@@ -250,6 +280,12 @@ export function fakeExec(m) {
       const s = m.scripts[args[args.indexOf("--name") + 1]];
       s.live = args[1];
       return { code: 0, stdout: "rolled back", stderr: "" };
+    }
+    if (args[0] === "d1" && args[1] === "export") {
+      const out = args[args.indexOf("--output") + 1];
+      writeFileSync(out, m.exportEmpty ? "" : "PRAGMA defer_foreign_keys=TRUE;\nCREATE TABLE messages (uid INTEGER);\n");
+      m.exports = [...(m.exports || []), out];
+      return { code: 0, stdout: `exported to ${out}`, stderr: "" };
     }
     if (args[0] === "d1" && args[1] === "time-travel" && args[2] === "restore") {
       m.restores.push({ db: args[3], bookmark: args[args.indexOf("--bookmark") + 1] });
