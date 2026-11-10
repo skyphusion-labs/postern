@@ -180,9 +180,12 @@ async function create(request: Request, env: Env): Promise<Response> {
   const rawUser = optString(body, "username");
   if (!rawUser || !rawUser.trim()) throw new AdminError(400, "E_FIELD_MISSING", "username is required", "username");
   const username = normalizeUsername(rawUser);
-  const problem = usernameProblem(username);
-  if (problem) throw new AdminError(400, "E_VALIDATION_ERROR", problem, "username");
-  const fromAddr = validFrom(env, optString(body, "from")?.trim() || username);
+  const domain = requireDomain(env);
+  const problem = usernameProblem(username, domain);
+  if (problem) throw new AdminError(400, "E_INVALID_USERNAME", problem, "username");
+  // A bare login binds to login@domain; an address binds to itself (contract 1.10.1).
+  const defaultFrom = username.includes("@") ? username : `${username}@${domain}`;
+  const fromAddr = validFrom(env, optString(body, "from")?.trim() || defaultFrom);
   const name = displayName(body) ?? null;
   const chosen = optString(body, "password");
   if (chosen !== undefined) policy(chosen, username);
