@@ -322,6 +322,35 @@
       "note": "the next request with its token is 401; no deploy. Idempotent; the row is kept with revokedAt and its id is never reused. Audited (identity.revoke)"
     },
     {
+      "id": "admin-delegations-list",
+      "method": "GET",
+      "path": "/api/admin/delegations",
+      "match": "exact",
+      "scope": "admin",
+      "auth": "bearer",
+      "note": "#740 S1: one keyset page ordered by createdAt; active only unless includeRevoked=1; grantee= (an idn_ id) and address= filter. Audited (delegation.list)"
+    },
+    {
+      "id": "admin-delegations-grant",
+      "method": "POST",
+      "path": "/api/admin/delegations",
+      "match": "exact",
+      "scope": "admin",
+      "auth": "bearer",
+      "note": "#740 S1: granteeId must be a LIVE agent identity (400 E_GRANTEE_INVALID otherwise, checked in the same statement as the insert); powers from organize|send_as|quote, anything else 400; address on the deploy domain and not the grantee's own; one active grant per (grantee, address), else 409 E_CONFLICT. No behaviour change in S1. Audited (delegation.grant)"
+    },
+    {
+      "id": "admin-delegation-revoke",
+      "method": "DELETE",
+      "path": "/api/admin/delegations/",
+      "match": "prefix",
+      "scope": "admin",
+      "auth": "bearer",
+      "requireChild": true,
+      "template": "/api/admin/delegations/{id}",
+      "note": "#740 S1: idempotent; the row is kept with revokedAt and its id is never reused. Audited (delegation.revoke)"
+    },
+    {
       "id": "admin-audit",
       "method": "GET",
       "path": "/api/admin/audit",

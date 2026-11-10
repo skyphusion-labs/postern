@@ -21,6 +21,7 @@ Back up the durable state; the derived state you can always rebuild.
 | Worker config + bindings | `inbound/wrangler.jsonc` (+ the operator `wrangler.ci.json`) | **DURABLE** | Keep it in your own git / secret store |
 | Worker secrets (`POSTERN_API_TOKEN`, scoped tokens) | `wrangler secret` / CF secret store | **DURABLE** | Not exportable; keep your own copy |
 | Per-identity registry (`POSTERN_SEND_IDENTITIES`) | Worker **var** (hashes only; in deploy config) | **DURABLE** | Readable + mergeable; keep in your git / deploy config (#335) |
+| Delegation grants (#740 S1) | D1 `postern`, table `delegation_grants` | **DURABLE** | Every grant is gone; once S2 to S4 enforce them, every delegated agent loses its delegated reach until re-granted |
 | Runtime agent identities + audit log (#801) | D1 `postern`, tables `agent_identities` (token hashes only), `audit_log` | **DURABLE** | Every runtime-minted agent token stops resolving (401) and must be re-minted; the record of who minted, listed and revoked what is gone |
 
 The FTS index and the Vectorize embeddings are the only things you never back up:

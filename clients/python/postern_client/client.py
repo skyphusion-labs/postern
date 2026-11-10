@@ -968,6 +968,53 @@ class PosternClient:
         """DELETE /api/admin/identities/{id}. Effective on the next request."""
         return self._json("DELETE", f"/api/admin/identities/{_quote(identity_id)}")
 
+    # --- delegation grants (#740 S1) ---------------------------------------------
+    #
+    # docs/DELEGATION.md. Operator routes: they need the `both` token. A grant names an
+    # agent identity, a human address and a set of powers (organize, quote, send_as). S1
+    # stores grants only: nothing enforces them yet.
+
+    def grant_delegation(
+        self,
+        grantee_id: str,
+        address: str,
+        powers: list[str],
+        *,
+        label: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """POST /api/admin/delegations. The grantee must be a live agent identity."""
+        body: dict[str, Any] = {"granteeId": grantee_id, "address": address, "powers": list(powers)}
+        if label is not None:
+            body["label"] = label
+        return self._json("POST", "/api/admin/delegations", body=body)
+
+    def list_delegations(
+        self,
+        *,
+        grantee: Optional[str] = None,
+        address: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        include_revoked: bool = False,
+    ) -> dict[str, Any]:
+        """GET /api/admin/delegations. Returns {items, cursor}; active grants unless include_revoked."""
+        params: dict[str, str] = {}
+        if grantee is not None:
+            params["grantee"] = grantee
+        if address is not None:
+            params["address"] = address
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        if include_revoked:
+            params["includeRevoked"] = "1"
+        return self._json("GET", "/api/admin/delegations", params=params or None)
+
+    def revoke_delegation(self, delegation_id: str) -> dict[str, Any]:
+        """DELETE /api/admin/delegations/{id}. Idempotent."""
+        return self._json("DELETE", f"/api/admin/delegations/{_quote(delegation_id)}")
+
     def list_audit(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
         """GET /api/admin/audit. The audit log, newest first: {items, cursor}."""
         params: dict[str, str] = {}

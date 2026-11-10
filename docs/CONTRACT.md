@@ -624,6 +624,8 @@ none touches D1 directly (#25, #26).
 | POST | `/api/admin/users/{username}/password` | operator reset `{password?}`: ends the user's sessions, clears the account lockout | #790 |
 | GET/POST | `/api/admin/identities` | list runtime agent identities (keyset `limit`/`cursor`, `includeRevoked=1`; never a token or hash) or mint one `{from, scopes, displayName?, label?}` (`201`, the token is returned ONCE and never again). Scopes: `read`, `send`, `organize`; anything else is `400`. A runtime identity never reaches `/api/admin/*`. See SEND-IDENTITIES.md section 10 | #801 |
 | DELETE | `/api/admin/identities/{id}` | revoke an identity; the next request with its token is `401`. Idempotent | #801 |
+| GET/POST | `/api/admin/delegations` | list delegation grants (keyset `limit`/`cursor`, `includeRevoked=1`, `grantee=`, `address=`) or grant one `{granteeId, address, powers, label?}`: the grantee must be a LIVE agent identity (`400 E_GRANTEE_INVALID`), powers from `organize`, `quote`, `send_as`, one active grant per (grantee, address) (`409 E_CONFLICT`). Stored only; nothing enforces a grant yet. See DELEGATION.md | #740 S1 |
+| DELETE | `/api/admin/delegations/{id}` | revoke a grant. Idempotent | #740 S1 |
 | GET | `/api/admin/audit` | the audit log, newest first (keyset `limit`/`cursor`): actor, action, target, outcome, detail; refusals included | #801 |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 | POST | `/api/admin/reproject` | refill `projected_size` after a `PROJECTION_VERSION` bump (one keyset page; body: `cursor?`, `limit?`, `dryRun?`, `countOnly?`) | #507 / #520 |
