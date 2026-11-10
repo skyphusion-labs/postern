@@ -11,7 +11,9 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
-## Unreleased
+## v1.8.0
+
+MINOR, because a default changes (see BREAKING below).
 
 ### LDAP: the directory certificate is verified by default
 
