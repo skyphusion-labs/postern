@@ -11,6 +11,115 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## v1.9.0
+
+MINOR. Native webmail sign-in and human user management, a one-command
+self-host installer, and the webmail redesign.
+
+**Upgrade.** Unset `WEBMAIL_AUTH_BACKEND` stays `off` (D-AUTH-3, #815).
+A deploy that already has logins does not turn webmail sign-in on by
+itself. Set `WEBMAIL_AUTH_BACKEND = "native"` to enable it. The installer
+writes that for a new install and does not add it on upgrade.
+
+### Added
+
+- **Human user management (#810).** `GET`/`POST /api/admin/users`,
+  `GET`/`PATCH`/`DELETE /api/admin/users/{u}`,
+  `POST /api/admin/users/{u}/password` (the `both` token), and
+  `postern admin users` in the Python CLI. Self-service
+  `POST /api/session/password`. Disable, a password reset, a `from`
+  change, and delete end that user's webmail sessions. The legacy
+  `POST /api/admin/smtp-credentials` reads the `password` field the route
+  table declares (`secret` stays an alias) and is body-capped. Migration
+  `0015` (additive) adds `webmail_sessions.username` and
+  `smtp_credentials.display_name`.
+- **First-run setup (#791, #815).** `POST /api/setup` creates the first user
+  from the browser. It is armed only when `WEBMAIL_AUTH_BACKEND` is
+  explicitly `native`, the `POSTERN_SETUP_TOKEN` secret is at least 32
+  characters, and `smtp_credentials` has zero rows. `GET /api/session`
+  reports `setupRequired`. While the backend is `off`, a session cookie
+  is ignored on `GET /api/session`, refresh, and change password.
+- **Webmail sign-in (#818, #822).** Sign-in, the token gate, and the
+  first-run screens (#818). Change password in Settings (#822).
+- **Webmail redesign (#799, #808, #811, #812).** Design tokens with
+  system, light, and dark themes (#799). Responsive layout, type scale,
+  and button hierarchy (#808). Calmer list, reading header, compose, and
+  empty and loading states (#811). Accessibility pass: landmarks, focus,
+  and list keyboard navigation (#812).
+- **One-command self-host installer (#807).**
+  `node deploy/postern.mjs install`, `upgrade`, and `rollback` stand
+  Postern up in the operator's own Cloudflare account. Preflight is
+  read-only and collects every refusal before any write. Each apply step
+  is an ensure against live state, so a second run writes nothing and a
+  stopped run resumes. Upgrade records a D1 Time Travel bookmark and the
+  replaced Worker version; rollback uses them (D1 restore only with
+  `--restore-db`). The first admin is created through
+  `POST /api/admin/users`. Secrets go to a mode-600 file; output prints
+  the path, never the values.
+
+### Changed
+
+- **New usernames (#823, #824).** A new username must be a 1 to 64 character
+  login of `a-z`, `0-9`, `.`, `_`, and `-`, with no leading, trailing, or
+  double dot, optionally followed by `@<ALLOWED_FROM_DOMAIN>`. `+` is no
+  longer accepted. Anything else answers `400 E_INVALID_USERNAME`.
+  Existing rows are not re-validated. A bare login binds to
+  `login@<ALLOWED_FROM_DOMAIN>`.
+- **Relay dependency (#839).** `github.com/emersion/go-smtp` moves from
+  0.25.0 to 0.25.1.
+- **Inbound types (#840).** `@cloudflare/workers-types` moves from
+  5.20261106.1 to 5.20261107.1.
+- **MCP test toolchain (#841).** The resolved `vitest` in `mcp/` moves
+  from 5.0.5 to 5.1.0 (`mcp/package.json` still allows `^5.0.5`).
+  `mcp/package.json` `version` stays 1.7.0; MCP still releases on
+  `postern-mcp-v*`.
+- **Webmail end-to-end toolchain (#842).** `@playwright/test` moves from
+  1.64.1 to 1.65.0.
+- **Inbound test toolchain (#843).** Resolved `vitest` moves from 5.0.5
+  to 5.1.0. `@vitest/coverage-istanbul` moves from `^5.0.5` to `^5.1.0`.
+
+### Fixed
+
+- **Native credentials on Cloudflare (#821, #825).** The deployed Workers
+  runtime refuses PBKDF2 above 100,000 iterations. The hash target was
+  210,000, so on the edge no login could be created (502) or verified.
+  The target is now PBKDF2-SHA256 at 100,000. A stored hash above the cap
+  (it could only have been made outside the Worker) answers exactly like
+  a wrong password, at the same cost, and logs a config error naming the
+  account. An operator password reset fixes it. A row hashed below
+  100,000 is re-hashed at 100,000 on the next successful sign-in.
+- **`sessionsEnded` on change password counts only the other sessions
+  (#826, #827).**
+- **`/api/smtp-auth` body (#829, #830).** The route contract declares
+  `username` and `secret`, matching the handler and both real callers.
+- **Search cursor on semantic and hybrid (#814).** Those modes are
+  score-ranked and never read `cursor`, so a cursor taken from an `fts`
+  page was accepted and then dropped, and the caller was told the page
+  continued. The HTTP edge now returns `400 E_VALIDATION_ERROR`, and
+  `store.search` throws the same refusal for the RPC door. `fts` and
+  `substr` still page on that cursor, and so does a search that omits
+  `mode` (that default is `fts`).
+- **IMAP LIST patterns (#816).** Matching is a linear-time glob.
+  `*` and `%` keep their RFC 3501 meaning, and `%` does not cross the
+  hierarchy delimiter.
+- **Sign-in card styles (#833).** They no longer leak onto the
+  Authentication disclosure.
+- **IMAP LDAP wire tests (#788).** Each test removes its tempdir.
+
+### Docs
+
+- Human account contract: user management, change password, and first run
+  (#793).
+- `DEPLOY.md` rewritten around the one-command installer (#809).
+- First-run setup and creating the first user (#836). Section 1: the
+  installer creates the first admin through `POST /api/admin/users` and
+  neither needs nor sets the setup secret. Section 4: logins come from
+  `POST /api/admin/users` or `postern admin users create`. New "First run
+  in the browser" and Appendix A2b, "Create the first user".
+- Webmail README screenshots and feature list after the redesign (#834).
+- Passkeys (WebAuthn) sign-in is a design note only. It is not shipped
+  (#817).
+
 ## v1.8.0
 
 MINOR, because a default changes (see BREAKING below).
