@@ -981,12 +981,13 @@ POST /api/smtp-auth          Authorization: Bearer <POSTERN_TRANSPORT_TOKEN>
 
   The endpoint is gated by the **transport token**, never the mailbox API token (section 5): the
   relay is an infra seam, not an API client. `smtp_credentials` (migration `0004`) stores the secret
-  only as a `pbkdf2$<iterations>$<salt>$<hash>` derivation (Web Crypto PBKDF2-HMAC-SHA256); an
+  only as a `pbkdf2-sha512$<iterations>$<salt>$<hash>` derivation (Web Crypto PBKDF2-HMAC-SHA512,
+  #828; a legacy `pbkdf2$` PBKDF2-HMAC-SHA256 row still verifies); an
   unknown user is verified against a dummy hash so timing does not reveal whether the username
   exists. Operators manage these accounts through the `admin`-scoped `/api/admin/users` routes
   (#790, webmail-v2-contracts 1.10.4) or the legacy `POST` / `DELETE /api/admin/smtp-credentials`
-  upsert (the secret is returned once and never logged). A hash below the current iteration
-  target is re-hashed on the next successful sign-in.
+  upsert (the secret is returned once and never logged). A hash not at the current target (a
+  legacy SHA-256 row, or a lower iteration count) is re-hashed on the next successful sign-in.
 
   The 2xx body is the only one a daemon parses; every other status is an INFRA failure, not a
   verdict on the credential. That split is load-bearing (#442): the worker answers an unexpected
