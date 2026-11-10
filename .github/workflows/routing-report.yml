@@ -1,0 +1,39 @@
+name: routing-report
+# Email Routing reachability report (#802, finding F5 of #632). READ-ONLY: lists the
+# zone's Email Routing rules and names every address that does NOT reach the Worker.
+# It never changes zone config. Goes red (exit 1) when an address is routed around the
+# Worker or a reading could not be made, and exit 3 when the token cannot read routing.
+#
+# Token (repo secret CF_ROUTING_REPORT_TOKEN), read-only, scoped to the one zone:
+#   Zone: Zone Read, Zone: Email Routing Rules Read, Zone: Zone Settings Read.
+# The weekly run reads the zone and Worker from repo variables ROUTING_REPORT_DOMAIN and
+# ROUTING_REPORT_WORKER; with ROUTING_REPORT_DOMAIN unset it skips.
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Mail domain (the zone) to report on"
+        required: true
+      worker:
+        description: "Worker the mail should reach"
+        default: postern
+  schedule:
+    - cron: "41 7 * * 1" # Mondays 07:41 UTC
+permissions:
+  contents: read
+jobs:
+  report:
+    if: github.event_name == 'workflow_dispatch' || vars.ROUTING_REPORT_DOMAIN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Reachability report
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_ROUTING_REPORT_TOKEN }}
+          DOMAIN: ${{ inputs.domain || vars.ROUTING_REPORT_DOMAIN }}
+          WORKER: ${{ inputs.worker || vars.ROUTING_REPORT_WORKER || 'postern' }}
+        run: node deploy/postern.mjs routing --domain "$DOMAIN" --name "$WORKER"

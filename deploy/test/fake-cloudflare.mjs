@@ -54,6 +54,9 @@ export function newAccount(domain = "acme-mail.test") {
 function permOf(path) {
   if (path.startsWith("/zones?")) return "zone";
   if (path.includes("/dns_records")) return "dns";
+  // Real API: the settings read and the enable/disable calls take Zone Settings; the
+  // rules (and the catch-all) take Email Routing Rules (#802).
+  if (/\/email\/routing(\/dns|\/disable|\/enable)?(\?|$)/.test(path)) return "settings";
   if (path.includes("/email/routing")) return "routing";
   if (path.includes("/email/sending")) return "sending";
   if (path.includes("/d1/")) return "d1";
@@ -120,7 +123,8 @@ export function fakeFetch(m) {
       }
       return ok(m.routing);
     }
-    if (p === `${z}/email/routing/rules` && method === "GET") return ok(m.rules, { result_info: { total_pages: 1 } });
+    // The real list includes the catch-all rule itself (measured 2026-11-10, #802).
+    if (p === `${z}/email/routing/rules` && method === "GET") return ok([...m.rules, m.catchAll], { result_info: { total_pages: 1 } });
     if (p === `${z}/email/routing/rules/catch_all`) {
       if (method === "GET") return ok(m.catchAll);
       if (method === "PUT") {
