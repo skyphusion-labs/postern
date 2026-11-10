@@ -114,3 +114,29 @@ describe("RelayTransport: header names at the transport seam", () => {
     expect(f).toHaveBeenCalledTimes(1);
   });
 });
+
+// --- Parity with the Go relay: ONE table (relay/testdata/header_names.json) ---
+import { readFileSync } from "node:fs";
+import { URL } from "node:url";
+import { headerNameProblem } from "./src/headernames";
+
+const PARITY = JSON.parse(readFileSync(new URL("../relay/testdata/header_names.json", import.meta.url), "utf8")) as {
+  maxNameLength: number;
+  cases: { name: string; ok: boolean }[];
+};
+
+describe("header-name rule: parity table shared with relay/header_names_test.go", () => {
+  it("the table covers the length boundary on both sides", () => {
+    const lens = PARITY.cases.filter((c) => /^X-a+$/.test(c.name)).map((c) => [c.name.length, c.ok]);
+    expect(lens).toContainEqual([PARITY.maxNameLength, true]);
+    expect(lens).toContainEqual([PARITY.maxNameLength + 1, false]);
+  });
+  for (const c of PARITY.cases) {
+    it(`${c.ok ? "accepts" : "refuses"} ${JSON.stringify(c.name)} (rule + send door)`, async () => {
+      expect(headerNameProblem(c.name) === null).toBe(c.ok);
+      const r = await sendWith({ [c.name]: "v" });
+      expect(r.status).toBe(c.ok ? 200 : 400);
+      expect(r.relayCalls).toHaveLength(c.ok ? 1 : 0);
+    });
+  }
+});

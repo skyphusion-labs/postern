@@ -83,9 +83,10 @@ through the configured upstream SMTP server (`smtp_transport.go`):
   (`413` over the limit);
 - reply threading headers (`In-Reply-To` / `References`) ride in `headers`;
 - all header values are **CR/LF-sanitized** (no header injection). A caller
-  header NAME must be an RFC 5322 field-name (printable ASCII 33-126, no `:`)
+  header NAME must be an RFC 5322 field-name (printable ASCII 33-126, no `:`,
+  at most 76 characters)
   and must not be reserved (From, Sender, To, Cc, Bcc, Reply-To, Return-Path,
-  Received, Resent-*, Subject, Date, MIME-Version, Content-*, Message-ID other
+  Received, Received-SPF, Authentication-Results, ARC-*, DKIM-Signature, Resent-*, Subject, Date, MIME-Version, Content-*, Message-ID other
   than the core-stamped `<messageId>`); otherwise `/dispatch` answers `400`.
 
 Leave `POSTERN_RELAY_HTTP_LISTEN` unset to run inbound-only.

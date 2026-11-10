@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/mail"
+	"os"
 	"strings"
 	"testing"
 )
@@ -113,6 +114,55 @@ func TestDispatch_BadHeaderNameIs400(t *testing.T) {
 		}
 		if stub.last.MessageID != "" {
 			t.Errorf("headers %v: transport was called", h)
+		}
+	}
+}
+
+// --- Parity with the worker: ONE table, also read by inbound/header-names.test.ts ---
+
+type headerNameTable struct {
+	MaxNameLength int `json:"maxNameLength"`
+	Cases         []struct {
+		Name string `json:"name"`
+		OK   bool   `json:"ok"`
+	} `json:"cases"`
+}
+
+func loadHeaderNameTable(t *testing.T) headerNameTable {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/header_names.json")
+	if err != nil {
+		t.Fatalf("read parity table: %v", err)
+	}
+	var tbl headerNameTable
+	if err := json.Unmarshal(raw, &tbl); err != nil {
+		t.Fatalf("parse parity table: %v", err)
+	}
+	if len(tbl.Cases) < 30 {
+		t.Fatalf("parity table has %d cases, want >= 30", len(tbl.Cases))
+	}
+	return tbl
+}
+
+func TestHeaderNameParityTable(t *testing.T) {
+	tbl := loadHeaderNameTable(t)
+	if tbl.MaxNameLength != maxHeaderNameLength {
+		t.Errorf("maxNameLength = %d in table, %d in code", tbl.MaxNameLength, maxHeaderNameLength)
+	}
+	for _, c := range tbl.Cases {
+		_, err := renderMIME(headerMsg(map[string]string{c.Name: "v"}), "agent@example.com")
+		if (err == nil) != c.OK {
+			t.Errorf("renderMIME %q: err=%v, want ok=%v", c.Name, err, c.OK)
+		}
+		stub := &stubTransport{}
+		body, _ := json.Marshal(headerMsg(map[string]string{c.Name: "v"}))
+		rr := postDispatch(t, newTestServer(stub), "Bearer "+testToken, string(body))
+		want := http.StatusOK
+		if !c.OK {
+			want = http.StatusBadRequest
+		}
+		if rr.Code != want {
+			t.Errorf("/dispatch %q: code=%d, want %d", c.Name, rr.Code, want)
 		}
 	}
 }

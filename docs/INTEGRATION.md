@@ -178,7 +178,7 @@ A bound webmail session may only name its own address there (`403 E_FORBIDDEN` o
 | `from` | string \| `{email,name}` | no | Defaults to `DEFAULT_FROM`; must be on `ALLOWED_FROM_DOMAIN` |
 | `replyTo` | string \| `{email,name}` | no | |
 | `cc` / `bcc` | string \| string[] | no | to+cc+bcc <= 50 |
-| `headers` | object | no | String values only; CR/LF rejected (no header injection). Names must be RFC 5322 field-names (printable ASCII 33-126, no `:`). Reserved names are rejected (400): From, Sender, To, Cc, Bcc, Reply-To, Return-Path, Received, Resent-*, Message-ID, Date, Subject, MIME-Version, Content-* |
+| `headers` | object | no | String values only; CR/LF rejected (no header injection). Names must be RFC 5322 field-names (printable ASCII 33-126, no `:`) of at most 76 characters. Reserved names are rejected (400): From, Sender, To, Cc, Bcc, Reply-To, Return-Path, Received, Received-SPF, Authentication-Results, ARC-*, DKIM-Signature, Resent-*, Message-ID, Date, Subject, MIME-Version, Content-* |
 
 `POST /api/reply` takes `{ messageId, html?, text?, from?, cc?, bcc?, mode?, quoteOriginal?, attachments? }`;
 `mode` (`reply` | `replyAll`) derives original To/Cc recipients server-side

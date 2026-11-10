@@ -523,19 +523,26 @@ func sanitizeHeader(v string) string {
 }
 
 // isReservedHeader reports whether a caller-supplied header name is one the
-// relay sets itself or an identity / trace header a caller must never set: the
-// addressing and sender headers, Return-Path, Received, Resent-*, message
-// identity and framing (Message-ID, Date, Subject, MIME-Version, Content-*).
-// Comparison is case-insensitive. Same rule as inbound/src/headernames.ts.
+// relay sets itself or an identity / trace / authentication header a caller
+// must never set: the addressing and sender headers, Return-Path, Received,
+// Received-SPF, Authentication-Results, ARC-*, DKIM-Signature, Resent-*,
+// message identity and framing (Message-ID, Date, Subject, MIME-Version,
+// Content-*). Comparison is case-insensitive. Same rule as
+// inbound/src/headernames.ts; parity is tested on testdata/header_names.json.
 func isReservedHeader(name string) bool {
 	k := strings.ToLower(strings.TrimSpace(name))
 	switch k {
 	case "from", "sender", "to", "cc", "bcc", "reply-to", "return-path", "received",
+		"received-spf", "authentication-results", "dkim-signature",
 		"subject", "message-id", "date", "mime-version":
 		return true
 	}
-	return strings.HasPrefix(k, "content-") || strings.HasPrefix(k, "resent-")
+	return strings.HasPrefix(k, "content-") || strings.HasPrefix(k, "resent-") || strings.HasPrefix(k, "arc-")
 }
+
+// maxHeaderNameLength caps a caller header name (RFC 5322 recommends short
+// names; 76 keeps a name plus ": " inside the 78-character line advice).
+const maxHeaderNameLength = 76
 
 // validHeaderFieldName reports whether name is an RFC 5322 field-name:
 // one or more printable US-ASCII characters (33-126) except colon.
@@ -561,6 +568,9 @@ func validateCallerHeaders(msg OutboundMessage) error {
 	for k, v := range msg.Headers {
 		if !validHeaderFieldName(k) {
 			return fmt.Errorf("invalid header name %q", k)
+		}
+		if len(k) > maxHeaderNameLength {
+			return fmt.Errorf("header name %q is longer than %d characters", k, maxHeaderNameLength)
 		}
 		if k == "Message-ID" && v == "<"+msg.MessageID+">" {
 			continue
