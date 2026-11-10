@@ -426,6 +426,7 @@ describe("#417 the two contract files join", () => {
       "health", "root", "robots", "sitemap", "webmail", "mta-sts", "ingest", "session-refresh",
       "message-get", "message-delete", "mobileconfig", "whoami",
       "admin-smtp-credential-delete", "admin-roles", "imap-roles",
+      "admin-user-get", "admin-user-delete",
     ];
     const withRows = new Set(Object.keys(PARAMS.params));
     const all = ROUTES.routes.map((r) => r.id);

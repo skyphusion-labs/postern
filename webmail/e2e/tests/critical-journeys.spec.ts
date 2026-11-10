@@ -393,4 +393,172 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#reading .msg-actions").getByRole("button", { name: "Archive" }))
       .toHaveCount(1);
   });
+
+  test("theme follows the OS by default and the toggle overrides it, plain-text body included (#794)", async ({ page }) => {
+    await installMocks(page, "token");
+    // A plain-text-only message: its frame is the one that follows the app theme.
+    await page.route("https://postern.test/api/messages/msg-1%40example.com", (route) =>
+      fulfillJson(route, { ...SAMPLE_MESSAGE, message: { ...SAMPLE_MESSAGE.message, bodyHtml: null } }));
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+    await page.getByText("Hello from Alice").click();
+
+    const html = page.locator("html");
+    const frameBody = page.frameLocator("#reading iframe").locator("body");
+    const pageBg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    await expect(html).toHaveAttribute("data-theme", "system");
+    await expect(frameBody).toContainText("plain body");
+    await expect(frameBody).toHaveCSS("background-color", "rgb(24, 27, 34)");
+    expect(await pageBg()).toBe("rgb(17, 19, 24)");
+
+    // OS flips to light: the system theme follows, and the open frame is retinted.
+    await page.emulateMedia({ colorScheme: "light" });
+    await expect(frameBody).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    expect(await pageBg()).toBe("rgb(246, 247, 249)");
+
+    // Toggle: system -> light -> dark. Dark wins over a light OS.
+    await page.locator("#themeBtn").click();
+    await expect(html).toHaveAttribute("data-theme", "light");
+    await page.locator("#themeBtn").click();
+    await expect(html).toHaveAttribute("data-theme", "dark");
+    await expect(page.locator("#themeBtn")).toHaveAttribute("aria-label", "Theme: dark");
+    await expect(frameBody).toHaveCSS("background-color", "rgb(24, 27, 34)");
+    expect(await pageBg()).toBe("rgb(17, 19, 24)");
+    expect(await page.evaluate(() => localStorage.getItem("postern_theme"))).toBe("dark");
+  });
+
+  test("phone width: list and reading are stacked views with Back, and folders open as a drawer (#795)", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installMocks(page, "token");
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+
+    const row = page.getByText("Hello from Alice");
+    await expect(row).toBeVisible();
+    await expect(page.locator("#folders")).toBeHidden();
+    // Nothing in the header may be pushed off-screen at phone width.
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+
+    await row.click();
+    await expect(page.locator("#reading h2")).toBeVisible();
+    await expect(page.locator("#reading h2")).toHaveText("Hello from Alice");
+    await expect(page.locator("#list")).toBeHidden();
+
+    await page.locator("#backBtn").click();
+    await expect(page.locator("#list")).toBeVisible();
+    await expect(page.locator("#reading h2")).toBeHidden();
+
+    await page.locator("#railBtn").click();
+    await expect(page.locator("#railBtn")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#folders")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#folders")).toBeHidden();
+    await expect(page.locator("#railBtn")).toHaveAttribute("aria-expanded", "false");
+
+    // Sign out stays reachable at phone width, via Settings.
+    await page.locator("#settingsBtn").click();
+    await expect(page.locator("#settingsSignout")).toBeVisible();
+  });
+
+  test("list rows, filters toggle, empty search and the Cc/Bcc toggle (#796)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/search**", (route) => fulfillJson(route, { ok: true, items: [], cursor: null }));
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#sendToken").fill("send-token");
+    await page.locator("#connect").click();
+
+    // Row: avatar initial, unread dot for an unseen message, and no loud "trusted" tag.
+    const row = page.locator(".row-item").first();
+    await expect(row.locator(".avatar")).toHaveText("A");
+    await expect(row.locator(".dot")).toBeVisible();
+    await expect(row.locator(".tag.trusted")).toHaveCount(0);
+
+    // Filters stay folded until asked for; the badge counts active ones.
+    await expect(page.locator("#filters")).toBeHidden();
+    await page.locator("#filtersBtn").click();
+    await expect(page.locator("#filtersBtn")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#filters")).toBeVisible();
+    await page.locator("#chipHasAtt").click();
+    await expect(page.locator("#chipHasAtt")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#filtersCount")).toHaveText("1");
+
+    // A search with no hits says so, with the query, instead of a bare "No messages."
+    await page.locator("#search").fill("zebra");
+    await page.locator("#search").press("Enter");
+    await expect(page.locator("#list .empty-state .es-title")).toHaveText("No results for “zebra”");
+
+    // Compose: Cc/Bcc folded by default, one click opens and focuses Cc.
+    await page.locator("#composeBtn").click();
+    await expect(page.locator("#cmpTo")).toBeVisible();
+    await expect(page.locator("#cmpCc")).toBeHidden();
+    await page.getByRole("button", { name: "Cc / Bcc" }).click();
+    await expect(page.locator("#cmpCc")).toBeVisible();
+    await expect(page.locator("#cmpCc")).toBeFocused();
+    await expect(page.locator("#cmpSend")).toBeVisible();
+  });
+
+  test("keyboard and landmarks: skip link, arrow keys, j/k, focus ring, one main (#797)", async ({ page }) => {
+    await installMocks(page, "token");
+    const second = { ...SAMPLE_LIST.items[0], messageId: "msg-2@example.com", subject: "Second note", from: "bob@example.com", seen: true };
+    await page.route("https://postern.test/api/messages?**", (route) =>
+      fulfillJson(route, { ok: true, items: [SAMPLE_LIST.items[0], second], cursor: null }));
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+    await expect(page.locator(".row-item")).toHaveCount(2);
+
+    // Landmarks: exactly one banner, one nav, one main, and a labelled list region.
+    await expect(page.getByRole("banner")).toHaveCount(1);
+    await expect(page.getByRole("navigation", { name: "Folders" })).toHaveCount(1);
+    await expect(page.getByRole("main")).toHaveCount(1);
+    await expect(page.getByRole("region", { name: "Message list" })).toHaveCount(1);
+    // The active folder is marked for assistive tech.
+    await expect(page.locator('#folders button[data-folder="inbox"]')).toHaveAttribute("aria-current", "page");
+    // The load is announced.
+    await expect(page.locator("#announce")).toHaveText("2 messages in Inbox.");
+
+    // First Tab lands on the skip link, which takes focus to the list.
+    // After Connect, focus is moved off the hidden gate into the list, not stranded.
+    await expect(page.locator("#list")).toBeFocused();
+    // On a fresh load of a restored mailbox, the first Tab reaches the skip link.
+    await page.reload();
+    await expect(page.locator(".row-item")).toHaveCount(2);
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#skipLink")).toBeFocused();
+    await page.keyboard.press("Enter");
+    const rows = page.locator(".row-item");
+    await expect(rows.nth(0)).toBeFocused();
+    // A keyboard focus ring is drawn (2px solid), not suppressed.
+    const ring = await rows.nth(0).evaluate((n) => { const c = getComputedStyle(n); return c.outlineStyle + " " + c.outlineWidth; });
+    expect(ring).toBe("solid 2px");
+
+    await page.keyboard.press("ArrowDown");
+    await expect(rows.nth(1)).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(rows.nth(0)).toBeFocused();
+
+    // j opens the next message and marks it current; k goes back.
+    await page.keyboard.press("j");
+    await expect(rows.nth(0)).toHaveAttribute("aria-current", "true");
+    await expect(page.locator("#reading h2")).toHaveText("Hello from Alice");
+    await page.keyboard.press("j");
+    await expect(rows.nth(1)).toHaveAttribute("aria-current", "true");
+    await expect(rows.nth(0)).not.toHaveAttribute("aria-current", "true");
+    await page.keyboard.press("k");
+    await expect(rows.nth(0)).toHaveAttribute("aria-current", "true");
+
+    // The body frame has an accessible name.
+    await expect(page.locator("#reading iframe")).toHaveAttribute("title", "Message body");
+
+    // "/" goes to search; typing there is not hijacked by the j/k shortcuts.
+    await page.keyboard.press("/");
+    await expect(page.locator("#search")).toBeFocused();
+    await page.keyboard.type("jk");
+    await expect(page.locator("#search")).toHaveValue("jk");
+  });
 });

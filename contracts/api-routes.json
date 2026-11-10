@@ -93,6 +93,15 @@
       "auth": "session-cookie"
     },
     {
+      "id": "session-password",
+      "method": "POST",
+      "path": "/api/session/password",
+      "match": "exact",
+      "scope": null,
+      "auth": "session-cookie",
+      "note": "self-service change password (#790, contract 1.10.5): cookie session + CSRF only, a Bearer is refused; throttled on the sign-in keys; rotates this session and ends the others"
+    },
+    {
       "id": "ingest",
       "method": "POST",
       "path": "/ingest",
@@ -212,6 +221,66 @@
       "requireChild": true,
       "template": "/api/admin/smtp-credentials/{username}",
       "note": "the bare prefix (no username) is deliberately NOT claimed, matching the original regex"
+    },
+    {
+      "id": "admin-users-list",
+      "method": "GET",
+      "path": "/api/admin/users",
+      "match": "exact",
+      "scope": "admin",
+      "auth": "bearer",
+      "note": "human accounts (#790, contract 1.10.4): one keyset page ordered by username; never carries a hash"
+    },
+    {
+      "id": "admin-users-create",
+      "method": "POST",
+      "path": "/api/admin/users",
+      "match": "exact",
+      "scope": "admin",
+      "auth": "bearer",
+      "note": "create only, never overwrites (409 E_CONFLICT); a generated password is returned once"
+    },
+    {
+      "id": "admin-user-password",
+      "method": "POST",
+      "path": "/api/admin/users/",
+      "match": "prefix",
+      "scope": "admin",
+      "auth": "bearer",
+      "requireChild": true,
+      "template": "/api/admin/users/{username}/password",
+      "note": "operator reset: ends the user's sessions and clears the account lockout"
+    },
+    {
+      "id": "admin-user-get",
+      "method": "GET",
+      "path": "/api/admin/users/",
+      "match": "prefix",
+      "scope": "admin",
+      "auth": "bearer",
+      "requireChild": true,
+      "template": "/api/admin/users/{username}"
+    },
+    {
+      "id": "admin-user-update",
+      "method": "PATCH",
+      "path": "/api/admin/users/",
+      "match": "prefix",
+      "scope": "admin",
+      "auth": "bearer",
+      "requireChild": true,
+      "template": "/api/admin/users/{username}",
+      "note": "disable or a from change ends the user's sessions"
+    },
+    {
+      "id": "admin-user-delete",
+      "method": "DELETE",
+      "path": "/api/admin/users/",
+      "match": "prefix",
+      "scope": "admin",
+      "auth": "bearer",
+      "requireChild": true,
+      "template": "/api/admin/users/{username}"
     },
     {
       "id": "admin-reindex",

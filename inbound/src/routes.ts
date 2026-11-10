@@ -55,7 +55,7 @@ export interface RouteSpec {
   /** Stable identifier, and the join key for the parameter manifest (#449). */
   id: string;
   /** The method that reaches this row; ANY = every method. */
-  method: "GET" | "POST" | "PUT" | "DELETE" | "ANY";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "ANY";
   /** The literal the worker matches. */
   path: string;
   /** exact = the whole path; prefix = this path plus anything under it. */
@@ -132,6 +132,9 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     auth: "session-mint", body: ["username", "password"] },
   { id: "session-refresh", method: "ANY", path: "/api/session/refresh", match: "exact", scope: null,
     auth: "session-cookie" },
+  { id: "session-password", method: "POST", path: "/api/session/password", match: "exact", scope: null,
+    auth: "session-cookie", body: ["currentPassword", "newPassword"],
+    note: "self-service change password (#790, contract 1.10.5): cookie session + CSRF only, a Bearer is refused; throttled on the sign-in keys; rotates this session and ends the others" },
   { id: "ingest", method: "POST", path: "/ingest", match: "exact", scope: null, auth: "transport-token",
     note: "inbound mail ingestion, gated by POSTERN_TRANSPORT_TOKEN, never a mailbox token" },
 
@@ -188,6 +191,23 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     match: "prefix", scope: "admin", auth: "bearer", requireChild: true,
     template: "/api/admin/smtp-credentials/{username}",
     note: "the bare prefix (no username) is deliberately NOT claimed, matching the original regex" },
+  { id: "admin-users-list", method: "GET", path: "/api/admin/users", match: "exact", scope: "admin",
+    auth: "bearer", query: ["limit", "cursor"],
+    note: "human accounts (#790, contract 1.10.4): one keyset page ordered by username; never carries a hash" },
+  { id: "admin-users-create", method: "POST", path: "/api/admin/users", match: "exact", scope: "admin",
+    auth: "bearer", body: ["username", "from", "displayName", "password"],
+    note: "create only, never overwrites (409 E_CONFLICT); a generated password is returned once" },
+  { id: "admin-user-password", method: "POST", path: "/api/admin/users/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/users/{username}/password", body: ["password"],
+    note: "operator reset: ends the user's sessions and clears the account lockout" },
+  { id: "admin-user-get", method: "GET", path: "/api/admin/users/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/users/{username}" },
+  { id: "admin-user-update", method: "PATCH", path: "/api/admin/users/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/users/{username}",
+    body: ["disabled", "displayName", "from"],
+    note: "disable or a from change ends the user's sessions" },
+  { id: "admin-user-delete", method: "DELETE", path: "/api/admin/users/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/users/{username}" },
   { id: "admin-reindex", method: "POST", path: "/api/admin/reindex", match: "exact", scope: "admin",
     auth: "bearer", body: ["cursor", "limit", "dryRun"] },
   { id: "admin-reproject", method: "POST", path: "/api/admin/reproject", match: "exact",

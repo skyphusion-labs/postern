@@ -30,6 +30,7 @@ interface SessionRow {
   last_seen_at: string;
   expires_at: string;
   revoked: number;
+  username: string | null;
 }
 // The #409 mint throttle counters. Behavioural coverage of the throttle itself lives
 // in session-hardening.test.ts against a REAL sqlite schema; this fake only has to
@@ -59,9 +60,13 @@ function makeEnv(creds: CredRow[] = [], overrides: Record<string, unknown> = {})
           const u = String(bound[0]);
           return (credRows.find((r) => r.username === u) ?? null) as T | null;
         }
-        if (/FROM webmail_sessions WHERE id_hash = \?/i.test(sql)) {
+        if (/FROM webmail_sessions s LEFT JOIN smtp_credentials c ON c\.username = s\.username\s+WHERE s\.id_hash = \?/i.test(sql)) {
+          // #790: resolution joins the minting account. Mirror the LEFT JOIN.
           const id = String(bound[0]);
-          return (sessions.find((r) => r.id_hash === id) ?? null) as T | null;
+          const s = sessions.find((r) => r.id_hash === id);
+          if (!s) return null as T | null;
+          const c = s.username === null ? undefined : credRows.find((r) => r.username === s.username);
+          return { ...s, cred_username: c?.username ?? null, cred_disabled: c ? c.disabled : null } as T;
         }
         return null as T | null;
       },
@@ -97,8 +102,8 @@ function makeEnv(creds: CredRow[] = [], overrides: Record<string, unknown> = {})
           return { meta: { changes: 0 } };
         }
         if (/INSERT INTO webmail_sessions/i.test(sql)) {
-          const [id_hash, identity, display_name, caps, csrf_hash, issued_at, last_seen_at, expires_at] =
-            bound as [string, string, string | null, string, string, string, string, string];
+          const [id_hash, identity, display_name, caps, csrf_hash, issued_at, last_seen_at, expires_at, username] =
+            bound as [string, string, string | null, string, string, string, string, string, string | null];
           sessions.push({
             id_hash,
             identity,
@@ -109,6 +114,7 @@ function makeEnv(creds: CredRow[] = [], overrides: Record<string, unknown> = {})
             last_seen_at,
             expires_at,
             revoked: 0,
+            username: username ?? null,
           });
           return { meta: { changes: 1 } };
         }

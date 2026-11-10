@@ -63,6 +63,11 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   // after a PROJECTION_VERSION bump). Same deliberate-act rule as the #438 row above.
   if (method === "POST" && path === "/api/admin/reproject") return "admin";
   if (method === "POST" && path === "/api/admin/reconcile") return "admin";
+  // #790 adds human user management at `admin` scope (contract 1.10.4). Same
+  // deliberate-act rule: the users collection and every child under it, any method the
+  // handler serves; the bare "/api/admin/users/" (no username) is NOT claimed.
+  if ((method === "GET" || method === "POST") && path === "/api/admin/users") return "admin";
+  if (["GET", "POST", "PATCH", "DELETE"].includes(method) && /^\/api\/admin\/users\/.+$/.test(path)) return "admin";
   if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
   // #650 adds GET /api/whoami at `read` scope (the Bearer-reachable self-identity call).
   if (method === "GET" && path === "/api/whoami") return "read";
@@ -77,7 +82,7 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   return null;
 }
 
-const METHODS = ["GET", "POST", "PUT", "DELETE"];
+const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const CORPUS = [
   "/api/send", "/send", "/api/reply",
   "/api/messages", "/api/messages/", "/api/messages/m1", "/api/messages/m%201",
@@ -88,9 +93,11 @@ const CORPUS = [
   "/api/imap/drafts", "/api/imap/drafts/d1", "/api/imap/import", "/api/imap/roles",
   "/api/admin/smtp-credentials", "/api/admin/smtp-credentials/", "/api/admin/smtp-credentials/bob",
   "/api/admin/reindex", "/api/admin/reconcile", "/api/admin/reproject",
+  "/api/admin/users", "/api/admin/users/", "/api/admin/users/bob", "/api/admin/users/bob/password",
+  "/api/admin/usersx", "/api/admin/users2/bob",
   // Pre-gate rows: they never reach the gate, and the table says so.
   "/health", "/", "/robots.txt", "/sitemap.xml", "/webmail", "/.well-known/mta-sts.txt", "/api/smtp-auth", "/api/session",
-  "/api/session/refresh", "/ingest",
+  "/api/session/refresh", "/api/session/password", "/ingest",
   // Adversarial: near-misses, and paths with no handler at all.
   "/api/message", "/api/messages2", "/api/messagesx/m1", "/api/drafts2", "/api/draftsx/d1",
   "/api/imap/draftsx", "/api/", "/api", "/api/threads", "/api/threadsx/t", "/api/sendx", "/sendx",
