@@ -37,7 +37,13 @@ import {
   handleAudit,
   resolveRuntimeIdentity,
 } from "./agentidentities";
-import { handleAdminDelegations } from "./delegations";
+import {
+  activeDelegations,
+  agentReadScope,
+  handleAdminDelegations,
+  noDelegations,
+  type AgentDelegations,
+} from "./delegations";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
@@ -467,7 +473,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // to find out it was lied to.
     if (request.method === "GET" && path === "/api/whoami") {
       const member = boundReadMember(resolution);
-      const estateReader = agentEstateRead(resolution);
+      const estateReader = agentEstateRead(env, resolution);
+      // #740 S2: the active grants this identity holds, from the same lookup the read and
+      // organize paths use. Empty for anything that is not a runtime agent identity.
+      const held = await delegationsOf(env, resolution);
       return json({
         ok: true,
         // The bound address, or null for a static estate token. `null` is the ANSWER --
@@ -494,6 +503,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // EMPTY for an estate reader: the queues add no reach to a caller that already
         // reads every address, and listing them would imply they were special.
         roleQueues: estateReader ? [] : member ? rolesForViewer(env, member) : [],
+        // #740 S2: the human addresses this identity holds an ACTIVE grant on, and what each
+        // allows. Under AGENT_READ_SCOPE=granted an agent reads one of these by naming it as
+        // to=, the same way it names a role queue; under estate it already reads them. The
+        // organize power applies under either setting. Empty means none, never "unknown".
+        delegations: held.grants.map((g) => ({ id: g.id, address: g.address, powers: g.powers })),
         // What the gate will honour, asked of the gate. An `imap` token reports
         // ["imap","organize"] here because scopeSatisfies grants organize to imap (#685),
         // which a naive echo of the token's own name would get wrong.
@@ -506,8 +520,13 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && (path === "/api/messages" || path === "/api/messages/")) {
       // `readViewer`, not `sessionViewer` (#718): an agent credential resolves to no forced
       // viewer and so reads the estate, down the same path the static operator token uses.
-      const sessionIdentity = readViewer(resolution);
-      const role = roleReadScope(env, sessionIdentity, url.searchParams);
+      // Under AGENT_READ_SCOPE=granted it resolves to its own address instead (#740 S2).
+      const boundIdentity = readViewer(env, resolution);
+      const role = roleReadScope(env, boundIdentity, url.searchParams);
+      // #740 S2: a to= naming an address this agent holds a grant on reads THAT address's
+      // mailbox, as its owner would. A role view wins first, so nothing about one changes;
+      // every other to= falls through to the bound identity untouched.
+      const sessionIdentity = (role ? null : await delegatedView(env, resolution, url.searchParams)) ?? boundIdentity;
       const query = parseListQuery(url, sessionIdentity);
       // Validated BEFORE the query runs, so a bogus projection costs no D1 read.
       const fields = parseFields(url.searchParams);
@@ -567,7 +586,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // with what a list would return -- that equivalence is the reason these counts are
       // server-side at all -- so an estate reader whose folder counts were still pinned to
       // its own address would report unread totals its own list route contradicts.
-      const bound = agentEstateRead(resolution) ? undefined : boundViewer(resolution);
+      // #740 S2: under AGENT_READ_SCOPE=granted, ?to= naming a granted address counts THAT
+      // mailbox, the same view the list route serves for the same to=.
+      const estateRail = agentEstateRead(env, resolution);
+      const delegatedRail = estateRail ? null : await delegatedView(env, resolution, url.searchParams);
+      const bound = estateRail ? undefined : (delegatedRail ?? boundViewer(resolution));
       const viewer = bound ?? url.searchParams.get("to") ?? undefined;
       // Role queues are enumerated ONLY for a bound session (#425). A static token is
       // estate-scoped already and reads role mail through its own door, so handing it a
@@ -816,11 +839,13 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // Viewer-relative view (#403), same rules as /api/messages: refuses an
       // unknown value, refuses lens+direction, refuses a lens with no viewer.
       // `readViewer` for the #718 reason given on the list route.
-      const sessionIdentity = readViewer(resolution);
+      const boundIdentity = readViewer(env, resolution);
       // Role queue (#425): searching INSIDE a role view stays scoped to the queue, with
       // read state still keyed on the member -- the same swap the list route makes, so
       // the two edges cannot drift apart on what a role view is.
-      const role = roleReadScope(env, sessionIdentity, url.searchParams);
+      const role = roleReadScope(env, boundIdentity, url.searchParams);
+      // #740 S2: the same granted-address view the list route resolves, by the same helper.
+      const sessionIdentity = (role ? null : await delegatedView(env, resolution, url.searchParams)) ?? boundIdentity;
       const lens = role
         ? ("inbox" as const)
         : parseViewLens(
@@ -929,7 +954,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (attMatch) {
       const id = decodeURIComponent(attMatch[1]);
       const index = Number(attMatch[2]);
-      const attScope = readAccessScope(env, resolution);
+      const attScope = await readAccessScope(env, resolution);
       // Both refusals below carry the SAME body, scope statement included (#717). The
       // caller learns the scope its 404 was produced under; it never learns which of the
       // two refusals it got, because "withheld" and "no such index" must stay one answer.
@@ -1029,7 +1054,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // separate pre-check, so the gate cannot be present here and missing elsewhere; a
       // static estate token has no member and names the unscoped reader. Same responses,
       // and one D1 round trip fewer. Refs GHSA-49mc-vh6w-95h4.
-      const readScope = readAccessScope(env, resolution);
+      const readScope = await readAccessScope(env, resolution);
       const msg = readScope
         ? await store.get(env, id, readScope)
         : await store.getUnscoped(env, id);
@@ -1059,7 +1084,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "GET" && path.startsWith("/api/threads/")) {
       const id = decodeURIComponent(path.slice("/api/threads/".length));
       if (!id) return json({ ok: false, error: "E_FIELD_MISSING", message: "thread id required" }, 400);
-      const threadScope = readAccessScope(env, resolution);
+      const threadScope = await readAccessScope(env, resolution);
       const page = await store.thread(env, id, threadScope, {
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
@@ -1160,11 +1185,15 @@ function boundReadMember(resolution: AuthResolution): string | undefined {
  * and already read the estate before this change; it returns false here and reaches estate
  * by the same route it always did, so there is exactly one estate-read code path.
  */
-function agentEstateRead(resolution: AuthResolution): boolean {
+function agentEstateRead(env: Env, resolution: AuthResolution): boolean {
   // A human in a browser keeps today's scope: itself plus its role queues (#425 / #404).
   if (resolution.viaSession) return false;
   // No bound identity is a static token, already estate by construction.
   if (!resolution.identity) return false;
+  // #740 S2 (Conrad's Q1 ruling): the estate read is now an operator flag. UNSET is
+  // estate, so an upgrade changes nothing; "granted" (or any unknown value, fail closed)
+  // sends the agent down the bound-member path below #718, widened only by its grants.
+  if (agentReadScope(env) !== "estate") return false;
   // A registry Bearer carrying the `read` cap IS the agent credential this ruling is
   // about. A send-only entry has no read cap and is still 403 at the gate, so widening
   // read reach can never hand a send-only identity a mailbox.
@@ -1177,9 +1206,54 @@ function agentEstateRead(resolution: AuthResolution): boolean {
  *  exactly. Read paths ONLY: `sessionReadScope` itself is deliberately left alone because
  *  POST /api/messages/seen depends on its narrow meaning (see the note at that call site).
  */
-function readAccessScope(env: Env, resolution: AuthResolution): string[] | undefined {
-  if (agentEstateRead(resolution)) return undefined;
-  return sessionReadScope(env, resolution);
+async function readAccessScope(env: Env, resolution: AuthResolution): Promise<string[] | undefined> {
+  if (agentEstateRead(env, resolution)) return undefined;
+  const base = sessionReadScope(env, resolution);
+  if (!base) return base;
+  // #740 S2: plus every address a grant names. Empty unless AGENT_READ_SCOPE=granted.
+  const granted = await grantedReads(env, resolution);
+  return granted.length ? [...new Set([...base, ...granted])] : base;
+}
+
+// One grant lookup per request, shared by every helper that asks (#740 S2). Keyed on the
+// resolution object, which lives exactly as long as the request.
+const delegationCache = new WeakMap<AuthResolution, Promise<AgentDelegations>>();
+
+/** The active grants this resolution holds (#740 S2). Only a Bearer that resolved to a
+ *  RUNTIME agent identity can hold one: a session, a static token and an env-registry
+ *  entry have no agent_identities id for a grant to name, so they hold none. */
+function delegationsOf(env: Env, resolution: AuthResolution): Promise<AgentDelegations> {
+  if (resolution.viaSession || !resolution.identityId) return Promise.resolve(noDelegations());
+  let held = delegationCache.get(resolution);
+  if (!held) {
+    held = activeDelegations(env, resolution.identityId);
+    delegationCache.set(resolution, held);
+  }
+  return held;
+}
+
+/** The addresses a grant ADDS to this resolution's reads (#740 S2).
+ *
+ *  Only under AGENT_READ_SCOPE=granted (an estate agent already reads them) and only for a
+ *  bound reader: a credential the gate would not let read at all gains nothing here. */
+async function grantedReads(env: Env, resolution: AuthResolution): Promise<string[]> {
+  if (agentReadScope(env) !== "granted") return [];
+  if (!boundReadMember(resolution)) return [];
+  return (await delegationsOf(env, resolution)).read;
+}
+
+/** The granted address a list, search or folders `to=` names, or null (#740 S2).
+ *
+ *  Like a role view (#425) this is a strict ADDITION: any other to= falls through to the
+ *  existing behaviour untouched. Unlike a role view it is the address's WHOLE mailbox
+ *  (every lens, its owner's seen state), because a grant is to act on that mailbox for its
+ *  owner, not to triage a shared queue. */
+async function delegatedView(env: Env, resolution: AuthResolution, p: URLSearchParams): Promise<string | null> {
+  const to = (p.get("to") ?? "").trim().toLowerCase();
+  if (!to) return null;
+  const member = boundReadMember(resolution)?.trim().toLowerCase();
+  if (!member || to === member) return null;
+  return (await grantedReads(env, resolution)).includes(to) ? to : null;
 }
 
 /** WHOSE mail list/search bind to, after #718.
@@ -1191,8 +1265,8 @@ function readAccessScope(env: Env, resolution: AuthResolution): string[] | undef
  *  is what keeps this change small: there is no new combination of lens, seen state and
  *  role scoping to reason about, because an agent now walks a path that already existed.
  */
-function readViewer(resolution: AuthResolution): string | undefined {
-  if (agentEstateRead(resolution)) return undefined;
+function readViewer(env: Env, resolution: AuthResolution): string | undefined {
+  if (agentEstateRead(env, resolution)) return undefined;
   return sessionViewer(resolution);
 }
 

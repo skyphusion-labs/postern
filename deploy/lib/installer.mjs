@@ -301,14 +301,22 @@ async function preflight(ctx) {
 // sign-in on explicitly (that is what the first admin is for). An existing Worker
 // keeps exactly what it has: upgrade never adds the var, and --adopt carries the
 // live value over (or its absence). The decision is stored once, in state.vars.
+//
+// #740 S2: AGENT_READ_SCOPE follows the same pattern in the opposite direction. UNSET
+// means "estate" (the #718 agent read), so an upgrade keeps it; a NEW install writes
+// "granted" explicitly (Conrad's Q1 ruling: estate-wide agent read is off on a new install).
+const NEW_INSTALL_VARS = { WEBMAIL_AUTH_BACKEND: "native", AGENT_READ_SCOPE: "granted" };
+
 async function decideAuthBackend(ctx, pf) {
   const { state, opts } = ctx;
   if (state.authBackendDecided) return;
-  if (!pf.script) {
-    if (state.vars.WEBMAIL_AUTH_BACKEND === undefined) state.vars.WEBMAIL_AUTH_BACKEND = "native";
-  } else if (state.vars.WEBMAIL_AUTH_BACKEND === undefined && !(opts.vars || {}).WEBMAIL_AUTH_BACKEND) {
-    const live = (pf.script.result?.bindings || []).find((b) => b.name === "WEBMAIL_AUTH_BACKEND" && b.type === "plain_text");
-    if (live) state.vars.WEBMAIL_AUTH_BACKEND = live.text;
+  for (const [name, fresh] of Object.entries(NEW_INSTALL_VARS)) {
+    if (!pf.script) {
+      if (state.vars[name] === undefined) state.vars[name] = fresh;
+    } else if (state.vars[name] === undefined && !(opts.vars || {})[name]) {
+      const live = (pf.script.result?.bindings || []).find((b) => b.name === name && b.type === "plain_text");
+      if (live) state.vars[name] = live.text;
+    }
   }
   state.authBackendDecided = true;
   saveState(opts, state);
