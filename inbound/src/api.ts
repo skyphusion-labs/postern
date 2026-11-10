@@ -28,14 +28,9 @@ import {
   type MessageReadScope,
 } from "./mailbox";
 import { serveWebmail } from "./webmail";
-import {
-  authenticate,
-  upsert as upsertCredential,
-  remove as removeCredential,
-  hashSecret,
-  generateSecret,
-  normalizeUsername,
-} from "./smtpcreds";
+import { authenticate } from "./smtpcreds";
+import { handleCredentialDelete, handleCredentialUpsert, handleUserAdmin } from "./useradmin";
+import { handleSetup } from "./setup";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
@@ -166,7 +161,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   // origin and NOT Bearer-gated (login carries no token), so handled BEFORE the token
   // gate, mirroring /api/smtp-auth. handleSession owns CSRF for its state-changing
   // verbs. It returns null only for a path it does not own (guarded here already).
-  if (path === "/api/session" || path === "/api/session/refresh") {
+  if (path === "/api/session" || path === "/api/session/refresh" || path === "/api/session/password") {
     // #429: this dispatch sits BEFORE the try/catch that wraps every gated route, so an
     // unexpected throw here (a genuine D1 outage inside mintNativeSession, past the
     // fail-closed throttle answer) escaped route-level error mapping entirely and
@@ -183,6 +178,17 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return preGateErrorResponse(err, "session", "session unavailable");
     }
     if (sres) return sres;
+  }
+
+  // First-run setup (#791, contract 1.10.7): creates the first user of an empty deploy
+  // and signs them in. Pre-gate like /api/session: it carries its own auth (the
+  // POSTERN_SETUP_TOKEN secret) and answers 404 unless armed.
+  if (path === "/api/setup") {
+    try {
+      return await handleSetup(request, env);
+    } catch (err) {
+      return preGateErrorResponse(err, "setup", "setup unavailable");
+    }
   }
 
   // The out-of-Worker inbound driver (CONTRACT section 2, #22/#29): POST /ingest
@@ -383,14 +389,20 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return await handleReconcile(request, env);
     }
 
-    // --- admin: revoke an SMTP submission credential ---
+    // --- admin: revoke an SMTP submission credential (an alias of the user delete) ---
     const credMatch =
       request.method === "DELETE" ? /^\/api\/admin\/smtp-credentials\/(.+)$/.exec(path) : null;
     if (credMatch) {
-      const username = decodeURIComponent(credMatch[1]);
-      const deleted = await removeCredential(env, username);
-      if (!deleted) return json({ ok: false, error: "E_NOT_FOUND", message: "no such credential" }, 404);
-      return json({ ok: true, deleted: normalizeUsername(username) });
+      return await handleCredentialDelete(env, credMatch[1]);
+    }
+
+    // --- admin: human user management (#790, contract 1.10.4) ---
+    // Operator routes past the scope gate above, so only `both` reaches them. List,
+    // create (never overwrites), show, PATCH (disable / displayName / from), reset
+    // password, delete. Writes that change sign-in end the user's sessions.
+    if (path === "/api/admin/users" || path.startsWith("/api/admin/users/")) {
+      const ures = await handleUserAdmin(request, env, url);
+      if (ures) return ures;
     }
 
     // --- read: per-user Apple .mobileconfig profile (#187, iOS Mail one-tap setup) ---
@@ -1775,46 +1787,6 @@ async function smtpAuthResponse(request: Request, env: Env): Promise<Response> {
   return json({ ok: true, from });
 }
 
-// POST /api/admin/smtp-credentials: create or rotate a credential. The secret is
-// returned once in the response (so the operator can hand it to the user) and is
-// otherwise only stored as a PBKDF2 hash, never logged.
-async function handleCredentialUpsert(request: Request, env: Env): Promise<Response> {
-  let body: { username?: unknown; from?: unknown; secret?: unknown };
-  try {
-    body = (await request.json()) as { username?: unknown; from?: unknown; secret?: unknown };
-  } catch {
-    return json({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
-  }
-  const username = normalizeUsername(typeof body.username === "string" ? body.username : "");
-  if (!username) return json({ ok: false, error: "E_FIELD_MISSING", message: "username is required" }, 400);
-
-  const fromAddr = (typeof body.from === "string" && body.from.trim() ? body.from.trim() : username).toLowerCase();
-  // Unset domain: refuse to mint a credential rather than bind it to a borrowed domain (#615).
-  const allowedDomain = allowedFromDomain(env);
-  if (!allowedDomain) {
-    return json(
-      { ok: false, error: "E_INTERNAL_SERVER_ERROR", message: "ALLOWED_FROM_DOMAIN is not configured" },
-      500,
-    );
-  }
-  if (!EMAIL_RE.test(fromAddr) || fromAddr.split("@")[1] !== allowedDomain) {
-    return json(
-      { ok: false, error: "E_SENDER_NOT_ALLOWED", message: `from must be a valid address on @${allowedDomain}` },
-      400,
-    );
-  }
-
-  let secret = typeof body.secret === "string" ? body.secret : "";
-  if (secret && secret.length < 12) {
-    return json({ ok: false, error: "E_VALIDATION_ERROR", message: "secret must be at least 12 characters" }, 400);
-  }
-  if (!secret) secret = generateSecret();
-
-  const hash = await hashSecret(secret);
-  await upsertCredential(env, username, fromAddr, hash, new Date().toISOString());
-  return json({ ok: true, username, from: fromAddr, secret });
-}
-
 // POST /api/admin/reindex: backfill the Vectorize index over the existing mailbox
 // (#116 ws4). Processes one keyset page per call (await the embeds so the page
 // finishes inside request limits) and returns a cursor; the runner loops until
@@ -2059,6 +2031,8 @@ interface AuthResolution extends TokenResolution {
 // only when no Authorization header is present (Bearer wins, contract 1.8). Gated on
 // the native backend so flipping WEBMAIL_AUTH_BACKEND to off is an instant kill-switch.
 async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolution | null> {
+  // Only an explicit native honors the cookie (contract 1.10.6); resolveSession then
+  // re-checks the minting account (1.10.3).
   if (webmailAuthBackend(env) !== "native") return null;
   const rawId = sessionCookieValue(request);
   if (!rawId) return null;

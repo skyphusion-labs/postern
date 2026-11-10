@@ -19,14 +19,32 @@
     "smtp-auth": {
       "body": [
         "username",
-        "password"
-      ]
+        "secret"
+      ],
+      "note": "the relay and the IMAP door send `secret`, as CONTRACT.md 9 documents (#829); precred-body-contract.test.ts pins the declared body to what the handler reads"
     },
     "session": {
       "body": [
         "username",
         "password"
       ]
+    },
+    "setup": {
+      "body": [
+        "setupToken",
+        "username",
+        "from",
+        "displayName",
+        "password"
+      ],
+      "note": "first run (#791, contract 1.10.7): armed only when WEBMAIL_AUTH_BACKEND is explicitly native AND the POSTERN_SETUP_TOKEN secret is set AND the account table is EMPTY; atomic; 409 E_SETUP_COMPLETE once any user exists; 404 when not armed"
+    },
+    "session-password": {
+      "body": [
+        "currentPassword",
+        "newPassword"
+      ],
+      "note": "self-service change password (#790, contract 1.10.5): cookie session + CSRF only, a Bearer is refused; throttled on the sign-in keys; rotates this session and ends the others"
     },
     "send": {
       "body": [
@@ -147,6 +165,36 @@
         "from",
         "password"
       ]
+    },
+    "admin-users-list": {
+      "query": [
+        "limit",
+        "cursor"
+      ],
+      "note": "human accounts (#790, contract 1.10.4): one keyset page ordered by username; never carries a hash"
+    },
+    "admin-users-create": {
+      "body": [
+        "username",
+        "from",
+        "displayName",
+        "password"
+      ],
+      "note": "create only, never overwrites (409 E_CONFLICT); a generated password is returned once"
+    },
+    "admin-user-password": {
+      "body": [
+        "password"
+      ],
+      "note": "operator reset: ends the user's sessions and clears the account lockout"
+    },
+    "admin-user-update": {
+      "body": [
+        "disabled",
+        "displayName",
+        "from"
+      ],
+      "note": "disable or a from change ends the user's sessions"
     },
     "admin-reindex": {
       "body": [

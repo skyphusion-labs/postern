@@ -159,6 +159,13 @@ def _emitted() -> list[dict[str, Any]]:
     c.list_draft_attachments("d1")
     c.add_draft_attachment("d1", b"bytes", filename="a.bin", mime_type="image/png")
     c.delete_draft_attachment("d1", "a1")
+    # #790 operator user management.
+    c.list_users(limit=5, cursor="a@x.com")
+    c.get_user("a@x.com")
+    c.create_user("a@x.com", from_addr="a@x.com", display_name="A", password="p" * 12)
+    c.update_user("a@x.com", disabled=True, display_name="A", from_addr="a@x.com")
+    c.reset_password("a@x.com", password="p" * 12)
+    c.delete_user("a@x.com")
 
     out: list[dict[str, Any]] = []
     for req in t.requests:

@@ -55,7 +55,7 @@ export interface RouteSpec {
   /** Stable identifier, and the join key for the parameter manifest (#449). */
   id: string;
   /** The method that reaches this row; ANY = every method. */
-  method: "GET" | "POST" | "PUT" | "DELETE" | "ANY";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "ANY";
   /** The literal the worker matches. */
   path: string;
   /** exact = the whole path; prefix = this path plus anything under it. */
@@ -127,11 +127,18 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     note: "the single-page human door; the page then calls the API with its own session" },
   { id: "mta-sts", method: "GET", path: "/.well-known/mta-sts.txt", match: "exact", scope: null, auth: "public" },
   { id: "smtp-auth", method: "POST", path: "/api/smtp-auth", match: "exact", scope: null,
-    auth: "smtp-credential", body: ["username", "password"] },
+    auth: "smtp-credential", body: ["username", "secret"],
+    note: "the relay and the IMAP door send `secret`, as CONTRACT.md 9 documents (#829); precred-body-contract.test.ts pins the declared body to what the handler reads" },
   { id: "session", method: "ANY", path: "/api/session", match: "exact", scope: null,
     auth: "session-mint", body: ["username", "password"] },
   { id: "session-refresh", method: "ANY", path: "/api/session/refresh", match: "exact", scope: null,
     auth: "session-cookie" },
+  { id: "setup", method: "ANY", path: "/api/setup", match: "exact", scope: null, auth: "session-mint",
+    body: ["setupToken", "username", "from", "displayName", "password"],
+    note: "first run (#791, contract 1.10.7): armed only when WEBMAIL_AUTH_BACKEND is explicitly native AND the POSTERN_SETUP_TOKEN secret is set AND the account table is EMPTY; atomic; 409 E_SETUP_COMPLETE once any user exists; 404 when not armed" },
+  { id: "session-password", method: "POST", path: "/api/session/password", match: "exact", scope: null,
+    auth: "session-cookie", body: ["currentPassword", "newPassword"],
+    note: "self-service change password (#790, contract 1.10.5): cookie session + CSRF only, a Bearer is refused; throttled on the sign-in keys; rotates this session and ends the others" },
   { id: "ingest", method: "POST", path: "/ingest", match: "exact", scope: null, auth: "transport-token",
     note: "inbound mail ingestion, gated by POSTERN_TRANSPORT_TOKEN, never a mailbox token" },
 
@@ -188,6 +195,23 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     match: "prefix", scope: "admin", auth: "bearer", requireChild: true,
     template: "/api/admin/smtp-credentials/{username}",
     note: "the bare prefix (no username) is deliberately NOT claimed, matching the original regex" },
+  { id: "admin-users-list", method: "GET", path: "/api/admin/users", match: "exact", scope: "admin",
+    auth: "bearer", query: ["limit", "cursor"],
+    note: "human accounts (#790, contract 1.10.4): one keyset page ordered by username; never carries a hash" },
+  { id: "admin-users-create", method: "POST", path: "/api/admin/users", match: "exact", scope: "admin",
+    auth: "bearer", body: ["username", "from", "displayName", "password"],
+    note: "create only, never overwrites (409 E_CONFLICT); a generated password is returned once" },
+  { id: "admin-user-password", method: "POST", path: "/api/admin/users/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/users/{username}/password", body: ["password"],
+    note: "operator reset: ends the user's sessions and clears the account lockout" },
+  { id: "admin-user-get", method: "GET", path: "/api/admin/users/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/users/{username}" },
+  { id: "admin-user-update", method: "PATCH", path: "/api/admin/users/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/users/{username}",
+    body: ["disabled", "displayName", "from"],
+    note: "disable or a from change ends the user's sessions" },
+  { id: "admin-user-delete", method: "DELETE", path: "/api/admin/users/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/users/{username}" },
   { id: "admin-reindex", method: "POST", path: "/api/admin/reindex", match: "exact", scope: "admin",
     auth: "bearer", body: ["cursor", "limit", "dryRun"] },
   { id: "admin-reproject", method: "POST", path: "/api/admin/reproject", match: "exact",

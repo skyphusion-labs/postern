@@ -445,3 +445,59 @@ class DraftsCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdminUsersCliTest(unittest.TestCase):
+    """#790: `postern admin users ...` maps onto /api/admin/users, password only via stdin."""
+
+    def test_create_reads_the_password_from_stdin_never_argv(self):
+        t = FakeTransport(status=201, body=b'{"ok":true,"user":{"username":"a@x.com"}}')
+        with mock.patch("sys.stdin", io.StringIO("a-long-password-here\n")):
+            code, out, _ = run(["admin", "users", "create", "a@x.com", "--name", "A", "--password-stdin"], t)
+        self.assertEqual(code, 0)
+        self.assertEqual(t.last.get_method(), "POST")
+        self.assertTrue(t.last.full_url.endswith("/api/admin/users"))
+        self.assertEqual(
+            json.loads(t.last.data.decode()),
+            {"username": "a@x.com", "displayName": "A", "password": "a-long-password-here"},
+        )
+        self.assertEqual(json.loads(out)["user"]["username"], "a@x.com")
+
+    def test_create_without_stdin_lets_the_server_generate(self):
+        t = FakeTransport(status=201, body=b'{"ok":true,"user":{},"password":"generated"}')
+        code, out, _ = run(["admin", "users", "create", "a@x.com"], t)
+        self.assertEqual(code, 0)
+        self.assertNotIn("password", json.loads(t.last.data.decode()))
+        self.assertEqual(json.loads(out)["password"], "generated")
+
+    def test_there_is_no_password_argument(self):
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["admin", "users", "create", "a@x.com", "--password", "x"])
+
+    def test_disable_enable_set_name_reset_delete_list(self):
+        cases = [
+            (["disable", "a@x.com"], "PATCH", "/api/admin/users/a%40x.com", {"disabled": True}),
+            (["enable", "a@x.com"], "PATCH", "/api/admin/users/a%40x.com", {"disabled": False}),
+            (["set-name", "a@x.com", ""], "PATCH", "/api/admin/users/a%40x.com", {"displayName": ""}),
+            (["reset-password", "a@x.com"], "POST", "/api/admin/users/a%40x.com/password", {}),
+            (["delete", "a@x.com"], "DELETE", "/api/admin/users/a%40x.com", None),
+        ]
+        for argv, method, path, body in cases:
+            t = FakeTransport(body=b'{"ok":true}')
+            code, _, _ = run(["admin", "users", *argv], t)
+            self.assertEqual(code, 0, argv)
+            self.assertEqual(t.last.get_method(), method, argv)
+            self.assertTrue(t.last.full_url.endswith(path), (argv, t.last.full_url))
+            if body is None:
+                self.assertIsNone(t.last.data)
+            else:
+                self.assertEqual(json.loads(t.last.data.decode()), body, argv)
+        t = FakeTransport(body=b'{"ok":true,"users":[],"nextCursor":null}')
+        run(["admin", "users", "list", "--limit", "2", "--cursor", "b@x.com"], t)
+        self.assertIn("/api/admin/users?limit=2&cursor=b%40x.com", t.last.full_url)
+
+    def test_show_missing_user_exits_1(self):
+        t = FakeTransport(status=404, body=b'{"ok":false,"error":"E_NOT_FOUND"}')
+        code, _, err = run(["admin", "users", "show", "ghost@x.com"], t)
+        self.assertEqual(code, 1)
+        self.assertIn("no such user", err)

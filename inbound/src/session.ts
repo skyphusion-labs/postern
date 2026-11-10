@@ -22,11 +22,21 @@
 // Directory (ldap/system) login is contract 1.9 / decision D-AUTH-2: DEFERRED and
 // Conrad-gated, NOT built here. Phase 2 recognizes `native` and `off` only.
 
-import { authenticate } from "./smtpcreds";
+import {
+  authenticateAccount,
+  hashSecret,
+  lookup,
+  normalizeUsername,
+  passwordProblem,
+  setPassword,
+  verifySecret,
+  type AuthenticatedAccount,
+} from "./smtpcreds";
 import { sha256Hex } from "./sendidentity";
 import type { BoundIdentity } from "./sendidentity";
 import { readBodyCapped, PayloadTooLargeError } from "./body";
 import { attemptKeys, gateAttempt, recordFailure, clearFailures } from "./auththrottle";
+import { anyUser } from "./smtpcreds";
 
 export const SESSION_COOKIE = "__Host-postern_session";
 export const CSRF_COOKIE = "__Host-postern_csrf";
@@ -38,13 +48,46 @@ export const CSRF_HEADER = "x-postern-csrf";
 // an honest "sessions disabled", never a half-built directory bind.
 export type AuthBackend = "native" | "off";
 
-// DELIBERATE deploy-safety default (design-conformance note D3): UNSET => `off`, not
-// `native`. This repo auto-deploys to a live shared store with real smtp_credentials
-// rows; defaulting to `native` would silently turn every submission password into a
-// webmail session on merge. A self-hoster opts in with WEBMAIL_AUTH_BACKEND=native.
+// DELIBERATE deploy-safety default (design-conformance note D3), REAFFIRMED by decision
+// D-AUTH-3 (contract 1.10.6, #791): UNSET => `off`, always, whatever smtp_credentials
+// holds. A release must never silently open a sign-in surface on an existing
+// self-hosted deploy. An operator (or the installer, for a new install) opts in with
+// an explicit WEBMAIL_AUTH_BACKEND=native. `ldap`/`system` (deferred, 1.9) and any typo
+// are `off`. Off also means a session cookie is ignored everywhere.
 export function webmailAuthBackend(env: Env): AuthBackend {
   const raw = (env.WEBMAIL_AUTH_BACKEND || "").trim().toLowerCase();
   return raw === "native" ? "native" : "off";
+}
+
+// The first-run secret (contract 1.10.7). Shorter than SETUP_TOKEN_MIN is treated as
+// UNSET and logged once per isolate, so a weak value can never arm setup.
+const SETUP_TOKEN_MIN = 32;
+let warnedShortSetupToken = false;
+export function setupToken(env: Env): string | null {
+  const raw = env.POSTERN_SETUP_TOKEN || "";
+  if (!raw) return null;
+  if (raw.length < SETUP_TOKEN_MIN) {
+    if (!warnedShortSetupToken) {
+      warnedShortSetupToken = true;
+      console.error(`POSTERN_SETUP_TOKEN is shorter than ${SETUP_TOKEN_MIN} characters; first-run setup stays disarmed`);
+    }
+    return null;
+  }
+  return raw;
+}
+
+export interface BackendState {
+  backend: AuthBackend;
+  setupRequired: boolean;
+}
+
+// Resolve the discovery state (contract 1.10.6/1.10.7). First run is armed only when
+// ALL hold: an explicit native backend, a usable POSTERN_SETUP_TOKEN, and zero users.
+// The "any user?" read (one indexed SELECT) runs only when the first two already hold.
+export async function resolveAuthBackend(env: Env): Promise<BackendState> {
+  if (webmailAuthBackend(env) === "off") return { backend: "off", setupRequired: false };
+  if (setupToken(env) === null) return { backend: "native", setupRequired: false };
+  return { backend: "native", setupRequired: !(await anyUser(env)) };
 }
 
 // Windows (contract 1.5.3). Idle window + absolute cap; expires_at = min(last_seen +
@@ -60,9 +103,9 @@ const REFRESH_THROTTLE_S = 60;
 // costs a 210k-iteration PBKDF2, including for an unknown user (by design), so an
 // oversized body is the cheapest thing to reject. 4 KiB is ample for
 // { username, password } and mirrors the readJson 413 shape.
-const MAX_SESSION_BODY_BYTES = 4 * 1024;
+export const MAX_SESSION_BODY_BYTES = 4 * 1024;
 
-function idleSeconds(env: Env): number {
+export function idleSeconds(env: Env): number {
   return posInt(env.WEBMAIL_SESSION_IDLE_SECONDS, DEFAULT_IDLE_S);
 }
 function absoluteSeconds(env: Env): number {
@@ -85,6 +128,7 @@ export const NATIVE_SESSION_CAPS = ["read", "send", "delete", "organize"];
 
 export interface SessionResolution {
   identity: BoundIdentity;   // the bound From (authoritative sender for this session)
+  username: string | null;   // the login that minted it; null on a pre-0015 row (#790)
   caps: string[];            // granted capability set, e.g. ["read","send"]
   csrfHash: string;          // sha256hex of the session synchronizer token
   expiresAt: string;         // ISO8601
@@ -100,6 +144,10 @@ interface SessionRow {
   last_seen_at: string;
   expires_at: string;
   revoked: number;
+  username: string | null;
+  // From the LEFT JOIN on smtp_credentials (#790): null when the account row is gone.
+  cred_username: string | null;
+  cred_disabled: number | null;
 }
 
 // --- opaque id + hashing ----------------------------------------------------
@@ -131,12 +179,12 @@ export function parseCookies(header: string | null): Record<string, string> {
 // forces Secure + Path=/ + no Domain, so the cookie cannot be scoped to a parent
 // domain or set over plaintext. SameSite=Lax so a top-level navigation to /webmail
 // still carries it; writes are additionally CSRF-gated.
-function sessionCookie(value: string, maxAgeS: number): string {
+export function sessionCookie(value: string, maxAgeS: number): string {
   return `${SESSION_COOKIE}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeS}`;
 }
 // The companion CSRF cookie is READABLE by JS (not HttpOnly): the page reads it and
 // echoes it in X-Postern-CSRF (double-submit). Same __Host- hardening otherwise.
-function csrfCookie(value: string, maxAgeS: number): string {
+export function csrfCookie(value: string, maxAgeS: number): string {
   return `${CSRF_COOKIE}=${value}; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeS}`;
 }
 function clearCookie(name: string, httpOnly: boolean): string {
@@ -163,9 +211,15 @@ export async function mintNativeSession(
   username: string,
   password: string,
 ): Promise<Minted | null> {
-  const from = await authenticate(env, username, password);
-  if (!from) return null;
+  const account = await authenticateAccount(env, username, password);
+  if (!account) return null;
+  return await insertSession(env, account);
+}
 
+// Write a fresh session row for a verified account: a NEW opaque id and CSRF token
+// every time (fixation resistance), the minting username (#790, so the account's
+// sessions can be ended and re-checked), and the display name for "Sending as".
+export async function insertSession(env: Env, account: AuthenticatedAccount): Promise<Minted> {
   const rawId = randomToken();
   const csrfToken = randomToken();
   const idHash = await sha256Hex(rawId);
@@ -180,13 +234,41 @@ export async function mintNativeSession(
 
   await env.DB.prepare(
     `INSERT INTO webmail_sessions
-       (id_hash, identity, display_name, caps, csrf_hash, issued_at, last_seen_at, expires_at, revoked)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+       (id_hash, identity, display_name, caps, csrf_hash, issued_at, last_seen_at, expires_at, revoked, username)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
   )
-    .bind(idHash, from, null, caps.join(","), csrfHash, issuedAt, issuedAt, expiresAt)
+    .bind(idHash, account.fromAddr, account.displayName, caps.join(","), csrfHash, issuedAt, issuedAt, expiresAt,
+      account.username)
     .run();
 
-  return { rawId, csrfToken, identity: { from }, caps, expiresAt };
+  const identity: BoundIdentity = { from: account.fromAddr };
+  if (account.displayName) identity.displayName = account.displayName;
+  return { rawId, csrfToken, identity, caps, expiresAt };
+}
+
+// End every session of one account (#790, contract 1.10.3): disable, reset, a from
+// change, delete and change password all call this. A row minted before migration
+// 0015 has no username, so it is matched by its bound identity instead. Returns how
+// many sessions ended.
+//
+// exceptIdHash keeps one session out of the sweep (change password: the caller's own
+// session is ROTATED, not ended, so it is neither deleted here nor counted, contract
+// 1.10.5).
+export async function endUserSessions(
+  env: Env,
+  username: string,
+  identity: string,
+  exceptIdHash?: string,
+): Promise<number> {
+  const where = "(username = ? OR (username IS NULL AND identity = ?))";
+  const res = exceptIdHash === undefined
+    ? await env.DB.prepare("DELETE FROM webmail_sessions WHERE " + where)
+        .bind(normalizeUsername(username), identity)
+        .run()
+    : await env.DB.prepare("DELETE FROM webmail_sessions WHERE " + where + " AND id_hash != ?")
+        .bind(normalizeUsername(username), identity, exceptIdHash)
+        .run();
+  return res.meta?.changes ?? 0;
 }
 
 // Resolve a presented session cookie to its { identity, caps, csrfHash, expiresAt }, or
@@ -197,14 +279,21 @@ export async function mintNativeSession(
 export async function resolveSession(env: Env, rawId: string): Promise<SessionResolution | null> {
   if (!rawId) return null;
   const idHash = await sha256Hex(rawId);
+  // ONE read, joined to the account (#790, contract 1.10.3): a session that names its
+  // minting username resolves only while that account exists and is enabled. This
+  // closes the race where a sign-in verifies just before a disable and writes its row
+  // just after the disable ended the sessions.
   const row = await env.DB.prepare(
-    `SELECT id_hash, identity, display_name, caps, csrf_hash, issued_at, last_seen_at, expires_at, revoked
-       FROM webmail_sessions WHERE id_hash = ? LIMIT 1`,
+    `SELECT s.id_hash, s.identity, s.display_name, s.caps, s.csrf_hash, s.issued_at, s.last_seen_at,
+            s.expires_at, s.revoked, s.username, c.username AS cred_username, c.disabled AS cred_disabled
+       FROM webmail_sessions s LEFT JOIN smtp_credentials c ON c.username = s.username
+      WHERE s.id_hash = ? LIMIT 1`,
   )
     .bind(idHash)
     .first<SessionRow>();
   if (!row) return null;
   if (row.revoked) return null;
+  if (row.username !== null && (row.cred_username === null || row.cred_disabled === 1)) return null;
 
   const now = Date.now();
   const expMs = Date.parse(row.expires_at);
@@ -231,7 +320,7 @@ export async function resolveSession(env: Env, rawId: string): Promise<SessionRe
       .run();
   }
 
-  return { identity, caps, csrfHash: row.csrf_hash, expiresAt };
+  return { identity, username: row.username, caps, csrfHash: row.csrf_hash, expiresAt };
 }
 
 // Revoke the session behind a presented cookie (instant, contract 1.5.3). Deletes the
@@ -284,10 +373,13 @@ export function sessionCookieValue(request: Request): string {
 export async function handleSession(request: Request, env: Env): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
-  if (path !== "/api/session" && path !== "/api/session/refresh") return null;
+  if (path !== "/api/session" && path !== "/api/session/refresh" && path !== "/api/session/password") return null;
 
   const backend = webmailAuthBackend(env);
   const idle = idleSeconds(env);
+  // Off (unset included) ignores the cookie everywhere (contract 1.10.6); sign-out
+  // still clears it.
+  const cookieId = backend === "off" ? "" : sessionCookieValue(request);
 
   if (path === "/api/session" && request.method === "POST") {
     if (backend === "off") {
@@ -379,10 +471,11 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
     // whoami / restore. Unauthenticated returns 401 with the authBackend so the client
     // can distinguish sessions-disabled (off -> show BYO-token gate) from logged-out
     // (native -> show the sign-in form). Leaks no identity.
-    const rawId = sessionCookieValue(request);
+    const rawId = cookieId;
     const resolved = rawId ? await resolveSession(env, rawId) : null;
     if (!resolved) {
-      return sjson({ ok: false, authBackend: backend }, 401);
+      const state = await resolveAuthBackend(env);
+      return sjson({ ok: false, authBackend: state.backend, setupRequired: state.setupRequired }, 401);
     }
     // Re-set both cookies with a fresh sliding Max-Age so a reload never strands the
     // session or the CSRF companion (contract 1.5.1). The server stores only hashes and
@@ -419,10 +512,14 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: h });
   }
 
+  if (path === "/api/session/password" && request.method === "POST") {
+    return await handleChangePassword(request, env, url, cookieId);
+  }
+
   if (path === "/api/session/refresh" && request.method === "POST") {
     // Explicit extend. Sliding refresh also happens on any authed request; this is the
     // deliberate call. CSRF-gated.
-    const rawId = sessionCookieValue(request);
+    const rawId = cookieId;
     const resolved = rawId ? await resolveSession(env, rawId) : null;
     if (!resolved) return sjson({ ok: false, error: "E_AUTH_FAILED" }, 401);
     if (!(await verifyCsrf(request, resolved.csrfHash))) {
@@ -441,6 +538,106 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
   return sjson({ ok: false, error: "method_not_allowed", message: "unsupported method" }, 405);
 }
 
+// POST /api/session/password (#790, contract 1.10.5): self-service change password.
+// Order: no Bearer, session, CSRF, same-origin, body cap, validation + policy, THROTTLE,
+// verify current, write. The throttle keys are the SIGN-IN keys, so this route is not a
+// second guessing channel. A wrong current password is counted but does not end the
+// session (that would hand an attacker a cheap sign-out lever). On success the hash is
+// replaced (compare-and-set on the verified hash), EVERY session of the account ends,
+// and a fresh one is minted for this caller (new id + new CSRF token: fixation).
+async function handleChangePassword(request: Request, env: Env, url: URL, rawId: string): Promise<Response> {
+  if (request.headers.has("authorization")) {
+    return sjson({ ok: false, error: "E_SESSION_REQUIRED", message: "change password needs a signed-in session" }, 403);
+  }
+  const resolved = rawId ? await resolveSession(env, rawId) : null;
+  if (!resolved) return sjson({ ok: false, error: "E_AUTH_FAILED" }, 401);
+  if (!(await verifyCsrf(request, resolved.csrfHash))) {
+    return sjson({ ok: false, error: "E_CSRF" }, 403);
+  }
+  if (crossSiteMint(request, url)) {
+    return sjson({ ok: false, error: "E_CROSS_ORIGIN", message: "cross-site request refused" }, 403);
+  }
+  if (resolved.username === null) {
+    return sjson({ ok: false, error: "E_REAUTH_REQUIRED", message: "sign in again, then retry" }, 401);
+  }
+  let rawBody: string;
+  try {
+    rawBody = await readBodyCapped(request, MAX_SESSION_BODY_BYTES);
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      return sjson({ ok: false, error: "E_PAYLOAD_TOO_LARGE", message: "request body too large" }, 413);
+    }
+    throw err;
+  }
+  let body: { currentPassword?: unknown; newPassword?: unknown };
+  try {
+    body = JSON.parse(rawBody) as typeof body;
+  } catch {
+    return sjson({ ok: false, error: "E_VALIDATION_ERROR", message: "invalid JSON body" }, 400);
+  }
+  const current = typeof body?.currentPassword === "string" ? body.currentPassword : "";
+  const next = typeof body?.newPassword === "string" ? body.newPassword : "";
+  if (!current || !next) {
+    return sjson({ ok: false, error: "E_FIELD_MISSING", message: "currentPassword and newPassword are required" }, 400);
+  }
+  const policy = passwordProblem(next, resolved.username, current);
+  if (policy) return sjson({ ok: false, error: "E_PASSWORD_POLICY", message: policy }, 400);
+
+  const keys = attemptKeys(request, resolved.username);
+  let gate;
+  try {
+    gate = await gateAttempt(env, keys);
+  } catch {
+    return unavailable();
+  }
+  if (!gate.allowed) return throttled(gate.retryAfter);
+
+  // The session resolved, so the account existed and was enabled a moment ago; a
+  // vanished row here is a race and reads as a plain rejection.
+  const cred = await lookup(env, resolved.username);
+  const ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash, cred.username) : false;
+  if (!cred || !ok) {
+    try {
+      await recordFailure(env, keys, gate);
+    } catch {
+      return unavailable();
+    }
+    return sjson({ ok: false, error: "E_AUTH_FAILED" }, 401);
+  }
+  try {
+    await clearFailures(env, keys, gate);
+  } catch {
+    return unavailable();
+  }
+  const changed = await setPassword(env, cred.username, await hashSecret(next), new Date().toISOString(), cred.secretHash);
+  if (!changed) {
+    // An operator reset landed between our verify and our write: theirs wins.
+    return sjson({ ok: false, error: "E_AUTH_FAILED" }, 401);
+  }
+  // sessionsEnded counts the OTHER sessions only (contract 1.10.5); the caller's own is
+  // rotated: revoked here, then replaced by the fresh one minted below.
+  const ended = await endUserSessions(env, cred.username, cred.fromAddr, await sha256Hex(rawId));
+  await revokeSession(env, rawId);
+  const minted = await insertSession(env, {
+    username: cred.username, fromAddr: cred.fromAddr, displayName: cred.displayName,
+  });
+  const idle = idleSeconds(env);
+  const h = new Headers({ "content-type": "application/json" });
+  h.append("set-cookie", sessionCookie(minted.rawId, idle));
+  h.append("set-cookie", csrfCookie(minted.csrfToken, idle));
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      identity: { from: minted.identity.from, displayName: minted.identity.displayName },
+      capabilities: minted.caps,
+      expiresAt: minted.expiresAt,
+      csrfToken: minted.csrfToken,
+      sessionsEnded: ended,
+    }),
+    { status: 200, headers: h },
+  );
+}
+
 // Is this mint request cross-site (#409 part 3)? The rule, in order:
 //   1. Sec-Fetch-Site, when the browser sent it, is authoritative: only same-origin
 //      passes. `none` (a direct user navigation / no initiator) also passes;
@@ -453,7 +650,7 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
 //      test suite). Login CSRF is a browser-only threat and every modern browser
 //      sends at least Origin on a POST, so allowing this is not a hole -- and
 //      refusing it would break every non-browser API client.
-function crossSiteMint(request: Request, url: URL): boolean {
+export function crossSiteMint(request: Request, url: URL): boolean {
   const fetchSite = (request.headers.get("sec-fetch-site") || "").trim().toLowerCase();
   if (fetchSite) return !(fetchSite === "same-origin" || fetchSite === "none");
   const origin = (request.headers.get("origin") || "").trim();
@@ -463,7 +660,7 @@ function crossSiteMint(request: Request, url: URL): boolean {
 
 // A tripped lockout (#409 part 1). Retry-After is the standard signal and the
 // sign-in UI already handles 429 (webmail/index.html signIn).
-function throttled(retryAfter: number): Response {
+export function throttled(retryAfter: number): Response {
   const seconds = Math.max(1, Math.ceil(retryAfter));
   return new Response(
     JSON.stringify({
@@ -486,7 +683,7 @@ function throttled(retryAfter: number): Response {
 // attempt, disclose nothing about the credential, and say so honestly rather than
 // returning E_AUTH_FAILED (which would read as a bad password) or proceeding
 // unthrottled (which would silently disable the control).
-function unavailable(): Response {
+export function unavailable(): Response {
   return new Response(
     JSON.stringify({
       ok: false,
