@@ -37,7 +37,7 @@ That is the product working: Email Routing -> worker -> D1 store.
 The demo token is READ-scoped and public by design. Here is what that means.
 
 It can read. It lists messages, reads one, walks a thread, searches, downloads an
-attachment, and lists folders.
+attachment, lists folders, and lists recent correspondents.
 
 It cannot write. The API scope wall refuses send, reply and delete. It also refuses the
 three routes that change stored state: mark read, set flags, and move between folders.

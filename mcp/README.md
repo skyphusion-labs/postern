@@ -15,7 +15,7 @@ flowchart LR
     mcp -->|HTTPS Bearer| api[Postern Mailbox API]
 ```
 
-- **Read tools** (always on): search, list, read a message, read a thread, list folders.
+- **Read tools** (always on): search, list, read a message, read a thread, list folders, list recent correspondents.
 - **Send tools** (v1.1, **opt-in**): `mailbox_send` / `mailbox_reply` plus the draft
   surface, registered when a send credential is configured (see env below).
 - **The draft tools additionally need a BOUND identity** (v1.5). A draft has an owner, and
@@ -42,6 +42,7 @@ flowchart LR
 | `mailbox_thread` | Read one BOUNDED page of a thread by `thread_id`, oldest first: at most `limit` messages (default 20, lower than the list default because these rows carry full bodies). `cursor` is the only signal that tells a COMPLETE thread from a FIRST PAGE: `null` means you have the whole thread, a string means there is more and must be passed back. `count` is the size of THIS page, never the thread length. | `GET /api/threads/{id}` |
 | `mailbox_whoami` | Ask who you are and what slice of the mailbox your own credential can read. Takes nothing. Call it FIRST, before spending a search or a list: the same empty page means "no such mail anywhere" under an estate credential and "none in your own slice" under an identity-bound one, and those call for opposite next actions. Returns `identity` (your bound address, or `null` for a shared estate credential), `identityScope` (the same projection `mailbox_list` and `mailbox_search` report), `roleQueues` (shared queues you may ALSO read by passing that address as `to`; an empty list means none, never "unknown"), `capabilities` (what the gate will actually honour, so a capability absent from it WILL be refused), and `via`. | `GET /api/whoami` |
 | `mailbox_folders` | List the folders with a message count and an unread count each, plus any shared role queues the caller may read. Use it to ORIENT before paging: it answers "where is there mail, and how much" in one call, which `mailbox_list` cannot. Counts are computed server-side with the same predicates a read uses, so they agree with what `mailbox_list` returns for the same folder. An entry carrying `role` is a shared QUEUE, and that field's presence is the signal, so never parse the id. `to` scopes the unread counts and is ignored under an identity-bound token. | `GET /api/folders` |
+| `mailbox_recipients_recent` | List recent correspondents: addresses this identity has sent mail to (outbound to, cc, bcc only; not people who only wrote inbound). Each entry is `address`, `displayName` (or null), `lastUsedAt` (when that address was last a recipient), and `messageCount` (messages inside the scan, not a lifetime total). The scan is the newest 200 outbound messages; `scanLimited: true` means older mail was not counted. A bound identity is the owner and the server ignores `viewer` and `to`. An unbound token must pass one of them or the worker returns `E_IDENTITY_REQUIRED`. `identityScope` is the scope the server imposed. | `GET /api/recipients/recent` |
 
 ### Send (scope `send`, opt-in)
 
@@ -261,7 +262,7 @@ npm run build && npm run smoke   # boots the built server over stdio and asserts
 ```
 
 `npm run smoke` proves the opt-in gate end to end at the process level: a read-only
-env exposes exactly the five read tools, and adding `POSTERN_SEND_TOKEN` adds
+env exposes the read tools and not the send tools, and adding `POSTERN_SEND_TOKEN` adds
 `mailbox_send` + `mailbox_reply`. Live request scope-gating (a read token gets `403` on
 send, a send token `403` on read) and the per-identity From-binding are enforced by the
 worker (#85, #138); the authoritative contract is

@@ -870,13 +870,17 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
-      const recipients = await store.recentRecipients(env, identity, parseLimit(url) ?? 25);
+      const { recipients, scanLimited } = await store.recentRecipients(env, identity, parseLimit(url) ?? 25);
       // Scoped on `bound` only, for the reason in scopeReportOf: an `explicit` viewer is
       // the CALLER's narrowing, and echoing it back as an imposed scope would turn this
       // field into a mirror of the request instead of a statement about authority (#717).
+      // `scanLimited` is omitted when the scan saw every outbound row. Present only
+      // when true, same rule as `complete: false`: the flag is the caveat, and a
+      // false here would read as a positive claim the LIMIT cannot make.
       return json({
         ok: true,
         identityScope: readScopeReport(bound || undefined, null),
+        ...(scanLimited ? { scanLimited: true } : {}),
         recipients,
       });
     }

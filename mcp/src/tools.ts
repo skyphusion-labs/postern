@@ -579,6 +579,53 @@ export const READ_TOOLS: ToolDef[] = [
         : { count: folders.length, identityScope, folders };
     },
   },
+  {
+    name: "mailbox_recipients_recent",
+    scope: "read",
+    description:
+      "List recent correspondents: addresses this identity has sent mail to (outbound " +
+      "to, cc, and bcc only). It does not include people who only wrote inbound. Each " +
+      "entry has address, displayName (from the newest scanned header that carried one, " +
+      "or null when every header was a bare address), lastUsedAt (when that address was " +
+      "last seen as a recipient of this identity's outbound mail), and messageCount (how " +
+      "many scanned outbound messages named it; one message counts once even if the " +
+      "address is on more than one header). The scan is the newest 200 outbound messages. " +
+      "scanLimited true means older mail was not counted, so messageCount is a floor, not " +
+      "a lifetime total; when the flag is absent the scan covered every outbound message. " +
+      "A bound identity is the owner and the server ignores viewer and to. An unbound token " +
+      "must pass viewer or to, or the worker refuses with E_IDENTITY_REQUIRED rather than " +
+      "listing the whole estate. identityScope is the scope the SERVER imposed (member for " +
+      "a bound identity, estate for an unbound token that named a viewer). It is not a copy " +
+      "of the viewer argument. The length of recipients is how many addresses came back; " +
+      "it is not messageCount.",
+    inputSchema: {
+      viewer: z
+        .string()
+        .optional()
+        .describe("whose outbound correspondents to list; ignored when the token is identity-bound, required (or to) when it is not"),
+      to: z
+        .string()
+        .optional()
+        .describe("same as viewer; the worker accepts either name"),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(50)
+        .optional()
+        .describe("max addresses to return (default 25, max 50)"),
+    },
+    handler: async (client, a) => {
+      const page = await client.recentRecipients({ viewer: a.viewer, to: a.to, limit: a.limit });
+      // Same rule as the other read tools: pass the scope through, never invent one.
+      // An empty list under member is "you have not sent mail", which is not the
+      // estate-wide claim an unbound token is making.
+      const out: Record<string, unknown> = { recipients: page.recipients };
+      if (page.identityScope !== undefined) out.identityScope = page.identityScope;
+      if (page.scanLimited === true) out.scanLimited = true;
+      return out;
+    },
+  },
 ];
 
 // v1.1 send tools (scope "send"). MUTATING: they actually send mail as the estate,
