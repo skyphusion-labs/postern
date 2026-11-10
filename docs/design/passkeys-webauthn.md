@@ -18,6 +18,10 @@ user:
   1.10.3 rule that a session lives only while its account is enabled.
 - The password stays. This note does not make accounts passwordless (decision
   D-PASSKEY-2 below). Recovery is therefore the existing operator reset.
+- Passkeys follow the backend rule (contract 1.10.6, decision D-AUTH-3): every passkey
+  route exists only when `WEBMAIL_AUTH_BACKEND` is explicitly `native`. Unset or `off`
+  means no passkey routes, the same as no password sign-in, so a release that adds
+  passkeys never opens a sign-in surface on an existing deploy.
 
 ## 2. Why it is worth building
 
