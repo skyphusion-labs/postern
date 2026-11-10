@@ -118,7 +118,7 @@ describe("RelayTransport: header names at the transport seam", () => {
 // --- Parity with the Go relay: ONE table (relay/testdata/header_names.json) ---
 import { readFileSync } from "node:fs";
 import { URL } from "node:url";
-import { headerNameProblem } from "./src/headernames";
+import { headerNameProblem, MAX_HEADER_NAME_LENGTH } from "./src/headernames";
 
 const PARITY = JSON.parse(readFileSync(new URL("../relay/testdata/header_names.json", import.meta.url), "utf8")) as {
   maxNameLength: number;
@@ -126,6 +126,9 @@ const PARITY = JSON.parse(readFileSync(new URL("../relay/testdata/header_names.j
 };
 
 describe("header-name rule: parity table shared with relay/header_names_test.go", () => {
+  it("the table cap equals the code constant (same check as the Go test)", () => {
+    expect(MAX_HEADER_NAME_LENGTH).toBe(PARITY.maxNameLength);
+  });
   it("the table covers the length boundary on both sides", () => {
     const lens = PARITY.cases.filter((c) => /^X-a+$/.test(c.name)).map((c) => [c.name.length, c.ok]);
     expect(lens).toContainEqual([PARITY.maxNameLength, true]);
