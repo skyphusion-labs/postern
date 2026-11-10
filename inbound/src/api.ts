@@ -794,6 +794,19 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           );
       // Whose seen state to render (#404): same parameter, same rules, both endpoints.
       const seenFor = role ? sessionIdentity : parseSeenFor(url.searchParams, sessionIdentity);
+      // #803 (#632 S3): semantic and hybrid are score-ranked and never read cursor.
+      // Accepting one and dropping it told the caller the page continued. Refuse
+      // it here, with the same envelope as the other query checks on this route,
+      // before any retrieval runs. fts and substr still page, and so does a
+      // request that omits mode (that default is fts). An empty cursor is not a
+      // cursor. store.search throws the same refusal for the RPC door.
+      const cursorParam = url.searchParams.get("cursor") ?? undefined;
+      if ((modeParam === "semantic" || modeParam === "hybrid") && cursorParam) {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: store.SCORE_RANKED_CURSOR_MESSAGE },
+          400,
+        );
+      }
       const page = await store.search(env, {
         q,
         mode: modeParam as "fts" | "substr" | "semantic" | "hybrid" | undefined,
@@ -816,7 +829,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // boundary would otherwise intersect it down to the member own mail (#425).
         viewer: role ? undefined : sessionIdentity,
         limit: parseLimit(url),
-        cursor: url.searchParams.get("cursor") ?? undefined,
+        cursor: cursorParam,
       });
       // `...page` carries `complete` / `retrievalCap` / `degraded` when the mode could not
       // answer exhaustively, so both halves of #631 (whose mail, and how much of it) are

@@ -2513,13 +2513,20 @@ export async function folders(
  *     served header columns (field-selectable), for IMAP SEARCH parity.
  * Returns SearchHit (the #24 summary, no body) so the read shape is uniform.
  *
- * fts is date-ordered and cursor-paged. semantic/hybrid are SCORE-ranked, so a
- * date keyset cursor does not apply: they return a single ranked page (cursor
- * always null) of up to `limit` hits. Paging a re-ranked semantic set is a
- * post-v1 nicety, noted not built.
+ * fts and substr are date-ordered and cursor-paged. semantic/hybrid are
+ * SCORE-ranked, so a date keyset cursor does not continue them: they return a
+ * single ranked page of up to `limit` hits. The HTTP edge refuses a cursor on
+ * those two modes (#803). This function refuses it too, so the RPC door
+ * (MailboxService.search) cannot accept the cursor and drop it. Paging a
+ * re-ranked semantic set is a post-v1 nicety, noted not built.
  */
 export async function search(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
   const mode = q.mode ?? "fts";
+  // Same refusal the HTTP edge returns as E_VALIDATION_ERROR. An omitted mode is
+  // fts, which still pages; only the two score-ranked modes have nothing to seek.
+  if ((mode === "semantic" || mode === "hybrid") && q.cursor) {
+    throw new SearchCursorRefused();
+  }
   switch (mode) {
     case "fts":
       return ftsSearch(env, q);
@@ -3084,6 +3091,25 @@ export class SearchModeUnsupported extends Error {
   constructor(mode: string) {
     super(`search mode '${mode}' is not supported yet (fts only until M4)`);
     this.name = "SearchModeUnsupported";
+  }
+}
+
+/**
+ * Wire text for a cursor on semantic or hybrid (#803). One string so the HTTP
+ * edge and this throw cannot drift. The HTTP helper returns it as
+ * `{ ok:false, error:"E_VALIDATION_ERROR" }` at 400; this class carries the
+ * same code so the RPC door and errorResponse do too.
+ */
+export const SCORE_RANKED_CURSOR_MESSAGE =
+  "cursor paginates mode fts and substr only; semantic and hybrid are score-ranked and refuse a cursor";
+
+/** Thrown when a cursor is supplied to a score-ranked search mode (#803). */
+export class SearchCursorRefused extends Error {
+  readonly code = "E_VALIDATION_ERROR";
+  readonly status = 400;
+  constructor() {
+    super(SCORE_RANKED_CURSOR_MESSAGE);
+    this.name = "SearchCursorRefused";
   }
 }
 
