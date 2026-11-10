@@ -412,39 +412,36 @@ ONCE in that response. It is never stored or logged in plaintext.
 
 #### 1.10.2 The stored hash: per-row parameters, upgrade on sign-in
 
-Each row names its own parameters, so the target can change without a schema change
-and an old row still verifies at its own parameters:
+The hash is `pbkdf2$<iterations>$<saltB64>$<hashB64>` (PBKDF2-HMAC-SHA256, 16-byte
+salt, 32-byte output). The iteration count lives in EACH row, so the target can change
+without a schema change and an old row still verifies at its own count.
 
-| encoding | KDF | role |
-|---|---|---|
-| `pbkdf2-sha512$<iterations>$<saltB64>$<hashB64>` | PBKDF2-HMAC-SHA512, 16-byte salt, 64-byte output | **the target: 100,000 iterations** (#821) |
-| `pbkdf2$<iterations>$<saltB64>$<hashB64>` | PBKDF2-HMAC-SHA256, 16-byte salt, 32-byte output | legacy (#68); verifies, then upgrades |
+**The target is 100,000 iterations, the Workers ceiling (#821, RULED by the lead).** The
+deployed Cloudflare Workers runtime refuses a PBKDF2 iteration count above 100,000
+("iteration counts above 100000 are not supported"). Local `wrangler dev` and Node accept
+more, so only the edge shows it: the former target of 210,000 could neither create nor
+verify any credential in production, and a green local suite could not see that. The cap
+and its reason sit next to the constant in `smtpcreds.ts`, and the suite runs under the
+edge's limit, so raising it goes red locally. A different KDF (scrypt or Argon2 in WASM)
+is a separate design item, not part of this contract.
 
-**Why 100,000 and SHA-512 (#821).** The deployed Cloudflare Workers runtime refuses a
-PBKDF2 iteration count above 100,000 ("iteration counts above 100000 are not
-supported"). Local `wrangler dev` and Node accept more, so only the edge shows it. The
-former target (SHA-256 at 210,000) could therefore not create or verify any credential in
-production. At the 100,000 ceiling, SHA-512 costs an attacker more per guess on GPU
-hardware than SHA-256 does, so the target is the strongest PBKDF2 the runtime allows.
-No other KDF is in Web Crypto on Workers.
-
-**A row the runtime cannot verify.** A row whose iteration count is above 100,000 (a
-legacy 210,000 row, created on a runtime without the cap) cannot be verified on Workers.
-It is refused WITHOUT being counted as a failed guess (it is a data condition, not a
-wrong password, so it never locks the user out), it answers the infra-failure shape
-(`503 E_AUTH_UNAVAILABLE` at sign-in; a non-2xx at `/api/smtp-auth`, which the relay
-maps to a transient failure, not a 535), and it is logged by username so the operator
-can reset it (`POST /api/admin/users/{u}/password`). The server never creates such a row.
+**A row above the cap fails closed as a wrong password.** A stored hash above 100,000
+iterations (it could only have been minted outside the Worker) is never derived. The
+server logs a config error naming the account, and the caller gets exactly the
+wrong-password answer: `401 E_AUTH_FAILED` at sign-in and change password (counted by the
+throttle like any rejection, so the account is not distinguishable), `200 {ok:false}` at
+`/api/smtp-auth`. It never answers a 5xx that carries the runtime message. The fix is an
+operator reset (`POST /api/admin/users/{u}/password`).
 
 **Upgrade on sign-in.** After a successful password verify (sign-in, change password),
-if the row is not at the target (another KDF, or fewer iterations), the server
-re-hashes the same password at the target and writes it with a conditional update
+if the row's iteration count is below the target (100,000), the server re-hashes the
+same password at the target, never above it, and writes it with a conditional update
 (`WHERE username = ? AND secret_hash = <the hash just verified>`), so a concurrent reset
 always wins. The upgrade never changes the answer to the caller; if the write fails,
 the sign-in still succeeds and the next one retries.
 
 Every compare is constant-time. An unknown, disabled or deleted user is verified
-against a dummy hash at the TARGET parameters, so it costs the same work and returns the
+against a dummy hash at the target count (100,000), so it costs the same work and returns the
 same error as a wrong password.
 
 #### 1.10.3 Sessions follow the account
