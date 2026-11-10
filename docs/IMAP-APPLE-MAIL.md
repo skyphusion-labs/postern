@@ -26,7 +26,7 @@ instead of a no-op.
 |---|---|---|
 | [#290](https://github.com/skyphusion-labs/postern/pull/290) | `inbound/` | `DELETE /api/messages/{id}` + Vectorize tombstone |
 | [#291](https://github.com/skyphusion-labs/postern/pull/291) | `imap/` | EXPUNGE wired to delete API |
-| [#292](https://github.com/skyphusion-labs/postern/pull/292) | `imap/`, crew-secrets, fleet | Dual-token IMAP: read + `POSTERN_API_TOKEN_DELETE` |
+| [#292](https://github.com/skyphusion-labs/postern/pull/292) | `imap/`, crew-secrets | Dual-token IMAP: read + `POSTERN_API_TOKEN_DELETE` |
 | [#293](https://github.com/skyphusion-labs/postern/pull/293) | `imap/` | COPY-to-Trash delete; first attachment CTE attempt |
 | [#294](https://github.com/skyphusion-labs/postern/pull/294) | `imap/` | Attachment base64 **wire** bytes in FETCH; session Trash staging |
 | [#295](https://github.com/skyphusion-labs/postern/pull/295) | `imap/` | Content-Type `name=` on attachments (PDF UTI); Trash staging **shared per username** across IMAP connections |

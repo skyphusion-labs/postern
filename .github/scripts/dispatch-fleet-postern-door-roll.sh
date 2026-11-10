@@ -10,15 +10,15 @@
 # this public repo and `check-topology-scrub.sh` keeps it out. The roles are named instead.)
 #
 # WHAT IT NEEDED, both halves:
-#   1. A container host running the door Swarm services, `postern-submission` (the Go relay on
+#   1. A container host running the door services, `postern-submission` (the Go relay on
 #      587) and `postern-imap` (the IMAP door on 993).
 #   2. The handler workflow `.github/workflows/postern-door-roll.yml` in
 #      skyphusion-labs/fleet-chezmoi, listening `on: repository_dispatch` for
 #      `types: [postern-door-roll]`, pinning the image into the door stack env file and
 #      redeploying the service.
 #
-# WHY IT IS OFF: the Swarm host that ran those door services was decommissioned 2026-09-24
-# with the rest of the leased fleet (cost). The handler workflow went out in the same teardown:
+# WHY IT IS OFF: the container host that ran those door services was decommissioned 2026-09-24
+# with the rest of those leased hosts (cost). The handler workflow went out in the same teardown:
 # it is 404 on fleet-chezmoi main (measured 2026-09-25), no workflow in that repo declares
 # `on: repository_dispatch` any more, and the handler's own `runs-on: [self-hosted, fleet,
 # <box>]` label matches no runner. GitHub answers POST /repos/{owner}/{repo}/dispatches with
@@ -54,7 +54,7 @@
 set -euo pipefail
 
 # ---- FAIL-CLOSED GUARD: delete this block to re-enable (see the header). ----
-echo "::error::postern door roll dispatch is DISABLED (2026-09-25), failing closed for door '${1:-unspecified}'. The handler workflow skyphusion-labs/fleet-chezmoi .github/workflows/postern-door-roll.yml no longer exists on main (removed in the 2026-09-24 teardown of the leased fleet) and no workflow in that repo listens for repository_dispatch any more, so POST /repos/skyphusion-labs/fleet-chezmoi/dispatches is accepted with HTTP 204 and NOTHING deploys; this script treated 204 as success and reported a green roll. The Swarm host that ran the postern-submission (relay, 587) and postern-imap (993) door services, and that was the handler's own runner, was decommissioned 2026-09-24. The image build, the artifact smoke and the GHCR push are unaffected, as is the postern inbound Worker on CF Email. Re-enabling needs a container host plus the restored fleet-chezmoi handler: that is Conrad's spend and topology call, so the recipe below is kept intact rather than deleted."
+echo "::error::postern door roll dispatch is DISABLED (2026-09-25), failing closed for door '${1:-unspecified}'. The handler workflow skyphusion-labs/fleet-chezmoi .github/workflows/postern-door-roll.yml no longer exists on main (removed in the 2026-09-24 teardown of those leased hosts) and no workflow in that repo listens for repository_dispatch any more, so POST /repos/skyphusion-labs/fleet-chezmoi/dispatches is accepted with HTTP 204 and NOTHING deploys; this script treated 204 as success and reported a green roll. The container host that ran the postern-submission (relay, 587) and postern-imap (993) door services, and that was the handler's own runner, was decommissioned 2026-09-24. The image build, the artifact smoke and the GHCR push are unaffected, as is the postern inbound Worker on CF Email. Re-enabling needs a container host plus the restored fleet-chezmoi handler: that is Conrad's spend and topology call, so the recipe below is kept intact rather than deleted."
 exit 1
 # ---- end fail-closed guard ----
 

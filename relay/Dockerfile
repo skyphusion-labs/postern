@@ -2,7 +2,7 @@
 # versioned container image.
 #
 # WHY THIS SHAPE: the relay is moving off the host systemd install onto a versioned
-# container image (CI -> GHCR -> Swarm), the same move the 993 IMAP door made. The
+# container image (CI builds it, GHCR stores it), the same move the 993 IMAP door made. The
 # image content IS the deployed code, pinned by the GHCR short-SHA tag, so there is
 # no host binary to drift and no stale unit to shadow it.
 #

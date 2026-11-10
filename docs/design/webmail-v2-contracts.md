@@ -7,14 +7,9 @@ reproducible from the doc alone (ICD discipline). Field names map to the code th
 touch (`inbound/src/api.ts`, `inbound/src/store.ts`, `inbound/schema.sql`,
 `imap/posternimap/`) so the implementation diff stays traceable.
 
-> **Written 2026-07, against the operator fleet topology of that time** (a bastion, a
-> private VLAN, a directory host). That fleet is retired. Two passages describe the
-> environment this design was reasoned in: the throttle-reasoning passage in **1.6.1**
-> ("the relay dropped it because behind the bastion...") and the directory-seam passage
-> in **1.9** (the VLAN and `nslcd`). Both are kept so the REASONS stay legible; neither
-> is a description of how anything is deployed now, and the first is the one most likely
-> to be mistaken for a live claim. The contracts themselves (columns, UID rules,
-> bindings, the verifier seam) are host-agnostic and unaffected.
+> **Written 2026-07.** An earlier draft named a retired operator estate. Those names
+> are not in the contracts below. The contracts (columns, UID rules, bindings, the
+> verifier seam) do not depend on a particular host.
 
 It inherits the Fable product-gap review (`docs/reviews/fable-product-gap-review-2026-07-17.md`,
 PR #340) and closes the finding class it names: D5/D6 (APPEND silent discard + Trash
@@ -96,7 +91,7 @@ A session is minted by verifying a credential. The verifier mirrors the door
 |---|---|---|
 | `off` | no session endpoint; BYO-token only (self-host operator posture) | always available |
 | `native` (explicit opt-in; 1.10.6) | `smtp_credentials` (the same PBKDF2 the relay `POST /api/smtp-auth` uses) | **phase 2** |
-| `ldap` / `system` | the directory, via a verifier the fleet doors already run | **phase 2+ (gated, see 1.9)** |
+| `ldap` / `system` | the directory, via a verifier the operator runs beside the Worker | **phase 2+ (gated, see 1.9)** |
 
 `native` is the fresh-clone RECOMMENDED backend and the one this phase specifies end
 to end: the SAME username+secret a user configures for SMTP submission (native mode)
@@ -117,10 +112,10 @@ after provisioning accounts (documented in DEPLOY). `ldap`/`system` are treated 
 whatever `smtp_credentials` holds; an upgrade never turns sign-in on. A new install gets
 sign-in because its installer WRITES `WEBMAIL_AUTH_BACKEND = "native"`.
 
-The `ldap`/`system` webmail login on a directory-backed deployment (the skyphusion
-fleet) is designed here but **gated to a later phase** because a Cloudflare Worker cannot
-bind the directory itself (section 1.9); until then, directory deployments use BYO-token
-webmail, which works today. This limitation is stated, never silently papered over.
+The `ldap`/`system` webmail login on a directory-backed deployment is designed here but
+**gated to a later phase** because a Cloudflare Worker cannot bind the directory itself
+(section 1.9); until then, directory deployments use BYO-token webmail, which works today.
+This limitation is stated, never silently papered over.
 
 ### 1.4 Custody decision: HttpOnly same-origin session cookie (hosted) vs bearer-in-JS (BYO)
 
@@ -285,8 +280,9 @@ alike; the IMAP door has its own equivalent (`imap/posternimap/throttle.py`, #18
   `WEBMAIL_AUTH_MAX_LOCKOUT_SECONDS`, `WEBMAIL_AUTH_GLOBAL_MAX`,
   `WEBMAIL_AUTH_GLOBAL_WINDOW_SECONDS`.
 - **Two deviations from the relay, both environmental.** (1) The per-client-IP layer
-  EXISTS here: the relay dropped it because behind the bastion every connection
-  presents one source IP, while a Worker sees the real client. (2) The relay global
+  EXISTS here: the relay omits it, because a submission door may see one source
+  address for every client unless PROXY protocol is on (`docs/PROXY-PROTOCOL.md`),
+  while a Worker sees the real client via `CF-Connecting-IP`. (2) The relay global
   layer is present but DEFAULT-OFF (`WEBMAIL_AUTH_GLOBAL_MAX` unset = 0): on a public
   endpoint a global cooldown is a login-denial lever any anonymous attacker can pull
   for every user, and the per-IP layer already covers spread-spraying. Operators can
@@ -345,17 +341,17 @@ they do for a registry token (`SEND-IDENTITIES.md` section 4), and the scope gat
 
 ### 1.9 Directory (ldap/system) webmail login: the seam, and why it is gated
 
-A Cloudflare Worker cannot open an LDAP/PAM bind to the fleet directory (it is not on the
-VLAN and has no socket path to `nslcd`). So worker-native session mint can verify only the
-`native` backend. To reconcile directory identity WITHOUT a second store, the design is a
-**session-verifier seam**: `POST /api/session` with `WEBMAIL_AUTH_BACKEND=ldap|system`
-delegates the credential check to a configured `WEBMAIL_SESSION_VERIFIER_URL` that a fleet
-door (the relay or a small verifier) already runs, using the SAME direct-bind + self-read
-+ `mail-users` gate the doors enforce (`AUTH-CONTRACT.md` section 5b). The verifier
-returns the bound `mail` identity; the worker mints the session from it. This is
-explicitly **phase 2+ and gated for lead/Conrad signoff** (it touches the fleet exposure
-posture, section 5 decision D-AUTH-2); it is designed now so the account contract is ONE
-contract, not invented later. Until it lands, directory deployments use BYO-token webmail.
+A Cloudflare Worker cannot open an LDAP or PAM bind (it has no socket to a directory).
+So worker-native session mint can verify only the `native` backend. To reconcile
+directory identity WITHOUT a second store, the design is a **session-verifier seam**:
+`POST /api/session` with `WEBMAIL_AUTH_BACKEND=ldap|system` delegates the credential
+check to a configured `WEBMAIL_SESSION_VERIFIER_URL` that the operator runs (the relay,
+or a small verifier), using the SAME direct-bind + self-read + `mail-users` gate the
+doors enforce (`AUTH-CONTRACT.md` section 5b). The verifier returns the bound `mail`
+identity; the worker mints the session from it. This is explicitly **phase 2+ and gated
+for lead/Conrad signoff** (section 5 decision D-AUTH-2); it is designed now so the
+account contract is ONE contract, not invented later. Until it lands, directory
+deployments use BYO-token webmail.
 
 ### 1.10 Human accounts: user management, change password, first run (#789)
 
@@ -1077,7 +1073,7 @@ Each has a recommendation; none is unilaterally settled in this doc.
 | **D-CONTACTS-1** | Contacts / autocomplete for the first release? | **Recent-recipients MVP only.** A read-only autocomplete derived by querying existing outbound `to/cc/bcc` from `messages` (most-recent, deduped). NO durable address book, no new PII store. | Meets the normal-client expectation cheaply and additively (it is a query over data we already store), and avoids standing up a contacts store (a second store) in phase 1. A full address book is a scoped later phase. |
 | **D-HTML-1** | HTML compose sanitization approach? | **Server-side allowlist sanitize at SEND** (authoritative), plus the existing sandboxed-iframe render on read. Browser-side sanitization is treated as UX only, never trusted. | The worker is authoritative and must not trust browser-sanitized HTML (bypassable). Open sub-question for signoff: hand-rolled allowlist serializer (zero-dep, house-preferred) vs one vetted sanitizer dep. Recommend hand-rolled allowlist (strip scripts/styles/event-handlers/remote refs/`cid` abuse; permit a small safe tag/attr set) to hold the minimal-dep line; escalate if the safe-HTML surface proves too large to hand-roll safely. |
 | **D-AUTH-1** | Session custody: HttpOnly cookie vs bearer-in-JS? | **HttpOnly same-origin session cookie for hosted; bearer-in-JS retained for BYO/operator.** (Section 1.4.) | XSS token-theft resistance + instant server-side revocation outweigh the CSRF cost, which is mitigated (1.6). BYO-token stays for self-host. |
-| **D-AUTH-2** | Directory (ldap/system) webmail login now or later? | **Later, gated.** Phase 1 specifies `native` (smtp_credentials) end to end; directory login uses the verifier seam (1.9) in a later, signoff-gated phase (it touches fleet exposure). BYO-token covers directory deployments meanwhile. | A CF Worker cannot bind the directory; the verifier-URL seam keeps the account contract ONE contract without inventing a parallel store, but it is a fleet-topology change that needs supervision. |
+| **D-AUTH-2** | Directory (ldap/system) webmail login now or later? | **Later, gated.** Phase 1 specifies `native` (smtp_credentials) end to end; directory login uses the verifier seam (1.9) in a later, signoff-gated phase. BYO-token covers directory deployments meanwhile. | A CF Worker cannot bind the directory; the verifier-URL seam keeps the account contract ONE contract without inventing a parallel store. Which host is allowed to verify passwords is an operator decision and needs supervision. |
 | **D-DELETE-1** | Organize mutations (move / flag / soft-delete-to-Trash): `read`-scoped or a new `organize` scope? | **`read`-scoped** (only hard delete gets the new `delete` scope). | Consistent with the standing `\Seen`-is-read-scoped decision; soft-delete is recoverable (Trash window), so it is non-destructive. A separate `organize` scope adds a fourth token most deployments never split. Flagged because it is a posture call. **Accepted consequence (must be stated):** because a `read` token can move mail to Trash and the retention purge (2.5) eventually hard-deletes trashed mail, a leaked READ token is EVENTUALLY destructive (trash everything, wait out `TRASH_RETENTION_DAYS`). This is accepted for consistency + the recovery window, on the CONDITION that the retention purge is a **gated, announced maintenance job, never a silent auto-run**, and the window is operator-configured with a sane floor. A deployment that cannot tolerate this can split `organize` out later (the model admits it). |
 | **D-AUTH-3** | `WEBMAIL_AUTH_BACKEND` unset: `off`, or `native` once a user exists? | **RULED: `off`, always** (1.10.6). Only explicit `native` enables sign-in; the installer writes it for new installs. | A release must never silently turn on a sign-in surface on an existing self-hosted deploy. |
 | **D-AUTH-4** | A signed-in human admin role? | **DEFERRED** (1.10.9). Admin stays the `both` token via API and CLI. | It is a new permission concept; a web admin UI needs it later, and that is Conrad's call. |
