@@ -154,6 +154,27 @@ offered in token mode, where there is no person and no password. Directory
 (`ldap`/`system`) sign-in is designed but deferred and out of this phase; those
 deployments keep using BYO-token webmail.
 
+**First run (no accounts yet).** A fresh manual deploy can create its first account
+from the browser. The page shows **Create the first account** only when ALL three hold
+(`docs/design/webmail-v2-contracts.md` section 1.10.7):
+
+1. `WEBMAIL_AUTH_BACKEND = "native"` (explicit; unset or `off` never arms it),
+2. the `POSTERN_SETUP_TOKEN` secret is set, at least 32 characters (a shorter value
+   counts as unset and is logged), and
+3. the account table is empty.
+
+```bash
+cd inbound && npx wrangler secret put POSTERN_SETUP_TOKEN   # paste a long random value
+```
+
+Enter that token, your address and a password; the account is created and you are
+signed in. Setup closes for good once any account exists (a second attempt answers
+`409` and the page goes to sign-in), and the token is inert from then on; you may
+delete the secret. The one-command installer (`deploy/`) does not need this: it
+creates the first admin itself through `POST /api/admin/users`.
+
+![First run](screenshots/webmail-first-run.png)
+
 ## Run it
 
 The page is served by the inbound (core) worker at **`/webmail`** on the same
