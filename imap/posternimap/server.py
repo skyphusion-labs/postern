@@ -168,8 +168,8 @@ class PosternIMAP4Server(imap4.IMAP4Server):
 
         The #105 throttle keys token/fixed attempts on the SOURCE address instead
         of the attacker-chosen username (auth.build_portal / throttle_account), so
-        the checker needs to know who is connecting. Behind the L4 load balancer
-        the PROXY wrapper (proxywrap.py) has already swapped the transport's peer
+        the checker needs to know who is connecting. When PROXY protocol is on,
+        the wrapper (proxywrap.py) has already swapped the transport's peer
         for the recovered real client IP, so getPeer() is the true source. The
         stock behavior is otherwise unchanged (portal.login with IUsernamePassword).
         """
@@ -1161,8 +1161,8 @@ def run(cfg: Config) -> None:
         ctx = _build_tls_context_factory(cfg.tls_cert, cfg.tls_key)
         scheme = "imaps"
         if proxy.enabled():
-            # 993 is implicit TLS, but the L4 LB prepends the PROXY header on the RAW
-            # TCP stream ahead of the TLS ClientHello. So we listen plain TCP with the
+            # 993 is implicit TLS, but when PROXY protocol is on the header is prepended
+            # on the RAW TCP stream ahead of the TLS ClientHello. So we listen plain TCP with the
             # PROXY wrapper OUTERMOST (it strips the header off the raw bytes) and the
             # TLS factory as the wrapped factory: raw bytes -> PROXY strip -> TLS ->
             # IMAP. (docs/PROXY-PROTOCOL.md section 8.)

@@ -5,7 +5,7 @@
 > A self-hoster applies the same RFC 8461/8460 mechanics against their own domain and MX
 > hosts, under whatever change-control fits their own operation.
 
-Status: IMPLEMENTED in code (#197); DNS/LB deploy is Conrad-supervised (see the fleet-chezmoi CR).
+Status: IMPLEMENTED in code (#197); the DNS records are a Conrad-supervised change (see the fleet-chezmoi CR).
 Nothing here mutates production from the repo alone; this document is the contract the CR implements.
 
 Issue: #197 (edge: implicit-TLS 465 + MTA-STS, STARTTLS-stripping resilience).

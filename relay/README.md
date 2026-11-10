@@ -181,8 +181,8 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
 
 > **Container deploys use `AUTH_BACKEND=ldap` (direct-bind + self-read), never `system`/PAM.**
 > The published image (`ghcr.io/skyphusion-labs/postern-relay`) is cgo-free, so the
-> `system`/PAM backend is not compiled in; PAM stays a host (`-tags pam`) build. On
-> the fleet the door uses **direct-bind + self-read** (#182): the user binds as
+> `system`/PAM backend is not compiled in; PAM stays a host (`-tags pam`) build. That
+> mode is **direct-bind + self-read** (#182): the user binds as
 > themselves, then reads their own entry for `mail` and the optional `memberOf`
 > authorization gate. See `docs/AUTH-CONTRACT.md` section 5b and `imap/README.md`;
 > the two doors share one login by design (#75).
@@ -418,10 +418,10 @@ are read as PATHs directly (`SUBMISSION_TLS_CERT` / `_KEY`).
 
 Container deploys use **`AUTH_BACKEND=ldap` (direct-bind + self-read, #182)** -- the cgo-free image
 has no `system`/PAM backend (see the auth-backend note above). Run the image under
-whatever orchestrator you use (Compose, Swarm, Kubernetes); bind the door to a
+whatever orchestrator you use; bind the door to a
 private address that only your own edge can reach (e.g. `192.0.2.10:587`), never
-`0.0.0.0`. The PROXY-protocol edge contract (the L4 LB in front) is
-`docs/PROXY-PROTOCOL.md`.
+`0.0.0.0`. When a load balancer speaks PROXY protocol in front of the door, the
+contract is `docs/PROXY-PROTOCOL.md`.
 
 This README covers the generic self-host path and names no particular operator
 topology. Skyphusion Labs runs no relay for anyone else.

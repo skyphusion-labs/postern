@@ -39,7 +39,7 @@ Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/A
   `/api/send`, `/api/reply`, `/api/threads`) plus a same-account `MailboxService` RPC entrypoint
   (legacy `EmailService` alias for send-only bindings). It also SENDS, so the sent copy is written in
   the same isolate as the store. **Production receiving is CF Email Routing -> this Worker**, not a
-  host MTA on a fleet box.
+  host MTA.
 - **`relay/`** -- a small Go SMTP daemon (`go-smtp` + `enmime`) for local services that can only speak
   SMTP (cron, backups, CI failure mail). Unauthenticated intake is **loopback only**
   (default `127.0.0.1:2525`; `0.0.0.0` is refused). Authenticated submission (587/465) is a
@@ -196,7 +196,7 @@ version** matches the tag you intended.
 
 The relay image is `ghcr.io/skyphusion-labs/postern-relay`, published by `relay-image.yml`
 (a `v*` tag, a `relay/**` push to `main`, or `workflow_dispatch`). Nothing installs it
-on a host: the directory-host `systemctl` path is gone (2026-09-24; see that workflow).
+on a host: the host `systemctl` path is gone (2026-09-24; see that workflow).
 Production receiving stays CF Email Routing to the inbound Worker.
 
 ## Conventions (SkyPhusion house style)

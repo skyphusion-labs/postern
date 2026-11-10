@@ -239,6 +239,11 @@ jobs:
         run: bash .github/scripts/tests/verify-worker-deployment.test.sh
       - name: topology scrub (fleet hostnames + RFC1918)
         run: bash .github/scripts/tests/check-topology-scrub.test.sh
+      # #806: live files must not name the retired orchestrator or the leased
+      # host vendor. History (CHANGELOG, docs/reviews, migration comments)
+      # is excluded.
+      - name: dead topology prose (#806)
+        run: bash .github/scripts/tests/check-dead-topology-prose.test.sh
       - name: forwarding preflight verdict logic (#611)
         run: bash .github/scripts/tests/forwarding-preflight.test.sh
       - name: relay Go pin skew detection (#704)
