@@ -70,10 +70,11 @@ describe("ingest trust decision", () => {
     } as ParsedInbound["auth"]))).toBe(1);
   });
 
-  it("trusts SPF pass whose MAIL FROM domain aligns (subdomain) with the From domain", async () => {
+  it("does NOT trust an aligned SPF pass alone: SPF is not a trust leg", async () => {
+    // SPF evidence echoes sender-chosen HELO / MAIL FROM; DMARC covers aligned SPF.
     expect(await trustedOf(msg("alerts@skyphusion.org", {
       spf: "pass", spfDomain: "bounce.skyphusion.org", dkim: "none", dmarc: "none",
-    } as ParsedInbound["auth"]))).toBe(1);
+    } as ParsedInbound["auth"]))).toBe(0);
   });
 
   it("trusts DKIM pass whose d= aligns with the From domain, among other signatures", async () => {
@@ -112,7 +113,7 @@ describe("in-Worker driver: auth verdicts from CF headers", () => {
     h.append("authentication-results", FORGED_AR);
     h.append("received-spf", CF_RECEIVED_SPF);
     const auth = authFromHeaders!((n) => h.get(n));
-    expect(auth).toMatchObject({ spf: "pass", spfDomain: "attacker.example", dkim: "none", dmarc: "fail", dmarcFrom: "skyphusion.org" });
+    expect(auth).toEqual({ spf: "pass", dkim: "none", dmarc: "fail", dmarcFrom: "skyphusion.org" });
     expect((auth as { dkimDomains?: string[] }).dkimDomains ?? []).toEqual([]);
     expect(await trustedOf(msg('"CEO" <ceo@skyphusion.org>', auth))).toBe(0);
   });
@@ -125,7 +126,7 @@ describe("in-Worker driver: auth verdicts from CF headers", () => {
       "spf=pass (mx.cloudflare.net: domain of x@skyphusion.org designates 192.0.2.9 as permitted sender) smtp.mailfrom=x@skyphusion.org; arc=none");
     h.append("received-spf", "pass (mx.cloudflare.net: domain of x@skyphusion.org designates 192.0.2.9 as permitted sender)");
     const auth = authFromHeaders!((n) => h.get(n));
-    expect(auth).toMatchObject({ spf: "pass", spfDomain: "skyphusion.org", dkim: "pass", dkimDomains: ["skyphusion.org"], dmarc: "pass", dmarcFrom: "skyphusion.org" });
+    expect(auth).toEqual({ spf: "pass", dkim: "pass", dkimDomains: ["skyphusion.org"], dmarc: "pass", dmarcFrom: "skyphusion.org" });
     expect(await trustedOf(msg('"Alerts" <alerts@skyphusion.org>', auth))).toBe(1);
   });
 
@@ -175,7 +176,7 @@ describe("in-Worker driver: values the sender controls cannot inject a verdict",
     it(`stays untrusted: ${name}`, async () => {
       const auth = trustOfAr(ar);
       expect(auth.dkimDomains ?? []).not.toContain("skyphusion.org");
-      expect(auth.spfDomain === "skyphusion.org").toBe(false);
+      expect("spfDomain" in auth).toBe(false);
       expect(auth.dmarc === "pass" && auth.dmarcFrom === "skyphusion.org").toBe(false);
       expect(await trustedOf(msg("CEO <ceo@skyphusion.org>", auth))).toBe(0);
     });
@@ -203,28 +204,85 @@ describe("in-Worker driver: the live Cloudflare header shape", () => {
     return rows[0].trusted;
   }
   for (const [label, ar] of [["folded", LIVE_NPM_AR_FOLDED], ["unfolded", LIVE_NPM_AR_FOLDED.replace(/\r\n\t/g, " ")]] as const) {
-    it(`parses every leg (${label}) and trusts npm`, async () => {
+    it(`parses DKIM and DMARC (${label}) and trusts npm`, async () => {
       const auth = trustOfAr(ar + ", evil; dkim=pass header.d=skyphusion.org", "npm <support@npmjs.com>");
+      // spf is the Received-SPF verdict, display only; nothing at/after `spf=` is read.
       expect(auth).toEqual({
-        spf: "pass", spfDomain: "us-west-2-amazonses.npmjs.com",
+        spf: "pass",
         dkim: "pass", dkimDomains: ["npmjs.com", "amazonses.com"],
         dmarc: "pass", dmarcFrom: "npmjs.com",
       });
       expect(await npmTrusted(auth)).toBe(1);
-      // Each leg alone carries trust: SPF (the leg that was dead), DKIM, DMARC.
-      expect(await npmTrusted({ spf: "pass", spfDomain: auth!.spfDomain, dkim: "none", dmarc: "none" })).toBe(1);
+      // DMARC alone and DKIM alone each carry trust; SPF alone does not.
       expect(await npmTrusted({ spf: "none", dkim: "pass", dkimDomains: auth!.dkimDomains, dmarc: "none" })).toBe(1);
       expect(await npmTrusted({ spf: "none", dkim: "none", dmarc: "pass", dmarcFrom: "npmjs.com" })).toBe(1);
+      expect(await npmTrusted({ spf: "pass", dkim: "none", dmarc: "none" })).toBe(0);
     });
   }
 });
 
 describe("in-Worker driver: a legitimate quoted MAIL FROM local part", () => {
-  it("keeps the SPF leg: the quoted local part is opaque, its domain is read", async () => {
+  it("does NOT use the SPF leg: nothing at or after spf= is read", async () => {
     const auth = trustOfAr("mx.cloudflare.net; dkim=none; dmarc=none; " +
       'spf=pass (mx.cloudflare.net: domain of "a;b c"@bounce.skyphusion.org designates 192.0.2.7 as permitted sender) ' +
       'smtp.mailfrom="a;b c"@bounce.skyphusion.org; arc=none', "alerts@skyphusion.org");
-    expect(auth).toMatchObject({ spf: "pass", spfDomain: "bounce.skyphusion.org" });
-    expect(await trustedOf(msg("alerts@skyphusion.org", auth))).toBe(1);
+    expect(auth).toEqual({ spf: "pass", dkim: "none", dmarc: "none" });
+    expect(await trustedOf(msg("alerts@skyphusion.org", auth))).toBe(0);
+  });
+});
+
+// --- Review round 3: sender-chosen echoes (HELO, MAIL FROM, a failing selector) ---
+//
+// CF echoes these unescaped, so text at or after the first raw `spf=` cannot be parsed
+// unambiguously, and an anomaly before it voids the WHOLE header. Shape: CF-folded
+// instance, a forged second instance after ", ", Received-SPF pass.
+
+function cfAr(o: { helo?: string; mailfrom?: string; dkim?: string } = {}): string {
+  const H = o.helo ?? "mta.attacker.example";
+  const M = o.mailfrom ?? "bounce@attacker.example";
+  return [
+    "mx.cloudflare.net;",
+    (o.dkim ?? "dkim=pass header.d=attacker.example header.s=s1 header.b=AAAA") + ";",
+    "dmarc=fail header.from=skyphusion.org policy.dmarc=reject;",
+    `spf=none (mx.cloudflare.net: no SPF records found for postmaster@${H}) smtp.helo=${H};`,
+    `spf=pass (mx.cloudflare.net: domain of ${M} designates 192.0.2.1 as permitted sender) smtp.mailfrom=${M};`,
+    "arc=none smtp.remote-ip=192.0.2.1",
+  ].join("\r\n\t") + ", forged.example; dkim=pass header.d=skyphusion.org; dmarc=pass header.from=skyphusion.org";
+}
+
+describe("round 3: echoes the sender chose cannot yield trust", () => {
+  const cases: Record<string, string> = {
+    "1 quote inside comment via MAIL FROM": cfAr({ mailfrom: '")a;spf=pass smtp.mailfrom=skyphusion.org;arc=none ("@attacker.example' }),
+    "2 same, cut at a comma": cfAr({ mailfrom: '")a;spf=pass smtp.mailfrom=skyphusion.org,"@attacker.example' }),
+    "3 HELO with a comma, no quotes": cfAr({ helo: "x)y;spf=pass/smtp.mailfrom=skyphusion.org," }),
+    "4 HELO using drop-the-rest": cfAr({ helo: 'x)y;spf=pass/smtp.mailfrom=skyphusion.org;"(' }),
+    "5 forged DMARC via a failing selector a(": cfAr({
+      dkim: "dkim=fail header.d=attacker.example header.s=a( header.b=AAAA",
+      helo: "x);dmarc=pass/header.from=skyphusion.org;q",
+    }),
+  };
+  for (const [name, ar] of Object.entries(cases)) {
+    it(`stays untrusted: ${name}`, async () => {
+      const auth = trustOfAr(ar);
+      expect(await trustedOf(msg("CEO <ceo@skyphusion.org>", auth))).toBe(0);
+    });
+  }
+});
+
+describe("round 3: positional rules inside the trusted region", () => {
+  it("ignores a dkim= entry after a non-dkim entry", async () => {
+    const auth = trustOfAr("mx.cloudflare.net; dkim=pass header.d=attacker.example; dmarc=fail header.from=skyphusion.org; dkim=pass header.d=skyphusion.org; spf=none smtp.helo=x");
+    expect(auth.dkimDomains).toEqual(["attacker.example"]);
+    expect(await trustedOf(msg("CEO <ceo@skyphusion.org>", auth))).toBe(0);
+  });
+  it("only the first dmarc= counts", async () => {
+    const auth = trustOfAr("mx.cloudflare.net; dkim=none; dmarc=fail header.from=skyphusion.org; dmarc=pass header.from=skyphusion.org");
+    expect(auth.dmarc).toBe("fail");
+    expect(await trustedOf(msg("CEO <ceo@skyphusion.org>", auth))).toBe(0);
+  });
+  it("needs the FIRST DKIM verdict to be pass (conservative), even with an aligned later pass", async () => {
+    const auth = trustOfAr("mx.cloudflare.net; dkim=fail header.d=esp.example; dkim=pass header.d=skyphusion.org; dmarc=none");
+    expect(auth).toMatchObject({ dkim: "fail", dkimDomains: ["skyphusion.org"] });
+    expect(await trustedOf(msg("alerts@skyphusion.org", auth))).toBe(0);
   });
 });

@@ -63,7 +63,7 @@ secrets set with `wrangler secret put`, never vars; see
 
 | Var | Effect | Empty (`""`) means |
 |-----|--------|--------------------|
-| `TRUSTED_SENDER_DOMAINS` | domains/addresses eligible for `trusted=1` (must also pass DMARC, or SPF/DKIM aligned with the header From) | nothing is ever trusted |
+| `TRUSTED_SENDER_DOMAINS` | domains/addresses eligible for `trusted=1` (must also pass DMARC, or DKIM aligned with the header From; SPF alone never trusts) | nothing is ever trusted |
 | `FORWARD_TO` | destination for transparent forwarding | forwarding disabled (store-only) |
 | `FORWARD_FOR` | recipients whose mail is forwarded to `FORWARD_TO` | forward everything (not recommended once crew share the domain) |
 | `VECTORIZE_FOR` | recipients whose mail is embedded into Vectorize (opt-in) | index everything |
@@ -105,30 +105,33 @@ operate an established instance, deploy it by pushing a tag, not from your lapto
 
 `trusted` (stored per message) is a coarse "is this from us / a known service"
 flag, not a spam verdict. It is set only when the RFC 5322 header From holds exactly
-one address, that address is on `TRUSTED_SENDER_DOMAINS`, AND an authenticated
-identity ALIGNED with the From domain passed:
+one address, that address is on `TRUSTED_SENDER_DOMAINS`, AND one of these passed for
+the From domain:
 
 - DMARC `pass` whose `header.from` is the From domain, OR
-- SPF `pass` whose `smtp.mailfrom` domain aligns with the From domain, OR
-- DKIM `pass` for a `d=` that aligns with the From domain.
+- DKIM: the FIRST DKIM verdict is `pass` and a passing `d=` aligns with the From domain
+  ("aligns" = equal, or one domain is a subdomain of the other).
 
-"Aligns" means equal, or one domain is a subdomain of the other. Sibling subdomains
-need DMARC pass (CF evaluates DMARC with the organizational domain).
+**SPF is not a trust leg.** An allowlisted domain that publishes NO DMARC record and
+whose mail carries no aligned DKIM signature is **not trusted**, even when SPF passes.
+Why: in CF's `Authentication-Results` (and in `Received-SPF`) the SPF entries echo the
+HELO name and the MAIL FROM address, both chosen by the sender, unescaped. Text like that
+can imitate the header's own structure (a fake `dkim=`, `dmarc=` or `spf=` entry), so it
+cannot be parsed safely. DMARC pass already covers an aligned SPF pass for any domain
+that publishes DMARC. To make such a domain trusted, publish DMARC or sign with DKIM.
 
-Nothing else is trusted: not SPF `neutral`, not a pass for an unrelated domain (SPF
-checks the envelope sender, which the sender chooses; a DKIM `d=` can be any domain
-the sender signs with), and not a message with no auth data (`spf=none`,
-`dkim=none`). So mail that reaches the store through a transport that carries no
-verdicts (postern-relay SMTP intake) is never trusted.
+Also never trusted: a pass for an unrelated domain (a DKIM `d=` can be any domain the
+sender signs with), bare verdict strings with no domain, and a message with no auth data
+(`spf=none`, `dkim=none`). So mail that reaches the store through a transport that
+carries no verdicts (postern-relay SMTP intake) is never trusted.
 
 The in-Worker driver reads the verdicts only from `message.headers`, and only the
-FIRST instance of `Authentication-Results` and `Received-SPF`: CF prepends its own,
-and any copy the sender wrote into the message sits below it and is ignored. Inside
-CF's instance, the sender still chooses `smtp.helo` and `smtp.mailfrom`, so the parser
-neutralises quoted strings and comments before splitting, drops an unterminated one,
-reads `dkim=` only in the leading run and `dmarc=` only before the `spf=` entries, and
-takes SPF from the one `spf=` entry that carries `smtp.mailfrom` (CF writes the HELO
-entry first). Anything ambiguous reads as no verdict.
+FIRST instance of `Authentication-Results` (CF prepends its own; any copy the sender
+wrote into the message sits below it and is ignored). Inside CF's instance it reads
+NOTHING at or after the first `spf=`. In the text before that, a failing signature's
+selector or domain is still sender-chosen, so ANY unterminated or unbalanced quote or
+comment there voids the whole header (no verdict). The stored `spf` value is the
+`Received-SPF` verdict, kept for display only.
 
 The allowlist match is anchored (`== entry` or `endsWith("@" + entry)`), so
 `notskyphusion.org` does not match `skyphusion.org`.

@@ -1967,7 +1967,6 @@ function parseIngestBody(raw: unknown): ParsedInbound {
       dmarc: typeof a.dmarc === "string" ? a.dmarc : undefined,
       // Authenticated domains for alignment with the header From (isTrusted). Without
       // them a verdict string alone never makes a message trusted.
-      spfDomain: typeof a.spfDomain === "string" ? a.spfDomain : undefined,
       dmarcFrom: typeof a.dmarcFrom === "string" ? a.dmarcFrom : undefined,
       dkimDomains: Array.isArray(a.dkimDomains)
         ? a.dkimDomains.filter((d): d is string => typeof d === "string").slice(0, 16)

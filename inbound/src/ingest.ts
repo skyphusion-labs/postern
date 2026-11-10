@@ -29,10 +29,10 @@ export interface ParsedInbound {
   /**
    * SPF/DKIM/DMARC verdicts plus the authenticated domains trust aligns against the
    * header From (see isTrusted). An SMTP transport may omit them; then nothing is
-   * trusted. `spfDomain` is the domain SPF passed for (smtp.mailfrom), `dkimDomains`
-   * the `d=` of each passing signature, `dmarcFrom` the header.from DMARC evaluated.
+   * trusted. `dkimDomains` is the `d=` of each passing signature, `dmarcFrom` the
+   * header.from DMARC evaluated. `spf` is stored for display only, never for trust.
    */
-  auth?: { spf?: string; dkim?: string; dmarc?: string; spfDomain?: string; dkimDomains?: string[]; dmarcFrom?: string };
+  auth?: { spf?: string; dkim?: string; dmarc?: string; dkimDomains?: string[]; dmarcFrom?: string };
   // --- M8 envelope fidelity v2 (#189). All optional and wire-compatible: an older
   //     transport omits them and the store falls back to `to` / NULLs. `to` KEEPS
   //     its v1 meaning (THE delivered-to envelope recipient), so every existing
@@ -82,7 +82,6 @@ export async function ingest(
     spf,
     dkim,
     dmarc,
-    spfDomain: parsed.auth?.spfDomain,
     dkimDomains: parsed.auth?.dkimDomains,
     dmarcFrom: parsed.auth?.dmarcFrom,
   }, env.TRUSTED_SENDER_DOMAINS);
@@ -396,22 +395,25 @@ export interface TrustAuth {
   spf: string;
   dkim: string;
   dmarc: string;
-  spfDomain?: string;
   dkimDomains?: string[];
   dmarcFrom?: string;
 }
 
 /**
- * Sender trust decision. `trusted` says the header From is on TRUSTED_SENDER_DOMAINS
- * AND an authenticated identity ALIGNED with that From domain passed:
+ * Sender trust decision. `trusted` says the header From holds exactly one address, it
+ * is on TRUSTED_SENDER_DOMAINS, AND one of these passed for that From domain:
  *
  *  - DMARC pass whose header.from IS the From domain, or
- *  - SPF pass whose smtp.mailfrom domain aligns with the From domain, or
- *  - DKIM pass for a d= that aligns with the From domain.
+ *  - the FIRST DKIM verdict is pass and a passing d= aligns with the From domain.
  *
- * Nothing else is trusted: not SPF neutral, not a pass for an unrelated domain (SPF
- * checks the ENVELOPE, which the sender chooses; DKIM d= is any domain the sender
- * signs with), not bare verdict strings with no domain, and not spf=none && dkim=none.
+ * SPF is NOT a trust leg. The SPF entries in CF's Authentication-Results (and
+ * Received-SPF) echo the HELO and MAIL FROM the sender chose, unescaped, so they cannot
+ * be parsed unambiguously (see parseAuthResults). DMARC pass already covers an aligned
+ * SPF pass for any domain that publishes DMARC. Cost, by design: an allowlisted domain
+ * with no DMARC record and no aligned DKIM signature is never trusted.
+ *
+ * Also never trusted: a pass for an unrelated domain, bare verdict strings with no
+ * domain, and spf=none && dkim=none.
  *
  * `allowlistEnv` is `env.TRUSTED_SENDER_DOMAINS`, read on the INGEST path, so an
  * ABSENT value must not throw (#473): absent reads exactly like the shipped "", an
@@ -428,9 +430,8 @@ export function isTrusted(from: string, auth: TrustAuth, allowlistEnv: string | 
   if (!onAllowlist) return false;
   const fromDomain = addr.slice(addr.lastIndexOf("@") + 1);
   const dmarcOk = auth.dmarc === "pass" && (auth.dmarcFrom ?? "").trim().toLowerCase() === fromDomain;
-  const spfOk = auth.spf === "pass" && domainsAlign(auth.spfDomain, fromDomain);
   const dkimOk = auth.dkim === "pass" && (auth.dkimDomains ?? []).some((d) => domainsAlign(d, fromDomain));
-  return dmarcOk || spfOk || dkimOk;
+  return dmarcOk || dkimOk;
 }
 
 // --- Body cleaning ---

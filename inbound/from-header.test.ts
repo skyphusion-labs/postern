@@ -70,7 +70,7 @@ describe("ingest stores the header From end-to-end", () => {
         from: '"Alerts" <alerts@skyphusion.org>',
         to: "conrad@skyphusion.org",
         text: "system alert",
-        auth: { spf: "pass", spfDomain: "bounces.vendor.example", dkim: "none", dmarc: "pass", dmarcFrom: "skyphusion.org" },
+        auth: { spf: "pass", dkim: "none", dmarc: "pass", dmarcFrom: "skyphusion.org" },
       },
       ctx,
     );

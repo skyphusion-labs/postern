@@ -50,14 +50,13 @@ export function extractDmarcResult(authResults: string): string {
 // --- Sender-trust inputs (aligned identities from the CF verdict) ---
 
 /** The verdicts plus the authenticated domains needed to check alignment with the
- *  header From. Mirrors ParsedInbound.auth (ingest.ts). */
+ *  header From. Mirrors ParsedInbound.auth (ingest.ts). `spf` is stored and shown, but
+ *  it is NEVER used for trust (see parseAuthResults). */
 export interface AuthVerdicts {
   spf: string;
   dkim: string;
   dmarc: string;
-  /** Domain SPF evaluated (smtp.mailfrom), set only when SPF passed. */
-  spfDomain?: string;
-  /** `header.d` of every DKIM signature that passed. */
+  /** `header.d` of every DKIM signature that passed, in the trusted region. */
   dkimDomains?: string[];
   /** The `header.from` domain DMARC was evaluated for. */
   dmarcFrom?: string;
@@ -70,10 +69,9 @@ export interface AuthVerdicts {
  * message sits below it and must never be read.
  *
  * This cuts at the first comma. It is NOT a header-boundary parser: a comma inside CF's
- * own instance (for example in a quoted MAIL FROM local part it echoes) cuts there too.
- * That only drops the rest of CF's instance (fail toward NOT trusted), and the cut text
- * is then read by `authResultsText`, which drops an unterminated quote or comment, so a
- * cut can never expose sender text as a verdict.
+ * own instance (in a value CF echoes from the sender) cuts there too. That only drops
+ * evidence, and parseAuthResults voids the whole instance if the cut leaves a quote or
+ * comment open, so a cut can never make sender text count as a verdict.
  */
 export function firstHeaderInstance(joined: string | null | undefined): string {
   const v = joined ?? "";
@@ -82,38 +80,54 @@ export function firstHeaderInstance(joined: string | null | undefined): string {
 }
 
 /**
- * The structural text of one Authentication-Results instance, safe to split on ";".
- * One linear scan:
- *  - a quoted-string ("...", backslash escapes honoured) becomes `""`, so a quoted MAIL
- *    FROM local part (`"x;dkim=pass header.d=ours"@attacker`) carries no ";" or "=";
- *  - a comment ( ... ) (nested, backslash escapes honoured) becomes one space;
- *  - an UNTERMINATED quote or comment drops the rest of the text (fail closed).
+ * The structural text of an Authentication-Results region, safe to split on ";", or
+ * null when the region is ANOMALOUS. One linear scan:
+ *  - a quoted-string ("...", backslash escapes honoured) becomes `""`;
+ *  - a comment ( ... ) becomes one space; it nests, honours backslash escapes, and
+ *    treats a quoted-string inside it as ATOMIC, so a ")" inside an echoed quoted value
+ *    cannot close it;
+ *  - an unterminated quote or comment, or a ")" with no open comment, returns null.
+ * null voids the whole header: an echo CF did not escape is ambiguous by construction,
+ * so a header that does not scan cleanly yields no verdict at all.
  */
-export function authResultsText(instance: string): string {
+export function authResultsText(region: string): string | null {
   let out = "";
   let i = 0;
-  const n = instance.length;
+  const n = region.length;
+  // Index just past the quoted-string that starts at `at`, or -1 when unterminated.
+  const skipQuoted = (at: number): number => {
+    let j = at + 1;
+    while (j < n && region[j] !== '"') j += region[j] === "\\" ? 2 : 1;
+    return j >= n ? -1 : j + 1;
+  };
   while (i < n) {
-    const c = instance[i];
+    const c = region[i];
     if (c === '"') {
-      let j = i + 1;
-      while (j < n && instance[j] !== '"') j += instance[j] === "\\" ? 2 : 1;
-      if (j >= n) break; // unterminated quoted-string: drop the rest
+      const j = skipQuoted(i);
+      if (j < 0) return null;
       out += '""';
-      i = j + 1;
+      i = j;
     } else if (c === "(") {
       let depth = 1;
       let j = i + 1;
       while (j < n && depth > 0) {
-        const d = instance[j];
+        const d = region[j];
         if (d === "\\") { j += 2; continue; }
+        if (d === '"') {
+          const k = skipQuoted(j);
+          if (k < 0) return null;
+          j = k;
+          continue;
+        }
         if (d === "(") depth++;
         else if (d === ")") depth--;
         j++;
       }
-      if (depth > 0) break; // unterminated comment: drop the rest
+      if (depth > 0) return null;
       out += " ";
       i = j;
+    } else if (c === ")") {
+      return null;
     } else {
       out += c;
       i++;
@@ -130,33 +144,39 @@ function domainOf(v: string): string {
   return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(dom) ? dom : "";
 }
 
+const NO_VERDICT: AuthVerdicts = { spf: "none", dkim: "none", dmarc: "none" };
+
 /**
- * Parse ONE Authentication-Results instance (RFC 8601): `authserv-id; method=result
- * prop=value ...; ...`. CF writes the results in a fixed order: every `dkim=` entry,
- * then `dmarc=`, then the `spf=` entries (HELO first, then MAIL FROM), then `arc=`.
- * The SPF entries carry values the SENDER chose (smtp.helo, smtp.mailfrom), so the
- * parse is positional and fail-closed:
+ * Parse ONE Authentication-Results instance (RFC 8601) for the two legs trust uses:
+ * DKIM and DMARC. Fail closed by construction:
  *
- *  - `dkim=` entries count only in the leading run, before any other method;
- *  - only the first `dmarc=` counts, and only before any `spf=` entry;
- *  - SPF is the ONE `spf=` entry that carries smtp.mailfrom; HELO entries are ignored.
- *    Zero or more than one such entry reads as spf=none, so an entry smuggled in
- *    through an smtp.helo value cannot be selected;
- *  - smtp.helo / smtp.mailfrom values are opaque: only the mailfrom domain is read.
- *
- * `dkim` is the FIRST DKIM verdict (kept conservative: trust also needs it to be pass);
- * `dkimDomains` lists the `header.d` of every passing signature in that run.
+ *  1. Read NOTHING at or after the first raw `spf=`. CF writes `dkim=` entries, then
+ *     `dmarc=`, then the `spf=` entries, and the SPF entries echo values the SENDER
+ *     chose (smtp.helo and smtp.mailfrom, each twice: in a comment and as a value),
+ *     unescaped. RFC 5322 comments do not hold quoted-strings, so such an echo cannot be
+ *     parsed unambiguously; no rule over the text after `spf=` is safe. The cut is found
+ *     in the RAW text, so a sender who plants `spf=` earlier only truncates evidence.
+ *     The SPF leg is therefore not read from AR at all; DMARC pass covers an aligned
+ *     SPF pass for any domain that publishes DMARC.
+ *  2. The region before the cut can still hold sender text (a failing signature's
+ *     `header.s` / `header.d`). It cannot hold ";" (DKIM tag syntax), so it can only
+ *     hide CF structure, never create a part, provided quotes and comments scan cleanly.
+ *     ANY anomaly there (authResultsText returns null) voids the whole instance.
+ *  3. `dkim` is the FIRST DKIM verdict; `dkimDomains` lists the `header.d` of every
+ *     passing signature in the leading dkim run; only the first `dmarc=` counts.
  */
 export function parseAuthResults(instance: string): AuthVerdicts {
-  const out: AuthVerdicts = { spf: "none", dkim: "none", dmarc: "none" };
-  const parts = authResultsText(instance).split(";").map((p) => p.trim());
+  const cut = instance.search(/spf\s*=/i);
+  const region = cut < 0 ? instance : instance.slice(0, cut);
+  const text = authResultsText(region);
+  if (text === null) return { ...NO_VERDICT };
+  const out: AuthVerdicts = { ...NO_VERDICT };
+  const parts = text.split(";").map((p) => p.trim());
   parts.shift(); // authserv-id
   const dkimDomains: string[] = [];
   let dkimRun = true;
   let dkimSeen = false;
   let dmarcSeen = false;
-  let spfSeen = false;
-  const spfMailfrom: { result: string; domain: string }[] = [];
   for (const part of parts) {
     const m = part.match(/^([a-z0-9_-]+)\s*=\s*([a-z]+)(.*)$/is);
     if (!m) continue;
@@ -175,24 +195,14 @@ export function parseAuthResults(instance: string): AuthVerdicts {
         const d = domainOf(props["header.d"]);
         if (d) dkimDomains.push(d);
       }
-    } else if (method === "dmarc") {
-      if (dmarcSeen || spfSeen) continue;
+    } else if (method === "dmarc" && !dmarcSeen) {
       dmarcSeen = true;
       out.dmarc = result;
       if (props["header.from"]) {
         const d = domainOf(props["header.from"]);
         if (d) out.dmarcFrom = d;
       }
-    } else if (method === "spf") {
-      spfSeen = true;
-      if (props["smtp.mailfrom"] !== undefined) {
-        spfMailfrom.push({ result, domain: domainOf(props["smtp.mailfrom"]) });
-      }
     }
-  }
-  if (spfMailfrom.length === 1) {
-    out.spf = spfMailfrom[0].result;
-    if (out.spf === "pass" && spfMailfrom[0].domain) out.spfDomain = spfMailfrom[0].domain;
   }
   if (dkimDomains.length) out.dkimDomains = dkimDomains;
   return out;
@@ -201,15 +211,14 @@ export function parseAuthResults(instance: string): AuthVerdicts {
 /**
  * The in-Worker driver's auth block, read ONLY from the headers CF hands the Worker
  * (`message.headers`), never from the parsed MIME, and only from the FIRST instance of
- * each header (the one CF prepended). The SPF verdict comes from Received-SPF when CF
- * wrote one, else from the Authentication-Results `spf=` entry.
+ * each header (the one CF prepended). `spf` is the Received-SPF verdict, stored for
+ * display only: Received-SPF echoes the same sender-chosen values, so it is never a
+ * trust input (isTrusted does not read it).
  */
 export function authFromHeaders(get: (name: string) => string | null): AuthVerdicts {
   const ar = parseAuthResults(firstHeaderInstance(get("authentication-results")));
   const receivedSpf = firstHeaderInstance(get("received-spf"));
-  const spf = receivedSpf ? extractSpfResult(receivedSpf) : ar.spf;
-  const out: AuthVerdicts = { spf, dkim: ar.dkim, dmarc: ar.dmarc };
-  if (spf === "pass" && ar.spf === "pass" && ar.spfDomain) out.spfDomain = ar.spfDomain;
+  const out: AuthVerdicts = { spf: receivedSpf ? extractSpfResult(receivedSpf) : "none", dkim: ar.dkim, dmarc: ar.dmarc };
   if (ar.dkimDomains) out.dkimDomains = ar.dkimDomains;
   if (ar.dmarcFrom) out.dmarcFrom = ar.dmarcFrom;
   return out;

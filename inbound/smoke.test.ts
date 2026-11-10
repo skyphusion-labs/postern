@@ -51,8 +51,8 @@ describe("isTrusted", () => {
   const allow = "skyphusion.org,example.net,github.com";
   const none = { spf: "none", dkim: "none", dmarc: "none" };
 
-  it("trusts an allowlisted From whose domain SPF passed for (aligned envelope)", () => {
-    expect(isTrusted("alerts@skyphusion.org", { ...none, spf: "pass", spfDomain: "skyphusion.org" }, allow)).toBe(true);
+  it("does NOT trust an aligned SPF pass alone (SPF is not a trust leg)", () => {
+    expect(isTrusted("alerts@skyphusion.org", { ...none, spf: "pass", spfDomain: "skyphusion.org" } as typeof none, allow)).toBe(false);
   });
 
   it("trusts an aligned DKIM pass even if SPF did not pass", () => {
@@ -64,7 +64,7 @@ describe("isTrusted", () => {
   });
 
   it("does NOT trust a sender off the allowlist regardless of auth", () => {
-    expect(isTrusted("evil@example.com", { spf: "pass", spfDomain: "example.com", dkim: "pass", dkimDomains: ["example.com"], dmarc: "pass", dmarcFrom: "example.com" }, allow)).toBe(false);
+    expect(isTrusted("evil@example.com", { spf: "pass", dkim: "pass", dkimDomains: ["example.com"], dmarc: "pass", dmarcFrom: "example.com" }, allow)).toBe(false);
   });
 
   it("does NOT trust an allowlisted domain that fails both SPF and DKIM", () => {
@@ -77,7 +77,6 @@ describe("isTrusted", () => {
   });
 
   it("does NOT trust a pass for a domain that does not align with the From", () => {
-    expect(isTrusted("ceo@skyphusion.org", { ...none, spf: "pass", spfDomain: "attacker.example" }, allow)).toBe(false);
     expect(isTrusted("ceo@skyphusion.org", { ...none, dkim: "pass", dkimDomains: ["attacker.example"] }, allow)).toBe(false);
     expect(isTrusted("ceo@skyphusion.org", { ...none, dmarc: "pass", dmarcFrom: "attacker.example" }, allow)).toBe(false);
     // A lookalike suffix is not a subdomain.
@@ -90,7 +89,8 @@ describe("isTrusted", () => {
   });
 
   it("is case-insensitive on the sender, the allowlist and the auth domains", () => {
-    expect(isTrusted("Alerts@SkyPhusion.ORG", { ...none, spf: "pass", spfDomain: "SKYPHUSION.org" }, "SKYPHUSION.ORG")).toBe(true);
+    expect(isTrusted("Alerts@SkyPhusion.ORG", { ...none, dkim: "pass", dkimDomains: ["SKYPHUSION.org"] }, "SKYPHUSION.ORG")).toBe(true);
+    expect(isTrusted("Alerts@SkyPhusion.ORG", { ...none, dmarc: "pass", dmarcFrom: "SKYPHUSION.org" }, "SKYPHUSION.ORG")).toBe(true);
   });
 
   it("does not treat a lookalike domain suffix as on-allowlist", () => {
@@ -133,29 +133,35 @@ describe("domainsAlign", () => {
 });
 
 describe("parseAuthResults / firstHeaderInstance", () => {
-  it("reads every method, strips comments, and collects passing DKIM domains", () => {
+  it("reads the dkim run and dmarc, strips comments, collects passing DKIM domains", () => {
     const r = parseAuthResults(
       "mx.cloudflare.net; dkim=pass header.d=esp.example header.s=a; dkim=pass header.d=Skyphusion.org header.s=b; " +
-      "dkim=fail header.d=x.example; dmarc=pass (p=none) header.from=skyphusion.org; " +
-      "spf=none (no record; for helo) smtp.helo=mta.example; " +
-      "spf=pass (mx.cloudflare.net: domain of b@bounce.skyphusion.org designates 1.2.3.4; as permitted) smtp.mailfrom=b@bounce.skyphusion.org",
+      "dkim=fail header.d=x.example; dmarc=pass (p=none; sp=none) header.from=skyphusion.org; " +
+      "spf=pass (whatever) smtp.mailfrom=b@bounce.skyphusion.org",
     );
-    expect(r).toEqual({ spf: "pass", spfDomain: "bounce.skyphusion.org", dkim: "pass", dkimDomains: ["esp.example", "skyphusion.org"], dmarc: "pass", dmarcFrom: "skyphusion.org" });
+    expect(r).toEqual({ spf: "none", dkim: "pass", dkimDomains: ["esp.example", "skyphusion.org"], dmarc: "pass", dmarcFrom: "skyphusion.org" });
   });
-  it("ignores dkim/dmarc entries that come after the SPF entries (CF order)", () => {
-    const r = parseAuthResults("mx; dkim=none; spf=pass smtp.mailfrom=a@b.example; dkim=pass header.d=late.example; dmarc=pass header.from=late.example");
-    expect(r).toEqual({ spf: "pass", spfDomain: "b.example", dkim: "none", dmarc: "none" });
+  it("reads nothing at or after the first raw spf= (SPF is never parsed)", () => {
+    expect(parseAuthResults("mx; dkim=none; spf=pass smtp.mailfrom=a@b.example; dkim=pass header.d=late.example; dmarc=pass header.from=late.example"))
+      .toEqual({ spf: "none", dkim: "none", dmarc: "none" });
+    // A planted spf= earlier (inside a selector) only truncates evidence.
+    expect(parseAuthResults("mx; dkim=pass header.d=x.example header.s=spf=1; dmarc=pass header.from=x.example").dmarc).toBe("none");
   });
-  it("reads spf=none when two entries carry smtp.mailfrom", () => {
-    expect(parseAuthResults("mx; spf=pass smtp.mailfrom=a@x.example; spf=pass smtp.mailfrom=a@y.example").spf).toBe("none");
+  it("voids the whole instance on an unterminated or unbalanced quote or comment", () => {
+    for (const bad of [
+      'mx; dkim=pass header.d=ours.example header.s="open; dmarc=pass header.from=ours.example',
+      "mx; dkim=pass header.d=ours.example header.s=a( ; dmarc=pass header.from=ours.example",
+      "mx; dkim=pass header.d=ours.example header.s=a) ; dmarc=pass header.from=ours.example",
+    ]) {
+      expect(parseAuthResults(bad)).toEqual({ spf: "none", dkim: "none", dmarc: "none" });
+    }
   });
-  it("neutralises quoted strings and drops an unterminated quote or comment", () => {
+  it("treats a quoted-string inside a comment as atomic", () => {
+    expect(authResultsText('a; (c ")" d) x')).toBe("a;   x");
     expect(authResultsText('a; x="q;\\"r" ; (c;(n)) d')).toBe('a; x="" ;   d');
-    expect(authResultsText('a; spf=pass smtp.mailfrom="open;dkim=pass')).toBe("a; spf=pass smtp.mailfrom=");
-    expect(authResultsText("a; spf=pass (open;dkim=pass")).toBe("a; spf=pass ");
-  });
-  it("sets no spfDomain unless SPF passed", () => {
-    expect(parseAuthResults("mx; spf=softfail smtp.mailfrom=a@b.example").spfDomain).toBeUndefined();
+    expect(authResultsText('a; (open "q)')).toBeNull();
+    expect(authResultsText("a; (open")).toBeNull();
+    expect(authResultsText("a; stray)")).toBeNull();
   });
   it("returns none for an empty instance", () => {
     expect(parseAuthResults("")).toEqual({ spf: "none", dkim: "none", dmarc: "none" });
