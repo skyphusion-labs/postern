@@ -714,12 +714,15 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           return { results: matched as unknown as T[] };
         }
         // #354 recent recipients: outbound rows for one bound From.
+        // The LIMIT is the scan window (store.RECENT_RECIPIENT_SCAN). Read it from
+        // the SQL so a changed cap is what this double applies, not a second 200.
         if (/SELECT to_addr, cc_addr, bcc_addr, date FROM messages/i.test(sql)) {
           const owner = String(bound[0]).toLowerCase();
+          const scan = Number(/LIMIT\s+(\d+)/i.exec(sql)?.[1] ?? "200");
           const matched = rows
             .filter((r) => r.direction === "outbound" && r.from_addr.toLowerCase() === owner)
             .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id))
-            .slice(0, 200)
+            .slice(0, scan)
             .map((r) => ({
               to_addr: r.to_addr,
               cc_addr: r.cc_addr,

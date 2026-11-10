@@ -2,8 +2,8 @@
 // Stdio smoke for the Postern MCP server: boot the built server over a real stdio
 // JSON-RPC transport and assert the tool surface matches the configured scope.
 //
-//   - Read-only (POSTERN_API_TOKEN, no send token): exactly the 4 read tools.
-//   - Send-enabled (+ POSTERN_SEND_TOKEN): the 4 read tools + the 2 send tools.
+//   - Read-only (POSTERN_API_TOKEN, no send token): the read tools, and no send tools.
+//   - Send-enabled (+ POSTERN_SEND_TOKEN): the read tools plus every send tool.
 //
 // This is a BOOT/registration check: tools register at startup, so no network call
 // is made and the dummy URL/token are never dialed. It proves the default-OFF gate
@@ -20,8 +20,26 @@ import { dirname, resolve } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(HERE, "..", "dist", "index.js");
 
-const READ_TOOLS = ["mailbox_get", "mailbox_list", "mailbox_search", "mailbox_thread"];
-const SEND_TOOLS = ["mailbox_reply", "mailbox_send"];
+const READ_TOOLS = [
+  "mailbox_folders",
+  "mailbox_get",
+  "mailbox_get_attachment",
+  "mailbox_list",
+  "mailbox_recipients_recent",
+  "mailbox_search",
+  "mailbox_thread",
+  "mailbox_whoami",
+];
+const SEND_TOOLS = [
+  "mailbox_draft_create",
+  "mailbox_draft_delete",
+  "mailbox_draft_get",
+  "mailbox_draft_send",
+  "mailbox_draft_update",
+  "mailbox_drafts_list",
+  "mailbox_reply",
+  "mailbox_send",
+];
 
 // Drive one server process: initialize, list tools, return the sorted tool names.
 function listTools(env) {

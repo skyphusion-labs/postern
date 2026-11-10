@@ -148,6 +148,18 @@ export type ReadScopeReport =
   | { kind: "member"; addresses: string[] }
   | { kind: "role"; address: string };
 
+/** One recent correspondent (worker RecentRecipient, GET /api/recipients/recent).
+ *
+ *  Outbound only: people this identity sent mail to. `lastUsedAt` is the newest
+ *  such message in the scan. `messageCount` counts messages inside that scan,
+ *  not a lifetime total; the response's `scanLimited` says when the scan stopped. */
+export interface RecentRecipient {
+  address: string;
+  displayName: string | null;
+  lastUsedAt: string;
+  messageCount: number;
+}
+
 export type SearchMode = "fts" | "substr" | "semantic" | "hybrid";
 // Which column(s) the substring mode matches (worker /api/search field param,
 // api.ts:206). Only meaningful for mode "substr"; ignored by the other modes.
