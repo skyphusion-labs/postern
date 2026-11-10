@@ -1,7 +1,7 @@
 #!/bin/sh
 # docker-entrypoint.sh -- load *_FILE secrets into env, then exec the relay.
 #
-# Swarm mounts secrets at a path (e.g. /run/secrets/postern_send_token). The relay
+# An orchestrator mounts a secret file at a path (e.g. /run/secrets/postern_send_token). The relay
 # reads each token/password as a VALUE from the env (config.go), so we expand any
 # <VAR>_FILE into <VAR> here. This keeps the secret VALUE out of the committed
 # stack and out of the image: only the PATH is configured, the bytes are read at

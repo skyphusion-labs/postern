@@ -1,7 +1,7 @@
 # Vectorize reconcile / orphan-vector audit (#134)
 
 Status: **read-only tooling of record** for the orphan-vector audit. The one-time
-prune (section 6, option 1) **completed 2026-07-09** on the fleet index; the tool
+prune (section 6, option 1) **completed 2026-07-09** on the operator Vectorize index; the tool
 remains the audit path for any future drift. This document is reproducible from itself
 (ICD discipline): the id scheme,
 the enumerability constraint, the report shape, and the prune options below were
@@ -59,9 +59,9 @@ The orphans are overwhelmingly GitHub-notification mail re-indexed as the id sch
 evolved across the #116 epic; the old-scheme vectors were never overwritten because
 their ids differ from the unified `base.chunk`.
 
-## 1b. Prune completed (fleet, 2026-07-09)
+## 1b. Prune completed (2026-07-09)
 
-Option 1 (full rebuild from D1) was executed against the live fleet store:
+Option 1 (full rebuild from D1) was executed against the live Vectorize index:
 
 | step | outcome |
 | --- | --- |
@@ -191,13 +191,13 @@ an ongoing leak. With `message_id` stable, the standing hypothesis was that the 
 pre-#116-scheme vectors for still-live messages. **The live audit confirmed it: 314/314
 sampled orphans are cause (b), zero cause (a)** (section 1a).
 
-## 6. Prune plan (option 1 executed on fleet, 2026-07-09)
+## 6. Prune plan (option 1 executed 2026-07-09)
 
 The live audit (section 1a) confirmed the orphans are cause (b): stale-id vectors for
 messages that are STILL in D1. A **full rebuild from D1 (option 1)** is the clean fix:
 it re-keys every live message under the unified `base.chunk` scheme and carries none of
-the old-scheme ids across, so the orphan class disappears in one pass. **Fleet executed
-this on 2026-07-09** (section 1b). The steps below remain the operator playbook for
+the old-scheme ids across, so the orphan class disappears in one pass. **The operator
+index executed this on 2026-07-09** (section 1b). The steps below remain the operator playbook for
 any other account that inherits the pre-#116 orphan class.
 
 Because the orphan SET is not cleanly enumerable, "list the orphans then delete them" is
@@ -221,7 +221,7 @@ Because the orphan SET is not cleanly enumerable, "list the orphans then delete 
    orphans (they predate it), so it complements, not replaces, option 1.
 
 Whichever path: run it supervised, after a reconcile dry-run report is signed off.
-On the fleet store, option 1 landed 2026-07-09 and #134 is closed.
+On the operator Vectorize index, option 1 landed 2026-07-09 and #134 is closed.
 
 ## 7. Delete-tombstone (#278)
 

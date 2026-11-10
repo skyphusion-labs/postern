@@ -8,8 +8,9 @@ touching D1/R2 directly.
 Stack map: [docs/architecture.md](../docs/architecture.md).
 
 **Production image:** `imap/Dockerfile` builds `ghcr.io/skyphusion-labs/postern-imap`
-on **Python 3.14 slim** (stay current; do not pin back without cause). Fleet deploy
-record: `fleet-chezmoi/system/postern-imap/README.md`.
+on **Python 3.14 slim** (stay current; do not pin back without cause). The image is
+published to GHCR. Where a door runs is the operator's choice. Skyphusion Labs runs
+no IMAP door for anyone else.
 
 ```mermaid
 flowchart LR
@@ -200,8 +201,8 @@ so clients discard their cached estate view and resync into the per-account view
 
 Projection changes that alter BODY[] bytes (including the #342 deterministic MIME
 boundary renderer, and any `PROJECTION_VERSION` bump such as v2 Unicode header
-encoding or v3 CRLF terminators) also require a **UIDVALIDITY bump** on the fleet
-IMAP image roll so clients drop SIZE/BODY caches that would disagree with the new
+encoding or v3 CRLF terminators) also require a **UIDVALIDITY bump** on the IMAP
+image roll so clients drop SIZE/BODY caches that would disagree with the new
 projection. This is not a precaution, it is RFC 3501 section 2.3.1.1: the
 combination of mailbox name, UIDVALIDITY and UID "must refer to a single immutable
 message on that server forever", and that sentence names the RFC-2822 size and the

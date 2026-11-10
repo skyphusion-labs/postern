@@ -1258,7 +1258,7 @@ Computed at `store.put` / attachment finalize from D1 metadata only (body length
 attachment size/filename/mime; no R2 reads). The IMAP door prefers this for RFC822.SIZE when
 `projectionVersion` matches the renderer's version, so bulk `UID FETCH … RFC822.SIZE` does
 zero attachment GETs. A renderer change bumps the version and requires a
-`POSTERN_IMAP_UIDVALIDITY` bump on the fleet image roll (same discipline as other projection
+`POSTERN_IMAP_UIDVALIDITY` bump on the door image roll (same discipline as other projection
 changes). Pre-0012 rows keep NULL and fall back to a placeholder hydrate (message GET, still
 zero attachment GETs for SIZE). Projection v2 introduced hand-rolled RFC 2047
 Base64 encoded-words for non-ASCII headers and filenames in both

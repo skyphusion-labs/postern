@@ -274,7 +274,7 @@ root, never an insecure-skip; no code change.
 
 ### 6b. Provision 636 + a chained cert (the cleaner long-term shape)
 
-1. Issue a cert with a SAN naming the directory host (an internal name via
+1. Issue a cert with a SAN naming the directory server (an internal name via
    DNS-01 is cleanest).
 2. Bind the keypair to the directory's LDAP endpoint and publish 636 (or enable
    StartTLS on 389). This is an IdP configuration change; treat it as a
