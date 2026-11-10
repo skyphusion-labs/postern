@@ -393,4 +393,74 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#reading .msg-actions").getByRole("button", { name: "Archive" }))
       .toHaveCount(1);
   });
+
+  test("theme follows the OS by default and the toggle overrides it, plain-text body included (#794)", async ({ page }) => {
+    await installMocks(page, "token");
+    // A plain-text-only message: its frame is the one that follows the app theme.
+    await page.route("https://postern.test/api/messages/msg-1%40example.com", (route) =>
+      fulfillJson(route, { ...SAMPLE_MESSAGE, message: { ...SAMPLE_MESSAGE.message, bodyHtml: null } }));
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+    await page.getByText("Hello from Alice").click();
+
+    const html = page.locator("html");
+    const frameBody = page.frameLocator("#reading iframe").locator("body");
+    const pageBg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    await expect(html).toHaveAttribute("data-theme", "system");
+    await expect(frameBody).toContainText("plain body");
+    await expect(frameBody).toHaveCSS("background-color", "rgb(24, 27, 34)");
+    expect(await pageBg()).toBe("rgb(17, 19, 24)");
+
+    // OS flips to light: the system theme follows, and the open frame is retinted.
+    await page.emulateMedia({ colorScheme: "light" });
+    await expect(frameBody).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    expect(await pageBg()).toBe("rgb(246, 247, 249)");
+
+    // Toggle: system -> light -> dark. Dark wins over a light OS.
+    await page.locator("#themeBtn").click();
+    await expect(html).toHaveAttribute("data-theme", "light");
+    await page.locator("#themeBtn").click();
+    await expect(html).toHaveAttribute("data-theme", "dark");
+    await expect(page.locator("#themeBtn")).toHaveAttribute("aria-label", "Theme: dark");
+    await expect(frameBody).toHaveCSS("background-color", "rgb(24, 27, 34)");
+    expect(await pageBg()).toBe("rgb(17, 19, 24)");
+    expect(await page.evaluate(() => localStorage.getItem("postern_theme"))).toBe("dark");
+  });
+
+  test("phone width: list and reading are stacked views with Back, and folders open as a drawer (#795)", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installMocks(page, "token");
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+
+    const row = page.getByText("Hello from Alice");
+    await expect(row).toBeVisible();
+    await expect(page.locator("#folders")).toBeHidden();
+    // Nothing in the header may be pushed off-screen at phone width.
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+
+    await row.click();
+    await expect(page.locator("#reading h2")).toBeVisible();
+    await expect(page.locator("#reading h2")).toHaveText("Hello from Alice");
+    await expect(page.locator("#list")).toBeHidden();
+
+    await page.locator("#backBtn").click();
+    await expect(page.locator("#list")).toBeVisible();
+    await expect(page.locator("#reading h2")).toBeHidden();
+
+    await page.locator("#railBtn").click();
+    await expect(page.locator("#railBtn")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#folders")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#folders")).toBeHidden();
+    await expect(page.locator("#railBtn")).toHaveAttribute("aria-expanded", "false");
+
+    // Sign out stays reachable at phone width, via Settings.
+    await page.locator("#settingsBtn").click();
+    await expect(page.locator("#settingsSignout")).toBeVisible();
+  });
 });
