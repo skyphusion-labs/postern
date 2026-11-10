@@ -118,22 +118,43 @@
   input:focus, select:focus, textarea:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-dim); }
   input:disabled { background: var(--panel-2); color: var(--muted); }
 
-  /* --- Gate + sign-in cards --- */
-  #gate, #signin { margin: auto; width: 100%; max-width: 440px; padding: var(--sp-5) var(--sp-4); }
-  #gate .card, #signin .card {
+  /* --- Auth screens (#798): sign-in, token gate and first run share one card --- */
+  .auth { margin: auto; width: 100%; max-width: 440px; padding: var(--sp-6) var(--sp-4); }
+  .auth .card {
     background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
-    padding: var(--sp-5); box-shadow: var(--shadow);
+    padding: var(--sp-6) var(--sp-5); box-shadow: var(--shadow);
   }
-  #gate h2, #signin h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-xl); }
-  #gate p, #signin p { color: var(--muted); margin: var(--sp-2) 0 var(--sp-4); font-size: var(--fs-sm); }
-  #gate label, #signin label {
-    display: block; font-size: var(--fs-sm); font-weight: 550; color: var(--fg); margin: var(--sp-3) 0 var(--sp-1);
+  .auth .eyebrow {
+    margin: 0 0 var(--sp-2); color: var(--accent); font-size: var(--fs-xs); font-weight: 700;
+    letter-spacing: .06em; text-transform: uppercase;
   }
-  #gate input, #signin input { width: 100%; }
-  #gate .row, #signin .row { display: flex; gap: var(--sp-2); margin-top: var(--sp-4); }
-  #gate .row button, #signin .row button { flex: 1; min-height: 40px; font-size: var(--fs-md); }
+  .auth h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-2xl); font-weight: 650; letter-spacing: -.01em; }
+  .auth .lede { color: var(--muted); margin: var(--sp-2) 0 var(--sp-4); font-size: var(--fs-sm); }
+  .auth label {
+    display: block; font-size: var(--fs-sm); font-weight: 550; color: var(--fg); margin: var(--sp-4) 0 var(--sp-1);
+  }
+  .auth label .opt { color: var(--muted); font-weight: 400; }
+  .auth input { width: 100%; }
+  .auth .hint { color: var(--muted); font-size: var(--fs-xs); margin: var(--sp-1) 0 0; }
+  .auth .row { display: flex; gap: var(--sp-2); margin-top: var(--sp-5); }
+  .auth .row button { flex: 1; min-height: 44px; font-size: var(--fs-md); }
+  .auth .note-ok { color: var(--ok); font-size: var(--fs-sm); margin: var(--sp-3) 0 0; }
+  .auth .note-ok:empty { display: none; }
+  .auth .err:empty { display: none; }
+  .auth .err { margin-top: var(--sp-3); }
+  .auth .switch { margin-top: var(--sp-5); padding-top: var(--sp-4); border-top: 1px solid var(--line); text-align: center; }
+  .pw-wrap { position: relative; }
+  .pw-wrap input { padding-right: 76px; }
+  .pw-wrap .pw-toggle {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    min-height: 30px; padding: 0 var(--sp-2); font-size: var(--fs-xs);
+  }
+  .auth details.help { margin-top: var(--sp-4); font-size: var(--fs-sm); color: var(--muted); }
+  .auth details.help summary { cursor: pointer; color: var(--accent); }
+  .auth details.help p { margin: var(--sp-2) 0 0; }
   .err { color: var(--bad); font-size: var(--fs-sm); min-height: 1.2em; margin-top: var(--sp-2); }
   .switch { margin: var(--sp-3) 0 0; font-size: var(--fs-sm); }
+  @media (max-width: 760px) { .auth { padding: var(--sp-4) var(--sp-3); } .auth .card { padding: var(--sp-5) var(--sp-4); } }
   .switch button { font: inherit; }
 
   /* --- App shell (#795): rail | list | reading. Below 1100px the rail is a drawer;
@@ -485,44 +506,88 @@
 </div>
 
 <!-- BYO-token gate (operator / self-host path, contract 1.7) -->
-<div id="gate" role="region" aria-labelledby="gateTitle">
+<div id="gate" class="auth" role="region" aria-labelledby="gateTitle">
   <div class="card">
-    <h2 id="gateTitle">Connect to your mailbox</h2>
-    <p>Paste a read-scoped API token to browse mail. Optionally add a send-scoped token
-       (or a dual-cap identity token with read+send) to compose and reply. A dual-cap
-       token may be pasted once in the read field; send falls back to it when the send
-       field is empty. Tokens stay in this browser tab only (sessionStorage), never sent
-       anywhere but the API you name below.</p>
-    <label for="origin">API origin</label>
+    <p class="eyebrow">Operators and agents</p>
+    <h2 id="gateTitle">Connect with an API token</h2>
+    <p class="lede">Your token stays in this browser tab and is sent only to the server below.</p>
+    <label for="origin">Server</label>
     <input id="origin" type="url" placeholder="https://postern.example" autocomplete="off" spellcheck="false">
-    <label for="token">Postern read token</label>
+    <label for="token">Read token</label>
     <input id="token" type="password" placeholder="read-scoped or dual-cap identity token" autocomplete="off" spellcheck="false">
-    <label for="sendToken">Send token (optional if dual-cap above)</label>
-    <input id="sendToken" type="password" placeholder="send-scoped token, or leave empty for dual-cap" autocomplete="off" spellcheck="false">
+    <label for="sendToken">Send token <span class="opt">(optional)</span></label>
+    <input id="sendToken" type="password" placeholder="leave empty if the read token can also send" autocomplete="off" spellcheck="false">
+    <details class="help">
+      <summary>Which token do I need?</summary>
+      <p>A read-scoped API token lets you browse mail. To compose and reply, add a send-scoped
+         token, or paste one dual-cap identity token (read and send) in the read field; send
+         falls back to it when the send field is empty. Tokens are kept in sessionStorage for
+         this tab only and are never sent anywhere but the server you name.</p>
+    </details>
     <div class="row">
-      <button id="connect">Connect</button>
+      <button id="connect" type="button">Connect</button>
     </div>
     <div class="err" id="gateErr" role="alert" aria-live="assertive"></div>
-    <p class="switch" id="toSigninWrap" style="display:none"><button type="button" class="link" id="toSignin">Back to sign in</button></p>
+    <p class="note-ok" id="gateNote" role="status"></p>
+    <p class="switch" id="toSigninWrap" style="display:none"><button type="button" class="link" id="toSignin">Sign in with a username and password</button></p>
   </div>
 </div>
 
 <!-- Native sign-in (session cookie mode, #351) -->
-<div id="signin" style="display:none" role="region" aria-labelledby="signinTitle">
+<div id="signin" class="auth" style="display:none" role="region" aria-labelledby="signinTitle">
   <div class="card">
-    <h2 id="signinTitle">Sign in to your mailbox</h2>
-    <p>Enter your Postern mailbox username and password.</p>
-    <form id="signinForm">
+    <h2 id="signinTitle">Sign in</h2>
+    <p class="lede">Use your Postern username and password: the same login your mail app uses.</p>
+    <form id="signinForm" novalidate>
       <label for="siUser">Username</label>
-      <input id="siUser" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false">
+      <input id="siUser" name="username" type="text" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false">
       <label for="siPass">Password</label>
-      <input id="siPass" name="password" type="password" autocomplete="current-password">
+      <div class="pw-wrap">
+        <input id="siPass" name="password" type="password" autocomplete="current-password">
+        <button type="button" class="btn-quiet pw-toggle" data-toggle-for="siPass" aria-pressed="false" aria-label="Show password">Show</button>
+      </div>
       <div class="row">
         <button type="submit" id="siSubmit">Sign in</button>
       </div>
     </form>
     <div class="err" id="signinErr" role="alert" aria-live="assertive"></div>
+    <p class="note-ok" id="signinNote" role="status"></p>
     <p class="switch"><button type="button" class="link" id="toTokenGate">Use an API token instead</button></p>
+  </div>
+</div>
+
+<!-- First run (#798, contract 1.10.7): no users yet and POSTERN_SETUP_TOKEN is set -->
+<div id="setup" class="auth" style="display:none" role="region" aria-labelledby="setupTitle">
+  <div class="card">
+    <p class="eyebrow">First run</p>
+    <h2 id="setupTitle">Create the first account</h2>
+    <p class="lede">This mailbox has no users yet. Enter the setup token from your deploy, then choose the
+       login for the first person. You can add more people later.</p>
+    <form id="setupForm" novalidate>
+      <label for="suToken">Setup token</label>
+      <div class="pw-wrap">
+        <input id="suToken" type="password" autocomplete="off" spellcheck="false" aria-describedby="suTokenHint">
+        <button type="button" class="btn-quiet pw-toggle" data-toggle-for="suToken" aria-pressed="false" aria-label="Show setup token">Show</button>
+      </div>
+      <p class="hint" id="suTokenHint">The POSTERN_SETUP_TOKEN secret you set when you deployed.</p>
+      <label for="suUser">Email address</label>
+      <input id="suUser" type="email" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false" aria-describedby="suUserHint">
+      <p class="hint" id="suUserHint">Your login, and the address you send from.</p>
+      <label for="suName">Display name <span class="opt">(optional)</span></label>
+      <input id="suName" type="text" autocomplete="name" maxlength="128">
+      <label for="suPass">Password</label>
+      <div class="pw-wrap">
+        <input id="suPass" type="password" autocomplete="new-password" aria-describedby="suPassHint">
+        <button type="button" class="btn-quiet pw-toggle" data-toggle-for="suPass" aria-pressed="false" aria-label="Show password">Show</button>
+      </div>
+      <p class="hint" id="suPassHint">At least 12 characters. A long phrase is easier to remember than symbols.</p>
+      <label for="suPass2">Confirm password</label>
+      <input id="suPass2" type="password" autocomplete="new-password">
+      <div class="row">
+        <button type="submit" id="suSubmit">Create account and sign in</button>
+      </div>
+    </form>
+    <div class="err" id="setupErr" role="alert" aria-live="assertive"></div>
   </div>
 </div>
 
@@ -643,7 +708,9 @@
     sendCapable: null,
     // Why compose is disabled, so the note stays truthful: readonly (403), invalid
     // (401), unreachable (network). Empty when capable or no send token.
-    sendReason: ""
+    sendReason: "",
+    // First run (#798, contract 1.10.6): GET /api/session 401 says setupRequired.
+    setupRequired: false
   };
 
   // Same-origin base for session mode (relative URLs, so the HttpOnly cookie rides);
@@ -1122,10 +1189,11 @@
     if (elm && typeof elm.focus === "function") { try { elm.focus(); } catch (_) {} }
   }
 
-  function showGate(msg) {
+  function showGate(msg, info) {
     state.authMode = "token";
     $("app").className = "";
     $("signin").style.display = "none";
+    $("setup").style.display = "none";
     $("gate").style.display = "";
     $("logout").style.display = "none";
     $("railBtn").style.display = "none";
@@ -1138,25 +1206,57 @@
     // Offer a way back to native sign-in only when the server supports it.
     $("toSigninWrap").style.display = state.authBackend === "native" ? "" : "none";
     $("gateErr").textContent = msg || "";
+    $("gateNote").textContent = info || "";
     focusFirst("origin");
   }
 
-  function showSignin(msg) {
+  function showSignin(msg, info) {
     state.authMode = "session";
     $("app").className = "";
     $("gate").style.display = "none";
+    $("setup").style.display = "none";
     $("signin").style.display = "";
     $("logout").style.display = "none";
     $("railBtn").style.display = "none";
     $("identity").textContent = "";
     $("who").textContent = "";
     $("signinErr").textContent = msg || "";
+    $("signinNote").textContent = info || "";
     $("siPass").value = "";
+    setPwVisible("siPass", false);
     focusFirst("siUser");
+  }
+
+  // First run (#798, contract 1.10.7). Shown only when GET /api/session says
+  // setupRequired; the server decides, the page never guesses.
+  function showSetup(msg) {
+    state.authMode = "session";
+    $("app").className = "";
+    $("gate").style.display = "none";
+    $("signin").style.display = "none";
+    $("setup").style.display = "";
+    $("logout").style.display = "none";
+    $("railBtn").style.display = "none";
+    $("identity").textContent = "";
+    $("who").textContent = "";
+    $("setupErr").textContent = msg || "";
+    focusFirst("suToken");
+  }
+
+  // Show / hide a password field (#798). The value never leaves the input.
+  function setPwVisible(id, on) {
+    var input = $(id);
+    if (input) input.type = on ? "text" : "password";
+    var btn = document.querySelector('.pw-toggle[data-toggle-for="' + id + '"]');
+    if (btn) {
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.textContent = on ? "Hide" : "Show";
+    }
   }
 
   function showApp() {
     $("gate").style.display = "none";
+    $("setup").style.display = "none";
     $("signin").style.display = "none";
     $("app").className = "on";
     $("logout").style.display = "";
@@ -1313,8 +1413,10 @@
     var username = $("siUser").value.trim();
     var password = $("siPass").value;
     $("signinErr").textContent = "";
+    $("signinNote").textContent = "";
     if (!username || !password) { $("signinErr").textContent = "Enter your username and password."; return; }
     $("siSubmit").disabled = true;
+    $("siSubmit").textContent = "Signing in\u2026";
     fetch("/api/session", {
       method: "POST",
       headers: { "content-type": "application/json", "accept": "application/json" },
@@ -1324,23 +1426,79 @@
       return r.json().catch(function () { return { ok: false }; }).then(function (b) { return { status: r.status, body: b }; });
     }).then(function (res) {
       $("siSubmit").disabled = false;
-      if (res.status === 200 && res.body && res.body.ok) { $("siPass").value = ""; onSession(res.body); return; }
+      $("siSubmit").textContent = "Sign in";
+      if (res.status === 200 && res.body && res.body.ok) { $("siPass").value = ""; setPwVisible("siPass", false); onSession(res.body); return; }
       // Locked out by the mint throttle (#409): the server sends Retry-After and a
       // retryAfter field, so tell the user how long instead of "wait a bit".
       if (res.status === 429) {
         var wait = res.body && res.body.retryAfter ? Number(res.body.retryAfter) : 0;
-        $("signinErr").textContent = wait > 0
-          ? "Too many attempts. Try again in " + Math.ceil(wait / 60) + " minute(s)."
-          : "Too many attempts. Please wait and try again.";
+        $("signinErr").textContent = tooManyText(wait);
         return;
       }
       // The throttle store is unreachable, so the server refuses rather than run the
       // sign-in unthrottled (#409 fail-closed). Not a credential problem; say so.
       if (res.status === 503) { $("signinErr").textContent = "Sign-in is temporarily unavailable. Try again shortly."; return; }
-      $("signinErr").textContent = "Sign in failed. Check your username and password.";
+      $("signinErr").textContent = "That username and password do not match. Check them and try again.";
     }).catch(function () {
       $("siSubmit").disabled = false;
+      $("siSubmit").textContent = "Sign in";
       $("signinErr").textContent = "Could not reach the server. Try again.";
+    });
+  }
+
+  function tooManyText(wait) {
+    if (!(wait > 0)) return "Too many attempts. Please wait and try again.";
+    var mins = Math.ceil(wait / 60);
+    return "Too many attempts. Try again in " + mins + (mins === 1 ? " minute." : " minutes.");
+  }
+
+  // First-run create (#798): POST /api/setup (contract 1.10.7). The server is the
+  // authority on every rule; the checks here only save a round trip on obvious slips.
+  function setupSubmit() {
+    var token = $("suToken").value;
+    var username = $("suUser").value.trim().toLowerCase();
+    var name = $("suName").value.trim();
+    var pw = $("suPass").value, pw2 = $("suPass2").value;
+    var err = $("setupErr");
+    err.textContent = "";
+    if (!token) { err.textContent = "Enter the setup token."; focusFirst("suToken"); return; }
+    if (!username) { err.textContent = "Enter the email address for this account."; focusFirst("suUser"); return; }
+    if (pw.length < 12) { err.textContent = "The password must be at least 12 characters."; focusFirst("suPass"); return; }
+    if (pw.toLowerCase() === username) { err.textContent = "The password cannot be the same as the email address."; focusFirst("suPass"); return; }
+    if (pw !== pw2) { err.textContent = "The two passwords do not match."; focusFirst("suPass2"); return; }
+    var body = { setupToken: token, username: username, password: pw };
+    if (name) body.displayName = name;
+    $("suSubmit").disabled = true;
+    $("suSubmit").textContent = "Creating account\u2026";
+    fetch("/api/setup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "accept": "application/json" },
+      body: JSON.stringify(body),
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      return r.json().catch(function () { return { ok: false }; }).then(function (b) { return { status: r.status, body: b || {} }; });
+    }).then(function (res) {
+      $("suSubmit").disabled = false;
+      $("suSubmit").textContent = "Create account and sign in";
+      var b = res.body, code = b.error || "";
+      if ((res.status === 201 || res.status === 200) && b.ok) {
+        ["suToken", "suPass", "suPass2"].forEach(function (id) { $(id).value = ""; setPwVisible(id, false); });
+        state.setupRequired = false;
+        onSession(b);
+        return;
+      }
+      if (res.status === 409) { state.setupRequired = false; showSignin("", "This mailbox is already set up. Sign in with your account."); return; }
+      if (res.status === 404) { state.setupRequired = false; showSignin("", "First-run setup is not turned on for this mailbox. Sign in, or ask your operator for an account."); return; }
+      if (res.status === 401) { err.textContent = "That setup token is not correct."; focusFirst("suToken"); return; }
+      if (res.status === 429) { err.textContent = tooManyText(Number(b.retryAfter) || 0); return; }
+      if (res.status === 503) { err.textContent = "Setup is temporarily unavailable. Try again shortly."; return; }
+      if (code === "E_SENDER_NOT_ALLOWED") { err.textContent = b.message || "That address is not on this mailbox domain."; focusFirst("suUser"); return; }
+      if (code === "E_PASSWORD_POLICY") { err.textContent = b.message || "That password does not meet the policy."; focusFirst("suPass"); return; }
+      err.textContent = b.message || "Could not create the account. Check the fields and try again.";
+    }).catch(function () {
+      $("suSubmit").disabled = false;
+      $("suSubmit").textContent = "Create account and sign in";
+      err.textContent = "Could not reach the server. Try again.";
     });
   }
 
@@ -1374,7 +1532,7 @@
         credentials: "include", referrerPolicy: "no-referrer"
       }).catch(function () {}).then(function () {
         sessionReset();
-        showSignin("Signed out.");
+        showSignin("", "You are signed out.");
       });
       return;
     }
@@ -1383,7 +1541,7 @@
     SS.removeItem("postern_origin");
     state.token = ""; state.sendToken = ""; state.sendCapable = null; state.sendReason = ""; state.items = []; state.selected = null; state.cursor = null;
     clear($("list")); renderReading(null);
-    showGate("Signed out. Your tokens were cleared from this browser.");
+    showGate("", "Signed out. Your tokens were cleared from this browser.");
   }
 
   // --- folders + list (#352) -------------------------------------------------
@@ -2457,6 +2615,14 @@
     applyChromePrefs();
   });
   $("signinForm").addEventListener("submit", function (e) { e.preventDefault(); signIn(); });
+  $("setupForm").addEventListener("submit", function (e) { e.preventDefault(); setupSubmit(); });
+  Array.prototype.forEach.call(document.querySelectorAll(".pw-toggle"), function (btn) {
+    btn.addEventListener("click", function () {
+      var id = btn.getAttribute("data-toggle-for");
+      setPwVisible(id, $(id).type === "password");
+      $(id).focus();
+    });
+  });
   $("toTokenGate").addEventListener("click", function () { showGate(""); });
   $("toSignin").addEventListener("click", function () { showSignin(""); });
   $("search").addEventListener("keydown", function (e) {
@@ -2516,6 +2682,7 @@
     }).then(function (res) {
       if (res.status === 200 && res.body && res.body.ok) { onSession(res.body); return; }
       state.authBackend = (res.body && res.body.authBackend) || "off";
+      state.setupRequired = !!(res.body && res.body.setupRequired === true);
       afterNoSession();
     }).catch(function () {
       state.authBackend = "off";
@@ -2526,6 +2693,7 @@
   // (native backend) or the token gate (sessions off / unreachable).
   function afterNoSession() {
     if (state.origin && state.token) { state.authMode = "token"; showApp(); resetAndLoad(); return; }
+    if (state.setupRequired) { showSetup(""); return; }
     if (state.authBackend === "native") { showSignin(""); return; }
     showGate("");
   }

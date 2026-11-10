@@ -561,4 +561,106 @@ test.describe("webmail critical journeys (#355)", () => {
     await page.keyboard.type("jk");
     await expect(page.locator("#search")).toHaveValue("jk");
   });
+
+  // First run, mocked to the #793 contract (docs/design/webmail-v2-contracts.md 1.10.6 and 1.10.7):
+  // GET /api/session 401 carries setupRequired; POST /api/setup answers 201 with a session.
+  test("first run: setupRequired shows setup; client checks, a wrong token, then 201 signs in (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
+      ? fulfillJson(route, { ok: false, authBackend: "native", setupRequired: true }, 401)
+      : route.fallback());
+    const posts: Array<Record<string, unknown>> = [];
+    await page.route("https://postern.test/api/setup", async (route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      posts.push(body);
+      if (body.setupToken !== "right-token-right-token-right-token") {
+        await fulfillJson(route, { ok: false, error: "E_AUTH_FAILED" }, 401);
+        return;
+      }
+      await fulfillJson(route, {
+        ok: true, setup: true,
+        user: { username: "alice@example.com", from: "alice@example.com", displayName: "Alice", disabled: false },
+        identity: { from: "alice@example.com", displayName: "Alice" },
+        capabilities: ["read", "send", "delete", "organize"],
+        expiresAt: "2026-11-11T00:00:00Z", csrfToken: "setup-csrf",
+      }, 201);
+    });
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#setup")).toBeVisible();
+    await expect(page.locator("#signin")).toBeHidden();
+    await expect(page.locator("#gate")).toBeHidden();
+    await expect(page.locator("#suToken")).toBeFocused();
+
+    await page.locator("#suToken").fill("wrong-token");
+    await page.locator("#suUser").fill("Alice@Example.com");
+    await page.locator("#suName").fill("Alice");
+    await page.locator("#suPass").fill("short");
+    await page.locator("#suPass2").fill("short");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#setupErr")).toHaveText("The password must be at least 12 characters.");
+    await page.locator("#suPass").fill("a long enough passphrase");
+    await page.locator("#suPass2").fill("a long enough passphrase!");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#setupErr")).toHaveText("The two passwords do not match.");
+    expect(posts).toHaveLength(0); // obvious slips never reach the server
+
+    await page.locator("#suPass2").fill("a long enough passphrase");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#setupErr")).toHaveText("That setup token is not correct.");
+    await expect(page.locator("#suToken")).toBeFocused();
+
+    await page.locator("#suToken").fill("right-token-right-token-right-token");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#app")).toBeVisible();
+    await expect(page.locator("#identity")).toHaveText("Sending as alice@example.com");
+    expect(posts).toHaveLength(2);
+    // Exactly the contract fields; the username is normalized; no "from" (it defaults server-side).
+    expect(posts[1]).toEqual({
+      setupToken: "right-token-right-token-right-token", username: "alice@example.com",
+      password: "a long enough passphrase", displayName: "Alice",
+    });
+    // The secret fields are cleared once used.
+    await expect(page.locator("#suToken")).toHaveValue("");
+    await expect(page.locator("#suPass")).toHaveValue("");
+  });
+
+  test("first run already completed (409) falls back to sign-in with a note (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
+      ? fulfillJson(route, { ok: false, authBackend: "native", setupRequired: true }, 401)
+      : route.fallback());
+    await page.route("https://postern.test/api/setup", (route) =>
+      fulfillJson(route, { ok: false, error: "E_SETUP_COMPLETE" }, 409));
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#suToken").fill("any-token");
+    await page.locator("#suUser").fill("bob@example.com");
+    await page.locator("#suPass").fill("another long passphrase");
+    await page.locator("#suPass2").fill("another long passphrase");
+    await page.locator("#suSubmit").click();
+    await expect(page.locator("#signin")).toBeVisible();
+    await expect(page.locator("#signinNote")).toHaveText("This mailbox is already set up. Sign in with your account.");
+    await expect(page.locator("#signinErr")).toHaveText("");
+  });
+
+  test("sign-in: throttled answer names the wait; show password toggles (#798)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
+      ? fulfillJson(route, { ok: false, authBackend: "native", setupRequired: false }, 401)
+      : fulfillJson(route, { ok: false, error: "E_RATE_LIMITED", retryAfter: 120 }, 429));
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#signin")).toBeVisible();
+    await expect(page.locator("#setup")).toBeHidden();
+    await page.locator("#siUser").fill("alice@example.com");
+    await page.locator("#siPass").fill("whatever-it-is");
+    const toggle = page.locator('.pw-toggle[data-toggle-for="siPass"]');
+    await toggle.click();
+    await expect(page.locator("#siPass")).toHaveAttribute("type", "text");
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await toggle.click();
+    await expect(page.locator("#siPass")).toHaveAttribute("type", "password");
+    await page.locator("#siSubmit").click();
+    await expect(page.locator("#signinErr")).toHaveText("Too many attempts. Try again in 2 minutes.");
+    await expect(page.locator("#siSubmit")).toHaveText("Sign in");
+    await expect(page.locator("#siSubmit")).toBeEnabled();
+  });
 });
