@@ -834,6 +834,21 @@ async function rollbackRun(ctx, opts) {
 // Mail is kept by default. --delete-data deletes D1 and R2 only with
 // --confirm-delete <domain> typed out, and only after `wrangler d1 export` has written
 // a non-empty .sql file next to the state file.
+// Every ordinary table in D1, for a table-by-table export. Left out: each virtual table and
+// its shadow tables (<name>_data, _idx, _content, _docsize, _config), SQLite's own sqlite_*
+// tables, and D1's internal _cf_* tables.
+async function exportableTables(ctx, accountId, d1Id) {
+  const res = await ctx.cf.call("list the D1 tables", P.d1, "POST", `/accounts/${accountId}/d1/database/${d1Id}/query`, {
+    sql: "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name",
+  });
+  const rows = res.result?.[0]?.results || [];
+  const virtual = rows.filter((r) => /^\s*CREATE\s+VIRTUAL\s+TABLE/i.test(r.sql || "")).map((r) => r.name);
+  const shadow = (n) => virtual.some((v) => n.startsWith(`${v}_`));
+  const skipped = rows.map((r) => r.name).filter((n) => virtual.includes(n) || shadow(n));
+  const tables = rows.map((r) => r.name).filter((n) => !skipped.includes(n) && !/^sqlite_/i.test(n) && !/^_cf_/i.test(n));
+  return { tables, skipped };
+}
+
 export async function uninstall(deps, opts) {
   const ctx = makeCtx(deps, opts, "uninstall");
   return guarded(ctx, () => uninstallRun(ctx, opts));
@@ -891,7 +906,8 @@ async function uninstallRun(ctx, opts) {
   }
 
   // 3. Email Sending, only if this installer enabled it. Cloudflare's DELETE removes the
-  //    Sending DNS records it added (API reference; not measured here).
+  //    Sending DNS records it added (measured 2026-11-10: all five cf-bounce MX / TXT / DKIM
+  //    records were gone after the DELETE).
   if (owned.sending) {
     if (dry) rep.would(`disable Email Sending for ${opts.domain} (Cloudflare removes its Sending DNS records)`);
     else {
@@ -913,13 +929,22 @@ async function uninstallRun(ctx, opts) {
       if (dry) rep.would(`export D1 ${opts.d1Name} to ${file}, then delete it`);
       else {
         writeConfig(ctx);
-        const r = await ctx.wrangler(["d1", "export", opts.d1Name, "--remote", "--output", file, "--skip-confirmation", "-c", paths.config]);
+        // Measured 2026-11-10: wrangler refuses to export a database that has a virtual table
+        // ("cannot export databases with virtual tables (like FTS5)"), and Postern's schema has
+        // messages_fts. So export every ordinary table by name, and leave out the virtual tables
+        // and their shadow tables. They are a search index built from messages.
+        const t = await exportableTables(ctx, a, state.d1Id);
+        if (!t.tables.length) throw new Error(`D1 ${opts.d1Name} lists no tables to export, so it was NOT deleted`);
+        const r = await ctx.wrangler(["d1", "export", opts.d1Name, "--remote", ...t.tables.flatMap((x) => ["--table", x]), "--output", file, "--skip-confirmation", "-c", paths.config]);
         if (r.code !== 0) throw new Error(`exporting D1 failed, so it was NOT deleted:\n${tail(r)}`);
         let size = 0;
         try { size = statSync(file).size; } catch { size = 0; }
         if (!size) throw new Error(`the D1 export at ${file} is missing or empty, so D1 was NOT deleted`);
         chmodSync(file, 0o600);
-        log(`  exported D1 ${opts.d1Name} to ${file} (${size} bytes)`);
+        log(`  exported D1 ${opts.d1Name} to ${file} (${size} bytes, ${t.tables.length} tables)`);
+        if (t.skipped.length) {
+          log(`  not exported: ${t.skipped.join(", ")}. wrangler cannot export a virtual table; this is the search index, built from messages, and Postern's migrations recreate it.`);
+        }
         await cf.call("delete the D1 database", P.d1, "DELETE", `/accounts/${a}/d1/database/${state.d1Id}`);
         delete owned.d1;
         delete state.d1Id;

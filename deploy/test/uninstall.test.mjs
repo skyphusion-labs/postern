@@ -114,6 +114,9 @@ describe("uninstall", () => {
     const c = await installed();
     await uninstall(c.deps, c.opts("uninstall", "--delete-data", "--confirm-delete", "acme-mail.test"));
     assert.equal(c.m.exports.length, 1);
+    // Table by table: every ordinary table, never the FTS5 index or its shadows, never _cf_ or sqlite_.
+    assert.deepEqual(c.m.exportTables, ["d1_migrations", "messages", "webmail_sessions"]);
+    assert.match(text(c), /not exported: messages_fts, messages_fts_config, messages_fts_data, messages_fts_docsize, messages_fts_idx\./);
     const f = c.m.exports[0];
     assert.ok(statSync(f).size > 0);
     assert.equal(statSync(f).mode & 0o777, 0o600);

@@ -206,6 +206,16 @@ export function fakeFetch(m) {
     }
     if ((mm = new RegExp(`^${a}/d1/database/([^/]+)/query$`).exec(p)) && method === "POST") {
       const applied = m.migrations[mm[1]];
+      // The table list, as a real migrated Postern D1 answers it (measured 2026-11-10): an FTS5
+      // virtual table with its shadow tables, D1's _cf_KV, and sqlite_sequence.
+      if (/sqlite_master/.test(body?.sql || "")) {
+        if (!applied) return ok([{ results: [] }]);
+        const t = (name, sql = `CREATE TABLE ${name} (id INTEGER)`) => ({ name, sql });
+        return ok([{ results: [t("_cf_KV"), t("d1_migrations"), t("messages"),
+          t("messages_fts", "CREATE VIRTUAL TABLE messages_fts USING fts5(subject, body_text, content='messages')"),
+          t("messages_fts_config"), t("messages_fts_data"), t("messages_fts_docsize"), t("messages_fts_idx"),
+          t("sqlite_sequence"), t("webmail_sessions")] }]);
+      }
       if (!applied) return fail(400, 7500, "no such table: d1_migrations: SQLITE_ERROR");
       return ok([{ results: applied.map((name, i) => ({ id: i + 1, name })) }]);
     }
@@ -287,6 +297,14 @@ export function fakeExec(m) {
     }
     if (args[0] === "d1" && args[1] === "export") {
       const out = args[args.indexOf("--output") + 1];
+      // The real wrangler refuses a whole-database export when the database has a virtual table
+      // (measured 2026-11-10), and a migrated Postern D1 always has messages_fts. It refuses a
+      // named virtual or shadow table the same way.
+      const named = args.flatMap((x, i) => (args[i - 1] === "--table" ? [x] : []));
+      if (!named.length || named.some((x) => /^messages_fts/.test(x))) {
+        return { code: 1, stdout: "", stderr: "✘ [ERROR] D1 Export error: cannot export databases with virtual tables (like FTS5)" };
+      }
+      m.exportTables = named;
       writeFileSync(out, m.exportEmpty ? "" : "PRAGMA defer_foreign_keys=TRUE;\nCREATE TABLE messages (uid INTEGER);\n");
       m.exports = [...(m.exports || []), out];
       return { code: 0, stdout: `exported to ${out}`, stderr: "" };
