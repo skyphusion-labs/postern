@@ -722,4 +722,79 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#disabled")).toBeHidden();
     await expect(page.locator("#gateErr")).toHaveText("Could not reach the server to check sign-in. Try again, or connect with an API token.");
   });
+
+  // Change password, mocked to the #793 contract 1.10.5 (handler: #810).
+  test("change password: session-only, client checks, wrong current, then success keeps the session (#819)", async ({ page }) => {
+    await installMocks(page, "session");
+    let sessionAlive = true;
+    await page.route("https://postern.test/api/session", (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      return sessionAlive
+        ? fulfillJson(route, { ok: true, identity: { from: "alice@example.com" }, capabilities: ["read", "send"], csrfToken: "c1", authBackend: "native" })
+        : fulfillJson(route, { ok: false, authBackend: "native", setupRequired: false }, 401);
+    });
+    const posts: Array<{ body: Record<string, unknown>; csrf: string | undefined }> = [];
+    await page.route("https://postern.test/api/session/password", async (route) => {
+      const req = route.request();
+      const body = req.postDataJSON() as Record<string, unknown>;
+      posts.push({ body, csrf: req.headers()["x-postern-csrf"] });
+      if (body.currentPassword !== "the current one!") { await fulfillJson(route, { ok: false, error: "E_AUTH_FAILED" }, 401); return; }
+      await fulfillJson(route, {
+        ok: true, identity: { from: "alice@example.com" }, capabilities: ["read", "send"],
+        expiresAt: "2026-11-11T00:00:00Z", csrfToken: "c2", sessionsEnded: 3,
+      });
+    });
+    await page.context().addCookies([{ name: "__Host-postern_csrf", value: "c1", url: "https://postern.test/" }]);
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#app")).toBeVisible();
+    await page.locator("#settingsBtn").click();
+    await expect(page.locator("#pwSection")).toBeVisible();
+
+    await page.locator("#pwCur").fill("the current one!");
+    await page.locator("#pwNew").fill("short");
+    await page.locator("#pwNew2").fill("short");
+    await page.locator("#pwSubmit").click();
+    await expect(page.locator("#pwErr")).toHaveText("The new password must be at least 12 characters.");
+    expect(posts).toHaveLength(0);
+
+    await page.locator("#pwCur").fill("not the current one");
+    await page.locator("#pwNew").fill("a brand new passphrase");
+    await page.locator("#pwNew2").fill("a brand new passphrase");
+    await page.locator("#pwSubmit").click();
+    // 401 is disambiguated with GET /api/session: the session is alive, so it is the password.
+    await expect(page.locator("#pwErr")).toHaveText("The current password is not correct.");
+    await expect(page.locator("#app")).toBeVisible();
+
+    await page.locator("#pwCur").fill("the current one!");
+    await page.locator("#pwSubmit").click();
+    await expect(page.locator("#pwNote")).toHaveText("Password changed. Any other devices were signed out.");
+    await expect(page.locator("#pwErr")).toHaveText("");
+    await expect(page.locator("#app")).toBeVisible();
+    await expect(page.locator("#pwCur")).toHaveValue("");
+    expect(posts[1].body).toEqual({ currentPassword: "the current one!", newPassword: "a brand new passphrase" });
+    expect(posts[1].csrf).toBe("c1"); // double-submit header from the companion cookie
+
+    // A 401 with the session gone signs out instead of blaming the password.
+    sessionAlive = false;
+    await page.locator("#pwCur").fill("not the current one");
+    await page.locator("#pwNew").fill("a brand new passphrase");
+    await page.locator("#pwNew2").fill("a brand new passphrase");
+    await page.locator("#pwSubmit").click();
+    await expect(page.locator("#signin")).toBeVisible();
+    await expect(page.locator("#signinNote")).toHaveText("Your session ended. Sign in again.");
+  });
+
+  test("change password is not offered in token mode (#819)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.goto("https://postern.test/webmail");
+    await openTokenGate(page);
+    await page.locator("#token").fill("read-token");
+    await page.locator("#connect").click();
+    await expect(page.locator("#app")).toBeVisible();
+    await page.locator("#settingsBtn").click();
+    await expect(page.locator("#settingsPanel")).toBeVisible();
+    // Present in the page (so this is not vacuous) but not offered: a token has no password.
+    await expect(page.locator("#pwSection")).toHaveCount(1);
+    await expect(page.locator("#pwSection")).toBeHidden();
+  });
 });
