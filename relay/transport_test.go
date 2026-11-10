@@ -168,7 +168,7 @@ func TestRenderMIME_Multipart(t *testing.T) {
 }
 
 func TestRenderMIME_HeaderInjectionBlocked(t *testing.T) {
-	// A malicious subject and a reserved-name custom header must not break out.
+	// A malicious subject and a CR/LF-bearing custom header value must not break out.
 	msg := OutboundMessage{
 		MessageID: "id@x",
 		To:        []string{"dest@example.com"},
@@ -176,9 +176,15 @@ func TestRenderMIME_HeaderInjectionBlocked(t *testing.T) {
 		Subject:   "ok\r\nBcc: attacker@evil.com",
 		Text:      "body",
 		Headers: map[string]string{
-			"Bcc":     "attacker2@evil.com", // reserved -> dropped
 			"X-Trace": "abc\r\nInjected: yes",
 		},
+	}
+	// A reserved-name custom header is REFUSED (not silently dropped), so the
+	// whole render fails and nothing is emitted (header_names_test.go has the rule).
+	bad := msg
+	bad.Headers = map[string]string{"Bcc": "attacker2@evil.com"}
+	if out, err := renderMIME(bad, "noreply@skyphusion.org"); err == nil {
+		t.Errorf("reserved Bcc header from Headers{} was accepted:\n%s", out)
 	}
 	raw := mustRender(t, msg)
 	// The attack would only succeed if the malicious text became its OWN header
@@ -192,10 +198,6 @@ func TestRenderMIME_HeaderInjectionBlocked(t *testing.T) {
 		if strings.HasPrefix(line, "Injected:") {
 			t.Errorf("CR/LF in a custom header injected a new header line: %q", line)
 		}
-	}
-	// The reserved Bcc header from Headers{} must have been dropped entirely.
-	if strings.Contains(raw, "attacker2@evil.com") {
-		t.Errorf("reserved Bcc header from Headers{} was not dropped:\n%s", raw)
 	}
 	assertContains(t, raw, "X-Trace: abcInjected: yes")
 	assertContains(t, raw, "Subject: okBcc: attacker@evil.com")

@@ -546,7 +546,11 @@ transport POSTs the `OutboundMessage` as JSON to `POST /dispatch`, gated by
   rides in `OutboundMessage.bcc`, never in `headers`.
 - `200`: `{ "ok": true, "messageId": "<core id>", "providerMessageId": "<or empty>" }`.
 - `400`: `{ "ok": false, "error": "..." }` for a malformed body (bad JSON / no recipients / empty
-  message). `401`: missing or wrong transport token. `413`: body over the size cap. `502`:
+  message / a `headers` name that is not an RFC 5322 field-name, is longer than 76 characters, or is
+  reserved: From, Sender, To,
+  Cc, Bcc, Reply-To, Return-Path, Received, Received-SPF, Authentication-Results, ARC-*, DKIM-Signature, Resent-*, Subject, Date, MIME-Version, Content-*, and
+  Message-ID other than the core-stamped `<messageId>`; the worker applies the same rule to
+  `SendRequest.headers` on every transport). `401`: missing or wrong transport token. `413`: body over the size cap. `502`:
   `{ "ok": false, "error": "dispatch failed: ..." }` when the upstream SMTP send fails (core may
   retry with backoff).
 

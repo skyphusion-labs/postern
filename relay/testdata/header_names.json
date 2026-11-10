@@ -1,0 +1,178 @@
+{
+  "_comment": "Caller header-name rule, ONE table read by relay/header_names_test.go and inbound/header-names.test.ts so the Go relay and the worker cannot drift. ok=false means the send is refused with 400. The core-stamped Message-ID exception is tested separately in each suite.",
+  "maxNameLength": 76,
+  "cases": [
+    {
+      "name": "X-Custom",
+      "ok": true
+    },
+    {
+      "name": "In-Reply-To",
+      "ok": true
+    },
+    {
+      "name": "References",
+      "ok": true
+    },
+    {
+      "name": "List-Unsubscribe",
+      "ok": true
+    },
+    {
+      "name": "X-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": true
+    },
+    {
+      "name": "x-arcade",
+      "ok": true
+    },
+    {
+      "name": "X-DKIM-Note",
+      "ok": true
+    },
+    {
+      "name": "Authentication-Info",
+      "ok": true
+    },
+    {
+      "name": "From",
+      "ok": false
+    },
+    {
+      "name": "Sender",
+      "ok": false
+    },
+    {
+      "name": "To",
+      "ok": false
+    },
+    {
+      "name": "Cc",
+      "ok": false
+    },
+    {
+      "name": "Bcc",
+      "ok": false
+    },
+    {
+      "name": "Reply-To",
+      "ok": false
+    },
+    {
+      "name": "Return-Path",
+      "ok": false
+    },
+    {
+      "name": "Received",
+      "ok": false
+    },
+    {
+      "name": "Message-ID",
+      "ok": false
+    },
+    {
+      "name": "message-id",
+      "ok": false
+    },
+    {
+      "name": "Date",
+      "ok": false
+    },
+    {
+      "name": "Subject",
+      "ok": false
+    },
+    {
+      "name": "MIME-Version",
+      "ok": false
+    },
+    {
+      "name": "Content-Type",
+      "ok": false
+    },
+    {
+      "name": "content-id",
+      "ok": false
+    },
+    {
+      "name": "Resent-From",
+      "ok": false
+    },
+    {
+      "name": "Authentication-Results",
+      "ok": false
+    },
+    {
+      "name": "authentication-results",
+      "ok": false
+    },
+    {
+      "name": "ARC-Seal",
+      "ok": false
+    },
+    {
+      "name": "ARC-Message-Signature",
+      "ok": false
+    },
+    {
+      "name": "arc-authentication-results",
+      "ok": false
+    },
+    {
+      "name": "DKIM-Signature",
+      "ok": false
+    },
+    {
+      "name": "dkim-signature",
+      "ok": false
+    },
+    {
+      "name": "Received-SPF",
+      "ok": false
+    },
+    {
+      "name": "RECEIVED-SPF",
+      "ok": false
+    },
+    {
+      "name": "",
+      "ok": false
+    },
+    {
+      "name": "X Bad",
+      "ok": false
+    },
+    {
+      "name": "X-Tab\tx",
+      "ok": false
+    },
+    {
+      "name": "X-\u0001",
+      "ok": false
+    },
+    {
+      "name": "X-\u007f",
+      "ok": false
+    },
+    {
+      "name": "X-caf\u00e9",
+      "ok": false
+    },
+    {
+      "name": " X-Lead",
+      "ok": false
+    },
+    {
+      "name": "X-Trail ",
+      "ok": false
+    },
+    {
+      "name": "X-A:b",
+      "ok": false
+    },
+    {
+      "name": "X-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ok": false
+    }
+  ]
+}

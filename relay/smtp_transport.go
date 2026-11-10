@@ -155,6 +155,9 @@ func outboundTLSConfig(host string) *tls.Config {
 // (Subject/Message-ID/custom) have CR/LF stripped. This is what breaks the
 // go/email-injection taint flow into the SMTP DATA write.
 func renderMIME(msg OutboundMessage, mailFrom string) ([]byte, error) {
+	if err := validateCallerHeaders(msg); err != nil {
+		return nil, err
+	}
 	var b bytes.Buffer
 
 	fromHdr, err := formatAddress(msg.From, mailFrom)
@@ -199,9 +202,9 @@ func renderMIME(msg OutboundMessage, mailFrom string) ([]byte, error) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		if isReservedHeader(k) {
-			continue // never let arbitrary headers override the ones we set
+			continue // only the core-stamped Message-ID reaches here (validated above); rendered from MessageID
 		}
-		writeHeader(&b, sanitizeHeader(k), sanitizeHeader(msg.Headers[k]))
+		writeHeader(&b, k, sanitizeHeader(msg.Headers[k]))
 	}
 
 	// Body: text/plain, text/html, or multipart/alternative (both). With
@@ -519,13 +522,62 @@ func sanitizeHeader(v string) string {
 	return strings.NewReplacer("\r", "", "\n", "").Replace(v)
 }
 
-// isReservedHeader reports whether a caller-supplied header name collides with
-// one the renderer sets itself. Comparison is case-insensitive.
+// isReservedHeader reports whether a caller-supplied header name is one the
+// relay sets itself or an identity / trace / authentication header a caller
+// must never set: the addressing and sender headers, Return-Path, Received,
+// Received-SPF, Authentication-Results, ARC-*, DKIM-Signature, Resent-*,
+// message identity and framing (Message-ID, Date, Subject, MIME-Version,
+// Content-*). Comparison is case-insensitive. Same rule as
+// inbound/src/headernames.ts; parity is tested on testdata/header_names.json.
 func isReservedHeader(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "from", "to", "cc", "bcc", "reply-to", "subject", "message-id",
-		"date", "mime-version", "content-type", "content-transfer-encoding":
+	k := strings.ToLower(strings.TrimSpace(name))
+	switch k {
+	case "from", "sender", "to", "cc", "bcc", "reply-to", "return-path", "received",
+		"received-spf", "authentication-results", "dkim-signature",
+		"subject", "message-id", "date", "mime-version":
 		return true
 	}
-	return false
+	return strings.HasPrefix(k, "content-") || strings.HasPrefix(k, "resent-") || strings.HasPrefix(k, "arc-")
+}
+
+// maxHeaderNameLength caps a caller header name (RFC 5322 recommends short
+// names; 76 keeps a name plus ": " inside the 78-character line advice).
+const maxHeaderNameLength = 76
+
+// validHeaderFieldName reports whether name is an RFC 5322 field-name:
+// one or more printable US-ASCII characters (33-126) except colon.
+func validHeaderFieldName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c < 33 || c > 126 || c == ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// validateCallerHeaders refuses an OutboundMessage whose Headers carry a name
+// that is not a valid field-name or is reserved. A name is written to the wire
+// verbatim, so a colon in it would emit a second header (for example a second
+// From). The one reserved key accepted is the core-stamped "Message-ID" whose
+// value is exactly "<" + MessageID + ">"; it is rendered once, from MessageID.
+func validateCallerHeaders(msg OutboundMessage) error {
+	for k, v := range msg.Headers {
+		if !validHeaderFieldName(k) {
+			return fmt.Errorf("invalid header name %q", k)
+		}
+		if len(k) > maxHeaderNameLength {
+			return fmt.Errorf("header name %q is longer than %d characters", k, maxHeaderNameLength)
+		}
+		if k == "Message-ID" && v == "<"+msg.MessageID+">" {
+			continue
+		}
+		if isReservedHeader(k) {
+			return fmt.Errorf("header %q is set by the relay and cannot be supplied", k)
+		}
+	}
+	return nil
 }

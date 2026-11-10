@@ -82,8 +82,12 @@ through the configured upstream SMTP server (`smtp_transport.go`):
   metadata cannot inject a header. Total size is bounded by the dispatch body cap
   (`413` over the limit);
 - reply threading headers (`In-Reply-To` / `References`) ride in `headers`;
-- all header values are **CR/LF-sanitized** (no header injection), and any
-  caller header that collides with a reserved name is dropped.
+- all header values are **CR/LF-sanitized** (no header injection). A caller
+  header NAME must be an RFC 5322 field-name (printable ASCII 33-126, no `:`,
+  at most 76 characters)
+  and must not be reserved (From, Sender, To, Cc, Bcc, Reply-To, Return-Path,
+  Received, Received-SPF, Authentication-Results, ARC-*, DKIM-Signature, Resent-*, Subject, Date, MIME-Version, Content-*, Message-ID other
+  than the core-stamped `<messageId>`); otherwise `/dispatch` answers `400`.
 
 Leave `POSTERN_RELAY_HTTP_LISTEN` unset to run inbound-only.
 
