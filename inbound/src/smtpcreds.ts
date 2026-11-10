@@ -8,17 +8,39 @@
 // This is a SEPARATE concern from store.ts (the message store): it gates the
 // SENDER per user. The mailbox/store stays the shared skyphusion.org D1.
 
-// OWASP 2023 floor for PBKDF2-HMAC-SHA256. Encoded into the hash string so it can
-// be raised later without a schema change (old hashes verify at their own count, and
-// a successful sign-in re-hashes them at this target, contract 1.10.2).
-export const PBKDF2_ITERATIONS = 210_000;
-const SALT_BYTES = 16;
-const HASH_BYTES = 32;
+// The deployed Cloudflare Workers runtime refuses PBKDF2 above this many iterations
+// ("Pbkdf2 failed: iteration counts above 100000 are not supported", #821). Node and
+// local wrangler dev accept more, which is how a 210,000 target shipped green and broke
+// every native credential on the edge. The suite now runs under this cap
+// (test-setup/workers-pbkdf2-cap.ts), so exceeding it goes red locally.
+export const RUNTIME_PBKDF2_MAX_ITERATIONS = 100_000;
 
-// A well-formed dummy hash verified against when a username is unknown, so a
-// missing user costs the same PBKDF2 work as a wrong secret (no user enumeration
-// by timing). The plaintext it encodes is irrelevant; it never matches.
-const DUMMY_HASH = `pbkdf2$${PBKDF2_ITERATIONS}$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`;
+// The target (contract 1.10.2): PBKDF2-HMAC-SHA512 at the runtime ceiling. At a fixed
+// iteration count SHA-512 costs a GPU attacker more per guess than SHA-256, and no other
+// KDF is in Web Crypto on Workers. Each row names its own KDF and count, so the target
+// can change without a schema change, and a successful sign-in re-hashes an older row.
+export const PBKDF2_ITERATIONS = RUNTIME_PBKDF2_MAX_ITERATIONS;
+const TARGET_TAG = "pbkdf2-sha512";
+const SALT_BYTES = 16;
+
+// Encodings by tag. "pbkdf2" is the #68 legacy (SHA-256, 32-byte output).
+const KDFS: Record<string, { hash: "SHA-256" | "SHA-512"; bytes: number }> = {
+  "pbkdf2-sha512": { hash: "SHA-512", bytes: 64 },
+  pbkdf2: { hash: "SHA-256", bytes: 32 },
+};
+
+/**
+ * A stored hash this runtime cannot verify (its iteration count is above the Workers
+ * cap). A DATA condition, not a wrong password: callers answer it as an infra failure
+ * and never count it as a guess, so it cannot lock a user out (contract 1.10.2).
+ */
+export class UnverifiableHashError extends Error {}
+
+// A well-formed dummy hash at the TARGET parameters (16-byte salt, 64-byte output),
+// verified against when a username is unknown or disabled, so a missing user costs the
+// same PBKDF2 work as a wrong secret (no user enumeration by timing). The plaintext it
+// encodes is irrelevant; it never matches.
+const DUMMY_HASH = [TARGET_TAG, String(PBKDF2_ITERATIONS), "A".repeat(22) + "==", "A".repeat(86) + "=="].join("$");
 
 // Contract 1.10.1 bounds.
 export const PASSWORD_MIN = 12;
@@ -64,19 +86,44 @@ interface CredRow {
 
 const COLS = "username, from_addr, secret_hash, disabled, display_name, created_at, updated_at";
 
-/** Encode a secret as pbkdf2$<iterations>$<saltB64>$<hashB64>. */
+/** Encode a secret at the target: pbkdf2-sha512$<iterations>$<saltB64>$<hashB64>. */
 export async function hashSecret(secret: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
-  const derived = await pbkdf2(secret, salt, PBKDF2_ITERATIONS);
-  return `pbkdf2$${PBKDF2_ITERATIONS}$${toB64(salt)}$${toB64(derived)}`;
+  const kdf = KDFS[TARGET_TAG];
+  const derived = await pbkdf2(secret, salt, PBKDF2_ITERATIONS, kdf.hash, kdf.bytes);
+  return [TARGET_TAG, String(PBKDF2_ITERATIONS), toB64(salt), toB64(derived)].join("$");
+}
+
+interface ParsedHash {
+  tag: string;
+  hash: "SHA-256" | "SHA-512";
+  iterations: number;
+  salt: Uint8Array;
+  expected: Uint8Array;
+}
+
+function parseHash(encoded: string): ParsedHash | null {
+  const parts = encoded.split("$");
+  if (parts.length !== 4) return null;
+  const kdf = KDFS[parts[0]];
+  if (!kdf) return null;
+  const iterations = Number(parts[1]);
+  if (!Number.isInteger(iterations) || iterations < 1) return null;
+  const salt = fromB64(parts[2]);
+  const expected = fromB64(parts[3]);
+  if (!salt || !expected || expected.length !== kdf.bytes) return null;
+  return { tag: parts[0], hash: kdf.hash, iterations, salt, expected };
+}
+
+/** Is this stored hash below the target (another KDF, or fewer iterations)? */
+export function needsUpgrade(encoded: string): boolean {
+  const h = parseHash(encoded);
+  return h !== null && (h.tag !== TARGET_TAG || h.iterations < PBKDF2_ITERATIONS);
 }
 
 /** The iteration count an encoded hash was made with, or null if malformed. */
 export function hashIterations(encoded: string): number | null {
-  const parts = encoded.split("$");
-  if (parts.length !== 4 || parts[0] !== "pbkdf2") return null;
-  const n = Number(parts[1]);
-  return Number.isInteger(n) && n >= 1 ? n : null;
+  return parseHash(encoded)?.iterations ?? null;
 }
 
 /**
@@ -84,17 +131,27 @@ export function hashIterations(encoded: string): number | null {
  * malformed encoding rather than throwing, so a corrupt row fails closed.
  */
 export async function verifySecret(secret: string, encoded: string): Promise<boolean> {
-  const parts = encoded.split("$");
-  const iterations = hashIterations(encoded);
-  if (iterations === null) return false;
-  const salt = fromB64(parts[2]);
-  const expected = fromB64(parts[3]);
-  if (!salt || !expected) return false;
-  const derived = await pbkdf2(secret, salt, iterations);
-  return timingSafeEqualBytes(derived, expected);
+  const h = parseHash(encoded);
+  if (!h) return false;
+  // A well-formed hash above the runtime cap is NOT a wrong password: throw, before
+  // deriving anything, so callers answer it as an infra failure (contract 1.10.2).
+  if (h.iterations > RUNTIME_PBKDF2_MAX_ITERATIONS) {
+    throw new UnverifiableHashError(
+      "stored hash uses " + h.iterations + " iterations and cannot be verified on this runtime (max " +
+        RUNTIME_PBKDF2_MAX_ITERATIONS + "); reset the password",
+    );
+  }
+  const derived = await pbkdf2(secret, h.salt, h.iterations, h.hash, h.expected.length);
+  return timingSafeEqualBytes(derived, h.expected);
 }
 
-async function pbkdf2(secret: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {
+async function pbkdf2(
+  secret: string,
+  salt: Uint8Array,
+  iterations: number,
+  hash: "SHA-256" | "SHA-512",
+  bytes: number,
+): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -103,9 +160,9 @@ async function pbkdf2(secret: string, salt: Uint8Array, iterations: number): Pro
     ["deriveBits"],
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt, iterations },
+    { name: "PBKDF2", hash, salt, iterations },
     key,
-    HASH_BYTES * 8,
+    bytes * 8,
   );
   return new Uint8Array(bits);
 }
@@ -131,10 +188,18 @@ export async function authenticateAccount(
     await verifySecret(secret, DUMMY_HASH);
     return null;
   }
-  const ok = await verifySecret(secret, cred.secretHash);
+  let ok: boolean;
+  try {
+    ok = await verifySecret(secret, cred.secretHash);
+  } catch (err) {
+    if (err instanceof UnverifiableHashError) {
+      // Name the account so the operator can reset it; never log the secret.
+      console.error("credential for " + cred.username + " needs a password reset: " + err.message);
+    }
+    throw err;
+  }
   if (!ok) return null;
-  const iterations = hashIterations(cred.secretHash);
-  if (iterations !== null && iterations < PBKDF2_ITERATIONS) {
+  if (needsUpgrade(cred.secretHash)) {
     try {
       await setPassword(env, cred.username, await hashSecret(secret), new Date().toISOString(), cred.secretHash);
     } catch (err) {
