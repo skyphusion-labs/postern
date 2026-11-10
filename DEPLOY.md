@@ -28,7 +28,14 @@ The installer creates the D1 store and the R2 attachment bucket, and applies the
 It deploys the Worker at `https://mail.example.com`, with a mailbox token it generates.
 It turns on Email Sending and Email Routing, adds the DNS records they need (MX, SPF,
 DKIM, and DMARC if you have none), and routes every address on the domain to the Worker.
-Then it creates your first admin login. Every line of output names one resource and says
+Then it creates your first admin login through the user API (`POST /api/admin/users`),
+and turns on webmail sign-in (`WEBMAIL_AUTH_BACKEND=native`) for a new install.
+
+**DMARC.** If your domain has no DMARC record, the installer writes `v=DMARC1; p=none`
+(or your `--dmarc` choice) BEFORE it enables Email Sending. It has to come first:
+enabling Sending on a domain without DMARC makes Cloudflare write `p=reject` itself.
+Cloudflare recommends `p=reject`; use `--dmarc reject` if only Postern sends as your
+domain. An existing DMARC record is never changed. Every line of output names one resource and says
 `created`, `updated`, `unchanged` or `kept`.
 
 Options: `--hostname` (default `mail.<domain>`), `--admin` (default `admin@<domain>`),
@@ -50,6 +57,9 @@ prints the path, never the values. Keep a copy somewhere safe.
 
 - **Webmail:** open `https://mail.example.com/webmail` and sign in with
   `POSTERN_ADMIN_USERNAME` / `POSTERN_ADMIN_PASSWORD` from the credentials file.
+- **Send:** right after the install, Cloudflare refuses sends from a newly enabled
+  domain with `E_SENDER_DOMAIN_NOT_AVAILABLE` for up to about a minute. The installer
+  says so in its output. Wait about 60 seconds before the first send.
 - **Receive:** send a message from any outside mailbox to any address on your domain.
   It shows up in webmail.
 - **The scripted acceptance smoke** (outbound, store, threading, inbound):
@@ -62,8 +72,21 @@ POSTERN_TO=you@example.com node smoke.mjs --expect-inbound --inbound-subject "po
 # then send a real email with that subject to an address on your domain
 ```
 
-A new Custom Domain can take a few minutes to get its certificate. If the first run
-stops at "did not answer yet", wait, then run the install command again.
+**What we measured** on a fresh throwaway domain (2026-11-10): the install took 22
+seconds. The first send was accepted about a minute after Sending was enabled. A message
+sent to an address on the domain was stored as inbound 2 seconds later.
+
+### Troubleshooting
+
+- **"did not answer yet"**: a new Custom Domain can take a few minutes to get its
+  certificate. Wait, then run the install command again. It resumes where it stopped.
+- **"this machine cannot resolve mail.example.com yet"**: the record exists in
+  Cloudflare, but your resolver cached "no such host" from a lookup made a moment before
+  the record existed. It keeps that answer for up to the zone's negative TTL (often 30
+  minutes). Check with `dig +short mail.example.com` (it asks the DNS servers directly).
+  Then either wait, or flush your resolver cache, and run the install command again.
+- **`E_SENDER_DOMAIN_NOT_AVAILABLE` on the first sends**: Email Sending is still
+  propagating. Wait about a minute.
 
 ## 3. Keep it current: upgrade and rollback
 
@@ -83,6 +106,12 @@ Time Travel bookmark and the Worker version it replaces.
 node deploy/postern.mjs rollback --domain example.com              # previous Worker version
 node deploy/postern.mjs rollback --domain example.com --restore-db # and D1 to the bookmark
 ```
+
+`rollback` changes only the Worker version and, with `--restore-db`, the D1 store. It
+never touches Email Routing or DNS, because **disabling Email Routing deletes the MX, SPF
+and DKIM records it manages**, and mail to your domain then stops arriving. Do not
+disable Routing by hand to "undo" an install. If you must, first save what
+`GET /zones/<zone>/email/routing/dns` returns, so you can re-create those records.
 
 `--restore-db` loses the mail stored after the upgrade. Use it only when the new schema
 is the problem. After a rollback, check out the older tag before you run `install` or
