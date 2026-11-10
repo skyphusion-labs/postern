@@ -74,6 +74,9 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   if ((method === "GET" || method === "POST") && path === "/api/admin/identities") return "admin";
   if (method === "DELETE" && /^\/api\/admin\/identities\/.+$/.test(path)) return "admin";
   if (method === "GET" && path === "/api/admin/audit") return "admin";
+  // #740 S1 adds delegation grants at `admin`, same deliberate-act rule.
+  if ((method === "GET" || method === "POST") && path === "/api/admin/delegations") return "admin";
+  if (method === "DELETE" && /^\/api\/admin\/delegations\/.+$/.test(path)) return "admin";
   if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
   // #650 adds GET /api/whoami at `read` scope (the Bearer-reachable self-identity call).
   if (method === "GET" && path === "/api/whoami") return "read";
@@ -103,6 +106,7 @@ const CORPUS = [
   "/api/admin/usersx", "/api/admin/users2/bob",
   "/api/admin/identities", "/api/admin/identities/", "/api/admin/identities/idn_0123", "/api/admin/identitiesx",
   "/api/admin/audit", "/api/admin/auditx",
+  "/api/admin/delegations", "/api/admin/delegations/", "/api/admin/delegations/dlg_0123", "/api/admin/delegationsx",
   "/api/identities", "/api/identities/idn_0123",
   // Pre-gate rows: they never reach the gate, and the table says so.
   "/health", "/", "/robots.txt", "/sitemap.xml", "/webmail", "/.well-known/mta-sts.txt", "/api/smtp-auth", "/api/session",

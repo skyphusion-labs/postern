@@ -171,6 +171,10 @@ def _emitted() -> list[dict[str, Any]]:
     c.list_identities(limit=5, cursor="c1", include_revoked=True)
     c.revoke_identity("idn_0")
     c.list_audit(limit=5, cursor="9")
+    # #740 S1 delegation grants (operator).
+    c.grant_delegation("idn_0", "a@x.com", ["organize"], label="l")
+    c.list_delegations(grantee="idn_0", address="a@x.com", limit=5, cursor="c1", include_revoked=True)
+    c.revoke_delegation("dlg_0")
 
     out: list[dict[str, Any]] = []
     for req in t.requests:
