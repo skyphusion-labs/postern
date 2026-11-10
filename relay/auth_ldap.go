@@ -130,13 +130,15 @@ func buildLDAPTLSConfig(cfg LDAPCfg) (*tls.Config, error) {
 	// (e.g. an Authentik default cert whose only SAN is the bare wildcard `*`, which
 	// matches NO name in modern Go, so CA-pin + ServerName cannot verify it at all).
 	//
-	// InsecureSkipVerify is set ONLY so our VerifyPeerCertificate becomes the sole
-	// gate. Despite the field name this is NOT an insecure bypass: it is an EXACT
+	// InsecureSkipVerify is set ONLY so our VerifyConnection becomes the sole gate.
+	// Despite the field name this is NOT an insecure bypass: it is an EXACT
 	// certificate pin, STRICTER than CA verification (it trusts one specific cert, not
 	// anything a CA signed) and MITM-resistant -- a swapped cert fails the SHA-256
-	// match. crypto/tls honors VerifyPeerCertificate even when InsecureSkipVerify is
-	// true. (Static analysis note: gosec G402 / a CodeQL InsecureSkipVerify finding
-	// here is a JUSTIFIED suppression, not a real issue -- the pin is the verification.)
+	// match. crypto/tls runs VerifyConnection even when InsecureSkipVerify is true,
+	// and, unlike VerifyPeerCertificate, it also runs on RESUMED sessions, so the pin
+	// holds even if a session cache is ever added to this config.
+	// (Static analysis note: gosec G402 / a CodeQL InsecureSkipVerify finding here is
+	// a JUSTIFIED suppression, not a real issue -- the pin is the verification.)
 	if cfg.TLSPinSHA256 != "" {
 		want, err := normalizePinSHA256(cfg.TLSPinSHA256)
 		if err != nil {
@@ -146,11 +148,11 @@ func buildLDAPTLSConfig(cfg LDAPCfg) (*tls.Config, error) {
 		// under the pin (the SHA-256 match is the verification).
 		tc.ServerName = cfg.TLSServerName
 		tc.InsecureSkipVerify = true // #nosec G402 -- gated by the exact-leaf SHA-256 pin below; verification is stricter, not skipped
-		tc.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
+		tc.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
 				return fmt.Errorf("ldap tls: peer presented no certificate")
 			}
-			got := sha256.Sum256(rawCerts[0]) // rawCerts[0] is the leaf DER
+			got := sha256.Sum256(cs.PeerCertificates[0].Raw) // [0] is the leaf; Raw is its DER
 			if subtle.ConstantTimeCompare(got[:], want) != 1 {
 				return fmt.Errorf("ldap tls: leaf certificate SHA-256 does not match LDAP_TLS_PIN_SHA256")
 			}
