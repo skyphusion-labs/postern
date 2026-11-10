@@ -6,32 +6,63 @@
 <meta name="referrer" content="no-referrer">
 <title>Postern webmail</title>
 <style>
-  :root, html[data-theme="dark"] {
-    --bg: #14161a; --panel: #1c1f26; --panel-2: #232733; --line: #2e3340;
-    --fg: #e7e9ee; --muted: #99a0ad; --accent: #6ea8fe; --accent-dim: #2b3550;
-    --bad: #e06c75; --ok: #98c379;
+  /* Design tokens (#794). Every color, size and space in this page reads from here.
+     Light is the base palette; dark applies when the OS asks for it (theme "system",
+     the default) or when the user picks Dark. The two dark blocks below MUST stay
+     identical: webmail-tokens.test.ts asserts it and checks WCAG AA on both palettes. */
+  :root {
+    color-scheme: light;
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --fs-2xs: 11px; --fs-xs: 12px; --fs-sm: 13px; --fs-md: 15px; --fs-lg: 17px; --fs-xl: 20px; --fs-2xl: 24px;
+    --lh-tight: 1.3; --lh: 1.5;
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
+    --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-pill: 999px;
+    --dur: 120ms;
+    /* tokens:light */
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --line: #dde1e8; --line-strong: #7c8596;
+    --fg: #171a21; --muted: #545d6b; --accent: #2456d3; --accent-fg: #ffffff; --accent-dim: #e5ecfb;
+    --bad: #b42318; --bad-dim: #fdecea; --ok: #067647; --ok-dim: #e7f5ee; --star: #9a6700;
+    --focus: #2456d3; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.10);
+    --frame-bg: #ffffff; --frame-fg: #171a21; --frame-link: #2456d3;
   }
-  html[data-theme="light"] {
-    --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f0f2f5; --line: #d7dbe3;
-    --fg: #1c1f26; --muted: #5c6575; --accent: #2563eb; --accent-dim: #dbe7ff;
-    --bad: #b42318; --ok: #067647;
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      /* tokens:dark */
+      --bg: #111318; --panel: #181b22; --panel-2: #20242d; --line: #2b303b; --line-strong: #6b7486;
+    --fg: #e8eaef; --muted: #9aa3b2; --accent: #7fa8ff; --accent-fg: #0b1020; --accent-dim: #1f2a44;
+    --bad: #f28b82; --bad-dim: #3a1f22; --ok: #7fd1a0; --ok-dim: #173326; --star: #e5c07b;
+    --focus: #7fa8ff; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
+    --frame-bg: #181b22; --frame-fg: #e8eaef; --frame-link: #7fa8ff;
+    }
   }
-  html[data-density="compact"] .row-item { padding: 6px 10px; }
-  html[data-density="compact"] body { font-size: 13px; }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    /* tokens:dark */
+    --bg: #111318; --panel: #181b22; --panel-2: #20242d; --line: #2b303b; --line-strong: #6b7486;
+    --fg: #e8eaef; --muted: #9aa3b2; --accent: #7fa8ff; --accent-fg: #0b1020; --accent-dim: #1f2a44;
+    --bad: #f28b82; --bad-dim: #3a1f22; --ok: #7fd1a0; --ok-dim: #173326; --star: #e5c07b;
+    --focus: #7fa8ff; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
+    --frame-bg: #181b22; --frame-fg: #e8eaef; --frame-link: #7fa8ff;
+  }
+  @media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } }
+  html[data-density="compact"] .row-item { padding: var(--sp-1) var(--sp-3); }
+  html[data-density="compact"] body { font-size: var(--fs-sm); }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--fg);
-    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    font: var(--fs-md)/var(--lh) var(--font-sans);
     display: flex; flex-direction: column;
   }
   header {
     display: flex; align-items: center; gap: 12px;
     padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
   }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  header h1 { font-size: var(--fs-lg); margin: 0; font-weight: 600; letter-spacing: .02em; }
   header .grow { flex: 1; }
-  header .who { color: var(--muted); font-size: 13px; }
+  header .who { color: var(--muted); font-size: var(--fs-sm); }
   button {
     background: var(--accent-dim); color: var(--fg); border: 1px solid var(--line);
     border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit;
@@ -39,7 +70,7 @@
   button:hover { border-color: var(--accent); }
   button.link { background: none; border: none; color: var(--accent); padding: 0; }
   input, select {
-    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line-strong);
     border-radius: 6px; padding: 8px 10px; font: inherit;
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
@@ -50,12 +81,12 @@
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px;
   }
   #gate h2 { margin: 0 0 4px; }
-  #gate p { color: var(--muted); margin: 6px 0 16px; font-size: 13px; }
-  #gate label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  #gate p { color: var(--muted); margin: 6px 0 16px; font-size: var(--fs-sm); }
+  #gate label { display: block; font-size: var(--fs-sm); color: var(--muted); margin: 12px 0 4px; }
   #gate input { width: 100%; }
   #gate .row { display: flex; gap: 8px; margin-top: 18px; }
   #gate .row button { flex: 1; }
-  .err { color: var(--bad); font-size: 13px; min-height: 1.2em; margin-top: 10px; }
+  .err { color: var(--bad); font-size: var(--fs-sm); min-height: 1.2em; margin-top: 10px; }
 
   /* App layout */
   #app { flex: 1; display: none; min-height: 0; }
@@ -69,23 +100,23 @@
     display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px;
     border-bottom: 1px solid var(--line); align-items: center;
   }
-  .filters label { font-size: 12px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
-  .filters input[type="date"] { padding: 4px 6px; font-size: 12px; }
+  .filters label { font-size: var(--fs-xs); color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  .filters input[type="date"] { padding: 4px 6px; font-size: var(--fs-xs); }
   .filters .chip {
-    font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line);
+    font-size: var(--fs-xs); padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line);
     background: var(--panel-2); color: var(--fg); cursor: pointer;
   }
   .filters .chip.on { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
   .settings-panel {
     position: fixed; top: 52px; right: 12px; width: 320px; z-index: 20;
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.35); display: none;
+    padding: 14px; box-shadow: var(--shadow); display: none;
   }
   .settings-panel.on { display: block; }
-  .settings-panel h2 { margin: 0 0 10px; font-size: 15px; }
-  .settings-panel label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  .settings-panel h2 { margin: 0 0 10px; font-size: var(--fs-md); }
+  .settings-panel label { display: block; font-size: var(--fs-sm); color: var(--muted); margin: 10px 0 4px; }
   .settings-panel select { width: 100%; }
-  .settings-panel .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  .settings-panel .note { color: var(--muted); font-size: var(--fs-xs); margin-top: 12px; }
   .ac-wrap { position: relative; }
   .ac-list {
     position: absolute; left: 0; right: 0; top: 100%; z-index: 5;
@@ -106,10 +137,10 @@
   .row-item.sel { background: var(--accent-dim); }
   .row-item .top { display: flex; justify-content: space-between; gap: 8px; }
   .row-item .from { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row-item .date { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .row-item .date { color: var(--muted); font-size: var(--fs-xs); flex-shrink: 0; }
   .row-item .subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row-item .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .tag { display: inline-block; font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); margin-right: 4px; }
+  .row-item .meta { color: var(--muted); font-size: var(--fs-xs); margin-top: 2px; }
+  .tag { display: inline-block; font-size: var(--fs-2xs); padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); margin-right: 4px; }
   .tag.trusted { color: var(--ok); }
   .tag.untrusted { color: var(--bad); }
   .tag.out { color: var(--accent); }
@@ -117,8 +148,8 @@
 
   .reading { flex: 1; overflow-y: auto; padding: 22px 28px; min-width: 0; }
   .reading .empty { color: var(--muted); margin-top: 40px; text-align: center; }
-  .msg-head h2 { margin: 0 0 8px; font-size: 20px; }
-  .msg-head .kv { color: var(--muted); font-size: 13px; }
+  .msg-head h2 { margin: 0 0 8px; font-size: var(--fs-xl); }
+  .msg-head .kv { color: var(--muted); font-size: var(--fs-sm); }
   .msg-head .kv b { color: var(--fg); font-weight: 600; }
   .msg-body-frame {
     margin-top: 18px; padding-top: 18px; border: none; border-top: 1px solid var(--line);
@@ -129,41 +160,41 @@
   .remote-banner {
     margin-top: 18px; padding: 8px 12px; display: flex; align-items: center; gap: 10px;
     flex-wrap: wrap; background: var(--panel-2); border: 1px solid var(--line);
-    border-radius: 6px; font-size: 13px; color: var(--muted);
+    border-radius: 6px; font-size: var(--fs-sm); color: var(--muted);
   }
   .remote-banner + .msg-body-frame { margin-top: 0; }
   .attachments { margin-top: 18px; }
-  .attachments h3 { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
-  .attachments li { font-size: 13px; margin-bottom: 4px; }
-  .attachments .dl { font-size: 12px; padding: 2px 8px; margin-left: 6px; }
+  .attachments h3 { font-size: var(--fs-sm); color: var(--muted); margin: 0 0 6px; }
+  .attachments li { font-size: var(--fs-sm); margin-bottom: 4px; }
+  .attachments .dl { font-size: var(--fs-xs); padding: 2px 8px; margin-left: 6px; }
   .thread { margin-top: 24px; }
-  .thread h3 { font-size: 13px; color: var(--muted); }
+  .thread h3 { font-size: var(--fs-sm); color: var(--muted); }
   .thread .t-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; cursor: pointer; }
   .thread .t-item:hover { border-color: var(--accent); }
   .loading { color: var(--muted); padding: 12px; }
-  .compose label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  .compose label { display: block; font-size: var(--fs-sm); color: var(--muted); margin: 10px 0 4px; }
   .compose input, .compose textarea { width: 100%; }
   .compose textarea { min-height: 180px; resize: vertical; }
   .compose-editor {
     width: 100%; min-height: 220px; padding: 10px; overflow-y: auto;
-    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line-strong);
     border-radius: 6px;
   }
   .compose-editor.plain { white-space: pre-wrap; font-family: inherit; }
   .formatbar { display: flex; gap: 4px; margin: 6px 0; flex-wrap: wrap; }
   .formatbar button { min-width: 34px; padding: 4px 8px; }
-  .compose-status { color: var(--muted); font-size: 12px; margin-left: auto; align-self: center; }
+  .compose-status { color: var(--muted); font-size: var(--fs-xs); margin-left: auto; align-self: center; }
   .draft-files { list-style: none; padding: 0; margin: 8px 0; }
   .draft-files li { display: flex; gap: 8px; align-items: center; margin: 5px 0; }
-  .draft-files .progress { color: var(--muted); font-size: 12px; }
+  .draft-files .progress { color: var(--muted); font-size: var(--fs-xs); }
   .quote-preview {
     margin-top: 14px; padding: 10px; border-left: 3px solid var(--line);
     color: var(--muted); white-space: pre-wrap; max-height: 180px; overflow: auto;
   }
   .compose-actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
-  .compose-note { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
-  .sendnote { color: var(--muted); font-size: 12px; }
-  header .identity { color: var(--fg); font-size: 13px; font-weight: 600; }
+  .compose-note { color: var(--muted); font-size: var(--fs-sm); margin: 0 0 12px; }
+  .sendnote { color: var(--muted); font-size: var(--fs-xs); }
+  header .identity { color: var(--fg); font-size: var(--fs-sm); font-weight: 600; }
 
 
   /* Folder rail (#352) */
@@ -179,23 +210,23 @@
   .folders button:hover { background: var(--panel-2); }
   .folders button.active { background: var(--accent-dim); color: var(--accent); }
   .folders .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .folders .fcount { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .folders .fcount { color: var(--muted); font-size: var(--fs-xs); flex-shrink: 0; }
   .folders .fcount.unread { color: var(--accent); font-weight: 600; }
   /* Role queues (#425): their own group, never mixed into the personal folders. */
   .folders .fgroup {
-    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    color: var(--muted); font-size: var(--fs-2xs); text-transform: uppercase;
     letter-spacing: .06em; padding: 10px 10px 4px; border-top: 1px solid var(--line);
     margin-top: 6px;
   }
-  .queue-note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .queue-note { color: var(--muted); font-size: var(--fs-xs); margin-top: 8px; }
   .row-item.unread .from, .row-item.unread .subject { font-weight: 700; }
   .row-item .star { color: var(--muted); margin-right: 4px; }
-  .row-item .star.on { color: #e5c07b; }
+  .row-item .star.on { color: var(--star); }
   .msg-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 
   /* Keyboard focus visibility (a11y foundation): a clear ring for keyboard users
      on every interactive control, without a persistent outline on mouse click. */
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .row-item:focus-visible { outline-offset: -2px; }
 
   /* Sign-in card shares the gate look. */
@@ -204,12 +235,12 @@
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px;
   }
   #signin h2 { margin: 0 0 4px; }
-  #signin p { color: var(--muted); margin: 6px 0 16px; font-size: 13px; }
-  #signin label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  #signin p { color: var(--muted); margin: 6px 0 16px; font-size: var(--fs-sm); }
+  #signin label { display: block; font-size: var(--fs-sm); color: var(--muted); margin: 12px 0 4px; }
   #signin input { width: 100%; }
   #signin .row { display: flex; gap: 8px; margin-top: 18px; }
   #signin .row button { flex: 1; }
-  .switch { margin: 14px 0 0; font-size: 13px; }
+  .switch { margin: 14px 0 0; font-size: var(--fs-sm); }
   .switch button { font: inherit; }
 </style>
 </head>
@@ -222,6 +253,7 @@
   <span class="who" id="who"></span>
   <span class="sendnote" id="sendNote" style="display:none"></span>
   <button id="composeBtn" style="display:none">Compose</button>
+  <button id="themeBtn" type="button" class="link" aria-label="Theme: match system" title="Theme: match system">Theme</button>
   <button id="settingsBtn" class="link" style="display:none">Settings</button>
   <button id="logout" class="link" style="display:none">Sign out</button>
 </header>
@@ -229,8 +261,9 @@
   <h2>Settings</h2>
   <label for="themeSelect">Theme</label>
   <select id="themeSelect" aria-label="Theme">
-    <option value="dark">Dark</option>
+    <option value="system">Match system</option>
     <option value="light">Light</option>
+    <option value="dark">Dark</option>
   </select>
   <label for="densitySelect">Density</label>
   <select id="densitySelect" aria-label="Density">
@@ -336,20 +369,38 @@
 
   // --- session state ---------------------------------------------------------
   var SS = window.sessionStorage;
-  var LS = window.localStorage;
+  var LS = (function () { try { return window.localStorage; } catch (_) { return null; } })();
   var SEARCH_MODES = ["fts", "semantic", "hybrid"];
   function normalizeSearchMode(v) {
     return SEARCH_MODES.indexOf(v) >= 0 ? v : "hybrid";
   }
+  // Theme (#794): "system" (default, follows prefers-color-scheme), "light" or "dark".
+  // localStorage can throw (private mode, blocked storage); a pref is a convenience, so
+  // a failed read falls back to the default and a failed write is ignored.
+  var THEMES = ["system", "light", "dark"];
+  var THEME_LABEL = { system: "match system", light: "light", dark: "dark" };
+  function prefGet(k) { try { return LS.getItem(k); } catch (_) { return null; } }
+  function prefSet(k, v) { try { LS.setItem(k, v); } catch (_) {} }
+  function themePref() {
+    var t = prefGet("postern_theme");
+    return THEMES.indexOf(t) >= 0 ? t : "system";
+  }
+  var DARK_MQ = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
   function applyChromePrefs() {
-    var theme = LS.getItem("postern_theme") === "light" ? "light" : "dark";
-    var density = LS.getItem("postern_density") === "compact" ? "compact" : "comfortable";
+    var theme = themePref();
+    var density = prefGet("postern_density") === "compact" ? "compact" : "comfortable";
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.setAttribute("data-density", density);
     if ($("themeSelect")) $("themeSelect").value = theme;
     if ($("densitySelect")) $("densitySelect").value = density;
+    var tb = $("themeBtn");
+    if (tb) {
+      var label = "Theme: " + THEME_LABEL[theme];
+      tb.setAttribute("aria-label", label);
+      tb.setAttribute("title", label);
+    }
+    retintPlainFrames();
   }
-  applyChromePrefs();
   var state = {
     origin: SS.getItem("postern_origin") || "",
     token: SS.getItem("postern_token") || "",
@@ -745,6 +796,42 @@
 
   // Build the sandboxed body iframe + (when content was blocked) the opt-in banner.
   // Returns a container node; the iframe stays sandbox="" in every path.
+  // Frame palette (#794). Plain text follows the app theme; HTML mail is authored for a
+  // light canvas, so it always gets the light palette. Values are read from the page own
+  // tokens and constrained to a color grammar before they enter the srcdoc style, so no
+  // value can close the style element or add a declaration.
+  var FRAME_LIGHT = { bg: "#ffffff", fg: "#171a21", link: "#2456d3" };
+  function cssColor(v, fallback) {
+    v = String(v || "").trim();
+    return /^#[0-9a-fA-F]{3,8}$/.test(v) ? v : fallback;
+  }
+  function framePalette(light) {
+    if (light) return FRAME_LIGHT;
+    var cs = window.getComputedStyle(document.documentElement);
+    return {
+      bg: cssColor(cs.getPropertyValue("--frame-bg"), "#ffffff"),
+      fg: cssColor(cs.getPropertyValue("--frame-fg"), "#171a21"),
+      link: cssColor(cs.getPropertyValue("--frame-link"), "#2456d3")
+    };
+  }
+  function frameBaseStyle(light) {
+    var p = framePalette(light);
+    return "<style>html,body{margin:0}body{font:14px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;" +
+      "word-wrap:break-word;padding:16px;color:" + p.fg + ";background:" + p.bg +
+      (light ? "" : ";white-space:pre-wrap") +
+      "}a{color:" + p.link + "}img{max-width:100%;height:auto}</style>";
+  }
+  function retintPlainFrames() {
+    var frames = document.querySelectorAll("iframe.msg-body-frame[data-plain]");
+    Array.prototype.forEach.call(frames, function (f) {
+      if (typeof f._posternInner !== "string") return;
+      var doc = f.getAttribute("srcdoc") || "";
+      var start = doc.indexOf("<style>"), end = doc.indexOf("</style>");
+      if (start < 0 || end < start) return;
+      f.setAttribute("srcdoc", doc.slice(0, start) + frameBaseStyle(false) + doc.slice(end + 8));
+    });
+  }
+
   function renderBody(m) {
     var wrap = el("div", { class: "body-wrap" });
     var hasHtml = !!(m && m.bodyHtml);
@@ -752,10 +839,7 @@
     // renders HTML mail on white), so use white + dark text for the HTML case to
     // avoid dark-on-dark unreadable bodies. Plain text keeps the app's dark theme.
     function baseStyle(light) {
-      return "<style>html,body{margin:0}body{font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;" +
-        "word-wrap:break-word;padding:10px" +
-        (light ? ";color:#1a1a1a;background:#ffffff" : ";color:#e7e9ee;background:#1c1f26;white-space:pre-wrap") +
-        "}a{color:#6ea8fe}img{max-width:100%;height:auto}</style>";
+      return frameBaseStyle(light);
     }
     // Defense in depth for the message iframe (#409). sandbox="" (no scripts, no
     // same-origin, no forms) is the primary isolation and the served-page CSP is
@@ -773,6 +857,9 @@
         '</head><body>' + inner + '</body></html>';
       var f = document.createElement("iframe");
       f.className = "msg-body-frame";
+      // Plain-text frames follow the app theme (#794); keep the inner so a theme change
+      // can rebuild the srcdoc with the new palette (retintPlainFrames).
+      if (!light) { f.setAttribute("data-plain", "1"); f._posternInner = inner; }
       f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
       f.setAttribute("referrerpolicy", "no-referrer");
       f.setAttribute("srcdoc", doc);
@@ -1863,11 +1950,21 @@
     $("settingsPanel").classList.toggle("on");
   });
   $("themeSelect").addEventListener("change", function (e) {
-    LS.setItem("postern_theme", e.target.value === "light" ? "light" : "dark");
+    prefSet("postern_theme", THEMES.indexOf(e.target.value) >= 0 ? e.target.value : "system");
     applyChromePrefs();
   });
+  $("themeBtn").addEventListener("click", function () {
+    var next = THEMES[(THEMES.indexOf(themePref()) + 1) % THEMES.length];
+    prefSet("postern_theme", next);
+    applyChromePrefs();
+  });
+  if (DARK_MQ) {
+    var onScheme = function () { if (themePref() === "system") retintPlainFrames(); };
+    if (DARK_MQ.addEventListener) DARK_MQ.addEventListener("change", onScheme);
+    else if (DARK_MQ.addListener) DARK_MQ.addListener(onScheme);
+  }
   $("densitySelect").addEventListener("change", function (e) {
-    LS.setItem("postern_density", e.target.value === "compact" ? "compact" : "comfortable");
+    prefSet("postern_density", e.target.value === "compact" ? "compact" : "comfortable");
     applyChromePrefs();
   });
   $("signinForm").addEventListener("submit", function (e) { e.preventDefault(); signIn(); });
@@ -1911,6 +2008,7 @@
     if (state.q) resetAndLoad();
   });
   syncFilterChips();
+  applyChromePrefs();
   // --- boot: prefer a live native session, else BYO-token, else the right gate -----
   // GET /api/session (same-origin, cookie) tells us: a live session (restore it), or
   // the configured backend so we show the sign-in form (native) or token gate (off).
