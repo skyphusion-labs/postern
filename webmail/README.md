@@ -295,7 +295,9 @@ full thread for reading.
 
 Recent-recipients autocomplete (`GET /api/recipients/recent`) is D-CONTACTS-1:
 outbound to/cc/bcc for one bound identity (session) or an explicit `viewer=` on
-BYO. It is never estate-wide when unbound.
+BYO. It is never estate-wide when unbound. The page autocompletes on `address`.
+Each entry also carries `displayName`, `lastUsedAt`, and `messageCount` (#805);
+the page does not render those.
 
 Settings (theme: system, light or dark; density) live in `localStorage`. Remote images remain blocked
 by CSP (`img-src 'self' data:` only) plus body neutralization; the settings panel

@@ -246,3 +246,35 @@ CREATE TABLE IF NOT EXISTS mailbox_uid_counter (
   next_uid    INTEGER NOT NULL,
   uidvalidity INTEGER NOT NULL
 );
+
+-- Runtime agent identities (#801, migration 0016). sha256 token HASH only, never the
+-- token; `id` is stable and never reused; revocation sets revoked_at (rows are never
+-- deleted). Operator-minted only. See inbound/src/agentidentities.ts.
+CREATE TABLE IF NOT EXISTS agent_identities (
+  id           TEXT PRIMARY KEY,
+  token_hash   TEXT NOT NULL UNIQUE,
+  from_addr    TEXT NOT NULL,
+  display_name TEXT,
+  label        TEXT,
+  scopes       TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  revoked_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_identities_created ON agent_identities(created_at, id);
+
+-- Generic audit log (#801, migration 0016): one row per action with actor, target and
+-- outcome. #801 writes identity mint/list/revoke; #740 extends it to agent actions on
+-- another identity's mail.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  at          TEXT NOT NULL,
+  actor_kind  TEXT NOT NULL,
+  actor_id    TEXT,
+  action      TEXT NOT NULL,
+  target_kind TEXT,
+  target_id   TEXT,
+  outcome     TEXT NOT NULL,
+  detail      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_id, id);
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(target_id, id);

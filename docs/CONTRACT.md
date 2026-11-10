@@ -432,7 +432,7 @@ alike: were it present only on a miss, its presence would itself be the existenc
 
 Clients relay it rather than interpret it. In `@skyphusion/postern-mcp` it rides on `mailbox_get`
 (including `found: false`), `mailbox_get_attachment`, `mailbox_thread`, `mailbox_folders`,
-`mailbox_list`, `mailbox_search` and `mailbox_whoami`. In `postern-client` (Python) it rides on
+`mailbox_recipients_recent`, `mailbox_list`, `mailbox_search` and `mailbox_whoami`. In `postern-client` (Python) it rides on
 `get_message_envelope`, `get_folders_envelope` and `get_thread_page`, with `get_message` and
 `get_folders` kept as lossy projections of the first two for existing callers, and the `postern get`
 and `postern folders` CLI commands emit the envelope (#730). An absent field means the worker sent
@@ -572,6 +572,14 @@ store.put(direction: "outbound")`. The sent copy lands in the same store, so thr
 prefixes `Re:` (collapsing an existing prefix), and rebuilds `In-Reply-To` / `References` from
 **stored state, not caller input**, so a reply cannot be pointed at an arbitrary thread.
 
+`send()`, `reply()`, and a forward (`forwardMessageId` on `send`) return
+`{ messageId, threadId, from, providerMessageId? }`. `from` is the address actually used,
+after identity binding and the domain check, and it is the same address stored on the
+outbound copy. A registry token that passed a different `from` still sees its bound
+address here (#804). `POST /api/send`, `POST /send`, `POST /api/reply`, and
+`POST /api/drafts/{id}/send` all return that object (`{ ok: true, ... }`). An unbound
+token reports the address it honored (the caller `from`, or `DEFAULT_FROM`).
+
 ---
 
 ## 4. The one mailbox API
@@ -587,24 +595,24 @@ none touches D1 directly (#25, #26).
 | GET | `/api/messages/{messageId}/attachments/{i}` | attachment bytes | M1 |
 | GET | `/api/threads/{threadId}?limit=&cursor=` | one BOUNDED page of a thread, oldest first: `{ok, threadId, messages, cursor}`. Default 20, max 200. `cursor: null` is the POSITIVE claim that this is the whole thread, so a non-null cursor means first page, not thread | M1 (done) / #649 |
 | GET | `/api/search?q=&mode=fts\|substr\|semantic\|hybrid&field=&fields=&to=&from=&direction=&lens=&seenFor=&mailbox=&after=&before=&hasAttachment=&seen=&limit=&cursor=` | search (fts + substr + semantic + hybrid); common filters apply in every mode (#354), and `direction` / `lens` / `seenFor` / `fields` mean exactly what they do on `/api/messages` (#403/#404/#646). Mind the pair: `field` (singular) = the substr COLUMN matched, `fields` (plural) = the summary keys RETURNED. `cursor` pages `fts` and `substr` only; on `semantic` and `hybrid` it is refused (`E_VALIDATION_ERROR`, 400), never dropped (#803) | M1 / M4 / M9 / webmail v2 (#212/#354) / #403 / #404 / #646 / #803 |
-| GET | `/api/recipients/recent?viewer=&limit=` | recent outbound To/Cc/Bcc addresses for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound | webmail v2 (#354) |
+| GET | `/api/recipients/recent?viewer=&to=&limit=` | recent outbound To/Cc/Bcc correspondents for the session-bound identity, or an explicit `viewer=`/`to=` on BYO; never estate-wide unbound. Each entry is `{address, displayName, lastUsedAt, messageCount}`. `scanLimited: true` means the 200-row scan stopped and `messageCount` omits older mail (#805) | webmail v2 (#354) / #805 |
 | GET | `/api/mobileconfig?user=&username=&name=` | per-user Apple .mobileconfig profile (iOS Mail one-tap setup) | M9 (#187) |
 | GET/POST/DELETE | `/api/session` | webmail native session: POST signs in `{username,password}` -> `Set-Cookie` + identity + caps + CSRF token; GET is whoami/restore; DELETE signs out | webmail v2 (#352) |
 | POST | `/api/session/refresh` | explicit session extend (a sliding refresh also happens on any authed request) | webmail v2 (#352) |
 | POST | `/api/session/password` | self-service change password `{currentPassword, newPassword}`: cookie session + CSRF only (a Bearer is `403 E_SESSION_REQUIRED`), throttled on the sign-in keys, rotates this session and ends the others | #790 |
 | GET | `/api/session` | the COOKIE whoami. A Bearer holder cannot reach it; `GET /api/whoami` above is the token-reachable equivalent | webmail v2 (#352) |
-| POST | `/api/send` | send (body = `SendRequest`) | M2 (done) |
-| POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments | M2 / webmail v2 (#353) |
+| POST | `/api/send` | send (body = `SendRequest`). Response `from` is the address actually used, the same one stored on the sent copy (#804) | M2 (done) / #804 |
+| POST | `/api/reply` | reply to `{messageId, mode?: "reply"\|"replyAll", quoteOriginal?, html?, text?, attachments?}`; core derives recipients, excludes/dedupes self for reply-all, fills subject/thread headers, and carries attachments. Response `from` is the address actually used (#804) | M2 / webmail v2 (#353) / #804 |
 | POST | `/api/messages/seen` | mark `{ids: string[], seen: boolean, for?: address}` (un)read; returns `{updated}` (READ-scoped, #seen). Under SESSION auth the viewer is FORCED to the bound identity and a mismatched `for` is `403 E_FORBIDDEN` (#410) | (#seen) |
 | POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
 | POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
 | GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts; durable folders also return `uidValidity` | webmail v2 (#352) |
-| GET | `/api/whoami` | the caller identity and the scope the SERVER imposes on its reads: `{identity, identityScope, roleQueues, capabilities, via}`. `read`-scoped and Bearer-reachable, which `/api/session` is not. `identityScope` is the SAME projection the two read routes emit; `capabilities` is derived by asking the live gate about each scope. Takes no parameters, so it reports the scope a BARE read would get | #650 |
+| GET | `/api/whoami` | the caller identity and the scope the SERVER imposes on its reads: `{identity, identityId, identityScope, roleQueues, capabilities, via}` (`identityId` is the stable id of a runtime agent identity, #801, else `null`). `read`-scoped and Bearer-reachable, which `/api/session` is not. `identityScope` is the SAME projection the two read routes emit; `capabilities` is derived by asking the live gate about each scope. Takes no parameters, so it reports the scope a BARE read would get | #650 |
 | GET/POST | `/api/drafts` | list or create an identity-owned server-side draft | webmail v2 (#352) |
 | GET/PUT/DELETE | `/api/drafts/{id}` | read, optimistic-concurrency replace, or discard own draft | webmail v2 (#352) |
 | GET/POST | `/api/drafts/{id}/attachments` | list or stage raw attachment bytes for an identity-owned draft | webmail v2 (#353) |
 | DELETE | `/api/drafts/{id}/attachments/{attachmentId}` | remove one staged attachment and its R2 bytes | webmail v2 (#353) |
-| POST | `/api/drafts/{id}/send` | load staged attachments, send through the one send core, then remove the draft and staging only after success | webmail v2 (#352/#353) |
+| POST | `/api/drafts/{id}/send` | load staged attachments, send through the one send core, then remove the draft and staging only after success. Response `from` is the address actually used (#804) | webmail v2 (#352/#353) / #804 |
 | GET/POST/PUT/DELETE | `/api/imap/drafts[/{id}]` | IMAP-service draft projection for an explicitly asserted, already-authenticated identity; PUT is the autosave revision, mirroring `PUT /api/drafts/{id}` | webmail v2 (#352) |
 | POST | `/api/imap/import` | preserve a genuine Sent/Trash/Junk/Archive APPEND from raw MIME without transmitting it; `rawMime` decoding past **22 MiB** is `413 E_PAYLOAD_TOO_LARGE` BEFORE the MIME is parsed | webmail v2 (#352/#493) |
 | DELETE | `/api/messages/{messageId}` | irreversible hard-delete + attachments + Vectorize tombstone (`delete` or `both` scope). A webmail session may delete only mail already in the trash: its own untrashed mail answers `409 E_NOT_IN_TRASH`, an unreadable or absent id answers one `404`, both under `identityScope` (see 10.9.1) | (#278/#352/#731/#745) |
@@ -614,6 +622,9 @@ none touches D1 directly (#25, #26).
 | GET/POST | `/api/admin/users` | list users (keyset `limit`/`cursor`, never a hash) or create one (never overwrites: `409 E_CONFLICT`; a generated password is returned once). See webmail-v2-contracts 1.10.4 | #790 |
 | GET/PATCH/DELETE | `/api/admin/users/{username}` | show, change `{disabled?, displayName?, from?}`, or delete a user. Disable, a `from` change and delete end the user's webmail sessions | #790 |
 | POST | `/api/admin/users/{username}/password` | operator reset `{password?}`: ends the user's sessions, clears the account lockout | #790 |
+| GET/POST | `/api/admin/identities` | list runtime agent identities (keyset `limit`/`cursor`, `includeRevoked=1`; never a token or hash) or mint one `{from, scopes, displayName?, label?}` (`201`, the token is returned ONCE and never again). Scopes: `read`, `send`, `organize`; anything else is `400`. A runtime identity never reaches `/api/admin/*`. See SEND-IDENTITIES.md section 10 | #801 |
+| DELETE | `/api/admin/identities/{id}` | revoke an identity; the next request with its token is `401`. Idempotent | #801 |
+| GET | `/api/admin/audit` | the audit log, newest first (keyset `limit`/`cursor`): actor, action, target, outcome, detail; refusals included | #801 |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 | POST | `/api/admin/reproject` | refill `projected_size` after a `PROJECTION_VERSION` bump (one keyset page; body: `cursor?`, `limit?`, `dryRun?`, `countOnly?`) | #507 / #520 |
 | POST | `/api/admin/reconcile` | read-only orphan-vector audit (admin; spans the estate) | #134 |
@@ -1354,6 +1365,17 @@ substr:
 `to` / `cc` / `bcc` for **one** identity. Session mode uses the bound identity; BYO requires
 explicit `viewer=` (or `to=`). Unbound BYO without a viewer returns validation error -- never
 an estate-wide contact dump. No recipients table; see 10.7.
+
+Each correspondent is `{ address, displayName, lastUsedAt, messageCount }` (#805).
+`address` is the bare mailbox. `displayName` is taken from the newest scanned header
+that carried one, and is null when every header in the scan was a bare address.
+`lastUsedAt` is the date of the newest outbound message in the scan that named the
+address. `messageCount` is how many of those scanned messages named it; one message
+counts once even when the address is on more than one of to, cc, and bcc. The scan
+is the newest 200 outbound messages from that identity. When the response includes
+`scanLimited: true`, the scan stopped at that cap and `messageCount` does not include
+older mail. The flag is omitted when the scan saw every outbound row. The caller's
+own address is not a correspondent of itself. Inbound mail is not part of this list.
 
 Thread search vs thread panel: `/api/search` finds matching messages; `GET /api/threads/{id}`
 still returns every stored sibling for the viewer (filter chips do not trim the thread panel).

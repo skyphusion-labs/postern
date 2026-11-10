@@ -26,6 +26,7 @@ import type {
   SearchMode,
   SendInput,
   ReadScopeReport,
+  RecentRecipient,
   SendResult,
   ViewLens,
   WhoAmI,
@@ -378,6 +379,31 @@ export class PosternClient {
     };
   }
 
+  /**
+   * GET /api/recipients/recent. Recent outbound correspondents for one identity.
+   *
+   * A bound token owns the answer and the worker ignores `viewer` and `to`. An
+   * unbound token must name one of them or the worker refuses. This client
+   * forwards what it was given and does not decide which of those happened.
+   * `scanLimited` is copied only when the worker set it: inventing `false`
+   * would claim the count covered every outbound message.
+   */
+  async recentRecipients(
+    args: { viewer?: string; to?: string; limit?: number } = {},
+  ): Promise<{ recipients: RecentRecipient[]; identityScope?: ReadScopeReport; scanLimited?: boolean }> {
+    const params: Record<string, string> = {};
+    if (args.viewer) params.viewer = args.viewer;
+    if (args.to) params.to = args.to;
+    if (args.limit !== undefined) params.limit = String(args.limit);
+    const body = await this.requestGet("/api/recipients/recent", params);
+    const out: { recipients: RecentRecipient[]; identityScope?: ReadScopeReport; scanLimited?: boolean } = {
+      recipients: (body.recipients as RecentRecipient[]) ?? [],
+    };
+    if (body.identityScope) out.identityScope = body.identityScope as ReadScopeReport;
+    if (body.scanLimited === true) out.scanLimited = true;
+    return out;
+  }
+
   // GET /api/whoami (worker #650). The worker is the authority on every field: the scope
   // it reports is derived from the resolution its own gate used, so this method forwards
   // nothing and interprets nothing. There is deliberately no client-side fallback for an
@@ -531,9 +557,13 @@ export class PosternClient {
   }
 
   private asSendResult(body: Record<string, any>): SendResult {
+    // Relay `from` only when the worker sent a string. Defaulting a missing one
+    // to "" would tell the caller an address was used when the worker said nothing.
+    const from = typeof body.from === "string" && body.from !== "" ? body.from : undefined;
     return {
       messageId: String(body.messageId ?? ""),
       threadId: String(body.threadId ?? ""),
+      ...(from !== undefined ? { from } : {}),
       providerMessageId: body.providerMessageId ? String(body.providerMessageId) : undefined,
     };
   }

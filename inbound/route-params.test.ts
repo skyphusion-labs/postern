@@ -34,7 +34,13 @@ const PARAMS = JSON.parse(
   readFileSync(new URL("../contracts/api-params.json", import.meta.url), "utf8"),
 ) as { version: number; params: Record<string, { query?: string[]; body?: string[]; note?: string }> };
 
-const API_SRC = readFileSync(new URL("./src/api.ts", import.meta.url), "utf8");
+// Every handler module that reads query parameters, not api.ts alone. Scanning only api.ts
+// was a blind spot: useradmin.ts (#790) reads limit and cursor, and the two arms below
+// passed only because api.ts happens to read the same names elsewhere. #801 added
+// includeRevoked in agentidentities.ts, which an api.ts-only scan reports as "invented".
+const API_SRC = ["./src/api.ts", "./src/useradmin.ts", "./src/agentidentities.ts"]
+  .map((p) => readFileSync(new URL(p, import.meta.url), "utf8"))
+  .join("\n");
 const TOKEN = "test-token";
 const ME = "me@skyphusion.org";
 const ALICE = "alice@example.com";
@@ -427,6 +433,7 @@ describe("#417 the two contract files join", () => {
       "message-get", "message-delete", "mobileconfig", "whoami",
       "admin-smtp-credential-delete", "admin-roles", "imap-roles",
       "admin-user-get", "admin-user-delete",
+      "admin-identity-revoke",
     ];
     const withRows = new Set(Object.keys(PARAMS.params));
     const all = ROUTES.routes.map((r) => r.id);

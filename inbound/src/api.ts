@@ -31,6 +31,12 @@ import { serveWebmail } from "./webmail";
 import { authenticate } from "./smtpcreds";
 import { handleCredentialDelete, handleCredentialUpsert, handleUserAdmin } from "./useradmin";
 import { handleSetup } from "./setup";
+import {
+  IdentityStoreUnavailable,
+  handleAdminIdentities,
+  handleAudit,
+  resolveRuntimeIdentity,
+} from "./agentidentities";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
@@ -213,7 +219,20 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
   // per route/method (#85). An absent or unknown token is 401; a known token used
   // outside its scope is 403. With only POSTERN_API_TOKEN set it resolves to `both`
   // and every route is permitted, exactly as before this change.
-  const resolution = await resolveToken(request, env);
+  let resolution: AuthResolution | null;
+  try {
+    resolution = await resolveToken(request, env);
+  } catch (err) {
+    // The runtime identity table could not be read (#801). 503, never 401: a client that
+    // reads 401 as "revoked" would throw away a live credential during a D1 outage.
+    if (err instanceof IdentityStoreUnavailable) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "E_AUTH_UNAVAILABLE", message: "credential store temporarily unavailable" }),
+        { status: 503, headers: { "content-type": "application/json", "retry-after": "30" } },
+      );
+    }
+    throw err;
+  }
   if (resolution === null) {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
@@ -396,6 +415,19 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return await handleCredentialDelete(env, credMatch[1]);
     }
 
+    // --- runtime agent identities (#801) ---
+    // Operator mint / list / revoke and the audit log, all under `admin`. Each handler
+    // serves ONLY the methods its routes.ts rows declare and returns null otherwise,
+    // because a method with no row has no scope gate in front of it.
+    if (path === "/api/admin/identities" || path.startsWith("/api/admin/identities/")) {
+      const ires = await handleAdminIdentities(request, env, url);
+      if (ires) return ires;
+    }
+    if (path === "/api/admin/audit") {
+      const ares = await handleAudit(request, env, url);
+      if (ares) return ares;
+    }
+
     // --- admin: human user management (#790, contract 1.10.4) ---
     // Operator routes past the scope gate above, so only `both` reaches them. List,
     // create (never overwrites), show, PATCH (disable / displayName / from), reset
@@ -442,6 +474,9 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // "this credential is not bound to an identity" -- never an omitted field, so a
         // caller never has to read absence as a value.
         identity: member ?? null,
+        // The stable id of a RUNTIME agent identity (#801), the one its own revoke and the
+        // audit log name; null for a static token, an env-registry entry, or a session.
+        identityId: resolution.identityId ?? null,
         // `role` is null BY CONSTRUCTION: a role view exists only when a read NAMES a
         // queue with to=, and this route takes no parameters. So this is the scope a BARE
         // read gets, which is the one a caller cannot work out for itself.
@@ -870,13 +905,17 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
-      const recipients = await store.recentRecipients(env, identity, parseLimit(url) ?? 25);
+      const { recipients, scanLimited } = await store.recentRecipients(env, identity, parseLimit(url) ?? 25);
       // Scoped on `bound` only, for the reason in scopeReportOf: an `explicit` viewer is
       // the CALLER's narrowing, and echoing it back as an imposed scope would turn this
       // field into a mirror of the request instead of a statement about authority (#717).
+      // `scanLimited` is omitted when the scan saw every outbound row. Present only
+      // when true, same rule as `complete: false`: the flag is the caveat, and a
+      // false here would read as a positive claim the LIMIT cannot make.
       return json({
         ok: true,
         identityScope: readScopeReport(bound || undefined, null),
+        ...(scanLimited ? { scanLimited: true } : {}),
         recipients,
       });
     }
@@ -2036,6 +2075,8 @@ function transportAuthorized(request: Request, env: Env): boolean {
 // #718 turns on, so it is corrected rather than left to mislead the next reader.
 interface AuthResolution extends TokenResolution {
   caps?: string[];
+  /** Set only for a RUNTIME agent identity (#801): its stable agent_identities id. */
+  identityId?: string;
   viaSession?: boolean;
   csrfHash?: string;
 }
@@ -2231,6 +2272,16 @@ async function resolveToken(request: Request, env: Env): Promise<AuthResolution 
     // read-only (audit note). Never use static `both` here (no delete/admin).
     const scope: Scope = hit.caps.includes("send") ? "send" : "read";
     return { scope, identity: hit.identity, caps: [...hit.caps] };
+  }
+  //   3. Runtime agent identities (#801): minted through the API, stored as a sha256 hash
+  //      in D1. Consulted LAST, so a static token and an env-registry entry resolve
+  //      exactly as before and an existing deploy is untouched. Read on every request
+  //      with no cache, which is what makes a revoke take effect on the next request.
+  //      A read failure throws IdentityStoreUnavailable (503 at the gate), never null.
+  const runtime = await resolveRuntimeIdentity(env, got, allowedDomain);
+  if (runtime) {
+    const scope: Scope = runtime.caps.includes("send") ? "send" : "read";
+    return { scope, identity: runtime.identity, caps: [...runtime.caps], identityId: runtime.id };
   }
   return null;
 }

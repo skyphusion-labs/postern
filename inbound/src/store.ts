@@ -885,18 +885,37 @@ export function shouldVectorize(allowlist: string[], direction: "inbound" | "out
   return recipients.some((r) => allowlist.includes(r));
 }
 
+/** One address from a stored header field, plus the display name on that part.
+ *
+ *  The address half is what `parseRecipients` has always returned. The name is
+ *  the text before `<...>`, quotes stripped, or null when the part was bare.
+ *  Same splitter as before, so a comma inside a quoted name still splits: this
+ *  does not become a new parser. */
+export function parseRecipientParts(field: string): { address: string; displayName: string | null }[] {
+  const out: { address: string; displayName: string | null }[] = [];
+  for (const part of field.split(",")) {
+    // [^<>] (not [^>]) so failed attempts cannot rescan overlapping spans;
+    // with [^>]+ a sender-controlled to_addr full of "<" is quadratic (ReDoS, alert #26).
+    const angle = part.match(/^([^<>]*)<([^<>]+)>/);
+    if (angle) {
+      let name = angle[1].trim();
+      if (name.length >= 2 && name.startsWith('"') && name.endsWith('"')) {
+        name = name.slice(1, -1).trim();
+      }
+      const address = angle[2].trim().toLowerCase();
+      if (address) out.push({ address, displayName: name || null });
+      continue;
+    }
+    const address = part.trim().toLowerCase();
+    if (address) out.push({ address, displayName: null });
+  }
+  return out;
+}
+
 /** Extract bare lower-cased addresses from a stored to_addr (which may be a
  *  comma-list and/or carry display names), for the backfill gate. */
 export function parseRecipients(toAddr: string): string[] {
-  return toAddr
-    .split(",")
-    .map((part) => {
-      // [^<>] (not [^>]) so failed attempts cannot rescan overlapping spans;
-      // with [^>]+ a sender-controlled to_addr full of "<" is quadratic (ReDoS, alert #26).
-      const angle = part.match(/<([^<>]+)>/);
-      return (angle ? angle[1] : part).trim().toLowerCase();
-    })
-    .filter(Boolean);
+  return parseRecipientParts(toAddr).map((p) => p.address);
 }
 
 /** Build the deduped, bare, lower-cased delivered-recipient list for delivered_to
@@ -3113,50 +3132,81 @@ export class SearchCursorRefused extends Error {
   }
 }
 
+/** Newest outbound rows one recent-recipient scan reads. The fake in
+ *  `inbound/fakes.ts` slices to this same number; the two have to move together. */
+export const RECENT_RECIPIENT_SCAN = 200;
+
 export interface RecentRecipient {
   address: string;
+  /** Display name from the newest header in the scan that carried one, else null. */
+  displayName: string | null;
+  /** Date of the newest outbound message in the scan that named this address. */
   lastUsedAt: string;
+  /** How many scanned outbound messages named this address. One message counts once
+   *  even when the address is on more than one of to/cc/bcc. */
+  messageCount: number;
 }
 
 /**
- * D-CONTACTS-1 (#354): recent recipients for ONE bound identity, derived from
+ * D-CONTACTS-1 (#354, #805): recent recipients for ONE bound identity, derived from
  * that identity's outbound to/cc/bcc. Never estate-wide -- caller MUST pass the
  * owning From address (session identity or explicit viewer).
+ *
+ * `scanLimited` is true when the query returned a full scan window, so
+ * `messageCount` may omit older mail. Exactly `RECENT_RECIPIENT_SCAN` rows also
+ * reports limited: the LIMIT hides whether one more row existed.
  */
 export async function recentRecipients(
   env: Env,
   identity: string,
   limit = 25,
-): Promise<RecentRecipient[]> {
+): Promise<{ recipients: RecentRecipient[]; scanLimited: boolean }> {
   const owner = identity.trim().toLowerCase();
-  if (!owner) return [];
+  if (!owner) return { recipients: [], scanLimited: false };
   const cap = Math.min(Math.max(1, Math.floor(limit)), 50);
   // Over-fetch outbound rows; dedupe addresses in memory by most-recent use.
+  // The scan is finished even after `cap` unique addresses, so a count for an
+  // address already accepted still includes its later rows. Stopping at `cap`
+  // would report messageCount 1 for anyone mailed twice outside the first hit.
   const res = await env.DB.prepare(
     `SELECT to_addr, cc_addr, bcc_addr, date FROM messages
       WHERE direction = 'outbound' AND lower(from_addr) = ?
       ORDER BY date DESC, id DESC
-      LIMIT 200`,
+      LIMIT ${RECENT_RECIPIENT_SCAN}`,
   )
     .bind(owner)
     .all<{ to_addr: string | null; cc_addr: string | null; bcc_addr: string | null; date: string }>();
 
-  const seen = new Map<string, string>();
-  for (const row of res.results ?? []) {
-    const fields = [row.to_addr, row.cc_addr, row.bcc_addr];
-    for (const field of fields) {
+  const rows = res.results ?? [];
+  const order: string[] = [];
+  const byAddr = new Map<string, RecentRecipient>();
+  for (const row of rows) {
+    const inRow = new Map<string, string | null>();
+    for (const field of [row.to_addr, row.cc_addr, row.bcc_addr]) {
       if (!field) continue;
-      for (const addr of parseRecipients(field)) {
-        const key = addr.toLowerCase();
-        if (!key || key === owner || seen.has(key)) continue;
-        seen.set(key, row.date);
-        if (seen.size >= cap) {
-          return [...seen.entries()].map(([address, lastUsedAt]) => ({ address, lastUsedAt }));
-        }
+      for (const part of parseRecipientParts(field)) {
+        if (!part.address || part.address === owner) continue;
+        const prev = inRow.get(part.address);
+        if (prev === undefined) inRow.set(part.address, part.displayName);
+        else if (!prev && part.displayName) inRow.set(part.address, part.displayName);
+      }
+    }
+    for (const [address, displayName] of inRow) {
+      const existing = byAddr.get(address);
+      if (!existing) {
+        if (order.length >= cap) continue;
+        order.push(address);
+        byAddr.set(address, { address, displayName, lastUsedAt: row.date, messageCount: 1 });
+      } else {
+        existing.messageCount += 1;
+        if (!existing.displayName && displayName) existing.displayName = displayName;
       }
     }
   }
-  return [...seen.entries()].map(([address, lastUsedAt]) => ({ address, lastUsedAt }));
+  return {
+    recipients: order.map((address) => byAddr.get(address)!),
+    scanLimited: rows.length >= RECENT_RECIPIENT_SCAN,
+  };
 }
 
 // --- Backfill / re-embed the existing mailbox (#116 ws4) ---

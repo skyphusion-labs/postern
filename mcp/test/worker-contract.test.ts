@@ -195,6 +195,8 @@ async function emissions(): Promise<Emitted[]> {
       direction: "inbound", lens: "inbox", mailbox: "all", seenFor: "c@x.com",
       after: "2026-01-01", before: "2026-01-31" })],
     ["folders", () => client.folders?.({ to: "a@x.com" })],
+    // All three declared parameters, or PARITY reports the ones this call skipped.
+    ["recentRecipients", () => client.recentRecipients?.({ viewer: "v@x.com", to: "a@x.com", limit: 5 })],
     ["setSeen", () => client.setSeen?.(["m1"], true)],
     ["setFlags", () => client.setFlags?.(["m1"], { flagged: true })],
     ["move", () => client.move?.(["m1"], "archive")],
@@ -314,6 +316,10 @@ const KNOWN_PARITY_GAPS: Record<string, string[]> = {
   // from birth. It is listed anyway, because a key with an empty list is what makes a
   // FUTURE declared parameter on this route fail here instead of going unnoticed.
   "/api/folders": [],
+  // #805: the client sends viewer, to, and limit. Listed so a later parameter on
+  // this route fails here instead of going unnoticed. The ledger is names only;
+  // a bound token ignoring viewer is the worker's rule, and this client still sends it.
+  "/api/recipients/recent": [],
   // #649: the thread route declares limit and cursor now, and the client sends both. Listed
   // for the same reason as /api/folders, and it is the first PREFIX row in this ledger,
   // which is why `reachable` below matches a concrete path under the prefix as well as the
@@ -406,6 +412,7 @@ const SAMPLE: Record<string, unknown> = {
   query: "kw", q: "kw", mode: "substr", field: "subject", limit: 7, cursor: "cur-1",
   direction: "inbound", to: "a@example.com", from: "b@example.com", lens: "inbox",
   mailbox: "archive", seenFor: "a@example.com", after: "2026-01-01", before: "2026-02-01",
+  viewer: "v@example.com",
   hasAttachment: true, seen: false, thread: "t-1", message_id: "m-1", thread_id: "t-1",
   index: 0, subject: "s", text: "t", html: "<p>h</p>", cc: "c@example.com",
   bcc: "d@example.com", reply_to: "r@example.com", quote_original: true,
@@ -441,6 +448,7 @@ const REQUIRED: Record<string, string[]> = {
   mailbox_send: ["to", "subject", "text"],
   mailbox_reply: ["message_id", "text"],
   mailbox_folders: [],
+  mailbox_recipients_recent: [],
   // A draft create needs nothing: an empty draft is a legitimate thing to open, and the
   // worker mints the id. Everything else is addressed by id, and an update additionally
   // carries the `updated_at` it read (read-modify-write, not an optional nicety).

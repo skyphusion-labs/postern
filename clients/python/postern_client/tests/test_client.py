@@ -128,6 +128,19 @@ class SendTest(unittest.TestCase):
         self.assertNotIn("attachments", body)
         self.assertNotIn("forwardMessageId", body)
 
+    def test_send_result_keeps_the_from_the_worker_used(self):
+        # The client returns the worker JSON unchanged. `from` on the result is
+        # the address the worker used, which a bound identity may have substituted
+        # for the from_addr this call passed (#804).
+        t = FakeTransport(
+            body=b'{"ok":true,"messageId":"m1","threadId":"t1","from":"rollins@skyphusion.org"}'
+        )
+        res = _client(t).send(
+            "a@x.com", "Hi", text="hello", from_addr="someone-else@skyphusion.org",
+        )
+        self.assertEqual(res["from"], "rollins@skyphusion.org")
+        self.assertEqual(t.last_json()["from"], "someone-else@skyphusion.org")
+
     def test_send_list_recipients_passthrough(self):
         t = FakeTransport(body=b'{"ok":true,"messageId":"m"}')
         _client(t).send(["a@x.com", "b@x.com"], "S", text="t")
@@ -195,14 +208,16 @@ class SendTest(unittest.TestCase):
 
 class ReplyTest(unittest.TestCase):
     def test_reply_body_shape(self):
-        t = FakeTransport(body=b'{"ok":true,"messageId":"m2","threadId":"t1"}')
-        res = _client(t).reply("orig-id", text="re", bcc="b@x.com")
+        t = FakeTransport(body=b'{"ok":true,"messageId":"m2","threadId":"t1","from":"joan@skyphusion.org"}')
+        res = _client(t).reply("orig-id", text="re", bcc="b@x.com", from_addr="someone-else@skyphusion.org")
         self.assertEqual(res["threadId"], "t1")
+        self.assertEqual(res["from"], "joan@skyphusion.org")
         self.assertTrue(t.last.full_url.endswith("/api/reply"))
         body = t.last_json()
         self.assertEqual(body["messageId"], "orig-id")
         self.assertEqual(body["text"], "re")
         self.assertEqual(body["bcc"], ["b@x.com"])
+        self.assertEqual(body["from"], "someone-else@skyphusion.org")
         self.assertNotIn("mode", body)
         self.assertNotIn("quoteOriginal", body)
 
@@ -638,8 +653,10 @@ class DraftsTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "E_CONFLICT")
 
     def test_send_draft_path(self):
-        t = FakeTransport(body=b'{"ok":true,"messageId":"m","threadId":"t"}')
-        self.assertEqual(_client(t).send_draft("d1")["messageId"], "m")
+        t = FakeTransport(body=b'{"ok":true,"messageId":"m","threadId":"t","from":"strummer@skyphusion.org"}')
+        res = _client(t).send_draft("d1")
+        self.assertEqual(res["messageId"], "m")
+        self.assertEqual(res["from"], "strummer@skyphusion.org")
         self.assertEqual(t.last.method, "POST")
         self.assertEqual(t.last_path(), "/api/drafts/d1/send")
 

@@ -3,6 +3,8 @@
 > Interface Control Document. This file is the contract: the registry var, its
 > JSON shape, how a token maps to an identity and caps (`read` / `send`), and how
 > an operator registers a new per-member token. Reproducible from this doc alone.
+> Section 10 covers RUNTIME identities (#801): minted, listed and revoked through the
+> API with no deploy, and audited.
 
 ## 1. Why
 
@@ -109,9 +111,17 @@ in two ordered stages (`inbound/src/api.ts` -> `resolveToken`, `inbound/src/send
    entry's **caps** (`read` and/or `send`) **plus** the bound identity. A miss is an
    unknown token -> `401`.
 
-When a request to `POST /api/send` or `POST /api/reply` is authorized by a registry
+When a request to `POST /api/send`, `POST /send`, `POST /api/reply`, or
+`POST /api/drafts/{id}/send` (including a forward) is authorized by a registry
 token with the `send` cap, the worker **overrides** the outbound `From` to the bound
 identity, discarding any caller-supplied `from`. A token cannot send as anyone else.
+
+The success body reports that address as `from`
+(`{ ok, messageId, threadId, from, providerMessageId? }`). The stored outbound row's
+From is the same address. A caller that passed `from: someone-else@` reads its own
+bound address back, so the substitution is in the response and in the sent copy,
+not only in this document (#804). An unbound token reports the address it actually
+used as well (the caller `from` it honored, or `DEFAULT_FROM`).
 
 When a **read** is authorized by a registry token with the `read` cap (#544), the worker
 forces the viewer to the bound identity (and that identity's role queues), the same way
@@ -221,6 +231,7 @@ the send From and bounds every write.
 
 To rotate: mint a new token, add its hash, deploy, hand out the new raw token, then
 remove the old hash on the next deploy. To revoke: remove the hash and redeploy.
+A runtime identity (section 10) needs no deploy for either.
 
 ## 8. Scope and boundaries
 
@@ -255,6 +266,85 @@ remove the old hash on the next deploy. To revoke: remove the hash and redeploy.
 | From-binding | `inbound/src/mailbox.ts` (`resolveFrom`, `send`, `reply`) |
 | Read viewer binding (#544) | `inbound/src/api.ts` (list/search/get + related) |
 | Env mirror | `inbound/src/env.d.ts` (`POSTERN_SEND_IDENTITIES`) |
-| Tests | `inbound/per-identity-send.test.ts`, `inbound/viewer-binding.test.ts`, `inbound/scopes.test.ts` |
+| Tests | `inbound/per-identity-send.test.ts`, `inbound/send-from-report.test.ts`, `inbound/viewer-binding.test.ts`, `inbound/scopes.test.ts` |
 | Scope table | `docs/AUTH-CONTRACT.md` section 7 |
 | MCP env + tools | `mcp/README.md` |
+| Runtime identities + audit log (#801) | `inbound/src/agentidentities.ts`, `inbound/migrations/0016_agent_identities.sql`, `inbound/agent-identities.test.ts` |
+
+## 10. Runtime identities: mint, list and revoke without a deploy (#801)
+
+The registry var above is operator CONFIG, so adding or removing an entry needs a
+deploy, and a credential that needs a deploy to revoke cannot be revoked in an
+incident. Runtime identities are the API half, on the same shape as the SMTP
+credentials (`/api/admin/smtp-credentials`, #68). They carry the same `read` / `send` /
+`organize` caps with the same meaning (sections 4 and 8 apply unchanged), are stored in
+D1 (migration `0016_agent_identities.sql`), and take effect on the next request.
+
+### 10.1 Resolution order
+
+A presented Bearer resolves in this order, and the first match wins:
+
+1. the static scope tokens (`POSTERN_API_TOKEN*`), compared constant-time;
+2. the `POSTERN_SEND_IDENTITIES` var (this document, sections 2 to 8), unchanged;
+3. the `agent_identities` table, looked up by `sha256(token)`, skipping revoked rows.
+
+An existing deploy is therefore untouched: nothing that resolved before resolves
+differently. The table is read on EVERY request and nothing caches it, so a revoke
+takes effect on the very next request. If the table cannot be read, the answer is
+`503 E_AUTH_UNAVAILABLE`, never `401`, so a client never mistakes an outage for a
+revocation and throws away a live credential.
+
+### 10.2 Operator routes (a `both` token)
+
+```bash
+# Mint. scopes is a non-empty subset of read, send, organize. Anything else
+# (delete, imap, admin, both, a typo) is 400 E_VALIDATION_ERROR, never stripped.
+curl -sS -X POST "$POSTERN_API_URL/api/admin/identities" \
+  -H "Authorization: Bearer $POSTERN_API_TOKEN" -H 'content-type: application/json' \
+  -d '{"from":"invoices@example.com","scopes":["read","send"],"displayName":"Invoice agent","label":"invoices"}'
+# -> 201 {"ok":true,"id":"idn_...","token":"pstn_...","scopes":["read","send"],...}
+
+# List (active only; add includeRevoked=1 for revoked rows). Keyset limit/cursor.
+curl -sS "$POSTERN_API_URL/api/admin/identities?limit=100" -H "Authorization: Bearer $POSTERN_API_TOKEN"
+
+# Revoke. Idempotent; the row is kept with revokedAt.
+curl -sS -X DELETE "$POSTERN_API_URL/api/admin/identities/idn_..." -H "Authorization: Bearer $POSTERN_API_TOKEN"
+
+# The audit log, newest first. Keyset limit/cursor.
+curl -sS "$POSTERN_API_URL/api/admin/audit?limit=50" -H "Authorization: Bearer $POSTERN_API_TOKEN"
+```
+
+- **The token is returned EXACTLY ONCE**, by the mint call, and no route returns it
+  again. The table stores only its sha256 hash (the same rule as section 5). No
+  response carries the hash either: not the list, not the audit log, not whoami. A
+  lost token is revoked and re-minted.
+- Tokens start with `pstn_`, so a secret scanner can match a leaked one.
+- `from` must be on `ALLOWED_FROM_DOMAIN`. A row whose From leaves the domain later
+  (the operator changed it) stops resolving (401), the same rule as section 6.
+- **`id` is stable** (`idn_` plus 24 hex characters) and is never reused: a row is
+  never deleted, revocation sets `revokedAt`. Other records attribute to this id;
+  #740's audit trail is the first. `GET /api/whoami` reports it as `identityId` for a
+  runtime identity, and `null` for anything else.
+- **A runtime identity never holds `admin`.** It cannot reach any `/api/admin/*` route,
+  so it cannot mint, list or revoke credentials, including ones narrower than itself.
+  Only a static `both` token can.
+
+### 10.3 The audit log
+
+Every mint, list and revoke writes one `audit_log` row: when, the actor, the action
+(`identity.mint`, `identity.list`, `identity.revoke`), the target id, the outcome (`ok`
+or `refused`) and a JSON detail (the From and scopes granted, or the error code of a
+refusal). A successful mint or revoke and its row are written in ONE D1 batch, so the
+action cannot land without its record. A list writes its row before it answers, and
+fails if it cannot. A refusal's row is best effort: the refusal is returned either way.
+
+Every actor today is `operator` (a static `both` token, which carries no id, so the
+log cannot tell two `both` tokens apart). The table is generic on purpose: #740 adds
+agent actions on another identity's mail to the same log, with the agent's id as the
+actor, rather than starting a second one.
+
+### 10.4 Rotation and revocation
+
+To rotate a runtime identity: mint the new one, hand it over, then revoke the old one.
+No deploy at any step. To revoke in an incident: `DELETE` it; the next request with
+that token is 401.

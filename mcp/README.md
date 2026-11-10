@@ -15,7 +15,7 @@ flowchart LR
     mcp -->|HTTPS Bearer| api[Postern Mailbox API]
 ```
 
-- **Read tools** (always on): search, list, read a message, read a thread, list folders.
+- **Read tools** (always on): search, list, read a message, read a thread, list folders, list recent correspondents.
 - **Send tools** (v1.1, **opt-in**): `mailbox_send` / `mailbox_reply` plus the draft
   surface, registered when a send credential is configured (see env below).
 - **The draft tools additionally need a BOUND identity** (v1.5). A draft has an owner, and
@@ -42,19 +42,20 @@ flowchart LR
 | `mailbox_thread` | Read one BOUNDED page of a thread by `thread_id`, oldest first: at most `limit` messages (default 20, lower than the list default because these rows carry full bodies). `cursor` is the only signal that tells a COMPLETE thread from a FIRST PAGE: `null` means you have the whole thread, a string means there is more and must be passed back. `count` is the size of THIS page, never the thread length. | `GET /api/threads/{id}` |
 | `mailbox_whoami` | Ask who you are and what slice of the mailbox your own credential can read. Takes nothing. Call it FIRST, before spending a search or a list: the same empty page means "no such mail anywhere" under an estate credential and "none in your own slice" under an identity-bound one, and those call for opposite next actions. Returns `identity` (your bound address, or `null` for a shared estate credential), `identityScope` (the same projection `mailbox_list` and `mailbox_search` report), `roleQueues` (shared queues you may ALSO read by passing that address as `to`; an empty list means none, never "unknown"), `capabilities` (what the gate will actually honour, so a capability absent from it WILL be refused), and `via`. | `GET /api/whoami` |
 | `mailbox_folders` | List the folders with a message count and an unread count each, plus any shared role queues the caller may read. Use it to ORIENT before paging: it answers "where is there mail, and how much" in one call, which `mailbox_list` cannot. Counts are computed server-side with the same predicates a read uses, so they agree with what `mailbox_list` returns for the same folder. An entry carrying `role` is a shared QUEUE, and that field's presence is the signal, so never parse the id. `to` scopes the unread counts and is ignored under an identity-bound token. | `GET /api/folders` |
+| `mailbox_recipients_recent` | List recent correspondents: addresses this identity has sent mail to (outbound to, cc, bcc only; not people who only wrote inbound). Each entry is `address`, `displayName` (or null), `lastUsedAt` (when that address was last a recipient), and `messageCount` (messages inside the scan, not a lifetime total). The scan is the newest 200 outbound messages; `scanLimited: true` means older mail was not counted. A bound identity is the owner and the server ignores `viewer` and `to`. An unbound token must pass one of them or the worker returns `E_IDENTITY_REQUIRED`. `identityScope` is the scope the server imposed. | `GET /api/recipients/recent` |
 
 ### Send (scope `send`, opt-in)
 
 | Tool | What it does | Wraps |
 |---|---|---|
-| `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`, and `attachments` (each `content` base64 + optional `filename`, `mime_type`). The worker caps attachment count and total size and rejects an oversize set with a clear error. With a per-identity token the worker stamps `From` to the bound identity; any caller `from` is discarded. | `POST /api/send` |
-| `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`, `mode` (`reply` default, or `replyAll` to include the original recipients, derived server-side from stored state), `quote_original`, and `attachments` (same shape and worker-enforced caps as `mailbox_send`; carried by `/api/reply` since #363). | `POST /api/reply` |
+| `mailbox_send` | Send a NEW email. Provide `to`, `subject`, and at least one of `text` / `html`. Optional `cc`, `bcc`, `from`, `reply_to`, and `attachments` (each `content` base64 + optional `filename`, `mime_type`). The worker caps attachment count and total size and rejects an oversize set with a clear error. A bound identity overrides the caller's `from`. The result's `from` is the address actually used, the same address stored on the sent copy. | `POST /api/send` |
+| `mailbox_reply` | Reply to a stored message by `message_id` (provide `text` and/or `html`). The server fills `to` / `subject` / `In-Reply-To` / `References` / thread, so the reply lands in the same conversation. Optional `cc`, `bcc`, `from`, `mode` (`reply` default, or `replyAll` to include the original recipients, derived server-side from stored state), `quote_original`, and `attachments` (same shape and worker-enforced caps as `mailbox_send`; carried by `/api/reply` since #363). A bound identity overrides the caller's `from`. The result's `from` is the address actually used. | `POST /api/reply` |
 | `mailbox_drafts_list` | List the caller's own saved drafts. Each carries the `updatedAt` that an update must echo back. | `GET /api/drafts` |
 | `mailbox_draft_get` | Fetch one own draft by `draft_id`, including its current `updatedAt`. A draft that does not exist and one owned by another identity are deliberately the SAME answer (`found: false`). | `GET /api/drafts/{id}` |
 | `mailbox_draft_create` | Open a new draft. Sends nothing. Optional `to` / `cc` / `bcc` / `subject` / `body_text` / `body_html` / `in_reply_to` / `thread_id`, plus `compose_mode` (`new` default, or `reply` / `replyAll` / `forward` with `source_message_id`) so the eventual send threads against an existing message. | `POST /api/drafts` |
 | `mailbox_draft_update` | Update an own draft. **Read-modify-write:** pass `updated_at` exactly as the last read returned it; a stale or missing value is refused with `E_CONFLICT` rather than overwriting a concurrent edit. Any field you OMIT is CLEARED, so send the whole draft as you want it to end up. | `PUT /api/drafts/{id}` |
 | `mailbox_draft_delete` | Discard an own draft. Reports `deleted: false` when there was nothing to delete, which is not an error. | `DELETE /api/drafts/{id}` |
-| `mailbox_draft_send` | Send an own draft. **MUTATING.** The worker dispatches, stores the sent copy, and only THEN discards the draft, so a failure leaves it intact and retryable rather than half-sent. A reply/forward draft threads against its source automatically. | `POST /api/drafts/{id}/send` |
+| `mailbox_draft_send` | Send an own draft. **MUTATING.** The worker dispatches, stores the sent copy, and only THEN discards the draft, so a failure leaves it intact and retryable rather than half-sent. A reply/forward draft threads against its source automatically. The result's `from` is the address actually used, which is the caller's bound identity. | `POST /api/drafts/{id}/send` |
 
 ### Organize (scope `organize`, opt-in)
 
@@ -85,7 +86,8 @@ a missing grant from a broken route.
 Send tools are **MUTATING**: they deliver mail. They register only when a send token
 is present (see below). The server owns From-enforcement, DKIM signing, threading, and
 storing the sent copy; the tools forward a composed message and return the core
-`messageId` + `threadId`.
+`messageId`, `threadId`, and `from` (the address actually used). A bound identity
+overrides the caller's from.
 
 Each tool returns pretty-printed JSON. Errors come back as an MCP `isError` result
 with a clear message (never a thrown exception) -- including the worker's own reason
@@ -213,8 +215,10 @@ How it works (the MCP client implements none of it; the worker is authoritative)
 - The worker holds one config var `POSTERN_SEND_IDENTITIES` mapping the **sha256 hex
   of a raw token** to `{ from, displayName?, scopes? }` (hashes, never raw tokens; it
   holds no credential, so it is a readable var, not a secret -- #335).
-- **Send:** on `POST /api/send` / `/api/reply`, a registry token with the `send` cap
-  has outbound `From` overridden to the bound identity; any caller `from` is discarded.
+- **Send:** on `POST /api/send` / `/api/reply` (and draft send), a registry token with
+  the `send` cap has outbound `From` overridden to the bound identity; any caller
+  `from` is discarded. The tool result's `from` is that address, so the caller can
+  see which identity the mail went out as (#804).
 - **Read (#544):** on list/search/get, a registry token with the `read` cap is forced
   to that identity's mailbox (+ role queues). Estate static tokens stay estate-wide.
 - An unknown token is `401`; a token without the needed cap is `403`. A registry
@@ -261,7 +265,7 @@ npm run build && npm run smoke   # boots the built server over stdio and asserts
 ```
 
 `npm run smoke` proves the opt-in gate end to end at the process level: a read-only
-env exposes exactly the five read tools, and adding `POSTERN_SEND_TOKEN` adds
+env exposes the read tools and not the send tools, and adding `POSTERN_SEND_TOKEN` adds
 `mailbox_send` + `mailbox_reply`. Live request scope-gating (a read token gets `403` on
 send, a send token `403` on read) and the per-identity From-binding are enforced by the
 worker (#85, #138); the authoritative contract is

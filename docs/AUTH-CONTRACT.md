@@ -313,6 +313,7 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import`, plus the `organize` routes (#685); the authenticated door asserts the account identity |
 | `POSTERN_API_TOKEN_ORGANIZE` | `organize` | `POST /api/messages/seen`/`flags`/`move` only (#692). NOT `GET /api/folders`, which is a read. Cannot read, send, hard-delete, reach admin, or write through the `imap` seam |
 | `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read` (#718): **estate-wide**, the same reach a static read token has; `to=` becomes an ordinary filter. The bound identity still fixes the send From and still bounds every WRITE. `organize` (#685): mark read / flags / move, still forced to that identity. Never delete/admin. |
+| runtime agent identities (#801; D1 `agent_identities`, hashes only) | the same caps (`read` / `send` / `organize`) + bound identity | Minted and revoked at runtime by a `both` token via `/api/admin/identities` (no deploy; a revoke is effective on the next request). Never `admin`: a runtime identity cannot reach any `/api/admin/*` route. See SEND-IDENTITIES.md section 10 |
 
 **`GET /api/whoami` is `read`-scoped, and that is a decision, not an oversight (#650).**
 The route answers what `readScopeReport` answers: WHOSE MAIL A READ IS BOUND TO. For a
@@ -323,8 +324,9 @@ the whole estate. A 403 at the gate is the better answer, because a wrong answer
 worse than no answer: the caller has no second source to check it against.
 
 The caller this serves is one that has to interpret an empty read page, and that caller is
-read-capable by definition. A send token's own open question is which From the server will
-force on it, which belongs to the send response (#632 F13), not here. If a future
+read-capable by definition. A send token learns which From the server used by reading
+`from` on the send, reply, forward, and draft-send response (#804, #632 F13). This
+route does not answer that. If a future
 non-read scope genuinely needs a self-identity call, it needs a projection that can say
 "you cannot read", not a widening of this one.
 
