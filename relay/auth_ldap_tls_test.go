@@ -224,4 +224,8 @@ func TestAuthenticate_DefaultStartTLSHasTLS12Floor(t *testing.T) {
 	if fake.startTLSConf.RootCAs != nil || fake.startTLSConf.InsecureSkipVerify {
 		t.Error("default StartTLS config must keep stock verification (system roots, no skip)")
 	}
+	if fake.startTLSConf.ServerName != "192.0.2.10" {
+		t.Errorf("default StartTLS ServerName = %q, want the LDAP_URL host (go-ldap does not derive it)",
+			fake.startTLSConf.ServerName)
+	}
 }

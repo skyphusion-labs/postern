@@ -113,7 +113,10 @@ jobs:
       # the e2e server test needs it, so install the package + dev extras. We also
       # install the [tls] extra (pyOpenSSL / service-identity, the 993 IMAPS TLS
       # stack, audit #107) so it resolves in CI and is covered by the scan below.
-      - run: pip install -e '.[dev,tls]'
+      # And the [ldap] extra (ldap3), so test_ldap_tls_wire.py runs the real
+      # directory-TLS handshake on every PR; under CI a missing ldap3 FAILS that
+      # module rather than skipping it. Same extras the runtime image ships.
+      - run: pip install -e '.[dev,tls,ldap]'
       - run: python -m mypy
       - run: python -m twisted.trial posternimap.tests
       # Vulnerability gate (audit #107): audit the installed environment, which now

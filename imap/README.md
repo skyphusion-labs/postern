@@ -138,8 +138,8 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `LDAP_REQUIRE_GROUP` | no | -- | group DN the bound user must carry in `LDAP_GROUP_ATTR` on a self-read of their own entry (the mail-users authz gate; FAIL-CLOSED). Empty = no gate |
 | `LDAP_GROUP_ATTR` | no | `memberOf` | the attribute listing the user's groups for the gate |
 | `LDAP_TLS_CA` | no | -- | PEM CA path: full verification with this as the ONLY trust anchor (#153). Mutually exclusive with the pin |
-| `LDAP_TLS_SERVER_NAME` | no | -- | extra accepted certificate name when `LDAP_URL` dials an IP (CA mode) |
-| `LDAP_TLS_PIN_SHA256` | no | -- | exact-leaf SHA-256 pin (hex, colons optional; non-secret), checked BEFORE any credential flows (#153). Neither trust knob set = the directory channel is encrypted but UNAUTHENTICATED and the proxy logs a loud startup warning |
+| `LDAP_TLS_SERVER_NAME` | no | -- | extra accepted certificate name when `LDAP_URL` dials an IP (CA and system-roots mode) |
+| `LDAP_TLS_PIN_SHA256` | no | -- | exact-leaf SHA-256 pin (hex, colons optional; non-secret), checked BEFORE any credential flows (#153). Neither trust knob set = the directory certificate is verified against the system roots and the `LDAP_URL` host; a directory on a private CA fails closed until one knob is set |
 | `LDAP_TIMEOUT` | no | `10` | seconds bounding LDAP connect + bind/search (0 = none); matches the Go relay knob 1:1 |
 | `AUTH_SYSTEM_PAM_SERVICE` | no | `postern` | PAM service name for `system` mode |
 | `AUTH_SYSTEM_DOMAIN` | no | -- | optional display suffix for `system` logins |
