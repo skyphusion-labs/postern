@@ -244,9 +244,28 @@ jobs:
       - name: relay Go pin skew detection (#704)
         run: bash .github/scripts/tests/assert-relay-go-pin.test.sh
 
+  # The self-host installer (deploy/postern.mjs) against a stubbed Cloudflare
+  # account: idempotency, resume after a partial failure, and every refusal.
+  # Zero dependencies (node:test). The count floor is the positive control: a
+  # suite that silently collected no tests would otherwise pass.
+  deploy-installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: installer suite
+        run: |
+          set -o pipefail
+          node --test deploy/test/*.test.mjs | tee installer-test.out
+          grep -Eq '^(ℹ|#) tests ([2-9][0-9]|[0-9]{3,})$' installer-test.out \
+            || { echo "::error::installer suite ran fewer than 20 tests"; exit 1; }
+
   ci:
     name: ci
-    needs: [inbound, relay, imap, clients-python, mcp, webmail-e2e, release-gate]
+    needs: [inbound, relay, imap, clients-python, mcp, webmail-e2e, release-gate, deploy-installer]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -260,3 +279,4 @@ jobs:
           test "${{ needs.mcp.result }}" = "success"
           test "${{ needs.webmail-e2e.result }}" = "success"
           test "${{ needs.release-gate.result }}" = "success"
+          test "${{ needs.deploy-installer.result }}" = "success"

@@ -250,12 +250,24 @@ export async function insertSession(env: Env, account: AuthenticatedAccount): Pr
 // change, delete and change password all call this. A row minted before migration
 // 0015 has no username, so it is matched by its bound identity instead. Returns how
 // many sessions ended.
-export async function endUserSessions(env: Env, username: string, identity: string): Promise<number> {
-  const res = await env.DB.prepare(
-    `DELETE FROM webmail_sessions WHERE username = ? OR (username IS NULL AND identity = ?)`,
-  )
-    .bind(normalizeUsername(username), identity)
-    .run();
+//
+// exceptIdHash keeps one session out of the sweep (change password: the caller's own
+// session is ROTATED, not ended, so it is neither deleted here nor counted, contract
+// 1.10.5).
+export async function endUserSessions(
+  env: Env,
+  username: string,
+  identity: string,
+  exceptIdHash?: string,
+): Promise<number> {
+  const where = "(username = ? OR (username IS NULL AND identity = ?))";
+  const res = exceptIdHash === undefined
+    ? await env.DB.prepare("DELETE FROM webmail_sessions WHERE " + where)
+        .bind(normalizeUsername(username), identity)
+        .run()
+    : await env.DB.prepare("DELETE FROM webmail_sessions WHERE " + where + " AND id_hash != ?")
+        .bind(normalizeUsername(username), identity, exceptIdHash)
+        .run();
   return res.meta?.changes ?? 0;
 }
 
@@ -583,7 +595,7 @@ async function handleChangePassword(request: Request, env: Env, url: URL, rawId:
   // The session resolved, so the account existed and was enabled a moment ago; a
   // vanished row here is a race and reads as a plain rejection.
   const cred = await lookup(env, resolved.username);
-  const ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash) : false;
+  const ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash, cred.username) : false;
   if (!cred || !ok) {
     try {
       await recordFailure(env, keys, gate);
@@ -602,7 +614,10 @@ async function handleChangePassword(request: Request, env: Env, url: URL, rawId:
     // An operator reset landed between our verify and our write: theirs wins.
     return sjson({ ok: false, error: "E_AUTH_FAILED" }, 401);
   }
-  const ended = await endUserSessions(env, cred.username, cred.fromAddr);
+  // sessionsEnded counts the OTHER sessions only (contract 1.10.5); the caller's own is
+  // rotated: revoked here, then replaced by the fresh one minted below.
+  const ended = await endUserSessions(env, cred.username, cred.fromAddr, await sha256Hex(rawId));
+  await revokeSession(env, rawId);
   const minted = await insertSession(env, {
     username: cred.username, fromAddr: cred.fromAddr, displayName: cred.displayName,
   });

@@ -118,22 +118,44 @@
   input:focus, select:focus, textarea:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-dim); }
   input:disabled { background: var(--panel-2); color: var(--muted); }
 
-  /* --- Gate + sign-in cards --- */
-  #gate, #signin { margin: auto; width: 100%; max-width: 440px; padding: var(--sp-5) var(--sp-4); }
-  #gate .card, #signin .card {
+  /* --- Auth screens (#798): sign-in, token gate and first run share one card --- */
+  .auth { margin: auto; width: 100%; max-width: 440px; padding: var(--sp-6) var(--sp-4); }
+  .auth .card {
     background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
-    padding: var(--sp-5); box-shadow: var(--shadow);
+    padding: var(--sp-6) var(--sp-5); box-shadow: var(--shadow);
   }
-  #gate h2, #signin h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-xl); }
-  #gate p, #signin p { color: var(--muted); margin: var(--sp-2) 0 var(--sp-4); font-size: var(--fs-sm); }
-  #gate label, #signin label {
-    display: block; font-size: var(--fs-sm); font-weight: 550; color: var(--fg); margin: var(--sp-3) 0 var(--sp-1);
+  .auth .eyebrow {
+    margin: 0 0 var(--sp-2); color: var(--accent); font-size: var(--fs-xs); font-weight: 700;
+    letter-spacing: .06em; text-transform: uppercase;
   }
-  #gate input, #signin input { width: 100%; }
-  #gate .row, #signin .row { display: flex; gap: var(--sp-2); margin-top: var(--sp-4); }
-  #gate .row button, #signin .row button { flex: 1; min-height: 40px; font-size: var(--fs-md); }
+  .auth h2 { margin: 0 0 var(--sp-1); font-size: var(--fs-2xl); font-weight: 650; letter-spacing: -.01em; }
+  .auth .lede { color: var(--muted); margin: var(--sp-2) 0 var(--sp-4); font-size: var(--fs-sm); }
+  .auth label {
+    display: block; font-size: var(--fs-sm); font-weight: 550; color: var(--fg); margin: var(--sp-4) 0 var(--sp-1);
+  }
+  .auth label .opt { color: var(--muted); font-weight: 400; }
+  .auth input { width: 100%; }
+  .auth .hint { color: var(--muted); font-size: var(--fs-xs); margin: var(--sp-1) 0 0; }
+  .auth .row { display: flex; gap: var(--sp-2); margin-top: var(--sp-5); }
+  .auth .row button { flex: 1; min-height: 44px; font-size: var(--fs-md); }
+  .auth .note-ok { color: var(--ok); font-size: var(--fs-sm); margin: var(--sp-3) 0 0; }
+  .auth .note-ok:empty { display: none; }
+  .auth .err:empty { display: none; }
+  .auth .err { margin-top: var(--sp-3); }
+  .auth .switch { margin-top: var(--sp-5); padding-top: var(--sp-4); border-top: 1px solid var(--line); text-align: center; }
+  .pw-wrap { position: relative; }
+  .pw-wrap input { padding-right: 76px; }
+  .pw-wrap .pw-toggle {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    min-height: 30px; padding: 0 var(--sp-2); font-size: var(--fs-xs);
+  }
+  .auth code { font: var(--fs-xs) var(--font-mono); background: var(--panel-2); padding: 1px 4px; border-radius: 4px; color: var(--fg); }
+  .auth details.help { margin-top: var(--sp-4); font-size: var(--fs-sm); color: var(--muted); }
+  .auth details.help summary { cursor: pointer; color: var(--accent); }
+  .auth details.help p { margin: var(--sp-2) 0 0; }
   .err { color: var(--bad); font-size: var(--fs-sm); min-height: 1.2em; margin-top: var(--sp-2); }
   .switch { margin: var(--sp-3) 0 0; font-size: var(--fs-sm); }
+  @media (max-width: 760px) { .auth { padding: var(--sp-4) var(--sp-3); } .auth .card { padding: var(--sp-5) var(--sp-4); } }
   .switch button { font: inherit; }
 
   /* --- App shell (#795): rail | list | reading. Below 1100px the rail is a drawer;
@@ -285,6 +307,13 @@
   .settings-panel select { width: 100%; }
   .settings-panel .note { color: var(--muted); font-size: var(--fs-xs); margin-top: var(--sp-3); }
   .settings-signout { display: none; width: 100%; margin-top: var(--sp-3); }
+  .settings-panel { max-height: calc(100vh - 76px); overflow-y: auto; }
+  .settings-panel h3 { margin: var(--sp-4) 0 0; padding-top: var(--sp-3); border-top: 1px solid var(--line); font-size: var(--fs-sm); }
+  .settings-panel input { width: 100%; }
+  .settings-panel .hint { color: var(--muted); font-size: var(--fs-xs); margin: var(--sp-1) 0 0; }
+  .settings-panel form button[type="submit"] { width: 100%; margin-top: var(--sp-3); }
+  .settings-panel .note-ok { color: var(--ok); font-size: var(--fs-xs); margin: var(--sp-2) 0 0; }
+  .settings-panel .note-ok:empty, .settings-panel .err:empty { display: none; }
   .ac-wrap { position: relative; }
   .ac-list {
     position: absolute; left: 0; right: 0; top: 100%; z-index: 5;
@@ -386,6 +415,27 @@
     .msg-head .sender-date { width: 100%; padding-left: 48px; }
   }
 
+  /* --- Accessibility (#797) --- */
+  .skip {
+    position: absolute; left: var(--sp-2); top: -60px; z-index: 50; text-decoration: none;
+    background: var(--accent); color: var(--accent-fg); padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--r-sm); font-weight: 650; font-size: var(--fs-sm);
+  }
+  .skip:focus { top: var(--sp-2); }
+  .list:focus { outline: none; }
+  .msg-head h2:focus, .auth h2:focus { outline: none; }
+  .toast {
+    position: fixed; left: 50%; bottom: var(--sp-4); transform: translateX(-50%); z-index: 40;
+    max-width: calc(100vw - 32px); padding: var(--sp-2) var(--sp-4); border-radius: var(--r-md);
+    background: var(--fg); color: var(--bg); box-shadow: var(--shadow); font-size: var(--fs-sm); font-weight: 550;
+  }
+  .toast.bad { background: var(--bad-dim); color: var(--bad); border: 1px solid var(--bad); }
+  .toast[hidden] { display: none; }
+  .settings-panel kbd {
+    font: var(--fs-2xs)/1 var(--font-mono); padding: 2px 5px; border: 1px solid var(--line-strong);
+    border-radius: 4px; background: var(--panel-2); color: var(--fg);
+  }
+
   /* Keyboard focus visibility (a11y foundation): a clear ring for keyboard users
      on every interactive control, without a persistent outline on mouse click. */
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -427,6 +477,7 @@
 </style>
 </head>
 <body>
+<a class="skip" href="#list" id="skipLink">Skip to messages</a>
 
 <header role="banner">
   <button id="railBtn" style="display:none" type="button" class="btn-quiet" aria-label="Folders" aria-controls="folders" aria-expanded="false">
@@ -439,7 +490,7 @@
   <span class="sendnote" id="sendNote" style="display:none"></span>
   <button id="composeBtn" style="display:none">Compose</button>
   <button id="themeBtn" type="button" class="link" aria-label="Theme: match system" title="Theme: match system">Theme</button>
-  <button id="settingsBtn" class="link" style="display:none">Settings</button>
+  <button id="settingsBtn" class="link" style="display:none" aria-controls="settingsPanel" aria-expanded="false">Settings</button>
   <button id="logout" class="link" style="display:none">Sign out</button>
 </header>
 <div id="settingsPanel" class="settings-panel" role="dialog" aria-label="Settings">
@@ -456,56 +507,131 @@
     <option value="compact">Compact</option>
   </select>
   <p class="note" id="settingsSession">Session: not signed in.</p>
+  <!-- Change password (#819, contract 1.10.5): session mode only -->
+  <div id="pwSection" style="display:none">
+    <h3 id="pwTitle">Change password</h3>
+    <form id="pwForm" novalidate aria-labelledby="pwTitle">
+      <label for="pwCur">Current password</label>
+      <input id="pwCur" type="password" autocomplete="current-password">
+      <label for="pwNew">New password</label>
+      <input id="pwNew" type="password" autocomplete="new-password" aria-describedby="pwNewHint">
+      <p class="hint" id="pwNewHint">At least 12 characters. Your other devices will be signed out.</p>
+      <label for="pwNew2">Confirm new password</label>
+      <input id="pwNew2" type="password" autocomplete="new-password">
+      <button type="submit" id="pwSubmit">Change password</button>
+    </form>
+    <div class="err" id="pwErr" role="alert" aria-live="assertive"></div>
+    <p class="note-ok" id="pwNote" role="status"></p>
+  </div>
   <button type="button" id="settingsSignout" class="settings-signout">Sign out</button>
+  <p class="note">Keyboard: <kbd>j</kbd> / <kbd>k</kbd> next and previous message, <kbd>/</kbd> search,
+    <kbd>c</kbd> compose, arrow keys move in the list, <kbd>Esc</kbd> closes a panel or goes back.</p>
   <p class="note">Remote images in message bodies are blocked by CSP (img-src 'self' data: only; no https:). There is no toggle that can enable them under the current policy.</p>
 </div>
 
 <!-- BYO-token gate (operator / self-host path, contract 1.7) -->
-<div id="gate">
+<div id="gate" class="auth" role="region" aria-labelledby="gateTitle">
   <div class="card">
-    <h2>Connect to your mailbox</h2>
-    <p>Paste a read-scoped API token to browse mail. Optionally add a send-scoped token
-       (or a dual-cap identity token with read+send) to compose and reply. A dual-cap
-       token may be pasted once in the read field; send falls back to it when the send
-       field is empty. Tokens stay in this browser tab only (sessionStorage), never sent
-       anywhere but the API you name below.</p>
-    <label for="origin">API origin</label>
+    <p class="eyebrow">Operators and agents</p>
+    <h2 id="gateTitle">Connect with an API token</h2>
+    <p class="lede">Your token stays in this browser tab and is sent only to the server below.</p>
+    <label for="origin">Server</label>
     <input id="origin" type="url" placeholder="https://postern.example" autocomplete="off" spellcheck="false">
-    <label for="token">Postern read token</label>
+    <label for="token">Read token</label>
     <input id="token" type="password" placeholder="read-scoped or dual-cap identity token" autocomplete="off" spellcheck="false">
-    <label for="sendToken">Send token (optional if dual-cap above)</label>
-    <input id="sendToken" type="password" placeholder="send-scoped token, or leave empty for dual-cap" autocomplete="off" spellcheck="false">
+    <label for="sendToken">Send token <span class="opt">(optional)</span></label>
+    <input id="sendToken" type="password" placeholder="leave empty if the read token can also send" autocomplete="off" spellcheck="false">
+    <details class="help">
+      <summary>Which token do I need?</summary>
+      <p>A read-scoped API token lets you browse mail. To compose and reply, add a send-scoped
+         token, or paste one dual-cap identity token (read and send) in the read field; send
+         falls back to it when the send field is empty. Tokens are kept in sessionStorage for
+         this tab only and are never sent anywhere but the server you name.</p>
+    </details>
     <div class="row">
-      <button id="connect">Connect</button>
+      <button id="connect" type="button">Connect</button>
     </div>
     <div class="err" id="gateErr" role="alert" aria-live="assertive"></div>
-    <p class="switch" id="toSigninWrap" style="display:none"><button type="button" class="link" id="toSignin">Back to sign in</button></p>
+    <p class="note-ok" id="gateNote" role="status"></p>
+    <p class="switch" id="toSigninWrap" style="display:none"><button type="button" class="link" id="toSignin">Sign in with a username and password</button></p>
   </div>
 </div>
 
 <!-- Native sign-in (session cookie mode, #351) -->
-<div id="signin" style="display:none">
+<div id="signin" class="auth" style="display:none" role="region" aria-labelledby="signinTitle">
   <div class="card">
-    <h2>Sign in to your mailbox</h2>
-    <p>Enter your Postern mailbox username and password.</p>
-    <form id="signinForm">
+    <h2 id="signinTitle">Sign in</h2>
+    <p class="lede">Use your Postern username and password: the same login your mail app uses.</p>
+    <form id="signinForm" novalidate>
       <label for="siUser">Username</label>
-      <input id="siUser" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false">
+      <input id="siUser" name="username" type="text" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false">
       <label for="siPass">Password</label>
-      <input id="siPass" name="password" type="password" autocomplete="current-password">
+      <div class="pw-wrap">
+        <input id="siPass" name="password" type="password" autocomplete="current-password">
+        <button type="button" class="btn-quiet pw-toggle" data-toggle-for="siPass" aria-pressed="false" aria-label="Show password">Show</button>
+      </div>
       <div class="row">
         <button type="submit" id="siSubmit">Sign in</button>
       </div>
     </form>
     <div class="err" id="signinErr" role="alert" aria-live="assertive"></div>
+    <p class="note-ok" id="signinNote" role="status"></p>
     <p class="switch"><button type="button" class="link" id="toTokenGate">Use an API token instead</button></p>
+  </div>
+</div>
+
+<!-- Sign-in not enabled (#798): WEBMAIL_AUTH_BACKEND unset or "off". Unset means OFF;
+     only an explicit "native" turns sign-in on (lead ruling, contract #793 amended). -->
+<div id="disabled" class="auth" style="display:none" role="region" aria-labelledby="disabledTitle">
+  <div class="card">
+    <p class="eyebrow">Not enabled</p>
+    <h2 id="disabledTitle" tabindex="-1">Webmail sign-in is not enabled on this server</h2>
+    <p class="lede">This Postern server does not offer username and password sign-in. If you run it,
+       set <code>WEBMAIL_AUTH_BACKEND</code> to <code>native</code> and create an account; see DEPLOY.md.</p>
+    <p class="lede">Your mail is unaffected: mail apps (IMAP and SMTP) and the API work as before.</p>
+    <p class="switch"><button type="button" class="link" id="toTokenFromOff">Operators and agents: connect with an API token</button></p>
+  </div>
+</div>
+
+<!-- First run (#798, contract 1.10.7): no users yet and POSTERN_SETUP_TOKEN is set -->
+<div id="setup" class="auth" style="display:none" role="region" aria-labelledby="setupTitle">
+  <div class="card">
+    <p class="eyebrow">First run</p>
+    <h2 id="setupTitle">Create the first account</h2>
+    <p class="lede">This mailbox has no users yet. Enter the setup token from your deploy, then choose the
+       login for the first person. You can add more people later.</p>
+    <form id="setupForm" novalidate>
+      <label for="suToken">Setup token</label>
+      <div class="pw-wrap">
+        <input id="suToken" type="password" autocomplete="off" spellcheck="false" aria-describedby="suTokenHint">
+        <button type="button" class="btn-quiet pw-toggle" data-toggle-for="suToken" aria-pressed="false" aria-label="Show setup token">Show</button>
+      </div>
+      <p class="hint" id="suTokenHint">The POSTERN_SETUP_TOKEN secret you set when you deployed.</p>
+      <label for="suUser">Email address</label>
+      <input id="suUser" type="email" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false" aria-describedby="suUserHint">
+      <p class="hint" id="suUserHint">Your login, and the address you send from.</p>
+      <label for="suName">Display name <span class="opt">(optional)</span></label>
+      <input id="suName" type="text" autocomplete="name" maxlength="128">
+      <label for="suPass">Password</label>
+      <div class="pw-wrap">
+        <input id="suPass" type="password" autocomplete="new-password" aria-describedby="suPassHint">
+        <button type="button" class="btn-quiet pw-toggle" data-toggle-for="suPass" aria-pressed="false" aria-label="Show password">Show</button>
+      </div>
+      <p class="hint" id="suPassHint">At least 12 characters. A long phrase is easier to remember than symbols.</p>
+      <label for="suPass2">Confirm password</label>
+      <input id="suPass2" type="password" autocomplete="new-password">
+      <div class="row">
+        <button type="submit" id="suSubmit">Create account and sign in</button>
+      </div>
+    </form>
+    <div class="err" id="setupErr" role="alert" aria-live="assertive"></div>
   </div>
 </div>
 
 <!-- App -->
 <div id="app">
   <nav class="folders" id="folders" role="navigation" aria-label="Folders"></nav>
-  <div class="sidebar" aria-label="Mailbox">
+  <section class="sidebar" aria-label="Message list">
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search mail" aria-label="Search mail">
       <select id="searchMode" class="mode" title="Search mode (applies when searching)" aria-label="Search mode">
@@ -525,8 +651,8 @@
       <label>Before <input id="filterBefore" type="date" aria-label="Before date"></label>
       <button type="button" class="link" id="clearFilters">Clear filters</button>
     </div>
-    <div class="list" id="list" aria-label="Messages"></div>
-  </div>
+    <div class="list" id="list" aria-label="Messages" tabindex="-1"></div>
+  </section>
   <main class="reading-col" aria-label="Message">
     <div class="reading-bar"><button type="button" id="backBtn" class="btn-quiet">&larr; Back to list</button></div>
     <div class="reading" id="reading">
@@ -535,6 +661,9 @@
   </main>
   <div class="scrim" id="scrim"></div>
 </div>
+
+<div id="announce" class="vh" aria-live="polite" aria-atomic="true"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
 <script>
 "use strict";
@@ -616,7 +745,9 @@
     sendCapable: null,
     // Why compose is disabled, so the note stays truthful: readonly (403), invalid
     // (401), unreachable (network). Empty when capable or no send token.
-    sendReason: ""
+    sendReason: "",
+    // First run (#798, contract 1.10.6): GET /api/session 401 says setupRequired.
+    setupRequired: false
   };
 
   // Same-origin base for session mode (relative URLs, so the HttpOnly cookie rides);
@@ -868,7 +999,7 @@
       // Revoke on the next tick so the download has started.
       setTimeout(function () { URL.revokeObjectURL(obj); }, 0);
     }).catch(function (e) {
-      if (e.message !== "unauthorized") alert("Download failed: " + e.message);
+      if (e.message !== "unauthorized") toast("Download failed: " + e.message, true);
     }).then(function () {
       if (btn) { btn.disabled = false; btn.textContent = label; }
     });
@@ -1053,6 +1184,7 @@
       // can rebuild the srcdoc with the new palette (retintPlainFrames).
       if (!light) { f.setAttribute("data-plain", "1"); f._posternInner = inner; }
       f.setAttribute("sandbox", "");        // no scripts, no same-origin, no forms
+      f.setAttribute("title", "Message body");
       f.setAttribute("referrerpolicy", "no-referrer");
       f.setAttribute("srcdoc", doc);
       return f;
@@ -1094,10 +1226,12 @@
     if (elm && typeof elm.focus === "function") { try { elm.focus(); } catch (_) {} }
   }
 
-  function showGate(msg) {
+  function showGate(msg, info) {
     state.authMode = "token";
     $("app").className = "";
     $("signin").style.display = "none";
+    $("setup").style.display = "none";
+    $("disabled").style.display = "none";
     $("gate").style.display = "";
     $("logout").style.display = "none";
     $("railBtn").style.display = "none";
@@ -1110,29 +1244,84 @@
     // Offer a way back to native sign-in only when the server supports it.
     $("toSigninWrap").style.display = state.authBackend === "native" ? "" : "none";
     $("gateErr").textContent = msg || "";
+    $("gateNote").textContent = info || "";
     focusFirst("origin");
   }
 
-  function showSignin(msg) {
+  function showSignin(msg, info) {
     state.authMode = "session";
     $("app").className = "";
     $("gate").style.display = "none";
+    $("setup").style.display = "none";
+    $("disabled").style.display = "none";
     $("signin").style.display = "";
     $("logout").style.display = "none";
     $("railBtn").style.display = "none";
     $("identity").textContent = "";
     $("who").textContent = "";
     $("signinErr").textContent = msg || "";
+    $("signinNote").textContent = info || "";
     $("siPass").value = "";
+    setPwVisible("siPass", false);
     focusFirst("siUser");
+  }
+
+  // First run (#798, contract 1.10.7). Shown only when GET /api/session says
+  // setupRequired; the server decides, the page never guesses.
+  function showSetup(msg) {
+    state.authMode = "session";
+    $("app").className = "";
+    $("gate").style.display = "none";
+    $("signin").style.display = "none";
+    $("disabled").style.display = "none";
+    $("setup").style.display = "";
+    $("logout").style.display = "none";
+    $("railBtn").style.display = "none";
+    $("identity").textContent = "";
+    $("who").textContent = "";
+    $("setupErr").textContent = msg || "";
+    focusFirst("suToken");
+  }
+
+  // Sign-in is off on this server (#798). A plain notice, not a form: a person who is
+  // not an operator has nothing to type here. The token gate stays one click away for
+  // operators and agents (contract 1.7, the off-mode path).
+  function showDisabled() {
+    state.authMode = "token";
+    $("app").className = "";
+    $("gate").style.display = "none";
+    $("signin").style.display = "none";
+    $("setup").style.display = "none";
+    $("disabled").style.display = "";
+    $("logout").style.display = "none";
+    $("railBtn").style.display = "none";
+    $("identity").textContent = "";
+    $("who").textContent = "";
+    focusFirst("disabledTitle");
+  }
+
+  // Show / hide a password field (#798). The value never leaves the input.
+  function setPwVisible(id, on) {
+    var input = $(id);
+    if (input) input.type = on ? "text" : "password";
+    var btn = document.querySelector('.pw-toggle[data-toggle-for="' + id + '"]');
+    if (btn) {
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.textContent = on ? "Hide" : "Show";
+    }
   }
 
   function showApp() {
     $("gate").style.display = "none";
+    $("setup").style.display = "none";
+    $("disabled").style.display = "none";
     $("signin").style.display = "none";
     $("app").className = "on";
     $("logout").style.display = "";
     $("railBtn").style.display = "";
+    // The gate or sign-in card that held focus is now hidden; do not strand focus there (#797).
+    var ae = document.activeElement;
+    if (ae && ae.closest && ae.closest("#gate, #signin")) $("list").focus();
     $("settingsBtn").style.display = "";
     if (state.authMode === "session" && state.identity) {
       // Identity display (contract 1.5.1): show who the browser sends as. A send
@@ -1141,10 +1330,13 @@
       $("who").textContent = state.identity.displayName || "";
       $("settingsSession").textContent = "Session: " + state.identity.from +
         (state.identity.displayName ? " (" + state.identity.displayName + ")" : "");
+      $("pwSection").style.display = "";
     } else {
       $("identity").textContent = "";
       $("who").textContent = state.origin;
       $("settingsSession").textContent = "Session: BYO token at " + (state.origin || "(same origin)");
+      // A token is not a person and has no password to change (contract 1.10.5).
+      $("pwSection").style.display = "none";
     }
     $("searchMode").value = state.searchMode;
     applyChromePrefs();
@@ -1282,8 +1474,10 @@
     var username = $("siUser").value.trim();
     var password = $("siPass").value;
     $("signinErr").textContent = "";
+    $("signinNote").textContent = "";
     if (!username || !password) { $("signinErr").textContent = "Enter your username and password."; return; }
     $("siSubmit").disabled = true;
+    $("siSubmit").textContent = "Signing in\u2026";
     fetch("/api/session", {
       method: "POST",
       headers: { "content-type": "application/json", "accept": "application/json" },
@@ -1293,23 +1487,136 @@
       return r.json().catch(function () { return { ok: false }; }).then(function (b) { return { status: r.status, body: b }; });
     }).then(function (res) {
       $("siSubmit").disabled = false;
-      if (res.status === 200 && res.body && res.body.ok) { $("siPass").value = ""; onSession(res.body); return; }
+      $("siSubmit").textContent = "Sign in";
+      if (res.status === 200 && res.body && res.body.ok) { $("siPass").value = ""; setPwVisible("siPass", false); onSession(res.body); return; }
       // Locked out by the mint throttle (#409): the server sends Retry-After and a
       // retryAfter field, so tell the user how long instead of "wait a bit".
       if (res.status === 429) {
         var wait = res.body && res.body.retryAfter ? Number(res.body.retryAfter) : 0;
-        $("signinErr").textContent = wait > 0
-          ? "Too many attempts. Try again in " + Math.ceil(wait / 60) + " minute(s)."
-          : "Too many attempts. Please wait and try again.";
+        $("signinErr").textContent = tooManyText(wait);
         return;
       }
       // The throttle store is unreachable, so the server refuses rather than run the
       // sign-in unthrottled (#409 fail-closed). Not a credential problem; say so.
       if (res.status === 503) { $("signinErr").textContent = "Sign-in is temporarily unavailable. Try again shortly."; return; }
-      $("signinErr").textContent = "Sign in failed. Check your username and password.";
+      $("signinErr").textContent = "That username and password do not match. Check them and try again.";
     }).catch(function () {
       $("siSubmit").disabled = false;
+      $("siSubmit").textContent = "Sign in";
       $("signinErr").textContent = "Could not reach the server. Try again.";
+    });
+  }
+
+  function tooManyText(wait) {
+    if (!(wait > 0)) return "Too many attempts. Please wait and try again.";
+    var mins = Math.ceil(wait / 60);
+    return "Too many attempts. Try again in " + mins + (mins === 1 ? " minute." : " minutes.");
+  }
+
+  // First-run create (#798): POST /api/setup (contract 1.10.7). The server is the
+  // authority on every rule; the checks here only save a round trip on obvious slips.
+  function setupSubmit() {
+    var token = $("suToken").value;
+    var username = $("suUser").value.trim().toLowerCase();
+    var name = $("suName").value.trim();
+    var pw = $("suPass").value, pw2 = $("suPass2").value;
+    var err = $("setupErr");
+    err.textContent = "";
+    if (!token) { err.textContent = "Enter the setup token."; focusFirst("suToken"); return; }
+    if (!username) { err.textContent = "Enter the email address for this account."; focusFirst("suUser"); return; }
+    if (pw.length < 12) { err.textContent = "The password must be at least 12 characters."; focusFirst("suPass"); return; }
+    if (pw.toLowerCase() === username) { err.textContent = "The password cannot be the same as the email address."; focusFirst("suPass"); return; }
+    if (pw !== pw2) { err.textContent = "The two passwords do not match."; focusFirst("suPass2"); return; }
+    var body = { setupToken: token, username: username, password: pw };
+    if (name) body.displayName = name;
+    $("suSubmit").disabled = true;
+    $("suSubmit").textContent = "Creating account\u2026";
+    fetch("/api/setup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "accept": "application/json" },
+      body: JSON.stringify(body),
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      return r.json().catch(function () { return { ok: false }; }).then(function (b) { return { status: r.status, body: b || {} }; });
+    }).then(function (res) {
+      $("suSubmit").disabled = false;
+      $("suSubmit").textContent = "Create account and sign in";
+      var b = res.body, code = b.error || "";
+      if ((res.status === 201 || res.status === 200) && b.ok) {
+        ["suToken", "suPass", "suPass2"].forEach(function (id) { $(id).value = ""; setPwVisible(id, false); });
+        state.setupRequired = false;
+        onSession(b);
+        return;
+      }
+      if (res.status === 409) { state.setupRequired = false; showSignin("", "This mailbox is already set up. Sign in with your account."); return; }
+      if (res.status === 404) { state.setupRequired = false; showSignin("", "First-run setup is not turned on for this mailbox. Sign in, or ask your operator for an account."); return; }
+      if (res.status === 401) { err.textContent = "That setup token is not correct."; focusFirst("suToken"); return; }
+      if (res.status === 429) { err.textContent = tooManyText(Number(b.retryAfter) || 0); return; }
+      if (res.status === 503) { err.textContent = "Setup is temporarily unavailable. Try again shortly."; return; }
+      if (code === "E_SENDER_NOT_ALLOWED") { err.textContent = b.message || "That address is not on this mailbox domain."; focusFirst("suUser"); return; }
+      if (code === "E_PASSWORD_POLICY") { err.textContent = b.message || "That password does not meet the policy."; focusFirst("suPass"); return; }
+      err.textContent = b.message || "Could not create the account. Check the fields and try again.";
+    }).catch(function () {
+      $("suSubmit").disabled = false;
+      $("suSubmit").textContent = "Create account and sign in";
+      err.textContent = "Could not reach the server. Try again.";
+    });
+  }
+
+  // Change password (#819, contract 1.10.5): POST /api/session/password, cookie session
+  // plus the CSRF header. On success the server ends every OTHER session of the account
+  // and rotates this one (new cookies, new csrfToken; #827), so this tab stays signed in.
+  function changePassword() {
+    var cur = $("pwCur").value, nw = $("pwNew").value, nw2 = $("pwNew2").value;
+    var err = $("pwErr"), note = $("pwNote");
+    err.textContent = ""; note.textContent = "";
+    if (!cur || !nw) { err.textContent = "Enter your current password and a new one."; return; }
+    if (nw.length < 12) { err.textContent = "The new password must be at least 12 characters."; focusFirst("pwNew"); return; }
+    if (nw === cur) { err.textContent = "The new password must be different from the current one."; focusFirst("pwNew"); return; }
+    if (nw !== nw2) { err.textContent = "The two new passwords do not match."; focusFirst("pwNew2"); return; }
+    $("pwSubmit").disabled = true;
+    $("pwSubmit").textContent = "Changing\u2026";
+    function done() { $("pwSubmit").disabled = false; $("pwSubmit").textContent = "Change password"; }
+    fetch("/api/session/password", {
+      method: "POST",
+      headers: { "content-type": "application/json", "accept": "application/json", "x-postern-csrf": csrfFromCookie() },
+      body: JSON.stringify({ currentPassword: cur, newPassword: nw }),
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).then(function (r) {
+      return r.json().catch(function () { return { ok: false }; }).then(function (b) { return { status: r.status, body: b || {} }; });
+    }).then(function (res) {
+      done();
+      var b = res.body, code = b.error || "";
+      if (res.status === 200 && b.ok) {
+        ["pwCur", "pwNew", "pwNew2"].forEach(function (id) { $(id).value = ""; });
+        state.csrfToken = b.csrfToken || csrfFromCookie();
+        if (b.identity) state.identity = b.identity;
+        note.textContent = "Password changed. Any other devices were signed out.";
+        return;
+      }
+      if (code === "E_REAUTH_REQUIRED") {
+        sessionReset(); setSettings(false);
+        showSignin("", "Sign in again, then change your password.");
+        return;
+      }
+      if (res.status === 401) {
+        // E_AUTH_FAILED means a wrong current password OR a session that is gone.
+        // Ask the server which, rather than guess.
+        return fetch("/api/session", { headers: { "accept": "application/json" }, credentials: "include", referrerPolicy: "no-referrer" })
+          .then(function (r) {
+            if (r.status === 200) { err.textContent = "The current password is not correct."; focusFirst("pwCur"); return; }
+            sessionReset(); setSettings(false);
+            showSignin("", "Your session ended. Sign in again.");
+          });
+      }
+      if (res.status === 429) { err.textContent = tooManyText(Number(b.retryAfter) || 0); return; }
+      if (res.status === 503) { err.textContent = "Password change is temporarily unavailable. Try again shortly."; return; }
+      if (res.status === 403) { err.textContent = "The request was refused for security reasons. Reload the page and try again."; return; }
+      if (code === "E_PASSWORD_POLICY") { err.textContent = b.message || "That password does not meet the policy."; focusFirst("pwNew"); return; }
+      err.textContent = b.message || "Could not change the password. Try again.";
+    }).catch(function () {
+      done();
+      err.textContent = "Could not reach the server. Try again.";
     });
   }
 
@@ -1343,7 +1650,7 @@
         credentials: "include", referrerPolicy: "no-referrer"
       }).catch(function () {}).then(function () {
         sessionReset();
-        showSignin("Signed out.");
+        showSignin("", "You are signed out.");
       });
       return;
     }
@@ -1352,7 +1659,7 @@
     SS.removeItem("postern_origin");
     state.token = ""; state.sendToken = ""; state.sendCapable = null; state.sendReason = ""; state.items = []; state.selected = null; state.cursor = null;
     clear($("list")); renderReading(null);
-    showGate("Signed out. Your tokens were cleared from this browser.");
+    showGate("", "Signed out. Your tokens were cleared from this browser.");
   }
 
   // --- folders + list (#352) -------------------------------------------------
@@ -1503,6 +1810,11 @@
       state.items = state.items.concat(rows);
       state.cursor = body.cursor || null;
       rows.forEach(appendRow);
+      if (!state.cursor || rows.length) {
+        announce(state.items.length === 0 ? (state.q ? "No results." : "No messages.")
+          : state.items.length + (state.items.length === 1 ? " message" : " messages") +
+            (state.q ? " found." : " in " + folderLabel(state.folder) + "."));
+      }
       if (fallbackFts) {
         $("list").appendChild(el("div", { class: "loading", text: "Semantic search unavailable; showing keyword results." }));
       }
@@ -1571,7 +1883,15 @@
     ]);
     item.addEventListener("click", function () { selectMessage(m.messageId, item); });
     item.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMessage(m.messageId, item); }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMessage(m.messageId, item); return; }
+      var rows = listRows(), i = rows.indexOf(item), to = null;
+      if (e.key === "ArrowDown") to = rows[i + 1];
+      else if (e.key === "ArrowUp") to = rows[i - 1];
+      else if (e.key === "Home") to = rows[0];
+      else if (e.key === "End") to = rows[rows.length - 1];
+      else return;
+      e.preventDefault();
+      focusRow(to);
     });
     $("list").appendChild(item);
   }
@@ -1643,6 +1963,33 @@
     return (f && f.label) || (id.charAt(0).toUpperCase() + id.slice(1));
   }
 
+  // --- announcements (#797) ---------------------------------------------------
+  // announce(): polite screen-reader text. toast(): a short visible notice that also
+  // reads out; errors use it in place of window.alert, which blocks the page.
+  function announce(msg) {
+    var a = $("announce");
+    a.textContent = "";
+    setTimeout(function () { a.textContent = msg; }, 30);
+  }
+  var toastTimer = null;
+  function toast(msg, bad) {
+    var t = $("toast");
+    t.className = "toast" + (bad ? " bad" : "");
+    t.setAttribute("role", bad ? "alert" : "status");
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, bad ? 6000 : 3500);
+  }
+  var NARROW_MQ = window.matchMedia ? window.matchMedia("(max-width: 760px)") : null;
+  function listRows() { return Array.prototype.slice.call($("list").querySelectorAll(".row-item")); }
+  function rowFor(id) {
+    var rows = listRows();
+    for (var i = 0; i < rows.length; i++) if (rows[i].getAttribute("data-id") === id) return rows[i];
+    return null;
+  }
+  function focusRow(row) { if (row) { row.focus(); row.scrollIntoView({ block: "nearest" }); } }
+
   // --- narrow-screen views (#795) -------------------------------------------------
   // Under 760px the list and the reading pane are one view at a time (CSS keys on
   // data-view); under 1100px the folder rail is a drawer (data-rail). Wide screens
@@ -1660,8 +2007,9 @@
   // --- reading ---------------------------------------------------------------
   function selectMessage(id, item) {
     var prev = $("list").querySelector(".row-item.sel");
-    if (prev) prev.classList.remove("sel");
-    if (item) item.classList.add("sel");
+    if (prev) { prev.classList.remove("sel"); prev.removeAttribute("aria-current"); }
+    item = item || rowFor(id);
+    if (item) { item.classList.add("sel"); item.setAttribute("aria-current", "true"); }
     // Drafts have no /api/messages/:id body; keep the list summary in the pane.
     var draft = state.items.find(function (x) { return x.messageId === id && x.isDraft; });
     if (draft) {
@@ -1746,7 +2094,7 @@
     var subInput = el("input", { id: "cmpSub", type: "text", value: draft.subject || opts.subject || "" });
     var editor = el("div", {
       id: "cmpBody", class: "compose-editor" + (rich ? "" : " plain"),
-      contenteditable: "true", role: "textbox", "aria-multiline": "true"
+      contenteditable: "true", role: "textbox", "aria-multiline": "true", "aria-label": "Message body"
     });
     var initialText = draft.bodyText || opts.text || "";
     if (rich && draft.bodyHtml) editor.appendChild(safeComposeFragment(draft.bodyHtml));
@@ -2187,7 +2535,7 @@
           if (sel) sel.classList.add("sel");
         }).catch(function (e) {
           if (e.code === 401) { logout(); return; }
-          alert("Flag update failed: " + e.message);
+          toast("Star update failed: " + e.message, true);
           starBtn.disabled = false;
         });
       });
@@ -2198,12 +2546,13 @@
         btn.addEventListener("click", function () {
           btn.disabled = true;
           apiOrganize("/api/messages/move", { ids: [m.messageId], mailbox: mailbox }).then(function () {
+            toast(mailbox ? "Moved to " + label + "." : "Restored.");
             state.selected = null;
             resetAndLoad();
             renderReading(null);
           }).catch(function (e) {
             if (e.code === 401) { logout(); return; }
-            alert("Move failed: " + e.message);
+            toast("Move failed: " + e.message, true);
             btn.disabled = false;
           });
         });
@@ -2252,6 +2601,12 @@
       }));
     }
     r.appendChild(head);
+    // At phone width the list (and the focused row) just disappeared, so move focus to
+    // the message heading; otherwise keyboard and screen-reader users are left nowhere.
+    if (NARROW_MQ && NARROW_MQ.matches) {
+      var h = head.querySelector("h2");
+      if (h) { h.setAttribute("tabindex", "-1"); h.focus(); }
+    }
 
     // Body: rendered inside a sandboxed iframe (sandbox="" = no scripts, no
     // same-origin), so stored content cannot execute or reach the token/API.
@@ -2321,8 +2676,43 @@
     if (sel) sel.focus();
   });
   $("composeBtn").addEventListener("click", function () { renderComposeForm({}); });
+  function setSettings(open) {
+    $("settingsPanel").classList.toggle("on", open);
+    $("settingsBtn").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) $("themeSelect").focus();
+  }
   $("settingsBtn").addEventListener("click", function () {
-    $("settingsPanel").classList.toggle("on");
+    setSettings(!$("settingsPanel").classList.contains("on"));
+  });
+  $("skipLink").addEventListener("click", function (e) {
+    e.preventDefault();
+    var target = $("list").querySelector(".row-item.sel") || $("list").querySelector(".row-item");
+    if (target) focusRow(target); else $("list").focus();
+  });
+  // Single-key shortcuts (#797). Never while typing, never with a modifier, and only
+  // once the mailbox is showing.
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      if ($("settingsPanel").classList.contains("on")) { setSettings(false); $("settingsBtn").focus(); return; }
+      if (NARROW_MQ && NARROW_MQ.matches && $("app").getAttribute("data-view") === "reading" &&
+          $("app").getAttribute("data-rail") !== "open") { $("backBtn").click(); return; }
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey || !$("app").classList.contains("on")) return;
+    var t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    if (e.key === "/") { e.preventDefault(); $("search").focus(); return; }
+    if (e.key === "c" && $("composeBtn").style.display !== "none") { e.preventDefault(); $("composeBtn").click(); return; }
+    if (e.key === "j" || e.key === "k") {
+      var rows = listRows();
+      if (!rows.length) return;
+      var cur = rows.indexOf($("list").querySelector(".row-item.sel"));
+      var next = e.key === "j" ? Math.min(cur + 1, rows.length - 1) : Math.max(cur - 1, 0);
+      if (cur < 0) next = 0;
+      e.preventDefault();
+      focusRow(rows[next]);
+      rows[next].click();
+    }
   });
   $("themeSelect").addEventListener("change", function (e) {
     prefSet("postern_theme", THEMES.indexOf(e.target.value) >= 0 ? e.target.value : "system");
@@ -2343,7 +2733,17 @@
     applyChromePrefs();
   });
   $("signinForm").addEventListener("submit", function (e) { e.preventDefault(); signIn(); });
+  $("setupForm").addEventListener("submit", function (e) { e.preventDefault(); setupSubmit(); });
+  $("pwForm").addEventListener("submit", function (e) { e.preventDefault(); changePassword(); });
+  Array.prototype.forEach.call(document.querySelectorAll(".pw-toggle"), function (btn) {
+    btn.addEventListener("click", function () {
+      var id = btn.getAttribute("data-toggle-for");
+      setPwVisible(id, $(id).type === "password");
+      $(id).focus();
+    });
+  });
   $("toTokenGate").addEventListener("click", function () { showGate(""); });
+  $("toTokenFromOff").addEventListener("click", function () { showGate(""); });
   $("toSignin").addEventListener("click", function () { showSignin(""); });
   $("search").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { state.q = e.target.value.trim(); resetAndLoad(); }
@@ -2402,9 +2802,11 @@
     }).then(function (res) {
       if (res.status === 200 && res.body && res.body.ok) { onSession(res.body); return; }
       state.authBackend = (res.body && res.body.authBackend) || "off";
+      state.setupRequired = !!(res.body && res.body.setupRequired === true);
       afterNoSession();
     }).catch(function () {
       state.authBackend = "off";
+      state.discoveryFailed = true;
       afterNoSession();
     });
   }
@@ -2412,8 +2814,13 @@
   // (native backend) or the token gate (sessions off / unreachable).
   function afterNoSession() {
     if (state.origin && state.token) { state.authMode = "token"; showApp(); resetAndLoad(); return; }
+    // setupRequired is only meaningful on an explicitly native backend (the server only
+    // sends it then); never show first run on any other answer.
+    if (state.authBackend === "native" && state.setupRequired) { showSetup(""); return; }
     if (state.authBackend === "native") { showSignin(""); return; }
-    showGate("");
+    // Discovery failed (network): do not claim sign-in is off; offer the token gate.
+    if (state.discoveryFailed) { showGate("Could not reach the server to check sign-in. Try again, or connect with an API token."); return; }
+    showDisabled();
   }
   boot();
 })();

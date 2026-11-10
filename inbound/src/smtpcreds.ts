@@ -8,10 +8,19 @@
 // This is a SEPARATE concern from store.ts (the message store): it gates the
 // SENDER per user. The mailbox/store stays the shared skyphusion.org D1.
 
-// OWASP 2023 floor for PBKDF2-HMAC-SHA256. Encoded into the hash string so it can
-// be raised later without a schema change (old hashes verify at their own count, and
-// a successful sign-in re-hashes them at this target, contract 1.10.2).
-export const PBKDF2_ITERATIONS = 210_000;
+// THE CAP (#821, ruled by the lead): the DEPLOYED Cloudflare Workers runtime refuses a
+// PBKDF2 iteration count above 100,000 ("Pbkdf2 failed: iteration counts above 100000 are
+// not supported"). Node and local `wrangler dev` accept more, which is how a 210,000 value
+// shipped with a green suite (#68) and could neither create nor verify ANY credential in
+// production. Do NOT raise this from a local result: the suite runs under the edge's limit
+// (test-setup/workers-pbkdf2-cap.ts) and goes red above it. A stronger KDF (scrypt or
+// Argon2 in WASM) is a separate design item.
+export const RUNTIME_PBKDF2_MAX_ITERATIONS = 100_000;
+
+// PBKDF2-HMAC-SHA256 at the cap. Encoded into the hash string, so old hashes verify at
+// their own count and a successful sign-in re-hashes a lower count at this target, never
+// above it (contract 1.10.2). DUMMY_HASH below uses the same count.
+export const PBKDF2_ITERATIONS = RUNTIME_PBKDF2_MAX_ITERATIONS;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32;
 
@@ -84,10 +93,26 @@ export function hashIterations(encoded: string): number | null {
  * Constant-time verify of a secret against an encoded hash. Returns false for any
  * malformed encoding rather than throwing, so a corrupt row fails closed.
  */
-export async function verifySecret(secret: string, encoded: string): Promise<boolean> {
+export async function verifySecret(secret: string, encoded: string, account = "?"): Promise<boolean> {
   const parts = encoded.split("$");
   const iterations = hashIterations(encoded);
   if (iterations === null) return false;
+  // A stored hash above the runtime cap cannot be derived on Workers. Fail CLOSED with a
+  // named config error (never a 5xx that leaks the runtime message): every caller then
+  // answers exactly as for a wrong password, so the account is not distinguishable.
+  // Such a row can only have been minted outside the Worker; the fix is a password reset.
+  // TIMING: it must also COST what a wrong password costs, so run the same derive at the
+  // target against the dummy hash before refusing; an early return would answer in
+  // microseconds and expose the account by its speed.
+  if (iterations > RUNTIME_PBKDF2_MAX_ITERATIONS) {
+    console.error(
+      "config error: credential for " + account + " is hashed at " + iterations +
+        " PBKDF2 iterations, above the runtime cap of " + RUNTIME_PBKDF2_MAX_ITERATIONS +
+        "; it cannot sign in until an operator resets its password",
+    );
+    await verifySecret(secret, DUMMY_HASH);
+    return false;
+  }
   const salt = fromB64(parts[2]);
   const expected = fromB64(parts[3]);
   if (!salt || !expected) return false;
@@ -132,7 +157,7 @@ export async function authenticateAccount(
     await verifySecret(secret, DUMMY_HASH);
     return null;
   }
-  const ok = await verifySecret(secret, cred.secretHash);
+  const ok = await verifySecret(secret, cred.secretHash, cred.username);
   if (!ok) return null;
   const iterations = hashIterations(cred.secretHash);
   if (iterations !== null && iterations < PBKDF2_ITERATIONS) {

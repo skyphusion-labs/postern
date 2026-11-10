@@ -74,7 +74,8 @@
       "path": "/api/smtp-auth",
       "match": "exact",
       "scope": null,
-      "auth": "smtp-credential"
+      "auth": "smtp-credential",
+      "note": "the relay and the IMAP door send `secret`, as CONTRACT.md 9 documents (#829); precred-body-contract.test.ts pins the declared body to what the handler reads"
     },
     {
       "id": "session",

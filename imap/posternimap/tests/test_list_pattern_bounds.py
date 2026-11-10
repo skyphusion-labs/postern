@@ -16,7 +16,8 @@ for every connected client, not only the caller.
 These tests assert the bound, never the blowup. A test that actually triggered
 catastrophic backtracking to prove backtracking exists would hang CI, which is a
 worse defect than the one being fixed. The exact, fast check is that a refused
-pattern never reaches `re.compile` at all.
+pattern never reaches `_wildcard_match` at all. #761 retired the glob-to-regex
+engine; the caps stay as defence in depth and these cases keep them observable.
 """
 
 from __future__ import annotations
@@ -55,12 +56,43 @@ def _cfg(**over: str) -> Config:
     return Config.from_env(env)
 
 
+class _MatchSpy:
+    """Records every call to ``_wildcard_match``, and delegates.
+
+    A spy rather than a stub: it never changes behavior, so it cannot itself be
+    the reason a case passes.
+    """
+
+    def __init__(self) -> None:
+        self.calls: List[Tuple[str, str, str]] = []
+        self._real: Any = None
+
+    def __enter__(self) -> "_MatchSpy":
+        import posternimap.account as account
+
+        self._real = account._wildcard_match
+
+        def spy(pattern: str, name: str, delim: str = "/") -> bool:
+            self.calls.append((pattern, name, delim))
+            return self._real(pattern, name, delim)
+
+        account._wildcard_match = spy
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        import posternimap.account as account
+
+        account._wildcard_match = self._real
+
+
 class _CompileSpy:
     """Records every pattern handed to re.compile, and delegates.
 
     A spy rather than a stub: it never changes behavior, so it cannot itself be
     the reason a case passes. Delegating also means an unexpected compile
-    elsewhere in the window is recorded instead of crashing the test.
+    elsewhere in the window is recorded instead of crashing the test. The
+    matcher is no longer a glob regex (#761); this still catches a refused
+    pattern leaking into any compile of the LIST glob.
     """
 
     def __init__(self) -> None:
@@ -125,12 +157,17 @@ class ListPatternBoundsTest(unittest.TestCase):
         self.assertEqual(self._names(self.WILDCARD_HEAVY), [])
 
     def test_refused_pattern_never_reaches_re_compile(self) -> None:
-        # The exact, fast check: not "it was quick", but "it was never compiled".
-        with _CompileSpy() as spy:
+        # The exact, fast check: not "it was quick", but "it was never matched".
+        # The compile spy is the #759 form; the matcher spy is the #761 form.
+        with _CompileSpy() as compile_spy, _MatchSpy() as match_spy:
             self.assertEqual(self._names(self.WILDCARD_HEAVY), [])
-        for compiled in spy.patterns:
+        for compiled in compile_spy.patterns:
             self.assertNotIn("z", compiled, compiled)
-        self.assertEqual([p for p in spy.patterns if p.count("(?:.*?)") > 4], [])
+        self.assertEqual([p for p in compile_spy.patterns if p.count("(?:.*?)") > 4], [])
+        self.assertEqual(
+            [c for c in match_spy.calls if c[0] == self.WILDCARD_HEAVY],
+            [],
+        )
 
     def test_the_cap_is_pinned(self) -> None:
         # Pins the constants so loosening either one has to edit a test, where a
@@ -143,14 +180,17 @@ class ListPatternBoundsTest(unittest.TestCase):
 
     def test_an_allowed_pattern_does_reach_re_compile(self) -> None:
         # The positive control for the test above. Without it, that assertion
-        # would also pass if listMailboxes compiled nothing for ANY pattern, or
-        # if the spy were simply never installed.
-        with _CompileSpy() as spy:
+        # would also pass if listMailboxes matched nothing for ANY pattern, or
+        # if the spy were simply never installed. The name still says compile
+        # because that is the #759 pin; the engine it watches is now the
+        # linear matcher.
+        with _MatchSpy() as spy:
             self._names("INBOX")
         self.assertTrue(
-            any("INBOX" in p for p in spy.patterns),
-            "the spy observed no compile for an ALLOWED pattern, so its negative "
-            "result on a refused pattern would prove nothing: %r" % (spy.patterns,),
+            any(pattern == "INBOX" for pattern, _name, _delim in spy.calls),
+            "the spy observed no match call for an ALLOWED pattern, so its "
+            "negative result on a refused pattern would prove nothing: %r"
+            % (spy.calls,),
         )
 
     def test_over_long_pattern_is_refused(self) -> None:
