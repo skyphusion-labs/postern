@@ -274,7 +274,7 @@ root, never an insecure-skip; no code change.
 
 ### 6b. Provision 636 + a chained cert (the cleaner long-term shape)
 
-1. Issue a cert with a SAN naming the directory host (an internal name via
+1. Issue a cert with a SAN naming the directory server (an internal name via
    DNS-01 is cleanest).
 2. Bind the keypair to the directory's LDAP endpoint and publish 636 (or enable
    StartTLS on 389). This is an IdP configuration change; treat it as a
@@ -314,6 +314,7 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 | `POSTERN_API_TOKEN_ORGANIZE` | `organize` | `POST /api/messages/seen`/`flags`/`move` only (#692). NOT `GET /api/folders`, which is a read. Cannot read, send, hard-delete, reach admin, or write through the `imap` seam |
 | `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read` (#718): **estate-wide**, the same reach a static read token has; `to=` becomes an ordinary filter. The bound identity still fixes the send From and still bounds every WRITE. `organize` (#685): mark read / flags / move, still forced to that identity. Never delete/admin. |
 | runtime agent identities (#801; D1 `agent_identities`, hashes only) | the same caps (`read` / `send` / `organize`) + bound identity | Minted and revoked at runtime by a `both` token via `/api/admin/identities` (no deploy; a revoke is effective on the next request). Never `admin`: a runtime identity cannot reach any `/api/admin/*` route. See SEND-IDENTITIES.md section 10 |
+| delegation grants (#740 S1; D1 `delegation_grants`) | not a credential: a record that an agent identity may act on a human address with `read` / `organize` / `quote` / `send_as` (each implies `read`) | Operator-made via `/api/admin/delegations`. **Stored only in S1; no gate reads a grant yet.** See DELEGATION.md |
 
 **`GET /api/whoami` is `read`-scoped, and that is a decision, not an oversight (#650).**
 The route answers what `readScopeReport` answers: WHOSE MAIL A READ IS BOUND TO. For a

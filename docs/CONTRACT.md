@@ -624,6 +624,8 @@ none touches D1 directly (#25, #26).
 | POST | `/api/admin/users/{username}/password` | operator reset `{password?}`: ends the user's sessions, clears the account lockout | #790 |
 | GET/POST | `/api/admin/identities` | list runtime agent identities (keyset `limit`/`cursor`, `includeRevoked=1`; never a token or hash) or mint one `{from, scopes, displayName?, label?}` (`201`, the token is returned ONCE and never again). Scopes: `read`, `send`, `organize`; anything else is `400`. A runtime identity never reaches `/api/admin/*`. See SEND-IDENTITIES.md section 10 | #801 |
 | DELETE | `/api/admin/identities/{id}` | revoke an identity; the next request with its token is `401`. Idempotent | #801 |
+| GET/POST | `/api/admin/delegations` | list delegation grants (keyset `limit`/`cursor`, `includeRevoked=1`, `grantee=`, `address=`) or grant one `{granteeId, address, powers, label?}`: the grantee must be a LIVE agent identity (`400 E_GRANTEE_INVALID`), powers from `read`, `organize`, `quote`, `send_as` (every power implies `read`), one active grant per (grantee, address) (`409 E_CONFLICT`). Stored only; nothing enforces a grant yet. See DELEGATION.md | #740 S1 |
+| DELETE | `/api/admin/delegations/{id}` | revoke a grant. Idempotent | #740 S1 |
 | GET | `/api/admin/audit` | the audit log, newest first (keyset `limit`/`cursor`): actor, action, target, outcome, detail; refusals included | #801 |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 | POST | `/api/admin/reproject` | refill `projected_size` after a `PROJECTION_VERSION` bump (one keyset page; body: `cursor?`, `limit?`, `dryRun?`, `countOnly?`) | #507 / #520 |
@@ -984,12 +986,13 @@ POST /api/smtp-auth          Authorization: Bearer <POSTERN_TRANSPORT_TOKEN>
 
   The endpoint is gated by the **transport token**, never the mailbox API token (section 5): the
   relay is an infra seam, not an API client. `smtp_credentials` (migration `0004`) stores the secret
-  only as a `pbkdf2$<iterations>$<salt>$<hash>` derivation (Web Crypto PBKDF2-HMAC-SHA256); an
+  only as a `pbkdf2-sha512$<iterations>$<salt>$<hash>` derivation (Web Crypto PBKDF2-HMAC-SHA512,
+  #828; a legacy `pbkdf2$` PBKDF2-HMAC-SHA256 row still verifies); an
   unknown user is verified against a dummy hash so timing does not reveal whether the username
   exists. Operators manage these accounts through the `admin`-scoped `/api/admin/users` routes
   (#790, webmail-v2-contracts 1.10.4) or the legacy `POST` / `DELETE /api/admin/smtp-credentials`
-  upsert (the secret is returned once and never logged). A hash below the current iteration
-  target is re-hashed on the next successful sign-in.
+  upsert (the secret is returned once and never logged). A hash not at the current target (a
+  legacy SHA-256 row, or a lower iteration count) is re-hashed on the next successful sign-in.
 
   The 2xx body is the only one a daemon parses; every other status is an INFRA failure, not a
   verdict on the credential. That split is load-bearing (#442): the worker answers an unexpected
@@ -1261,7 +1264,7 @@ Computed at `store.put` / attachment finalize from D1 metadata only (body length
 attachment size/filename/mime; no R2 reads). The IMAP door prefers this for RFC822.SIZE when
 `projectionVersion` matches the renderer's version, so bulk `UID FETCH … RFC822.SIZE` does
 zero attachment GETs. A renderer change bumps the version and requires a
-`POSTERN_IMAP_UIDVALIDITY` bump on the fleet image roll (same discipline as other projection
+`POSTERN_IMAP_UIDVALIDITY` bump on the door image roll (same discipline as other projection
 changes). Pre-0012 rows keep NULL and fall back to a placeholder hydrate (message GET, still
 zero attachment GETs for SIZE). Projection v2 introduced hand-rolled RFC 2047
 Base64 encoded-words for non-ASCII headers and filenames in both

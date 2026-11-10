@@ -21,12 +21,31 @@
 //   - Every mint, list and revoke writes one audit_log row, refusals included. A
 //     successful mint or revoke and its audit row land in ONE D1 batch, so the action
 //     cannot happen without its record.
+//
+// The error envelope, body parsing, paging and the audit writer are shared with the
+// delegation grants (#740 S1) through ./adminkit.
 
 import type { BoundIdentity, IdentityCap } from "./sendidentity";
 import { sha256Hex } from "./sendidentity";
-import { allowedFromDomain } from "./fromdomain";
 import { displayNameProblem } from "./smtpcreds";
-import { readBodyCapped, PayloadTooLargeError } from "./body";
+import {
+  AdminError,
+  EMAIL_RE,
+  auditStatement,
+  b64url,
+  decodeCursor,
+  encodeCursor,
+  fail,
+  generateId,
+  json,
+  optLine,
+  parseIncludeRevoked,
+  parseLimit,
+  pathId,
+  readBody,
+  requireDomain,
+  runAudited,
+} from "./adminkit";
 
 /** What a runtime identity may hold: exactly the registry caps. Never delete or admin. */
 export const RUNTIME_CAPS: readonly IdentityCap[] = ["read", "send", "organize"];
@@ -46,49 +65,13 @@ export interface RuntimeHit {
 export class IdentityStoreUnavailable extends Error {}
 
 const TOKEN_PREFIX = "pstn_";
-const ID_PREFIX = "idn_";
-const MAX_BODY_BYTES = 4 * 1024;
 const LABEL_MAX = 100;
-const LIST_DEFAULT = 100;
-const LIST_MAX = 500;
-const EMAIL_RE = /^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$/;
-const ID_RE = /^idn_[0-9a-f]{24}$/;
-
-class IdentityError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string, readonly field?: string) {
-    super(message);
-  }
-}
-
-function json(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
-}
-
-function fail(err: IdentityError): Response {
-  const body: Record<string, unknown> = { ok: false, error: err.code, message: err.message };
-  if (err.field) body.field = err.field;
-  return json(body, err.status);
-}
-
-function hex(bytes: Uint8Array): string {
-  let s = "";
-  for (const b of bytes) s += b.toString(16).padStart(2, "0");
-  return s;
-}
-
-function b64url(bytes: Uint8Array): string {
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
+/** The shape of an agent identity id; exported so other records can validate a reference. */
+export const IDENTITY_ID_RE = /^idn_[0-9a-f]{24}$/;
 
 /** A fresh token: a recognisable prefix (so secret scanners can match it) plus 256 bits. */
 export function generateToken(): string {
   return TOKEN_PREFIX + b64url(crypto.getRandomValues(new Uint8Array(32)));
-}
-
-function generateId(): string {
-  return ID_PREFIX + hex(crypto.getRandomValues(new Uint8Array(12)));
 }
 
 /** Parse a stored scopes column. Unknown strings are dropped, so a bad row can only narrow. */
@@ -154,87 +137,18 @@ export async function resolveRuntimeIdentity(env: Env, token: string, allowedDom
   return { id: row.id, identity, caps };
 }
 
-// --- audit ---
-
-interface AuditEntry {
-  action: "identity.mint" | "identity.list" | "identity.revoke";
-  targetId?: string | null;
-  outcome: "ok" | "refused";
-  detail?: Record<string, unknown>;
-}
-
-// Every writer today is the operator (a static `both` token, which carries no id).
-// actor_kind / actor_id exist so #740 can record an agent identity as the actor.
-function auditStatement(env: Env, at: string, entry: AuditEntry) {
-  return env.DB.prepare(
-    "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
-      "VALUES (?, 'operator', NULL, ?, ?, ?, ?, ?)",
-  ).bind(
-    at,
-    entry.action,
-    entry.targetId ? "identity" : null,
-    entry.targetId ?? null,
-    entry.outcome,
-    entry.detail ? JSON.stringify(entry.detail) : null,
-  );
-}
-
-/**
- * Record a refusal. Best effort BY DESIGN: the refusal already happened and its answer
- * is the same either way, so a failed write is logged and the refusal is still returned
- * (failing it would turn a 400 into a 500 and tell the caller less, not more).
- */
-async function auditRefusal(env: Env, entry: Omit<AuditEntry, "outcome">, err: IdentityError) {
-  try {
-    await auditStatement(env, new Date().toISOString(), {
-      ...entry,
-      outcome: "refused",
-      detail: { ...(entry.detail ?? {}), error: err.code },
-    }).run();
-  } catch (e) {
-    console.error("audit_log write failed for a refusal", e instanceof Error ? e.message : String(e));
-  }
-}
-
 // --- request parsing ---
-
-async function readBody(request: Request): Promise<Record<string, unknown>> {
-  let text: string;
-  try {
-    text = await readBodyCapped(request, MAX_BODY_BYTES);
-  } catch (err) {
-    if (err instanceof PayloadTooLargeError) throw new IdentityError(413, "E_PAYLOAD_TOO_LARGE", "request body too large");
-    throw err;
-  }
-  if (!text.trim()) return {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new IdentityError(400, "E_VALIDATION_ERROR", "invalid JSON body");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new IdentityError(400, "E_VALIDATION_ERROR", "body must be a JSON object");
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function requireDomain(env: Env): string {
-  const domain = allowedFromDomain(env);
-  if (!domain) throw new IdentityError(500, "E_INTERNAL_SERVER_ERROR", "ALLOWED_FROM_DOMAIN is not configured");
-  return domain;
-}
 
 /** Requested caps: a non-empty array of known cap names. Anything else is a 400, never a strip. */
 function requestedCaps(body: Record<string, unknown>): IdentityCap[] {
   const raw = body.scopes;
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new IdentityError(400, "E_VALIDATION_ERROR", `scopes must be a non-empty array of ${RUNTIME_CAPS.join(", ")}`, "scopes");
+    throw new AdminError(400, "E_VALIDATION_ERROR", `scopes must be a non-empty array of ${RUNTIME_CAPS.join(", ")}`, "scopes");
   }
   const out: IdentityCap[] = [];
   for (const item of raw) {
     if (typeof item !== "string" || !(RUNTIME_CAPS as readonly string[]).includes(item)) {
-      throw new IdentityError(
+      throw new AdminError(
         400,
         "E_VALIDATION_ERROR",
         `unknown scope ${JSON.stringify(item)}: an agent identity may hold only ${RUNTIME_CAPS.join(", ")}`,
@@ -246,68 +160,15 @@ function requestedCaps(body: Record<string, unknown>): IdentityCap[] {
   return out;
 }
 
-function optText(body: Record<string, unknown>, key: "displayName" | "label"): string | null {
-  const v = body[key];
+function displayName(body: Record<string, unknown>): string | null {
+  const v = body.displayName;
   if (v === undefined || v === null) return null;
-  if (typeof v !== "string") throw new IdentityError(400, "E_VALIDATION_ERROR", `${key} must be a string`, key);
+  if (typeof v !== "string") throw new AdminError(400, "E_VALIDATION_ERROR", "displayName must be a string", "displayName");
   const s = v.trim();
   if (!s) return null;
-  if (key === "displayName") {
-    const problem = displayNameProblem(s);
-    if (problem) throw new IdentityError(400, "E_VALIDATION_ERROR", problem, key);
-  } else {
-    if (s.length > LABEL_MAX) throw new IdentityError(400, "E_VALIDATION_ERROR", `label must be at most ${LABEL_MAX} characters`, key);
-    // eslint-disable-next-line no-control-regex
-    if (/[\u0000-\u001f\u007f]/.test(s)) throw new IdentityError(400, "E_VALIDATION_ERROR", "label must not contain control characters", key);
-  }
+  const problem = displayNameProblem(s);
+  if (problem) throw new AdminError(400, "E_VALIDATION_ERROR", problem, "displayName");
   return s;
-}
-
-function parseLimit(url: URL): number {
-  const raw = url.searchParams.get("limit");
-  if (raw === null) return LIST_DEFAULT;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1 || n > LIST_MAX) {
-    throw new IdentityError(400, "E_VALIDATION_ERROR", `limit must be an integer from 1 to ${LIST_MAX}`, "limit");
-  }
-  return n;
-}
-
-function parseIncludeRevoked(url: URL): boolean {
-  const raw = url.searchParams.get("includeRevoked");
-  if (raw === null || raw === "0" || raw === "false") return false;
-  if (raw === "1" || raw === "true") return true;
-  throw new IdentityError(400, "E_VALIDATION_ERROR", "includeRevoked must be 1, true, 0 or false", "includeRevoked");
-}
-
-// Keyset cursor over (created_at, id). Opaque base64url of "created_at id".
-function encodeCursor(row: { created_at: string; id: string }): string {
-  return b64url(new TextEncoder().encode(`${row.created_at} ${row.id}`));
-}
-
-function decodeCursor(url: URL): { createdAt: string; id: string } | null {
-  const raw = url.searchParams.get("cursor");
-  if (raw === null) return null;
-  try {
-    const padded = raw.replace(/-/g, "+").replace(/_/g, "/");
-    const text = atob(padded + "===".slice((padded.length + 3) % 4));
-    const [createdAt, id] = text.split(" ");
-    if (!createdAt || !id || !ID_RE.test(id)) throw new Error("shape");
-    return { createdAt, id };
-  } catch {
-    throw new IdentityError(400, "E_VALIDATION_ERROR", "malformed cursor", "cursor");
-  }
-}
-
-function pathId(raw: string): string {
-  let id: string;
-  try {
-    id = decodeURIComponent(raw);
-  } catch {
-    throw new IdentityError(400, "E_VALIDATION_ERROR", "malformed identity id in path");
-  }
-  if (!ID_RE.test(id)) throw new IdentityError(404, "E_NOT_FOUND", "no such identity");
-  return id;
 }
 
 // The column list every read of a row uses. token_hash is deliberately NOT in it: the
@@ -334,25 +195,26 @@ async function mint(request: Request, env: Env): Promise<Response> {
   const body = await readBody(request);
   const domain = requireDomain(env);
   const caps = requestedCaps(body);
-  const displayName = optText(body, "displayName");
-  const label = optText(body, "label");
+  const name = displayName(body);
+  const label = optLine(body, "label", LABEL_MAX);
   const raw = body.from;
-  if (typeof raw !== "string") throw new IdentityError(400, "E_FIELD_MISSING", "from is required", "from");
+  if (typeof raw !== "string") throw new AdminError(400, "E_FIELD_MISSING", "from is required", "from");
   const from = raw.trim().toLowerCase();
   if (!EMAIL_RE.test(from) || from.split("@")[1] !== domain) {
-    throw new IdentityError(400, "E_SENDER_NOT_ALLOWED", `from must be a valid address on @${domain}`, "from");
+    throw new AdminError(400, "E_SENDER_NOT_ALLOWED", `from must be a valid address on @${domain}`, "from");
   }
 
   const token = generateToken();
   const tokenHash = await sha256Hex(token);
-  const id = generateId();
+  const id = generateId("idn_");
   const now = new Date().toISOString();
   const insert = env.DB.prepare(
     "INSERT INTO agent_identities (id, token_hash, from_addr, display_name, label, scopes, created_at) " +
       "VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).bind(id, tokenHash, from, displayName, label, JSON.stringify(caps), now);
+  ).bind(id, tokenHash, from, name, label, JSON.stringify(caps), now);
   const audit = auditStatement(env, now, {
     action: "identity.mint",
+    targetKind: "identity",
     targetId: id,
     outcome: "ok",
     detail: { from, scopes: caps },
@@ -364,7 +226,7 @@ async function mint(request: Request, env: Env): Promise<Response> {
       id,
       token,
       from,
-      displayName,
+      displayName: name,
       label,
       scopes: caps,
       createdAt: now,
@@ -377,7 +239,7 @@ async function mint(request: Request, env: Env): Promise<Response> {
 async function list(url: URL, env: Env): Promise<Response> {
   const limit = parseLimit(url);
   const includeRevoked = parseIncludeRevoked(url);
-  const cursor = decodeCursor(url);
+  const cursor = decodeCursor(url, IDENTITY_ID_RE);
   const where: string[] = [];
   const binds: unknown[] = [];
   if (!includeRevoked) where.push("revoked_at IS NULL");
@@ -406,15 +268,16 @@ async function list(url: URL, env: Env): Promise<Response> {
 }
 
 async function revoke(env: Env, rawId: string): Promise<Response> {
-  const id = pathId(rawId);
+  const id = pathId(rawId, IDENTITY_ID_RE, "identity");
   const row = await env.DB.prepare(`SELECT ${COLUMNS} FROM agent_identities WHERE id = ?`).bind(id).first<IdentityRow>();
-  if (!row) throw new IdentityError(404, "E_NOT_FOUND", "no such identity");
+  if (!row) throw new AdminError(404, "E_NOT_FOUND", "no such identity");
   const now = new Date().toISOString();
   const update = env.DB.prepare(
     "UPDATE agent_identities SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
   ).bind(now, id);
   const audit = auditStatement(env, now, {
     action: "identity.revoke",
+    targetKind: "identity",
     targetId: id,
     outcome: "ok",
     detail: { alreadyRevoked: row.revoked_at !== null },
@@ -428,19 +291,6 @@ async function revoke(env: Env, rawId: string): Promise<Response> {
 
 const ADMIN_ITEM = /^\/api\/admin\/identities\/([^/]+)$/;
 
-async function run(env: Env, action: AuditEntry["action"], targetId: string | null, fn: () => Promise<Response>) {
-  try {
-    return await fn();
-  } catch (err) {
-    if (err instanceof IdentityError) {
-      // Only a well-formed id is recorded as the target; a junk path segment is not data.
-      await auditRefusal(env, { action, targetId: targetId && ID_RE.test(targetId) ? targetId : null }, err);
-      return fail(err);
-    }
-    throw err;
-  }
-}
-
 /**
  * /api/admin/identities[/{id}], reached only past the `admin` scope gate. Returns null
  * for a method or path this does not serve, which falls through to 404. That matters: a
@@ -449,13 +299,14 @@ async function run(env: Env, action: AuditEntry["action"], targetId: string | nu
  */
 export async function handleAdminIdentities(request: Request, env: Env, url: URL): Promise<Response | null> {
   const path = url.pathname;
+  const target = (raw: string | null) => ({ kind: "identity", raw, idRe: IDENTITY_ID_RE });
   if (path === "/api/admin/identities") {
-    if (request.method === "POST") return run(env, "identity.mint", null, () => mint(request, env));
-    if (request.method === "GET") return run(env, "identity.list", null, () => list(url, env));
+    if (request.method === "POST") return runAudited(env, "identity.mint", target(null), () => mint(request, env));
+    if (request.method === "GET") return runAudited(env, "identity.list", target(null), () => list(url, env));
     return null;
   }
   const m = ADMIN_ITEM.exec(path);
-  if (m && request.method === "DELETE") return run(env, "identity.revoke", m[1], () => revoke(env, m[1]));
+  if (m && request.method === "DELETE") return runAudited(env, "identity.revoke", target(m[1]), () => revoke(env, m[1]));
   return null;
 }
 
@@ -468,7 +319,7 @@ export async function handleAudit(request: Request, env: Env, url: URL): Promise
     let before: number | null = null;
     if (rawCursor !== null) {
       before = Number(rawCursor);
-      if (!Number.isInteger(before) || before < 1) throw new IdentityError(400, "E_VALIDATION_ERROR", "malformed cursor", "cursor");
+      if (!Number.isInteger(before) || before < 1) throw new AdminError(400, "E_VALIDATION_ERROR", "malformed cursor", "cursor");
     }
     const sql =
       "SELECT id, at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail FROM audit_log" +
@@ -495,7 +346,7 @@ export async function handleAudit(request: Request, env: Env, url: URL): Promise
       cursor: rows.length > limit ? String(page[page.length - 1].id) : null,
     });
   } catch (err) {
-    if (err instanceof IdentityError) return fail(err);
+    if (err instanceof AdminError) return fail(err);
     throw err;
   }
 }

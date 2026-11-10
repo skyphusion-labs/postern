@@ -261,6 +261,7 @@ that reports no scope it says so rather than guessing.
 | `list_draft_attachments` / `add_draft_attachment` / `delete_draft_attachment` | `/api/drafts/{id}/attachments[/{aid}]` | `[attachment]` / attachment / `None` |
 | `mint_identity` / `list_identities` / `revoke_identity` | `/api/admin/identities[/{id}]` | `{id, token, ...}` (the token ONCE, never again) / `{items, cursor}` / `{revoked, alreadyRevoked}` (#801) |
 | `list_audit` | `GET /api/admin/audit` | `{items, cursor}`, newest first (#801) |
+| `grant_delegation` / `list_delegations` / `revoke_delegation` | `/api/admin/delegations[/{id}]` | `{id, granteeId, address, powers, ...}` / `{items, cursor}` / `{revoked, alreadyRevoked}` (#740 S1; stored, not yet enforced) |
 | `ping` | `GET /api/messages?limit=1` | `bool` |
 
 **Scopes** ([AUTH-CONTRACT](../../docs/AUTH-CONTRACT.md)): reads and read-state writes

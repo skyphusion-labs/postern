@@ -1,0 +1,269 @@
+// Delegation grants (#740 S1): the store and the operator routes.
+//
+// A grant says that one agent identity (#801, agent_identities.id) may act on one human
+// address with a named set of powers. #740 is "delegated agent read AND send with an
+// audit trail", and the audit trail is a precondition for the write side, so this slice
+// lays the rails and changes NO behaviour: nothing reads a grant for authorization yet.
+// The powers are named now so a grant made today means what the later slices enforce:
+//
+//   read      read the address's mail (under AGENT_READ_SCOPE=granted) (S2)
+//   organize  mark read / flags / move on the address's mail          (S2)
+//   quote     quote the address's mail into a reply or forward        (S3)
+//   send_as   send with the address as From                           (S4)
+//
+// Properties, each pinned by inbound/delegations.test.ts:
+//   - Operator only (`admin`). No agent identity, no static scoped token, and no session
+//     can grant, list or revoke.
+//   - The grantee must be a LIVE agent identity at mint. D1 does not enforce foreign keys,
+//     so the INSERT itself is conditional on the grantee row existing unrevoked; a revoke
+//     that lands between the check and the write leaves no grant and no "ok" audit row.
+//   - powers is a non-empty subset of the four above; anything else is 400, never
+//     stripped. Every power implies `read` (filing, quoting or sending as mail you cannot
+//     read means nothing), so the STORED set always carries it: the record says what the
+//     grant allows, with no rule left for a reader to re-derive.
+//   - The address must be on ALLOWED_FROM_DOMAIN and must not be the grantee's
+//     own address (an identity already acts on its own mail; a grant there means nothing).
+//   - At most one ACTIVE grant per (grantee, address), enforced by a partial unique index.
+//   - Every grant, list and revoke writes one audit_log row, refusals included; a grant or
+//     revoke and its row land in one D1 batch.
+
+import { IDENTITY_ID_RE } from "./agentidentities";
+import {
+  AdminError,
+  EMAIL_RE,
+  auditStatement,
+  decodeCursor,
+  encodeCursor,
+  generateId,
+  json,
+  optLine,
+  parseIncludeRevoked,
+  parseLimit,
+  pathId,
+  readBody,
+  requireDomain,
+  runAudited,
+} from "./adminkit";
+
+export type DelegationPower = "read" | "organize" | "quote" | "send_as";
+export const DELEGATION_POWERS: readonly DelegationPower[] = ["read", "organize", "quote", "send_as"];
+export const DELEGATION_ID_RE = /^dlg_[0-9a-f]{24}$/;
+const LABEL_MAX = 100;
+
+interface GrantRow {
+  id: string;
+  grantee_id: string;
+  address: string;
+  powers: string;
+  label: string | null;
+  created_by: string;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+const COLUMNS = "id, grantee_id, address, powers, label, created_by, created_at, revoked_at";
+
+function parsePowers(raw: unknown): DelegationPower[] {
+  let parsed: unknown;
+  try {
+    parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return DELEGATION_POWERS.filter((p) => parsed.includes(p));
+}
+
+function project(row: GrantRow) {
+  return {
+    id: row.id,
+    granteeId: row.grantee_id,
+    address: row.address,
+    powers: parsePowers(row.powers),
+    label: row.label,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    revokedAt: row.revoked_at,
+  };
+}
+
+/** Requested powers: a non-empty array of known names. Anything else is 400, never a strip. */
+function requestedPowers(body: Record<string, unknown>): DelegationPower[] {
+  const raw = body.powers;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new AdminError(400, "E_VALIDATION_ERROR", `powers must be a non-empty array of ${DELEGATION_POWERS.join(", ")}`, "powers");
+  }
+  const out: DelegationPower[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string" || !(DELEGATION_POWERS as readonly string[]).includes(item)) {
+      throw new AdminError(
+        400,
+        "E_VALIDATION_ERROR",
+        `unknown power ${JSON.stringify(item)}: a grant may carry only ${DELEGATION_POWERS.join(", ")}`,
+        "powers",
+      );
+    }
+    if (!out.includes(item as DelegationPower)) out.push(item as DelegationPower);
+  }
+  // Every power implies read. Returned in the canonical order, so equal grants store
+  // byte-equal sets.
+  if (!out.includes("read")) out.push("read");
+  return DELEGATION_POWERS.filter((p) => out.includes(p));
+}
+
+function bodyAddress(body: Record<string, unknown>, domain: string): string {
+  const raw = body.address;
+  if (typeof raw !== "string") throw new AdminError(400, "E_FIELD_MISSING", "address is required", "address");
+  const address = raw.trim().toLowerCase();
+  if (!EMAIL_RE.test(address) || address.split("@")[1] !== domain) {
+    throw new AdminError(400, "E_VALIDATION_ERROR", `address must be a valid address on @${domain}`, "address");
+  }
+  return address;
+}
+
+const LIVE_GRANTEE = "SELECT 1 FROM agent_identities WHERE id = ? AND revoked_at IS NULL";
+
+async function grant(request: Request, env: Env): Promise<Response> {
+  const body = await readBody(request);
+  const domain = requireDomain(env);
+  const rawGrantee = body.granteeId;
+  if (typeof rawGrantee !== "string") throw new AdminError(400, "E_FIELD_MISSING", "granteeId is required", "granteeId");
+  const granteeId = rawGrantee.trim();
+  const address = bodyAddress(body, domain);
+  const powers = requestedPowers(body);
+  const label = optLine(body, "label", LABEL_MAX);
+
+  // The reference check. Absent and revoked are the same refusal: either way there is no
+  // live identity to grant to, and the operator learns which from the identity list.
+  const grantee = IDENTITY_ID_RE.test(granteeId)
+    ? await env.DB.prepare("SELECT from_addr, revoked_at FROM agent_identities WHERE id = ?")
+        .bind(granteeId)
+        .first<{ from_addr: string; revoked_at: string | null }>()
+    : null;
+  if (!grantee || grantee.revoked_at !== null) {
+    throw new AdminError(400, "E_GRANTEE_INVALID", "granteeId must name a live (unrevoked) agent identity", "granteeId");
+  }
+  if (grantee.from_addr.toLowerCase() === address) {
+    throw new AdminError(400, "E_VALIDATION_ERROR", "an identity already acts on its own address; a grant there means nothing", "address");
+  }
+  const active = await env.DB.prepare(
+    "SELECT id FROM delegation_grants WHERE grantee_id = ? AND address = ? AND revoked_at IS NULL",
+  )
+    .bind(granteeId, address)
+    .first<{ id: string }>();
+  if (active) {
+    throw new AdminError(409, "E_CONFLICT", `an active grant already exists (${active.id}); revoke it to change the powers`);
+  }
+
+  const id = generateId("dlg_");
+  const now = new Date().toISOString();
+  // Conditional on the grantee STILL being live, in the same statement as the write.
+  const insert = env.DB.prepare(
+    `INSERT INTO delegation_grants (id, grantee_id, address, powers, label, created_by, created_at) ` +
+      `SELECT ?, ?, ?, ?, ?, 'operator', ? WHERE EXISTS (${LIVE_GRANTEE})`,
+  ).bind(id, granteeId, address, JSON.stringify(powers), label, now, granteeId);
+  const audit = auditStatement(
+    env,
+    now,
+    { action: "delegation.grant", targetKind: "delegation", targetId: id, outcome: "ok", detail: { granteeId, address, powers } },
+    { sql: "SELECT 1 FROM delegation_grants WHERE id = ?", binds: [id] },
+  );
+  let results: Array<{ meta?: { changes?: number } }>;
+  try {
+    results = await env.DB.batch([insert, audit]);
+  } catch (err) {
+    // The partial unique index: a concurrent grant for the same pair won the race.
+    if (err instanceof Error && /UNIQUE/i.test(err.message)) {
+      throw new AdminError(409, "E_CONFLICT", "an active grant already exists for this grantee and address");
+    }
+    throw err;
+  }
+  if ((results[0]?.meta?.changes ?? 0) === 0) {
+    throw new AdminError(409, "E_GRANTEE_INVALID", "the grantee was revoked before the grant was written");
+  }
+  return json(
+    { ok: true, id, granteeId, address, powers, label, createdBy: "operator", createdAt: now, revokedAt: null },
+    201,
+  );
+}
+
+async function list(url: URL, env: Env): Promise<Response> {
+  const limit = parseLimit(url);
+  const includeRevoked = parseIncludeRevoked(url);
+  const cursor = decodeCursor(url, DELEGATION_ID_RE);
+  const where: string[] = [];
+  const binds: unknown[] = [];
+  const grantee = url.searchParams.get("grantee");
+  if (grantee !== null) {
+    if (!IDENTITY_ID_RE.test(grantee)) throw new AdminError(400, "E_VALIDATION_ERROR", "grantee must be an agent identity id", "grantee");
+    where.push("grantee_id = ?");
+    binds.push(grantee);
+  }
+  const address = url.searchParams.get("address");
+  if (address !== null) {
+    const a = address.trim().toLowerCase();
+    if (!EMAIL_RE.test(a)) throw new AdminError(400, "E_VALIDATION_ERROR", "address must be an email address", "address");
+    where.push("address = ?");
+    binds.push(a);
+  }
+  if (!includeRevoked) where.push("revoked_at IS NULL");
+  if (cursor) {
+    where.push("(created_at > ? OR (created_at = ? AND id > ?))");
+    binds.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const sql =
+    `SELECT ${COLUMNS} FROM delegation_grants` +
+    (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
+    " ORDER BY created_at, id LIMIT ?";
+  binds.push(limit + 1);
+  const { results } = await env.DB.prepare(sql).bind(...binds).all<GrantRow>();
+  const rows = results ?? [];
+  const page = rows.slice(0, limit);
+  const next = rows.length > limit ? encodeCursor(page[page.length - 1]) : null;
+  // Audited before answering; a failed write fails the request (same rule as identities).
+  await auditStatement(env, new Date().toISOString(), {
+    action: "delegation.list",
+    outcome: "ok",
+    detail: { returned: page.length, includeRevoked, grantee, address },
+  }).run();
+  return json({ ok: true, items: page.map(project), cursor: next });
+}
+
+async function revoke(env: Env, rawId: string): Promise<Response> {
+  const id = pathId(rawId, DELEGATION_ID_RE, "delegation");
+  const row = await env.DB.prepare(`SELECT ${COLUMNS} FROM delegation_grants WHERE id = ?`).bind(id).first<GrantRow>();
+  if (!row) throw new AdminError(404, "E_NOT_FOUND", "no such delegation");
+  const now = new Date().toISOString();
+  const update = env.DB.prepare(
+    "UPDATE delegation_grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+  ).bind(now, id);
+  const audit = auditStatement(env, now, {
+    action: "delegation.revoke",
+    targetKind: "delegation",
+    targetId: id,
+    outcome: "ok",
+    detail: { alreadyRevoked: row.revoked_at !== null, granteeId: row.grantee_id, address: row.address },
+  });
+  const results = await env.DB.batch([update, audit]);
+  return json({ ok: true, id, revoked: results[0]?.meta?.changes ?? 0, alreadyRevoked: row.revoked_at !== null });
+}
+
+const ADMIN_ITEM = /^\/api\/admin\/delegations\/([^/]+)$/;
+
+/**
+ * /api/admin/delegations[/{id}], reached only past the `admin` scope gate. Returns null
+ * for a method or path this does not serve (falls through to 404): a method with no
+ * route row has no scope gate in front of it.
+ */
+export async function handleAdminDelegations(request: Request, env: Env, url: URL): Promise<Response | null> {
+  const path = url.pathname;
+  const target = (raw: string | null) => ({ kind: "delegation", raw, idRe: DELEGATION_ID_RE });
+  if (path === "/api/admin/delegations") {
+    if (request.method === "POST") return runAudited(env, "delegation.grant", target(null), () => grant(request, env));
+    if (request.method === "GET") return runAudited(env, "delegation.list", target(null), () => list(url, env));
+    return null;
+  }
+  const m = ADMIN_ITEM.exec(path);
+  if (m && request.method === "DELETE") return runAudited(env, "delegation.revoke", target(m[1]), () => revoke(env, m[1]));
+  return null;
+}

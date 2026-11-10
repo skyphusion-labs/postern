@@ -37,6 +37,7 @@ import {
   handleAudit,
   resolveRuntimeIdentity,
 } from "./agentidentities";
+import { handleAdminDelegations } from "./delegations";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
@@ -422,6 +423,11 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (path === "/api/admin/identities" || path.startsWith("/api/admin/identities/")) {
       const ires = await handleAdminIdentities(request, env, url);
       if (ires) return ires;
+    }
+    // #740 S1: delegation grants, operator only, store and routes with no behaviour change.
+    if (path === "/api/admin/delegations" || path.startsWith("/api/admin/delegations/")) {
+      const dres = await handleAdminDelegations(request, env, url);
+      if (dres) return dres;
     }
     if (path === "/api/admin/audit") {
       const ares = await handleAudit(request, env, url);

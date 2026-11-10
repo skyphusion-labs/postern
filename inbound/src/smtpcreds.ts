@@ -3,7 +3,8 @@
 // #790): one row is one user, verified by the submission relay, the IMAP door and the
 // webmail sign-in alike. The store + hashing behind POST /api/smtp-auth, the session
 // mint, and the operator user-management routes. Secrets are persisted ONLY as a
-// PBKDF2-HMAC-SHA256 derivation, never in plaintext, and never logged.
+// PBKDF2 derivation (HMAC-SHA512 since #828; HMAC-SHA256 rows from before still
+// verify), never in plaintext, and never logged.
 //
 // This is a SEPARATE concern from store.ts (the message store): it gates the
 // SENDER per user. The mailbox/store stays the shared skyphusion.org D1.
@@ -17,17 +18,42 @@
 // Argon2 in WASM) is a separate design item.
 export const RUNTIME_PBKDF2_MAX_ITERATIONS = 100_000;
 
-// PBKDF2-HMAC-SHA256 at the cap. Encoded into the hash string, so old hashes verify at
-// their own count and a successful sign-in re-hashes a lower count at this target, never
-// above it (contract 1.10.2). DUMMY_HASH below uses the same count.
+// THE TARGET (#828): PBKDF2-HMAC-SHA512 at the cap. At a FIXED iteration count, SHA-512
+// costs a GPU attacker more per guess than SHA-256 (64-bit operations, larger state), so
+// under the same 100,000 ceiling this is a strength upgrade, not a fix. The KDF and count
+// are encoded into each stored hash, so a legacy `pbkdf2$` (SHA-256) row keeps verifying
+// at its own parameters, and a successful sign-in re-hashes any row that is not at the
+// target (a different KDF, or a lower count) to the target, never above it (contract
+// 1.10.2). DUMMY_HASH below is at the target too.
 export const PBKDF2_ITERATIONS = RUNTIME_PBKDF2_MAX_ITERATIONS;
 const SALT_BYTES = 16;
-const HASH_BYTES = 32;
 
-// A well-formed dummy hash verified against when a username is unknown, so a
-// missing user costs the same PBKDF2 work as a wrong secret (no user enumeration
-// by timing). The plaintext it encodes is irrelevant; it never matches.
-const DUMMY_HASH = `pbkdf2$${PBKDF2_ITERATIONS}$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`;
+/** One supported KDF: the tag a stored hash starts with, its PRF, and its output length. */
+interface Kdf {
+  tag: string;
+  hash: "SHA-256" | "SHA-512";
+  bytes: number;
+}
+const LEGACY_SHA256: Kdf = { tag: "pbkdf2", hash: "SHA-256", bytes: 32 };
+const TARGET_SHA512: Kdf = { tag: "pbkdf2-sha512", hash: "SHA-512", bytes: 64 };
+const KDFS: readonly Kdf[] = [LEGACY_SHA256, TARGET_SHA512];
+
+/** The tag and PRF every new hash is written with (#828). */
+export const PBKDF2_TARGET_TAG = TARGET_SHA512.tag;
+export const PBKDF2_TARGET_HASH = TARGET_SHA512.hash;
+
+// A well-formed dummy hash at the TARGET (same KDF, same count), verified against when a
+// username is unknown or disabled, so a missing user costs the same work as a wrong
+// secret on a current row (no user enumeration by timing). It never matches. A row still
+// on the legacy SHA-256 KDF costs a little less to verify until its owner next signs in
+// and it is re-hashed; that is the same transitional property a lower iteration count
+// had under #810, and it closes per row on the next sign-in.
+const DUMMY_HASH = [
+  TARGET_SHA512.tag,
+  String(PBKDF2_ITERATIONS),
+  "A".repeat(22) + "==",
+  "A".repeat(86) + "==",
+].join("$");
 
 // Contract 1.10.1 bounds.
 export const PASSWORD_MIN = 12;
@@ -74,29 +100,61 @@ interface CredRow {
 
 const COLS = "username, from_addr, secret_hash, disabled, display_name, created_at, updated_at";
 
-/** Encode a secret as pbkdf2$<iterations>$<saltB64>$<hashB64>. */
-export async function hashSecret(secret: string): Promise<string> {
-  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
-  const derived = await pbkdf2(secret, salt, PBKDF2_ITERATIONS);
-  return `pbkdf2$${PBKDF2_ITERATIONS}$${toB64(salt)}$${toB64(derived)}`;
+interface ParsedHash {
+  kdf: Kdf;
+  iterations: number;
+  salt: string;
+  hash: string;
 }
 
-/** The iteration count an encoded hash was made with, or null if malformed. */
-export function hashIterations(encoded: string): number | null {
+/** Parse `<tag>$<iterations>$<saltB64>$<hashB64>` for a supported tag, or null. */
+function parseHash(encoded: string): ParsedHash | null {
   const parts = encoded.split("$");
-  if (parts.length !== 4 || parts[0] !== "pbkdf2") return null;
+  if (parts.length !== 4) return null;
+  const kdf = KDFS.find((k) => k.tag === parts[0]);
+  if (!kdf) return null;
   const n = Number(parts[1]);
-  return Number.isInteger(n) && n >= 1 ? n : null;
+  if (!Number.isInteger(n) || n < 1) return null;
+  return { kdf, iterations: n, salt: parts[2], hash: parts[3] };
+}
+
+/** Encode a secret at the target: pbkdf2-sha512$<iterations>$<saltB64>$<hashB64>. */
+export async function hashSecret(secret: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  const derived = await pbkdf2(secret, salt, PBKDF2_ITERATIONS, TARGET_SHA512);
+  return [TARGET_SHA512.tag, String(PBKDF2_ITERATIONS), toB64(salt), toB64(derived)].join("$");
+}
+
+/** The iteration count an encoded hash was made with (any supported KDF), or null if malformed. */
+export function hashIterations(encoded: string): number | null {
+  return parseHash(encoded)?.iterations ?? null;
+}
+
+/** The PRF an encoded hash was made with, or null if malformed or an unknown tag. */
+export function hashPrf(encoded: string): "SHA-256" | "SHA-512" | null {
+  return parseHash(encoded)?.kdf.hash ?? null;
+}
+
+/**
+ * True when a VERIFIED row should be re-hashed: it is on a KDF other than the target, or
+ * below the target count. A malformed row is false (it never verifies, so it is never
+ * reached with a good password anyway).
+ */
+export function needsRehash(encoded: string): boolean {
+  const p = parseHash(encoded);
+  if (!p) return false;
+  return p.kdf.tag !== TARGET_SHA512.tag || p.iterations < PBKDF2_ITERATIONS;
 }
 
 /**
  * Constant-time verify of a secret against an encoded hash. Returns false for any
- * malformed encoding rather than throwing, so a corrupt row fails closed.
+ * malformed encoding (including an unknown KDF tag, or an output of the wrong length for
+ * its KDF) rather than throwing, so a corrupt row fails closed.
  */
 export async function verifySecret(secret: string, encoded: string, account = "?"): Promise<boolean> {
-  const parts = encoded.split("$");
-  const iterations = hashIterations(encoded);
-  if (iterations === null) return false;
+  const parsed = parseHash(encoded);
+  if (parsed === null) return false;
+  const iterations = parsed.iterations;
   // A stored hash above the runtime cap cannot be derived on Workers. Fail CLOSED with a
   // named config error (never a 5xx that leaks the runtime message): every caller then
   // answers exactly as for a wrong password, so the account is not distinguishable.
@@ -113,14 +171,14 @@ export async function verifySecret(secret: string, encoded: string, account = "?
     await verifySecret(secret, DUMMY_HASH);
     return false;
   }
-  const salt = fromB64(parts[2]);
-  const expected = fromB64(parts[3]);
+  const salt = fromB64(parsed.salt);
+  const expected = fromB64(parsed.hash);
   if (!salt || !expected) return false;
-  const derived = await pbkdf2(secret, salt, iterations);
+  const derived = await pbkdf2(secret, salt, iterations, parsed.kdf);
   return timingSafeEqualBytes(derived, expected);
 }
 
-async function pbkdf2(secret: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {
+async function pbkdf2(secret: string, salt: Uint8Array, iterations: number, kdf: Kdf): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -129,9 +187,9 @@ async function pbkdf2(secret: string, salt: Uint8Array, iterations: number): Pro
     ["deriveBits"],
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt, iterations },
+    { name: "PBKDF2", hash: kdf.hash, salt, iterations },
     key,
-    HASH_BYTES * 8,
+    kdf.bytes * 8,
   );
   return new Uint8Array(bits);
 }
@@ -142,8 +200,8 @@ async function pbkdf2(secret: string, salt: Uint8Array, iterations: number): Pro
  * user still runs a PBKDF2 against a dummy hash at the target count, so the timing
  * does not reveal whether the username exists.
  *
- * On success, a hash below the current iteration target is re-hashed at the target
- * (contract 1.10.2). The write is conditional on the hash just verified, so a
+ * On success, a hash that is not at the target (a legacy SHA-256 row, or a lower count)
+ * is re-hashed at the target (contract 1.10.2, #828). The write is conditional on the hash just verified, so a
  * concurrent reset always wins, and a failed upgrade never fails the sign-in.
  */
 export async function authenticateAccount(
@@ -159,8 +217,7 @@ export async function authenticateAccount(
   }
   const ok = await verifySecret(secret, cred.secretHash, cred.username);
   if (!ok) return null;
-  const iterations = hashIterations(cred.secretHash);
-  if (iterations !== null && iterations < PBKDF2_ITERATIONS) {
+  if (needsRehash(cred.secretHash)) {
     try {
       await setPassword(env, cred.username, await hashSecret(secret), new Date().toISOString(), cred.secretHash);
     } catch (err) {

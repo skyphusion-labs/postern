@@ -8,9 +8,9 @@ name: relay-image
 # orchestrator can pin an exact build.
 #
 # NO DEPLOY LANE (2026-09-24). This workflow builds and PUBLISHES; nothing rolls the
-# image onto a host, because the host is gone. The Swarm host that ran the door services,
+# image onto a host, because the host is gone. The container host that ran the door services,
 # and the fleet-chezmoi `postern-door-roll` handler this workflow used to dispatch, were
-# both released with the Hetzner cut (#2066 over there). The recipe is kept in
+# both released in the 2026-09-24 teardown (#2066 over there). The recipe is kept in
 # `.github/scripts/dispatch-fleet-postern-door-roll.sh`, which fails closed and documents
 # what re-enabling needs; it just has no caller any more. Where the door tier runs next is
 # a spend and topology decision, so nothing here guesses at one.
@@ -151,7 +151,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # The runtime target is x86_64; a single linux/amd64 image keeps the GHCR
-          # package and the short-SHA digest clean for swarm pinning.
+          # package and the short-SHA digest clean for digest pinning.
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max

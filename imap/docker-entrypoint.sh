@@ -1,7 +1,7 @@
 #!/bin/sh
 # docker-entrypoint.sh -- load *_FILE secrets into env, then exec the proxy.
 #
-# Swarm mounts secrets at a path (e.g. /run/secrets/postern_imap_api_token). The
+# An orchestrator mounts a secret file at a path (e.g. /run/secrets/postern_imap_api_token). The
 # proxy's config (config.py) reads POSTERN_API_TOKEN as a VALUE from the env, so we
 # expand any <VAR>_FILE into <VAR> here. This keeps the secret VALUE out of the
 # committed stack and out of the image: only the PATH is configured, the bytes are
@@ -33,7 +33,7 @@ load_secret() {
 
 # The per-function service token the proxy reads the store with (native/ldap/system
 # modes). POSTERN_TRANSPORT_TOKEN is the native-mode transport bearer; load it too so
-# either service-token mode can be driven entirely from swarm secrets.
+# either service-token mode can be driven entirely from mounted secret files.
 load_secret POSTERN_API_TOKEN
 load_secret POSTERN_API_TOKEN_DELETE
 load_secret POSTERN_API_TOKEN_IMAP

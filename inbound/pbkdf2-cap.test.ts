@@ -95,17 +95,17 @@ describe("#821 item 2: the target can never exceed the cap", () => {
     expect(PBKDF2_ITERATIONS).toBeLessThanOrEqual(CAP);
   });
 
-  it("every hash hashSecret writes parses to at most 100,000, and is SHA-256 at exactly the target", async () => {
+  it("every hash hashSecret writes parses to at most 100,000, and is SHA-512 at exactly the target (#828)", async () => {
     for (let i = 0; i < 3; i++) {
       const h = await hashSecret(PASSWORD + i);
       expect(hashIterations(h)).toBeLessThanOrEqual(CAP);
       expect(hashIterations(h)).toBe(PBKDF2_ITERATIONS);
       const [tag, iters, saltB64, hashB64] = h.split("$");
-      expect([tag, iters]).toEqual(["pbkdf2", "100000"]);
-      // Independent derivation: the stored bytes ARE PBKDF2-HMAC-SHA256 at that count.
+      expect([tag, iters]).toEqual(["pbkdf2-sha512", "100000"]);
+      // Independent derivation: the stored bytes ARE PBKDF2-HMAC-SHA512 at that count (#828).
       const salt = Uint8Array.from(atob(saltB64), (c) => c.charCodeAt(0));
       const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(PASSWORD + i), "PBKDF2", false, ["deriveBits"]);
-      const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: CAP }, key, 256));
+      const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-512", salt, iterations: CAP }, key, 512));
       expect(b64(bits)).toBe(hashB64);
     }
   });
