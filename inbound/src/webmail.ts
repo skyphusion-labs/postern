@@ -316,6 +316,94 @@ export const WEBMAIL_HTML = `<!doctype html>
   }
   .ac-list button:hover { background: var(--accent-dim); }
 
+  /* --- Components (#796) --- */
+  .avatar {
+    width: 36px; height: 36px; border-radius: var(--r-pill); flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--accent-dim); color: var(--accent); font-weight: 700; font-size: var(--fs-md);
+  }
+  .row-item { display: flex; gap: var(--sp-3); align-items: flex-start; }
+  .row-item .avatar { width: 32px; height: 32px; font-size: var(--fs-sm); margin-top: 2px; }
+  .row-main { flex: 1; min-width: 0; }
+  .row-item .dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--accent); flex-shrink: 0; display: none; align-self: center; }
+  .row-item.unread .dot { display: inline-block; }
+  .row-item .top .from { flex: 1; min-width: 0; }
+  .row-item .top { justify-content: flex-start; }
+  .row-item:not(.unread) .from { font-weight: 500; }
+  .row-item .meta:empty { display: none; }
+  .row-item .att { display: inline-flex; align-items: center; gap: 2px; }
+  .ico { width: 14px; height: 14px; flex-shrink: 0; }
+  .toolbar #filtersBtn { min-height: 38px; }
+  .badge {
+    display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px;
+    padding: 0 5px; border-radius: var(--r-pill); background: var(--accent); color: var(--accent-fg);
+    font-size: var(--fs-2xs); font-weight: 700;
+  }
+  .badge:empty { display: none; }
+  .filters[hidden] { display: none; }
+  .filters .fhint { width: 100%; color: var(--muted); font-size: var(--fs-xs); }
+
+  .msg-head .sender { display: flex; gap: var(--sp-3); align-items: flex-start; margin-top: var(--sp-2); }
+  .msg-head .sender-main { flex: 1; min-width: 0; }
+  .msg-head .sender-line { overflow-wrap: anywhere; }
+  .msg-head .sender-name { font-weight: 650; }
+  .msg-head .sender-addr { color: var(--muted); font-size: var(--fs-sm); margin-left: var(--sp-1); }
+  .msg-head .sender-date { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; flex-shrink: 0; }
+  .msg-head .trust { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-top: var(--sp-3); font-size: var(--fs-sm); }
+  .msg-head details.auth { color: var(--muted); }
+  .msg-head details.auth summary { cursor: pointer; color: var(--accent); }
+  .msg-head details.auth span { margin-left: var(--sp-2); }
+
+  .empty-state { text-align: center; padding: var(--sp-7) var(--sp-4); color: var(--muted); }
+  .empty-state .es-ico { width: 40px; height: 40px; color: var(--line-strong); }
+  .empty-state .es-title { margin: var(--sp-3) 0 var(--sp-1); color: var(--fg); font-weight: 600; font-size: var(--fs-md); }
+  .empty-state .es-hint { margin: 0; font-size: var(--fs-sm); }
+  .reading > .empty-state { max-width: none; margin-top: 10vh; }
+
+  .skel { display: block; border-radius: var(--r-sm); background: var(--panel-2); position: relative; overflow: hidden; }
+  .skel::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, var(--line), transparent);
+    animation: skel 1.2s ease-in-out infinite;
+  }
+  @keyframes skel { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+  @media (prefers-reduced-motion: reduce) { .skel::after { animation: none; } }
+  .skel-row { display: flex; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--line); }
+  .skel-row .skel-av { width: 32px; height: 32px; border-radius: var(--r-pill); flex-shrink: 0; }
+  .skel-row .skel-lines { flex: 1; display: flex; flex-direction: column; gap: var(--sp-2); padding-top: 2px; }
+  .skel-line { height: 10px; }
+  .loading.skel-list, .loading.skel-read { padding: 0; }
+  .skel-read { display: flex; flex-direction: column; gap: var(--sp-3); }
+  .skel-read .skel-title { height: 22px; width: 60%; }
+  .skel-read .skel-body { height: 280px; margin-top: var(--sp-3); }
+
+  .compose-head { display: flex; align-items: baseline; gap: var(--sp-3); }
+  .compose-head .compose-status { margin-left: auto; }
+  .compose .field-row { display: flex; align-items: flex-end; gap: var(--sp-2); }
+  .compose .field-row > .grow { flex: 1; min-width: 0; }
+  .compose .cc-toggle { min-height: 38px; white-space: nowrap; }
+  .file-pick { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); }
+  .compose .file-pick label.file-btn {
+    display: inline-flex; align-items: center; gap: var(--sp-2); margin: 0; min-height: 36px; padding: 0 var(--sp-3);
+    border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--panel);
+    cursor: pointer; font-weight: 550; font-size: var(--fs-sm);
+  }
+  .compose .file-pick label.file-btn:hover { background: var(--panel-2); }
+  .file-pick input:focus-visible + label.file-btn { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .file-pick .fhint { color: var(--muted); font-size: var(--fs-xs); }
+  .compose > .compose-actions {
+    position: sticky; bottom: 0; z-index: 2; background: var(--panel);
+    margin: var(--sp-4) calc(-1 * var(--sp-6)) 0; padding: var(--sp-3) var(--sp-6);
+    border-top: 1px solid var(--line);
+  }
+  .compose > .err:empty { display: none; }
+  @media (max-width: 1100px) { .compose > .compose-actions { margin: var(--sp-4) calc(-1 * var(--sp-5)) 0; padding: var(--sp-3) var(--sp-5); } }
+  @media (max-width: 760px) {
+    .compose > .compose-actions { margin: var(--sp-4) calc(-1 * var(--sp-4)) 0; padding: var(--sp-3) var(--sp-4); }
+    .msg-head .sender { flex-wrap: wrap; }
+    .msg-head .sender-date { width: 100%; padding-left: 48px; }
+  }
+
   /* Keyboard focus visibility (a11y foundation): a clear ring for keyboard users
      on every interactive control, without a persistent outline on mouse click. */
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -437,14 +525,16 @@ export const WEBMAIL_HTML = `<!doctype html>
   <nav class="folders" id="folders" role="navigation" aria-label="Folders"></nav>
   <div class="sidebar" aria-label="Mailbox">
     <div class="toolbar">
-      <input id="search" type="search" placeholder="Search (press Enter)" aria-label="Search mail">
+      <input id="search" type="search" placeholder="Search mail" aria-label="Search mail">
       <select id="searchMode" class="mode" title="Search mode (applies when searching)" aria-label="Search mode">
         <option value="hybrid">Hybrid</option>
         <option value="fts">Keyword</option>
         <option value="semantic">Semantic</option>
       </select>
+      <button type="button" id="filtersBtn" class="btn-quiet" aria-expanded="false" aria-controls="filters">Filters <span class="badge" id="filtersCount"></span></button>
     </div>
-    <div class="filters" id="filters" aria-label="Search filters">
+    <div class="filters" id="filters" aria-label="Search filters" hidden>
+      <span class="fhint">Filters narrow a search. Type a query and press Enter.</span>
       <button type="button" class="chip" data-filter="unseen" id="chipUnseen">Unread</button>
       <button type="button" class="chip" data-filter="seen" id="chipSeen">Read</button>
       <button type="button" class="chip" data-filter="hasAtt" id="chipHasAtt">Has attachment</button>
@@ -1158,6 +1248,20 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("filterFrom").value = state.filters.from || "";
     $("filterAfter").value = state.filters.after || "";
     $("filterBefore").value = state.filters.before || "";
+    ["chipUnseen", "chipSeen", "chipHasAtt"].forEach(function (id) {
+      $(id).setAttribute("aria-pressed", / on$/.test($(id).className) ? "true" : "false");
+    });
+    updateFilterCount();
+  }
+  function updateFilterCount() {
+    var f = state.filters, n = 0;
+    if (f.seen !== null) n++;
+    if (f.hasAttachment) n++;
+    if (f.from) n++;
+    if (f.after) n++;
+    if (f.before) n++;
+    $("filtersCount").textContent = n ? String(n) : "";
+    $("filtersBtn").setAttribute("aria-label", n ? "Filters, " + n + " active" : "Filters");
   }
 
   // BYO-token connect (operator / self-host path, contract 1.7).
@@ -1359,7 +1463,8 @@ export const WEBMAIL_HTML = `<!doctype html>
   }
 
   function loadMore(fallbackFts) {
-    var loading = el("div", { class: "loading", text: "Loading..." });
+    var loading = el("div", { class: "loading skel-list", role: "status" },
+      [el("span", { class: "vh", text: "Loading messages" })].concat(skeletonRows(state.items.length ? 2 : 6)));
     $("list").appendChild(loading);
     var mode = fallbackFts ? "fts" : state.searchMode;
     var req;
@@ -1424,7 +1529,10 @@ export const WEBMAIL_HTML = `<!doctype html>
         more.firstChild.addEventListener("click", function () { $("list").removeChild(more); loadMore(); });
         $("list").appendChild(more);
       } else if (state.items.length === 0) {
-        $("list").appendChild(el("div", { class: "loading", text: "No messages." }));
+        $("list").appendChild(state.q
+          ? emptyState("search", "No results for \\u201c" + state.q + "\\u201d", "Try Keyword mode, or clear the filters.")
+          : emptyState("inbox", state.folder === "inbox" ? "Your inbox is empty" : "No messages in " + folderLabel(state.folder),
+              state.folder === "inbox" ? "New mail shows up here." : ""));
       }
     }).catch(function (e) {
       try { $("list").removeChild(loading); } catch (_) {}
@@ -1452,7 +1560,13 @@ export const WEBMAIL_HTML = `<!doctype html>
       tags.push(el("span", { class: "tag out", text: "Draft" }));
     } else {
       if (m.direction === "outbound") tags.push(el("span", { class: "tag out", text: "Sent" }));
-      tags.push(el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }));
+      // Trusted is the normal case, so it stays quiet in the list; only untrusted is loud.
+      // The reading pane always states the verdict.
+      if (!m.trusted && m.direction !== "outbound") tags.push(el("span", { class: "tag untrusted", text: "untrusted" }));
+    }
+    if (m.attachmentCount) {
+      tags.push(el("span", { class: "att", title: m.attachmentCount + " attachment" + (m.attachmentCount === 1 ? "" : "s") },
+        [icon("clip"), document.createTextNode(String(m.attachmentCount))]));
     }
     var who = m.direction === "outbound" ? ("To: " + (m.to || "")) : (m.from || "");
     var item = el("div", {
@@ -1462,20 +1576,89 @@ export const WEBMAIL_HTML = `<!doctype html>
       tabindex: "0",
       "aria-label": (m.subject || "(no subject)") + " from " + who
     }, [
-      el("div", { class: "top" }, [
-        el("div", { class: "from", text: who }),
-        el("div", { class: "date", text: fmtDate(m.date || m.receivedAt) })
-      ]),
-      el("div", { class: "subject", text: m.subject || "(no subject)" }),
-      el("div", { class: "meta" }, tags.concat(
-        m.attachmentCount ? [el("span", { text: m.attachmentCount + " attachment(s)" })] : []
-      ))
+      avatar(who),
+      el("div", { class: "row-main" }, [
+        el("div", { class: "top" }, [
+          el("span", { class: "dot", "aria-hidden": "true" }),
+          el("div", { class: "from", text: (m.direction === "outbound" ? "To: " : "") + parseAddr(m.direction === "outbound" ? m.to : m.from).name, title: who }),
+          el("div", { class: "date", text: fmtDate(m.date || m.receivedAt) })
+        ]),
+        el("div", { class: "subject", text: m.subject || "(no subject)" }),
+        el("div", { class: "meta" }, tags)
+      ])
     ]);
     item.addEventListener("click", function () { selectMessage(m.messageId, item); });
     item.addEventListener("keydown", function (e) {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMessage(m.messageId, item); }
     });
     $("list").appendChild(item);
+  }
+
+  // --- small presentational helpers (#796). All text goes in via text nodes. -----
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var ICONS = {
+    clip: "M20 11.5l-7.8 7.8a4.6 4.6 0 0 1-6.5-6.5l7.8-7.8a3 3 0 0 1 4.3 4.3l-7.6 7.6a1.5 1.5 0 0 1-2.1-2.1l7-7",
+    inbox: "M3 13l2.5-7h13L21 13v6H3zM3 13h5l1.5 2.5h5L16 13h5",
+    mail: "M3 6h18v12H3zM3 7l9 6 9-6",
+    search: "M10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13zM15.5 15.5L21 21"
+  };
+  function icon(name, cls, box) {
+    var svg = document.createElementNS(SVGNS, "svg");
+    svg.setAttribute("viewBox", box || "0 0 24 24");
+    svg.setAttribute("class", cls || "ico");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    var p = document.createElementNS(SVGNS, "path");
+    p.setAttribute("d", ICONS[name]);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "1.7");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(p);
+    return svg;
+  }
+  // "Name <addr>" -> { name, addr }; a bare address is its own name.
+  function parseAddr(s) {
+    var t = String(s || "").trim();
+    var m = t.match(/^"?([^"<]*?)"?\\s*<([^>]+)>$/);
+    if (m && m[1].trim()) return { name: m[1].trim(), addr: m[2].trim() };
+    return { name: t, addr: m ? m[2].trim() : t };
+  }
+  function initialOf(s) {
+    var m = parseAddr(String(s || "").replace(/^To:\\s*/i, "")).name.match(/[\\p{L}\\p{N}]/u);
+    return m ? m[0].toUpperCase() : "?";
+  }
+  function avatar(s) { return el("span", { class: "avatar", "aria-hidden": "true", text: initialOf(s) }); }
+  function fmtSize(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+  function emptyState(ico, title, hint) {
+    return el("div", { class: "empty-state" }, [
+      icon(ico, "es-ico"),
+      el("p", { class: "es-title", text: title }),
+      hint ? el("p", { class: "es-hint", text: hint }) : null
+    ]);
+  }
+  function skeletonRows(n) {
+    var out = [];
+    for (var i = 0; i < n; i++) {
+      out.push(el("div", { class: "skel-row", "aria-hidden": "true" }, [
+        el("span", { class: "skel skel-av" }),
+        el("span", { class: "skel-lines" }, [
+          el("span", { class: "skel skel-line", style: "width:" + (45 + (i * 17) % 35) + "%" }),
+          el("span", { class: "skel skel-line", style: "width:" + (70 + (i * 11) % 25) + "%" })
+        ])
+      ]));
+    }
+    return out;
+  }
+  function folderLabel(id) {
+    var f = state.folders.filter(function (x) { return x.id === id; })[0];
+    return (f && f.label) || (id.charAt(0).toUpperCase() + id.slice(1));
   }
 
   // --- narrow-screen views (#795) -------------------------------------------------
@@ -1546,7 +1729,13 @@ export const WEBMAIL_HTML = `<!doctype html>
 
   function renderLoadingReading() {
     setView("reading");
-    var r = $("reading"); clear(r); r.appendChild(el("div", { class: "loading", text: "Loading message..." }));
+    var r = $("reading"); clear(r);
+    r.appendChild(el("div", { class: "loading skel-read", role: "status" }, [
+      el("span", { class: "vh", text: "Loading message" }),
+      el("span", { class: "skel skel-title", "aria-hidden": "true" }),
+      el("span", { class: "skel skel-line", "aria-hidden": "true", style: "width:40%" }),
+      el("span", { class: "skel skel-body", "aria-hidden": "true" })
+    ]));
   }
   function renderError(msg) {
     setView("reading");
@@ -1604,27 +1793,50 @@ export const WEBMAIL_HTML = `<!doctype html>
       modeBtn.textContent = rich ? "Use plain text" : "Use rich text";
       scheduleSave();
     });
-    var fileInput = el("input", { id: "cmpFiles", type: "file", multiple: "multiple" });
+    var fileInput = el("input", { id: "cmpFiles", type: "file", multiple: "multiple", class: "vh" });
     var fileList = el("ul", { class: "draft-files", id: "cmpFileList" });
     var quoteBox = el("div", { class: "quote-preview" });
     quoteBox.style.display = "none";
-    var form = el("div", { class: "compose" }, [
-      el("h2", { text: mode === "replyAll" ? "Reply all" : mode === "reply" ? "Reply" : mode === "forward" ? "Forward" : "Compose" }),
-      el("p", { class: "compose-note", text: "Autosaves server-side; Send uses the same mailbox core as API clients." }),
-      err,
-      el("label", { for: "cmpTo", text: "To" }), wrapAutocomplete(toInput),
+    var ccFields = el("div", { class: "cc-fields", id: "cmpCcFields" }, [
       el("label", { for: "cmpCc", text: "Cc" }), wrapAutocomplete(ccInput),
-      el("label", { for: "cmpBcc", text: "Bcc" }), wrapAutocomplete(bccInput),
+      el("label", { for: "cmpBcc", text: "Bcc" }), wrapAutocomplete(bccInput)
+    ]);
+    var ccOpen = !!(ccInput.value || bccInput.value);
+    ccFields.style.display = ccOpen ? "" : "none";
+    var ccToggle = el("button", {
+      type: "button", class: "btn-quiet cc-toggle", text: "Cc / Bcc",
+      "aria-controls": "cmpCcFields", "aria-expanded": ccOpen ? "true" : "false"
+    });
+    ccToggle.addEventListener("click", function () {
+      var open = ccFields.style.display === "none";
+      ccFields.style.display = open ? "" : "none";
+      ccToggle.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open && !ccInput.disabled) ccInput.focus();
+    });
+    var form = el("div", { class: "compose" }, [
+      el("div", { class: "compose-head" }, [
+        el("h2", { text: mode === "replyAll" ? "Reply all" : mode === "reply" ? "Reply" : mode === "forward" ? "Forward" : "New message" }),
+        status
+      ]),
+      el("p", { class: "compose-note", text: "Drafts save automatically while you type." }),
+      err,
+      el("label", { for: "cmpTo", text: "To" }),
+      el("div", { class: "field-row" }, [el("div", { class: "grow" }, [wrapAutocomplete(toInput)]), ccToggle]),
+      ccFields,
       el("label", { for: "cmpSub", text: "Subject" }), subInput,
       el("label", { for: "cmpBody", text: "Message" }),
       el("div", { class: "formatbar" }, [modeBtn]),
       formatbar, editor, quoteBox,
-      el("label", { for: "cmpFiles", text: "Attachments (20 files, 25 MiB total)" }), fileInput, fileList,
+      el("div", { class: "file-pick" }, [
+        fileInput,
+        el("label", { for: "cmpFiles", class: "file-btn" }, [icon("clip"), document.createTextNode("Attach files")]),
+        el("span", { class: "fhint", text: "Up to 20 files, 25 MiB in total" })
+      ]),
+      fileList,
       el("div", { class: "compose-actions" }, [
         el("button", { id: "cmpSend", text: "Send" }),
-        el("button", { id: "cmpCancel", text: "Close" }),
-        el("button", { id: "cmpDiscard", text: "Discard", class: "btn-danger" }),
-        status
+        el("button", { id: "cmpCancel", text: "Save and close" }),
+        el("button", { id: "cmpDiscard", text: "Discard", class: "btn-danger" })
       ])
     ]);
     r.appendChild(form);
@@ -1806,7 +2018,7 @@ export const WEBMAIL_HTML = `<!doctype html>
           }).catch(function (e) { err.textContent = e.message; remove.disabled = false; });
         });
         fileList.appendChild(el("li", {}, [
-          el("span", { text: (a.filename || "attachment") + " (" + a.size + " bytes)" }), remove
+          el("span", { text: (a.filename || "attachment") + " (" + fmtSize(a.size) + ")" }), remove
         ]));
       });
     }
@@ -1930,24 +2142,45 @@ export const WEBMAIL_HTML = `<!doctype html>
 
   function renderReading(m) {
     var r = $("reading"); clear(r);
-    if (!m) { setView("list"); r.appendChild(el("div", { class: "empty", text: "Select a message to read." })); return; }
+    if (!m) {
+      setView("list");
+      r.appendChild(el("div", { class: "empty" }, [emptyState("mail", "Select a message to read.", "")]));
+      return;
+    }
     setView("reading");
     state.selected = m;
 
+    var sender = parseAddr(m.from);
+    var when = m.date ? new Date(m.date) : null;
+    var trustKids = [
+      el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted sender" : "untrusted sender" })
+    ];
+    if (m.auth) {
+      trustKids.push(el("details", { class: "auth" }, [
+        el("summary", { text: "Authentication" }),
+        el("span", { text: "SPF " + (m.auth.spf || "none") + ", DKIM " + (m.auth.dkim || "none") + ", DMARC " + (m.auth.dmarc || "none") })
+      ]));
+    }
     var head = el("div", { class: "msg-head" }, [
       el("h2", { text: m.subject || "(no subject)" }),
-      kv("From", m.from),
-      kv("To", m.to),
-      m.cc ? kv("Cc", m.cc) : null,
-      m.bcc ? kv("Bcc", m.bcc) : null,
-      kv("Date", m.date ? new Date(m.date).toLocaleString() : ""),
-      el("div", { class: "kv" }, [
-        el("b", { text: "Trust: " }),
-        el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted" : "untrusted" }),
-        document.createTextNode(
-          m.auth ? ("  spf=" + (m.auth.spf || "none") + " dkim=" + (m.auth.dkim || "none") + " dmarc=" + (m.auth.dmarc || "none")) : ""
-        )
-      ])
+      el("div", { class: "sender" }, [
+        avatar(m.from),
+        el("div", { class: "sender-main" }, [
+          el("div", { class: "sender-line" }, [
+            el("span", { class: "sender-name", text: sender.name || "(unknown sender)" }),
+            sender.addr && sender.addr !== sender.name ? el("span", { class: "sender-addr", text: "<" + sender.addr + ">" }) : null
+          ]),
+          kv("To", m.to),
+          m.cc ? kv("Cc", m.cc) : null,
+          m.bcc ? kv("Bcc", m.bcc) : null
+        ]),
+        el("div", {
+          class: "sender-date",
+          text: when && !isNaN(when.getTime()) ? when.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "",
+          title: m.date || ""
+        })
+      ]),
+      el("div", { class: "trust" }, trustKids)
     ]);
     var actions = [];
     // Role queue (#425): read plus mark-read ONLY. Starring, filing and deleting would
@@ -2049,7 +2282,8 @@ export const WEBMAIL_HTML = `<!doctype html>
         var btn = el("button", { class: "dl", text: "Download" });
         btn.addEventListener("click", function () { downloadAttachment(m.messageId, i, name, btn); });
         ul.appendChild(el("li", {}, [
-          document.createTextNode(name + " (" + (a.mime || "?") + ", " + (a.size || 0) + " bytes) "),
+          el("span", {}, [icon("clip"), document.createTextNode(" " + name + " "),
+            el("span", { class: "sender-addr", text: (a.mime || "?") + ", " + fmtSize(a.size) })]),
           btn
         ]));
       });
@@ -2073,7 +2307,10 @@ export const WEBMAIL_HTML = `<!doctype html>
         box.appendChild(el("h3", { text: "Thread (" + msgs.length + partial + ")" }));
         msgs.forEach(function (tm) {
           var t = el("div", { class: "t-item" }, [
-            el("div", { text: (tm.from || "") + "  -  " + fmtDate(tm.date) }),
+            el("div", { class: "top" }, [
+              el("b", { text: parseAddr(tm.from).name }),
+              el("span", { class: "sender-addr", text: " " + fmtDate(tm.date) })
+            ]),
             el("div", { class: "subject", text: tm.subject || "(no subject)" })
           ]);
           t.addEventListener("click", function () { selectMessage(tm.messageId, null); });
@@ -2153,11 +2390,17 @@ export const WEBMAIL_HTML = `<!doctype html>
     state.filters.from = $("filterFrom").value.trim();
     state.filters.after = $("filterAfter").value || "";
     state.filters.before = $("filterBefore").value || "";
+    updateFilterCount();
     if (state.q) resetAndLoad();
   }
   $("filterFrom").addEventListener("change", applyTextFilters);
   $("filterAfter").addEventListener("change", applyTextFilters);
   $("filterBefore").addEventListener("change", applyTextFilters);
+  $("filtersBtn").addEventListener("click", function () {
+    var open = $("filters").hasAttribute("hidden");
+    if (open) $("filters").removeAttribute("hidden"); else $("filters").setAttribute("hidden", "");
+    $("filtersBtn").setAttribute("aria-expanded", open ? "true" : "false");
+  });
   $("clearFilters").addEventListener("click", function () {
     state.filters = { from: "", after: "", before: "", seen: null, hasAttachment: null };
     syncFilterChips();

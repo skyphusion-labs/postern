@@ -463,4 +463,42 @@ test.describe("webmail critical journeys (#355)", () => {
     await page.locator("#settingsBtn").click();
     await expect(page.locator("#settingsSignout")).toBeVisible();
   });
+
+  test("list rows, filters toggle, empty search and the Cc/Bcc toggle (#796)", async ({ page }) => {
+    await installMocks(page, "token");
+    await page.route("https://postern.test/api/search**", (route) => fulfillJson(route, { ok: true, items: [], cursor: null }));
+    await page.goto("https://postern.test/webmail");
+    await page.locator("#token").fill("read-token");
+    await page.locator("#sendToken").fill("send-token");
+    await page.locator("#connect").click();
+
+    // Row: avatar initial, unread dot for an unseen message, and no loud "trusted" tag.
+    const row = page.locator(".row-item").first();
+    await expect(row.locator(".avatar")).toHaveText("A");
+    await expect(row.locator(".dot")).toBeVisible();
+    await expect(row.locator(".tag.trusted")).toHaveCount(0);
+
+    // Filters stay folded until asked for; the badge counts active ones.
+    await expect(page.locator("#filters")).toBeHidden();
+    await page.locator("#filtersBtn").click();
+    await expect(page.locator("#filtersBtn")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#filters")).toBeVisible();
+    await page.locator("#chipHasAtt").click();
+    await expect(page.locator("#chipHasAtt")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#filtersCount")).toHaveText("1");
+
+    // A search with no hits says so, with the query, instead of a bare "No messages."
+    await page.locator("#search").fill("zebra");
+    await page.locator("#search").press("Enter");
+    await expect(page.locator("#list .empty-state .es-title")).toHaveText("No results for “zebra”");
+
+    // Compose: Cc/Bcc folded by default, one click opens and focuses Cc.
+    await page.locator("#composeBtn").click();
+    await expect(page.locator("#cmpTo")).toBeVisible();
+    await expect(page.locator("#cmpCc")).toBeHidden();
+    await page.getByRole("button", { name: "Cc / Bcc" }).click();
+    await expect(page.locator("#cmpCc")).toBeVisible();
+    await expect(page.locator("#cmpCc")).toBeFocused();
+    await expect(page.locator("#cmpSend")).toBeVisible();
+  });
 });
