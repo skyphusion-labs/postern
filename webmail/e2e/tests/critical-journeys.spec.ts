@@ -694,14 +694,24 @@ test.describe("webmail critical journeys (#355)", () => {
     await expect(page.locator("#gate")).toBeVisible();
   });
 
-  test("setupRequired on a non-native answer is ignored: off stays off (#798)", async ({ page }) => {
+  test("first run, backend unset: the not-enabled page, no sign-in form, no setup form (#798)", async ({ page }) => {
     await installMocks(page, "token");
+    // An unset WEBMAIL_AUTH_BACKEND resolves to off (lead ruling, #793 amended). The server never
+    // answers setupRequired:true unless the backend is explicitly native, so neither does this mock.
     await page.route("https://postern.test/api/session", (route) => route.request().method() === "GET"
-      ? fulfillJson(route, { ok: false, authBackend: "off", setupRequired: true }, 401)
+      ? fulfillJson(route, { ok: false, authBackend: "off", setupRequired: false }, 401)
       : route.fallback());
+    let setupCalls = 0;
+    await page.route("https://postern.test/api/setup", (route) => { setupCalls++; return fulfillJson(route, { ok: false, error: "E_NOT_FOUND" }, 404); });
     await page.goto("https://postern.test/webmail");
     await expect(page.locator("#disabled")).toBeVisible();
+    await expect(page.locator("#disabledTitle")).toHaveText("Webmail sign-in is not enabled on this server");
+    // No sign-in form and no setup form: neither card is shown, and none of their fields are reachable.
+    await expect(page.locator("#signin")).toBeHidden();
     await expect(page.locator("#setup")).toBeHidden();
+    for (const id of ["#siUser", "#siPass", "#suToken", "#suUser", "#suPass"]) await expect(page.locator(id)).toBeHidden();
+    await expect(page.locator("input[type=password]:visible")).toHaveCount(0);
+    expect(setupCalls).toBe(0);
   });
 
   test("discovery unreachable is not reported as off: token gate with a reachability note (#798)", async ({ page }) => {
