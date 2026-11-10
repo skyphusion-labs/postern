@@ -818,4 +818,81 @@ test.describe("webmail critical journeys (#355)", () => {
     expect(m.marginLeft).toBe("0px");       // the card rule centered it with auto margins
     expect(m.gap).toBeLessThan(24);         // the disclosure sits next to the trust tag
   });
+
+  // #814: a deploy with no AI or Vectorize answers semantic/hybrid as HTTP 200
+  // with degraded "semantic search unavailable...", not an error. The keyword
+  // fallback page can carry an fts cursor. Load more must send mode=fts with
+  // that cursor. mode=semantic or hybrid with the same cursor is the #803 400.
+  test("semantic unavailable: Load more pages the fts fallback with mode=fts (#814)", async ({ page }) => {
+    await installMocks(page, "session");
+    const searches: { mode: string | null; cursor: string | null }[] = [];
+    function hit(messageId: string, subject: string, date: string) {
+      return {
+        message: {
+          messageId,
+          from: "bob@example.com",
+          to: "conrad@skyphusion.org",
+          subject,
+          date,
+          direction: "inbound",
+          seen: true,
+          flagged: false,
+          trusted: true,
+          attachmentCount: 0,
+          mailbox: null,
+          bodyText: subject,
+        },
+      };
+    }
+    await page.route("https://postern.test/api/search**", async (route) => {
+      const url = new URL(route.request().url());
+      const mode = url.searchParams.get("mode");
+      const cursor = url.searchParams.get("cursor");
+      searches.push({ mode, cursor });
+      if (mode === "fts" && cursor === "cur-2") {
+        await fulfillJson(route, {
+          ok: true,
+          items: [hit("p2@example.com", "Keyword page two", "2026-07-17T12:00:00.000Z")],
+          cursor: null,
+        });
+        return;
+      }
+      if (mode === "fts") {
+        await fulfillJson(route, {
+          ok: true,
+          items: [hit("p1@example.com", "Keyword page one", "2026-07-18T12:00:00.000Z")],
+          cursor: "cur-2",
+        });
+        return;
+      }
+      if (cursor) {
+        await fulfillJson(route, {
+          ok: false,
+          error: "E_VALIDATION_ERROR",
+          message: "cursor paginates mode fts and substr only; semantic and hybrid are score-ranked and refuse a cursor",
+        }, 400);
+        return;
+      }
+      await fulfillJson(route, {
+        ok: true,
+        items: [],
+        complete: false,
+        degraded: "semantic search unavailable: no AI binding is configured, so no query was run",
+      });
+    });
+
+    await page.goto("https://postern.test/webmail");
+    await expect(page.locator("#app")).toBeVisible({ timeout: 10_000 });
+    await page.locator("#searchMode").selectOption("semantic");
+    await page.locator("#search").fill("invoice");
+    await page.locator("#search").press("Enter");
+
+    await expect(page.getByText("Keyword page one")).toBeVisible();
+    await expect(page.getByText("Semantic search unavailable; showing keyword results.")).toBeVisible();
+    await page.getByRole("button", { name: "Load more" }).click();
+    await expect(page.getByText("Keyword page two")).toBeVisible();
+
+    const continued = searches.filter((s) => s.cursor === "cur-2");
+    expect(continued).toEqual([{ mode: "fts", cursor: "cur-2" }]);
+  });
 });
