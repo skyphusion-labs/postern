@@ -95,7 +95,7 @@ A session is minted by verifying a credential. The verifier mirrors the door
 | `WEBMAIL_AUTH_BACKEND` | verifies against | phase |
 |---|---|---|
 | `off` | no session endpoint; BYO-token only (self-host operator posture) | always available |
-| `native` (explicit, or the default once a user exists: 1.10.6) | `smtp_credentials` (the same PBKDF2 the relay `POST /api/smtp-auth` uses) | **phase 2** |
+| `native` (explicit opt-in; 1.10.6) | `smtp_credentials` (the same PBKDF2 the relay `POST /api/smtp-auth` uses) | **phase 2** |
 | `ldap` / `system` | the directory, via a verifier the fleet doors already run | **phase 2+ (gated, see 1.9)** |
 
 `native` is the fresh-clone RECOMMENDED backend and the one this phase specifies end
@@ -113,9 +113,9 @@ merge), and an operator turns sessions on with an explicit `WEBMAIL_AUTH_BACKEND
 after provisioning accounts (documented in DEPLOY). `ldap`/`system` are treated as
 `off` until the D-AUTH-2 phase lands.
 
-**Superseded by 1.10.6 (#789, #791).** Unset now resolves to `native` once
-`smtp_credentials` has a row (or first run is armed) and `off` otherwise; an explicit
-`off` is always honored. The surprise-on-deploy reason above is answered there.
+**Reaffirmed by 1.10.6 (#789, #791, decision D-AUTH-3).** Unset or empty stays `off`
+whatever `smtp_credentials` holds; an upgrade never turns sign-in on. A new install gets
+sign-in because its installer WRITES `WEBMAIL_AUTH_BACKEND = "native"`.
 
 The `ldap`/`system` webmail login on a directory-backed deployment (the skyphusion
 fleet) is designed here but **gated to a later phase** because a Cloudflare Worker cannot
@@ -380,12 +380,14 @@ backend and first run).
 #### 1.10.1 Names and passwords
 
 **Username (NEW users only; existing rows keep working as they are).** Trimmed and
-lowercased before every use. 1 to 254 characters from `a-z 0-9 . _ + @ -`, first
-character a letter or digit. Usually it is the address itself (`alice@example.com`), but
-a short login (`alice`) is allowed; the bound identity is `from`, not the username.
-Failure: `400 E_VALIDATION_ERROR` with `field: "username"`.
+lowercased before every use. Either a bare login `L`, or the address `L@<ALLOWED_FROM_DOMAIN>`,
+where `L` is 1 to 64 characters of `a-z 0-9 . _ -` with no leading or trailing dot and no
+`..` (so `L` is always a safe address local part). Any other value is refused
+`400 E_INVALID_USERNAME` with `field: "username"` and a `message` naming the rule.
+The bound identity is `from`, not the username.
 
-**`from` (the bound identity).** Defaults to the username. Must be a valid address on
+**`from` (the bound identity).** Defaults to the username when it is an address, else
+to `<username>@<ALLOWED_FROM_DOMAIN>`. Must be a valid address on
 `ALLOWED_FROM_DOMAIN` (`400 E_SENDER_NOT_ALLOWED`). Unset domain refuses every create
 (`500 E_INTERNAL_SERVER_ERROR`, "ALLOWED_FROM_DOMAIN is not configured"), never a
 borrowed domain (#615).
@@ -477,6 +479,8 @@ The user object, in every answer that has one (it NEVER carries a hash or a pass
   so "I am locked out" has an operator fix. It never clears an IP row.
 - Disabled is a soft state: the row stays, every door refuses it (`E_AUTH_FAILED` at
   sign-in, SMTP 535 at the relay), and enabling restores it with the same password.
+- The admin routes are NOT throttled: they need the `both` token and verify no password.
+  A scripted re-run cannot trip a lockout; a repeated create answers `409 E_CONFLICT`.
 
 **Back-compat: `POST /api/admin/smtp-credentials` stays** (create OR rotate, upsert),
 with three changes: (1) it reads the body field `password`, which is what the route
@@ -526,26 +530,25 @@ attacker a cheap way to sign a victim out), but it is counted.
 The UI keeps the user signed in: it takes the new cookies and the new `csrfToken` from
 the answer. Other devices are signed out.
 
-#### 1.10.6 Which backend is on (amends 1.3)
+#### 1.10.6 Which backend is on (reaffirms 1.3)
 
 | `WEBMAIL_AUTH_BACKEND` | result |
 |---|---|
-| `off` | off: no sign-in, no setup, cookies ignored. Always honored. |
+| unset or empty | **off**, always, whatever `smtp_credentials` holds |
+| `off` | off: no sign-in, no setup, session cookies ignored |
 | `native` | native |
-| unset or empty | native if `smtp_credentials` has ANY row, or if first run is armed (1.10.7); otherwise off |
 | any other value (`ldap`, `system`, a typo) | off (1.9 is still deferred) |
 
-Why this is now safe when 1.3's note said it was not: the risk there was "every
-submission password becomes a webmail sign-in on merge, by surprise". Here it is the
-documented default, the deploy is tag-gated (a merge does not ship), and the release
-note for the version that carries #791 states it: **an existing deployment that has
-submission credentials and no `WEBMAIL_AUTH_BACKEND` turns webmail sign-in ON; set
-`WEBMAIL_AUTH_BACKEND = "off"` before upgrading to keep the old behaviour.** Every
-security property of sign-in (1.6) is unchanged.
+**An upgrade never turns sign-in on.** A release must not silently open a sign-in
+surface on an existing self-hosted deploy, so rows in `smtp_credentials` change nothing.
+A NEW install still gets sign-in with no hand edit: the installer writes
+`WEBMAIL_AUTH_BACKEND = "native"` explicitly (DEPLOY lane). Upgrade note for the
+version that carries #791: **no behaviour change on upgrade; set
+`WEBMAIL_AUTH_BACKEND = "native"` to enable webmail sign-in.**
 
-Cost: the "any row" check is one indexed read, made only on the session routes
-(`GET`/`POST /api/session`, `/api/setup`). A request that carries a session cookie
-skips it: a session row can only exist if a user did, and 1.10.3 re-checks that user.
+Off ignores a session cookie everywhere (`GET /api/session`, refresh, change password,
+and every API call), so a session minted while `native` stops working the moment the
+operator sets `off` (or unsets the var).
 
 The unauthenticated `GET /api/session` discovery answer gains one field:
 
@@ -553,15 +556,19 @@ The unauthenticated `GET /api/session` discovery answer gains one field:
 401 { "ok": false, "authBackend": "native" | "off", "setupRequired": true | false }
 ```
 
-`setupRequired` is true only in the first-run state. Like `authBackend`, it reveals
-nothing about any user.
+`setupRequired` is true only in the first-run state (1.10.7). Like `authBackend`, it
+reveals nothing about any user, and it needs no auth, so an installer may poll it (for
+example, to delete the setup secret once it reads false).
 
 #### 1.10.7 First run: `POST /api/setup`
 
-Armed only when BOTH hold: the Worker secret `POSTERN_SETUP_TOKEN` is set (at least 32
-characters; a shorter value is treated as unset and logged once as a config error) and
-`smtp_credentials` has NO rows at all. A disabled user is still a row, so disabling
-everyone never re-opens setup. An explicit `WEBMAIL_AUTH_BACKEND = "off"` disarms it.
+Armed only when ALL THREE hold:
+
+1. `WEBMAIL_AUTH_BACKEND` is explicitly `native` (unset, empty and `off` disarm it),
+2. the Worker secret `POSTERN_SETUP_TOKEN` is set, at least 32 characters (a shorter
+   value is treated as unset and logged once as a config error), and
+3. `smtp_credentials` has NO rows at all. A disabled user is still a row, so disabling
+   everyone never re-opens setup.
 
 ```
 POST /api/setup          (same-origin; no Authorization; no cookie needed)
@@ -572,10 +579,11 @@ POST /api/setup          (same-origin; no Authorization; no cookie needed)
   { "ok": true, "setup": true, "user": {...}, "identity": {...},
     "capabilities": [...], "expiresAt": "...", "csrfToken": "..." }
 
-400 E_VALIDATION_ERROR | E_FIELD_MISSING | E_PASSWORD_POLICY | E_SENDER_NOT_ALLOWED
+400 E_VALIDATION_ERROR | E_FIELD_MISSING | E_INVALID_USERNAME | E_PASSWORD_POLICY
+    | E_SENDER_NOT_ALLOWED
 401 E_AUTH_FAILED          (wrong setupToken)
 403 E_CROSS_ORIGIN
-404 E_NOT_FOUND            (not armed: no token configured, or backend off)
+404 E_NOT_FOUND            (not armed: backend not explicitly native, or no token)
 409 E_SETUP_COMPLETE       (a user already exists; closed for good)
 413 E_PAYLOAD_TOO_LARGE
 429 E_RATE_LIMITED + Retry-After
@@ -590,8 +598,9 @@ POST /api/setup          (same-origin; no Authorization; no cookie needed)
 - The create is ATOMIC: `INSERT ... SELECT ... WHERE NOT EXISTS (SELECT 1 FROM
   smtp_credentials)`. Two racing setups produce one user; the loser gets
   `409 E_SETUP_COMPLETE`.
-- After the first user exists the token is inert. The installer MAY delete the secret;
-  it does not have to.
+- After the first user exists the token is inert. The installer SHOULD delete the
+  secret once `GET /api/session` reports `setupRequired: false` (one less credential at
+  rest); the server check stays as the second layer.
 
 **Scripted installs do not need this route.** An installer that holds the `both` token
 creates the first user with `POST /api/admin/users` (1.10.4) and treats
@@ -606,15 +615,19 @@ creates the first user with `POST /api/admin/users` (1.10.4) and treats
 | CSRF | Change password needs the session-bound CSRF header AND same-origin. Setup and sign-in carry no session, so they use the same-origin rule. Admin routes are Bearer-only. |
 | Session fixation | Sign-in and setup mint a fresh id; change password rotates the id and the CSRF token and ends every other session. No route adopts a client id. |
 | Stale access after offboarding | Disable, reset, delete and a `from` change end sessions, and resolution re-checks the account (1.10.3). |
-| Setup takeover on a live deploy | Setup needs a server secret AND an empty table, the create is atomic, and it is closed forever once a row exists. |
+| Setup takeover on a live deploy | Setup needs an explicit `native` backend, a server secret AND an empty table; the create is atomic, and it is closed forever once a row exists. |
+| Sign-in switched on by an upgrade | Unset stays `off` (1.10.6); only an explicit `native` opens sign-in. |
 | Password in logs or argv | Never logged; the CLI reads passwords from stdin; generated passwords appear once in one response. |
 
-#### 1.10.9 Decision for signoff
+#### 1.10.9 Decisions
 
-**D-AUTH-3** (default backend): unset resolves to `native` once a user exists
-(1.10.6). Recommended, because it is what "a non-technical operator creates a user and
-that user signs in" requires; the cost is the stated release-note change for existing
-deployments.
+**D-AUTH-3** (default backend), RULED by the lead: unset stays `off`; only an explicit
+`native` enables sign-in; the installer writes `native` for new installs (1.10.6).
+
+**D-AUTH-4** (a human admin role), DEFERRED: no signed-in admin this sprint. User
+management stays on the `both` token through the API and the CLI. A web admin UI will
+need a session-held admin capability, which is a new permission concept; that is
+Conrad's call when the UI is planned.
 
 ---
 
@@ -1037,7 +1050,8 @@ Each has a recommendation; none is unilaterally settled in this doc.
 | **D-AUTH-1** | Session custody: HttpOnly cookie vs bearer-in-JS? | **HttpOnly same-origin session cookie for hosted; bearer-in-JS retained for BYO/operator.** (Section 1.4.) | XSS token-theft resistance + instant server-side revocation outweigh the CSRF cost, which is mitigated (1.6). BYO-token stays for self-host. |
 | **D-AUTH-2** | Directory (ldap/system) webmail login now or later? | **Later, gated.** Phase 1 specifies `native` (smtp_credentials) end to end; directory login uses the verifier seam (1.9) in a later, signoff-gated phase (it touches fleet exposure). BYO-token covers directory deployments meanwhile. | A CF Worker cannot bind the directory; the verifier-URL seam keeps the account contract ONE contract without inventing a parallel store, but it is a fleet-topology change that needs supervision. |
 | **D-DELETE-1** | Organize mutations (move / flag / soft-delete-to-Trash): `read`-scoped or a new `organize` scope? | **`read`-scoped** (only hard delete gets the new `delete` scope). | Consistent with the standing `\Seen`-is-read-scoped decision; soft-delete is recoverable (Trash window), so it is non-destructive. A separate `organize` scope adds a fourth token most deployments never split. Flagged because it is a posture call. **Accepted consequence (must be stated):** because a `read` token can move mail to Trash and the retention purge (2.5) eventually hard-deletes trashed mail, a leaked READ token is EVENTUALLY destructive (trash everything, wait out `TRASH_RETENTION_DAYS`). This is accepted for consistency + the recovery window, on the CONDITION that the retention purge is a **gated, announced maintenance job, never a silent auto-run**, and the window is operator-configured with a sane floor. A deployment that cannot tolerate this can split `organize` out later (the model admits it). |
-| **D-AUTH-3** | `WEBMAIL_AUTH_BACKEND` unset: `off`, or `native` once a user exists? | **`native` once a user exists** (1.10.6); explicit `off` always wins. | A non-technical operator should create a user and have that user sign in, with no config var. The tag-gated deploy and a release note replace the surprise that kept the 1.3 default `off`. |
+| **D-AUTH-3** | `WEBMAIL_AUTH_BACKEND` unset: `off`, or `native` once a user exists? | **RULED: `off`, always** (1.10.6). Only explicit `native` enables sign-in; the installer writes it for new installs. | A release must never silently turn on a sign-in surface on an existing self-hosted deploy. |
+| **D-AUTH-4** | A signed-in human admin role? | **DEFERRED** (1.10.9). Admin stays the `both` token via API and CLI. | It is a new permission concept; a web admin UI needs it later, and that is Conrad's call. |
 | **D-SESSION-STORE-1** | Session state: server-side D1 rows vs stateless signed token? | **Server-side D1 rows** (1.5.2). | Instant revocation is an epic hard requirement; D1 write amplification is bounded by the throttled sliding-refresh (1.5.3). A stateless JWT trades away revocation. |
 
 ---
