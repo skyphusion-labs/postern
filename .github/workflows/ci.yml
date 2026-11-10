@@ -259,7 +259,7 @@ jobs:
       - name: installer suite
         run: |
           set -o pipefail
-          node --test deploy/test/ | tee installer-test.out
+          node --test deploy/test/*.test.mjs | tee installer-test.out
           grep -Eq '^(ℹ|#) tests ([2-9][0-9]|[0-9]{3,})$' installer-test.out \
             || { echo "::error::installer suite ran fewer than 20 tests"; exit 1; }
 

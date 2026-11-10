@@ -1,5 +1,5 @@
 // installer.test.mjs -- the installer against a stubbed Cloudflare account.
-// Run: node --test deploy/test/
+// Run: node --test deploy/test/*.test.mjs
 //
 // No test here talks to a real Cloudflare account. Each case asserts on the
 // fake's STATE and its request log, not on the installer's prose.

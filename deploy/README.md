@@ -107,7 +107,7 @@ set, so a dashboard-only var is lost at the next upgrade.
 
 ## Tests
 
-`node --test deploy/test/` runs the installer against an in-memory Cloudflare account
+`node --test deploy/test/*.test.mjs` runs the installer against an in-memory Cloudflare account
 (`deploy/test/fake-cloudflare.mjs`): a fresh install, a second run that writes nothing, resume
 after a failure at several points, every refusal (each asserted to make zero writes), upgrade,
 the migration gate, and rollback. No test talks to Cloudflare.
