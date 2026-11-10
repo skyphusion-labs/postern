@@ -113,7 +113,7 @@ describe("#790 admin user management (both token)", () => {
     });
     expect(body.password).toMatch(/^[A-Za-z0-9_-]{32}$/);
     const stored = row(raw, "bob@skyphusion.org")!;
-    expect(String(stored.secret_hash)).toMatch(/^pbkdf2\$210000\$/);
+    expect(String(stored.secret_hash)).toMatch(/^pbkdf2\$100000\$/);
     expect(String(stored.secret_hash)).not.toContain(body.password);
 
     const list = await call(env, "GET", "/api/admin/users", { token: ADMIN });
@@ -391,7 +391,7 @@ describe("#790 no enumeration, per-row hash upgrade", () => {
     await call(env, "POST", "/api/session", { body: { username: USER, password: "wrong-password-x" } });
     expect(row(raw)!.secret_hash).toBe(weak);
     await signIn(env);
-    expect(String(row(raw)!.secret_hash)).toMatch(/^pbkdf2\$210000\$/);
+    expect(String(row(raw)!.secret_hash)).toMatch(/^pbkdf2\$100000\$/);
     await signIn(env); // still the same password
   });
 });
@@ -423,7 +423,9 @@ describe("#790 POST /api/session/password", () => {
     expect(rotated.id).toBeTruthy();
     expect(rotated.id).not.toBe(here.id);
     expect(rotated.csrf).not.toBe(here.csrf);
-    expect(body).toMatchObject({ ok: true, csrfToken: rotated.csrf, sessionsEnded: 2, identity: { from: USER } });
+    // Two sessions, change on one: ONE other session ended; the caller's own is rotated,
+    // not counted (contract 1.10.5).
+    expect(body).toMatchObject({ ok: true, csrfToken: rotated.csrf, sessionsEnded: 1, identity: { from: USER } });
 
     expect(await whoami(env, here)).toBe(401);   // fixation: the pre-change id is dead
     expect(await whoami(env, other)).toBe(401);  // other devices signed out
@@ -431,6 +433,19 @@ describe("#790 POST /api/session/password", () => {
     expect(sessionCount(raw)).toBe(1);
     expect((await call(env, "POST", "/api/session", { body: { username: USER, password: PASSWORD } })).status).toBe(401);
     await signIn(env, USER, NEW);
+  });
+
+  it("with no other session, sessionsEnded is 0 (the caller's rotation is not an ending)", async () => {
+    const { env, raw } = realEnv();
+    await seed(raw);
+    const only = await signIn(env);
+    const res = await call(env, "POST", "/api/session/password", {
+      headers: withSession(only), body: { currentPassword: PASSWORD, newPassword: NEW },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, sessionsEnded: 0 });
+    expect(await whoami(env, only)).toBe(401);
+    expect(sessionCount(raw)).toBe(1);
   });
 
   it("a wrong current password is 401, is counted, and does not sign the caller out", async () => {

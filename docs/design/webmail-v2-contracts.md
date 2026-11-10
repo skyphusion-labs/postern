@@ -94,8 +94,8 @@ A session is minted by verifying a credential. The verifier mirrors the door
 
 | `WEBMAIL_AUTH_BACKEND` | verifies against | phase |
 |---|---|---|
-| `off` (DEFAULT when unset) | no session endpoint; BYO-token only (self-host operator posture) | always available |
-| `native` (explicit opt-in) | `smtp_credentials` (the same PBKDF2 the relay `POST /api/smtp-auth` uses) | **phase 2** |
+| `off` | no session endpoint; BYO-token only (self-host operator posture) | always available |
+| `native` (explicit opt-in; 1.10.6) | `smtp_credentials` (the same PBKDF2 the relay `POST /api/smtp-auth` uses) | **phase 2** |
 | `ldap` / `system` | the directory, via a verifier the fleet doors already run | **phase 2+ (gated, see 1.9)** |
 
 `native` is the fresh-clone RECOMMENDED backend and the one this phase specifies end
@@ -112,6 +112,10 @@ the moment #351 deploys, a surprise-on-deploy we do not ship. So an UNSET
 merge), and an operator turns sessions on with an explicit `WEBMAIL_AUTH_BACKEND=native`
 after provisioning accounts (documented in DEPLOY). `ldap`/`system` are treated as
 `off` until the D-AUTH-2 phase lands.
+
+**Reaffirmed by 1.10.6 (#789, #791, decision D-AUTH-3).** Unset or empty stays `off`
+whatever `smtp_credentials` holds; an upgrade never turns sign-in on. A new install gets
+sign-in because its installer WRITES `WEBMAIL_AUTH_BACKEND = "native"`.
 
 The `ldap`/`system` webmail login on a directory-backed deployment (the skyphusion
 fleet) is designed here but **gated to a later phase** because a Cloudflare Worker cannot
@@ -352,6 +356,297 @@ returns the bound `mail` identity; the worker mints the session from it. This is
 explicitly **phase 2+ and gated for lead/Conrad signoff** (it touches the fleet exposure
 posture, section 5 decision D-AUTH-2); it is designed now so the account contract is ONE
 contract, not invented later. Until it lands, directory deployments use BYO-token webmail.
+
+### 1.10 Human accounts: user management, change password, first run (#789)
+
+Sections 1.1 to 1.9 let a human SIGN IN. This section lets an operator who is not a
+developer MANAGE the people who sign in, lets a person change their own password, and
+lets a fresh deploy create its first user. It adds NO second store and NO second
+permission model:
+
+- A **user** is one `smtp_credentials` row. The username is the login; `from_addr` is
+  the bound identity; the row is the SAME credential the submission relay and the IMAP
+  door verify. One account, all doors.
+- **Managing** users is the existing `admin` scope (held only by the static `both`
+  token, `routes.ts` `scopeSatisfies`). A webmail session never carries `admin`, so a
+  signed-in human cannot reach these routes. A signed-in "human admin" role is NOT in
+  this contract; it would be a new permission concept and needs a lead ruling first.
+- A signed-in user gets exactly `NATIVE_SESSION_CAPS` (read, send, delete, organize),
+  as today. Nothing here changes what a session may do.
+
+Implementation issues: #790 (user management, CLI, change password), #791 (default
+backend and first run).
+
+#### 1.10.1 Names and passwords
+
+**Username (NEW users only; existing rows keep working as they are).** Trimmed and
+lowercased before every use. Either a bare login `L`, or the address `L@<ALLOWED_FROM_DOMAIN>`,
+where `L` is 1 to 64 characters of `a-z 0-9 . _ -` with no leading or trailing dot and no
+`..` (so `L` is always a safe address local part). Any other value is refused
+`400 E_INVALID_USERNAME` with `field: "username"` and a `message` naming the rule.
+The bound identity is `from`, not the username.
+
+**`from` (the bound identity).** Defaults to the username when it is an address, else
+to `<username>@<ALLOWED_FROM_DOMAIN>`. Must be a valid address on
+`ALLOWED_FROM_DOMAIN` (`400 E_SENDER_NOT_ALLOWED`). Unset domain refuses every create
+(`500 E_INTERNAL_SERVER_ERROR`, "ALLOWED_FROM_DOMAIN is not configured"), never a
+borrowed domain (#615).
+
+**`displayName`.** Optional, at most 128 characters, no control characters. Shown as
+"Sending as Name <from>" and returned in the session identity.
+
+**Password policy (NIST SP 800-63B style; no composition rules).**
+
+- at least 12 characters, at most 256 (the upper cap bounds PBKDF2 input; the request
+  body cap is 4 KiB on every route in this section)
+- not equal to the username (case-insensitive)
+- on change: not equal to the current password
+
+Failure: `400 E_PASSWORD_POLICY` with a `message` the UI can show as it is, for
+example `"password must be at least 12 characters"`. The policy check runs BEFORE any
+PBKDF2, so a bad request costs no hashing.
+
+**Generated passwords.** Where a route accepts an optional `password` and it is
+omitted, the server generates 24 random bytes (base64url, 32 characters) and returns it
+ONCE in that response. It is never stored or logged in plaintext.
+
+#### 1.10.2 The stored hash: per-row parameters, upgrade on sign-in
+
+The hash is `pbkdf2$<iterations>$<saltB64>$<hashB64>` (PBKDF2-HMAC-SHA256, 16-byte
+salt, 32-byte output). The iteration count lives in EACH row, so the target can change
+without a schema change and an old row still verifies at its own count.
+
+**The target is 100,000 iterations, the Workers ceiling (#821, RULED by the lead).** The
+deployed Cloudflare Workers runtime refuses a PBKDF2 iteration count above 100,000
+("iteration counts above 100000 are not supported"). Local `wrangler dev` and Node accept
+more, so only the edge shows it: the former target of 210,000 could neither create nor
+verify any credential in production, and a green local suite could not see that. The cap
+and its reason sit next to the constant in `smtpcreds.ts`, and the suite runs under the
+edge's limit, so raising it goes red locally. A different KDF (scrypt or Argon2 in WASM)
+is a separate design item, not part of this contract.
+
+**A row above the cap fails closed as a wrong password.** A stored hash above 100,000
+iterations (it could only have been minted outside the Worker) is never derived. The
+server logs a config error naming the account, and the caller gets exactly the
+wrong-password answer: `401 E_AUTH_FAILED` at sign-in and change password (counted by the
+throttle like any rejection, so the account is not distinguishable), `200 {ok:false}` at
+`/api/smtp-auth`. It never answers a 5xx that carries the runtime message. The fix is an
+operator reset (`POST /api/admin/users/{u}/password`).
+
+**Upgrade on sign-in.** After a successful password verify (sign-in, change password),
+if the row's iteration count is below the target (100,000), the server re-hashes the
+same password at the target, never above it, and writes it with a conditional update
+(`WHERE username = ? AND secret_hash = <the hash just verified>`), so a concurrent reset
+always wins. The upgrade never changes the answer to the caller; if the write fails,
+the sign-in still succeeds and the next one retries.
+
+Every compare is constant-time. An unknown, disabled or deleted user is verified
+against a dummy hash at the target count (100,000), so it costs the same work and returns the
+same error as a wrong password.
+
+#### 1.10.3 Sessions follow the account
+
+Migration 0015 (additive, `ALTER TABLE ... ADD COLUMN` only, no backfill):
+
+```sql
+ALTER TABLE webmail_sessions ADD COLUMN username TEXT;   -- the login that minted it
+ALTER TABLE smtp_credentials ADD COLUMN display_name TEXT;
+```
+
+- A new session stores the `username` that minted it.
+- **Disable, reset password, change `from`, and delete END that user's sessions**
+  (delete every `webmail_sessions` row with that `username`; a row minted before 0015
+  has no `username` and is matched by `identity` instead). The admin answer is sent
+  only after the rows are gone.
+- **Resolution re-checks the account.** A session that carries a `username` resolves
+  only while that `smtp_credentials` row exists and is not disabled (one joined read,
+  the same single query as today). This closes the race where a sign-in verifies just
+  before a disable and writes its session just after.
+- Change password (1.10.5) ends every OTHER session of the user and ROTATES the
+  current one (a new opaque id and a new CSRF token), so a cookie fixed or stolen before
+  the change is dead after it.
+
+#### 1.10.4 Admin routes (scope `admin`, `Authorization: Bearer <both token>`)
+
+All are Bearer-only (no cookie, so no CSRF). `{username}` in a path is
+percent-decoded then normalized; a malformed encoding is `400 E_VALIDATION_ERROR`.
+Admin routes may say a user does not exist (`404 E_NOT_FOUND`): only the estate
+operator holds this token, so this is not an enumeration surface.
+
+The user object, in every answer that has one (it NEVER carries a hash or a password):
+
+```
+{ "username": "alice@example.com", "from": "alice@example.com",
+  "displayName": "Alice" | null, "disabled": false,
+  "createdAt": "2026-11-10T12:00:00Z", "updatedAt": "2026-11-10T12:00:00Z" }
+```
+
+| Method | Route | Body | Success | Errors |
+|---|---|---|---|---|
+| GET | `/api/admin/users` | query `limit` (1 to 500, default 100), `cursor` | `200 { ok, users: [user...], nextCursor: string \| null }`, ordered by username | 400 bad limit/cursor |
+| GET | `/api/admin/users/{username}` | | `200 { ok, user }` | 404 |
+| POST | `/api/admin/users` | `{ username, from?, displayName?, password? }` | `201 { ok, user, password? }` (`password` only when generated) | 400 validation / policy / sender, 409 `E_CONFLICT` (exists: never overwritten) |
+<!-- sessionsEnded on the admin routes counts every session of that user that was ended. -->
+| PATCH | `/api/admin/users/{username}` | any of `{ disabled: bool, displayName: string \| null, from }` | `200 { ok, user, sessionsEnded: n }` | 400, 404 |
+| POST | `/api/admin/users/{username}/password` | `{ password? }` | `200 { ok, user, password?, sessionsEnded: n }` | 400 policy, 404 |
+| DELETE | `/api/admin/users/{username}` | | `200 { ok, deleted: "<username>", sessionsEnded: n }` | 404 |
+
+- `PATCH` with `disabled: true` or a new `from` ends the user's sessions; enabling or a
+  display-name change does not. An empty PATCH body is `400 E_FIELD_MISSING`.
+- A password reset also clears the user's ACCOUNT lockout row (`a:<username>`, 1.6.1),
+  so "I am locked out" has an operator fix. It never clears an IP row.
+- Disabled is a soft state: the row stays, every door refuses it (`E_AUTH_FAILED` at
+  sign-in, SMTP 535 at the relay), and enabling restores it with the same password.
+- The admin routes are NOT throttled: they need the `both` token and verify no password.
+  A scripted re-run cannot trip a lockout; a repeated create answers `409 E_CONFLICT`.
+
+**Back-compat: `POST /api/admin/smtp-credentials` stays** (create OR rotate, upsert),
+with three changes: (1) it reads the body field `password`, which is what the route
+contract (`inbound/src/routes.ts`, `contracts/api-params.json`) has always declared,
+and keeps `secret` as an alias (both present and different is `400`); (2) it reads
+through the 4 KiB body cap; (3) a rotation ends the user's sessions like a reset does.
+New callers should use `/api/admin/users`, whose create never overwrites.
+`DELETE /api/admin/smtp-credentials/{username}` is an alias of the user DELETE.
+
+**CLI.** `postern-client admin users list | show <u> | create <u> [--from] [--name]
+[--password-stdin] | disable <u> | enable <u> | reset-password <u> [--password-stdin]
+| delete <u>`, using the `both` token from `POSTERN_API_TOKEN`. A password is read from
+stdin, never from argv; a generated one is printed once.
+
+#### 1.10.5 Self-service: `POST /api/session/password`
+
+Cookie session ONLY (served before the token gate, like `/api/session`). A request
+that carries an `Authorization` header is refused `403 E_SESSION_REQUIRED`: a token is
+not a person and has no password to change.
+
+```
+POST /api/session/password       (same-origin; session cookie; X-Postern-CSRF)
+  { "currentPassword": "...", "newPassword": "..." }
+
+200 Set-Cookie: __Host-postern_session=<NEW id>; ...
+    Set-Cookie: __Host-postern_csrf=<NEW token>; ...
+  { "ok": true, "identity": {...}, "capabilities": [...], "expiresAt": "...",
+    "csrfToken": "<NEW token>", "sessionsEnded": n }   (n = OTHER sessions ended; the
+                                                         caller's own rotation is not counted)
+
+400 E_VALIDATION_ERROR | E_FIELD_MISSING | E_PASSWORD_POLICY
+401 E_AUTH_FAILED          (no valid session, OR currentPassword is wrong)
+401 E_REAUTH_REQUIRED      (session minted before 0015: sign in again, then retry)
+403 E_CSRF | E_CROSS_ORIGIN | E_SESSION_REQUIRED
+413 E_PAYLOAD_TOO_LARGE
+429 E_RATE_LIMITED + Retry-After
+503 E_AUTH_UNAVAILABLE
+```
+
+Order of checks: session, CSRF, same-origin (the 1.6 `Sec-Fetch-Site`/`Origin` rule),
+body cap, field and policy validation, THROTTLE gate, verify `currentPassword`, write.
+The throttle uses the SAME keys and budget as sign-in (`a:<username>`, `i:<ip>`), so
+this route is not a second guessing channel: a wrong current password counts exactly
+like a failed sign-in, and a lockout here is a lockout there. A wrong current password
+does NOT end the session (the caller is already signed in; ending it would give an
+attacker a cheap way to sign a victim out), but it is counted.
+
+The UI keeps the user signed in: it takes the new cookies and the new `csrfToken` from
+the answer. Other devices are signed out.
+
+#### 1.10.6 Which backend is on (reaffirms 1.3)
+
+| `WEBMAIL_AUTH_BACKEND` | result |
+|---|---|
+| unset or empty | **off**, always, whatever `smtp_credentials` holds |
+| `off` | off: no sign-in, no setup, session cookies ignored |
+| `native` | native |
+| any other value (`ldap`, `system`, a typo) | off (1.9 is still deferred) |
+
+**An upgrade never turns sign-in on.** A release must not silently open a sign-in
+surface on an existing self-hosted deploy, so rows in `smtp_credentials` change nothing.
+A NEW install still gets sign-in with no hand edit: the installer writes
+`WEBMAIL_AUTH_BACKEND = "native"` explicitly (DEPLOY lane). Upgrade note for the
+version that carries #791: **no behaviour change on upgrade; set
+`WEBMAIL_AUTH_BACKEND = "native"` to enable webmail sign-in.**
+
+Off ignores a session cookie everywhere (`GET /api/session`, refresh, change password,
+and every API call), so a session minted while `native` stops working the moment the
+operator sets `off` (or unsets the var).
+
+The unauthenticated `GET /api/session` discovery answer gains one field:
+
+```
+401 { "ok": false, "authBackend": "native" | "off", "setupRequired": true | false }
+```
+
+`setupRequired` is true only in the first-run state (1.10.7). Like `authBackend`, it
+reveals nothing about any user, and it needs no auth, so an installer may poll it (for
+example, to delete the setup secret once it reads false).
+
+#### 1.10.7 First run: `POST /api/setup`
+
+Armed only when ALL THREE hold:
+
+1. `WEBMAIL_AUTH_BACKEND` is explicitly `native` (unset, empty and `off` disarm it),
+2. the Worker secret `POSTERN_SETUP_TOKEN` is set, at least 32 characters (a shorter
+   value is treated as unset and logged once as a config error), and
+3. `smtp_credentials` has NO rows at all. A disabled user is still a row, so disabling
+   everyone never re-opens setup.
+
+```
+POST /api/setup          (same-origin; no Authorization; no cookie needed)
+  { "setupToken": "...", "username": "...", "from"?: "...",
+    "displayName"?: "...", "password": "..." }
+
+201 Set-Cookie: session + csrf (exactly as POST /api/session)
+  { "ok": true, "setup": true, "user": {...}, "identity": {...},
+    "capabilities": [...], "expiresAt": "...", "csrfToken": "..." }
+
+400 E_VALIDATION_ERROR | E_FIELD_MISSING | E_INVALID_USERNAME | E_PASSWORD_POLICY
+    | E_SENDER_NOT_ALLOWED
+401 E_AUTH_FAILED          (wrong setupToken)
+403 E_CROSS_ORIGIN
+404 E_NOT_FOUND            (not armed: backend not explicitly native, or no token)
+409 E_SETUP_COMPLETE       (a user already exists; closed for good)
+413 E_PAYLOAD_TOO_LARGE
+429 E_RATE_LIMITED + Retry-After
+503 E_AUTH_UNAVAILABLE
+```
+
+- The password is REQUIRED here (the person at the screen chooses it; nothing is
+  generated and shown in a browser).
+- The setup token is compared in constant time over the sha256 of both values, so its
+  length does not leak. A wrong token is throttled on the `i:<ip>` key and a fixed
+  `s:setup` key with the 1.6.1 defaults.
+- The create is ATOMIC: `INSERT ... SELECT ... WHERE NOT EXISTS (SELECT 1 FROM
+  smtp_credentials)`. Two racing setups produce one user; the loser gets
+  `409 E_SETUP_COMPLETE`.
+- After the first user exists the token is inert. The installer SHOULD delete the
+  secret once `GET /api/session` reports `setupRequired: false` (one less credential at
+  rest); the server check stays as the second layer.
+
+**Scripted installs do not need this route.** An installer that holds the `both` token
+creates the first user with `POST /api/admin/users` (1.10.4) and treats
+`409 E_CONFLICT` on a re-run as done. Both paths write one `smtp_credentials` row.
+
+#### 1.10.8 Threats this section adds, and the answer to each
+
+| Threat | Answer |
+|---|---|
+| Username enumeration | Sign-in, change password and setup answer `E_AUTH_FAILED` for every credential failure, with dummy-hash timing for unknown and disabled users; the throttle counts unknown names exactly like known ones (1.6.1). Only the `both`-token admin routes say "not found". |
+| Brute force | Every route that verifies a password or the setup token goes through `auththrottle` (sign-in, change password, setup). The submission relay throttles `POST /api/smtp-auth` itself (#105). Admin routes verify no password. |
+| CSRF | Change password needs the session-bound CSRF header AND same-origin. Setup and sign-in carry no session, so they use the same-origin rule. Admin routes are Bearer-only. |
+| Session fixation | Sign-in and setup mint a fresh id; change password rotates the id and the CSRF token and ends every other session. No route adopts a client id. |
+| Stale access after offboarding | Disable, reset, delete and a `from` change end sessions, and resolution re-checks the account (1.10.3). |
+| Setup takeover on a live deploy | Setup needs an explicit `native` backend, a server secret AND an empty table; the create is atomic, and it is closed forever once a row exists. |
+| Sign-in switched on by an upgrade | Unset stays `off` (1.10.6); only an explicit `native` opens sign-in. |
+| Password in logs or argv | Never logged; the CLI reads passwords from stdin; generated passwords appear once in one response. |
+
+#### 1.10.9 Decisions
+
+**D-AUTH-3** (default backend), RULED by the lead: unset stays `off`; only an explicit
+`native` enables sign-in; the installer writes `native` for new installs (1.10.6).
+
+**D-AUTH-4** (a human admin role), DEFERRED: no signed-in admin this sprint. User
+management stays on the `both` token through the API and the CLI. A web admin UI will
+need a session-held admin capability, which is a new permission concept; that is
+Conrad's call when the UI is planned.
 
 ---
 
@@ -774,6 +1069,8 @@ Each has a recommendation; none is unilaterally settled in this doc.
 | **D-AUTH-1** | Session custody: HttpOnly cookie vs bearer-in-JS? | **HttpOnly same-origin session cookie for hosted; bearer-in-JS retained for BYO/operator.** (Section 1.4.) | XSS token-theft resistance + instant server-side revocation outweigh the CSRF cost, which is mitigated (1.6). BYO-token stays for self-host. |
 | **D-AUTH-2** | Directory (ldap/system) webmail login now or later? | **Later, gated.** Phase 1 specifies `native` (smtp_credentials) end to end; directory login uses the verifier seam (1.9) in a later, signoff-gated phase (it touches fleet exposure). BYO-token covers directory deployments meanwhile. | A CF Worker cannot bind the directory; the verifier-URL seam keeps the account contract ONE contract without inventing a parallel store, but it is a fleet-topology change that needs supervision. |
 | **D-DELETE-1** | Organize mutations (move / flag / soft-delete-to-Trash): `read`-scoped or a new `organize` scope? | **`read`-scoped** (only hard delete gets the new `delete` scope). | Consistent with the standing `\Seen`-is-read-scoped decision; soft-delete is recoverable (Trash window), so it is non-destructive. A separate `organize` scope adds a fourth token most deployments never split. Flagged because it is a posture call. **Accepted consequence (must be stated):** because a `read` token can move mail to Trash and the retention purge (2.5) eventually hard-deletes trashed mail, a leaked READ token is EVENTUALLY destructive (trash everything, wait out `TRASH_RETENTION_DAYS`). This is accepted for consistency + the recovery window, on the CONDITION that the retention purge is a **gated, announced maintenance job, never a silent auto-run**, and the window is operator-configured with a sane floor. A deployment that cannot tolerate this can split `organize` out later (the model admits it). |
+| **D-AUTH-3** | `WEBMAIL_AUTH_BACKEND` unset: `off`, or `native` once a user exists? | **RULED: `off`, always** (1.10.6). Only explicit `native` enables sign-in; the installer writes it for new installs. | A release must never silently turn on a sign-in surface on an existing self-hosted deploy. |
+| **D-AUTH-4** | A signed-in human admin role? | **DEFERRED** (1.10.9). Admin stays the `both` token via API and CLI. | It is a new permission concept; a web admin UI needs it later, and that is Conrad's call. |
 | **D-SESSION-STORE-1** | Session state: server-side D1 rows vs stateless signed token? | **Server-side D1 rows** (1.5.2). | Instant revocation is an epic hard requirement; D1 write amplification is bounded by the throttled sliding-refresh (1.5.3). A stateless JWT trades away revocation. |
 
 ---
