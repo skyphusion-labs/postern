@@ -212,6 +212,21 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
     note: "disable or a from change ends the user's sessions" },
   { id: "admin-user-delete", method: "DELETE", path: "/api/admin/users/", match: "prefix", scope: "admin",
     auth: "bearer", requireChild: true, template: "/api/admin/users/{username}" },
+  // Runtime agent identities (#801): mint, list, revoke, and the audit log they write.
+  // Operator only, on the smtp-credentials precedent: a runtime identity never holds
+  // `admin`, so it cannot mint, list or revoke credentials.
+  { id: "admin-identities-list", method: "GET", path: "/api/admin/identities", match: "exact", scope: "admin",
+    auth: "bearer", query: ["limit", "cursor", "includeRevoked"],
+    note: "runtime agent identities (#801): one keyset page ordered by createdAt; never carries a token or its hash; active only unless includeRevoked=1. Audited (identity.list)" },
+  { id: "admin-identities-mint", method: "POST", path: "/api/admin/identities", match: "exact", scope: "admin",
+    auth: "bearer", body: ["from", "scopes", "displayName", "label"],
+    note: "scopes from read|send|organize; anything else (delete, imap, admin, both, a typo) is 400, never stripped. Returns the token ONCE (201); it is never retrievable again and only its sha256 is stored. Authenticates on the next request, no deploy. Audited (identity.mint)" },
+  { id: "admin-identity-revoke", method: "DELETE", path: "/api/admin/identities/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/identities/{id}",
+    note: "the next request with its token is 401; no deploy. Idempotent; the row is kept with revokedAt and its id is never reused. Audited (identity.revoke)" },
+  { id: "admin-audit", method: "GET", path: "/api/admin/audit", match: "exact", scope: "admin", auth: "bearer",
+    query: ["limit", "cursor"],
+    note: "the audit log (#801), newest first: actor, action, target, outcome, detail. Refusals are recorded too" },
   { id: "admin-reindex", method: "POST", path: "/api/admin/reindex", match: "exact", scope: "admin",
     auth: "bearer", body: ["cursor", "limit", "dryRun"] },
   { id: "admin-reproject", method: "POST", path: "/api/admin/reproject", match: "exact",

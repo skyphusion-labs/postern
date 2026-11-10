@@ -259,6 +259,8 @@ that reports no scope it says so rather than guessing.
 | `create_draft` / `update_draft` | `POST /api/drafts`, `PUT /api/drafts/{id}` | `{id, draft}` / `{draft}` |
 | `delete_draft` / `send_draft` | `DELETE`, `POST /api/drafts/{id}/send` | `None` / `{messageId, threadId, from, ...}` |
 | `list_draft_attachments` / `add_draft_attachment` / `delete_draft_attachment` | `/api/drafts/{id}/attachments[/{aid}]` | `[attachment]` / attachment / `None` |
+| `mint_identity` / `list_identities` / `revoke_identity` | `/api/admin/identities[/{id}]` | `{id, token, ...}` (the token ONCE, never again) / `{items, cursor}` / `{revoked, alreadyRevoked}` (#801) |
+| `list_audit` | `GET /api/admin/audit` | `{items, cursor}`, newest first (#801) |
 | `ping` | `GET /api/messages?limit=1` | `bool` |
 
 **Scopes** ([AUTH-CONTRACT](../../docs/AUTH-CONTRACT.md)): reads and read-state writes
@@ -267,6 +269,10 @@ that reports no scope it says so rather than guessing.
 identity (a per-identity send credential,
 [SEND-IDENTITIES](../../docs/SEND-IDENTITIES.md)); a static operator token is
 refused with `E_IDENTITY_REQUIRED` because no owner can be derived from it.
+
+Runtime agent identities (#801): `mint_identity`, `list_identities`,
+`revoke_identity` and `list_audit` need the `both` token. See
+[SEND-IDENTITIES section 10](../../docs/SEND-IDENTITIES.md).
 
 ## Tests
 
