@@ -5,6 +5,7 @@
 //
 // Usage (from inbound/): npm run sync-webmail
 
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,36 @@ if (html.includes("`") || html.includes("${")) {
   console.error("sync-webmail: webmail/index.html contains backticks or ${; cannot embed in a template literal");
   process.exit(1);
 }
+
+// The page's one inline script is allowed by its hash, not by 'unsafe-inline', so a
+// script that is not ours (an injected <script>, an inline event handler, a
+// javascript: URL) does not run. Refuse any page shape the hash cannot cover: a
+// second <script>, a script with attributes, an inline on*= handler, or a javascript:
+// URL would be blocked by the CSP and break the page silently.
+// The end tag is matched the way a browser ends a script: "</script" then whitespace,
+// "/" or ">".
+const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+if (scripts.length !== 1 || scripts[0][1].trim() !== "") {
+  console.error("sync-webmail: webmail/index.html must contain exactly one <script> with no attributes");
+  process.exit(1);
+}
+const outside = html.slice(0, scripts[0].index) + html.slice(scripts[0].index + scripts[0][0].length);
+if (/<[a-z][^>]*\son[a-z]+\s*=/i.test(outside)) {
+  console.error("sync-webmail: webmail/index.html has an inline on*= event handler; the script CSP would block it");
+  process.exit(1);
+}
+if (/javascript:/i.test(outside)) {
+  console.error("sync-webmail: webmail/index.html has a javascript: URL; the script CSP would block it");
+  process.exit(1);
+}
+// The browser hashes the script text after HTML input normalization (CR LF and CR
+// become LF), so hash the same text.
+const scriptText = scripts[0][2].replace(/\r\n?/g, "\n");
+const scriptHash = "sha256-" + createHash("sha256").update(scriptText, "utf8").digest("base64");
+const csp =
+  "default-src 'none'; style-src 'unsafe-inline'; script-src '" + scriptHash + "'; " +
+  "connect-src 'self'; img-src 'self' data:; frame-src 'self'; " +
+  "base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 function escapeForTemplateLiteral(text) {
   return text.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
@@ -48,18 +79,21 @@ export const WEBMAIL_HTML = \``;
 
 const footer = `\`;
 
+// sha256 of the page's one inline <script>, computed by scripts/sync-webmail.mjs.
+export const WEBMAIL_SCRIPT_HASH = "${scriptHash}";
+
+// The page CSP. It loads no third-party anything and only talks to the same origin
+// (its own API): connect-src 'self' means a hijacked page cannot send the pasted token
+// to another host. script-src allows exactly the page's own script, by its hash, so an
+// injected script does not run. frame-src 'self' permits the sandboxed srcdoc iframe
+// the reading pane uses to render message bodies (sandbox="" = no scripts, no
+// same-origin), so stored body content can never execute or reach the API.
+// style-src keeps 'unsafe-inline' for the inline <style> and style attributes.
+export const WEBMAIL_CSP = "${csp}";
+
 const SECURITY_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
-  // Lock the page down: it loads no third-party anything and only talks to the
-  // same origin (its own API). connect-src 'self' means a hijacked page cannot
-  // exfiltrate the pasted token to another host.
-  "content-security-policy":
-    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
-    // frame-src 'self' permits the sandboxed srcdoc iframe the reading pane uses
-    // to render message bodies in an isolated context (sandbox="" = no scripts,
-    // no same-origin), so stored body content can never execute or reach the API.
-    "connect-src 'self'; img-src 'self' data:; frame-src 'self'; " +
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "content-security-policy": WEBMAIL_CSP,
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
 };

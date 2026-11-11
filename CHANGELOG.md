@@ -11,6 +11,57 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+**Upgrade.** Migration `0019` (the principal tables and six service-principal seeds) is
+additive and is applied by the deploy. Run `POST /api/admin/principals/backfill` once after
+upgrading to copy existing identities and users in; it is safe to run again.
+
+### Added
+
+- **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
+  `principal_addresses` tables, the six static token slots as service
+  principals, and `POST /api/admin/principals/backfill`, which copies agent
+  identities (keeping their `idn_` ids) and human users in. Idempotent and
+  convergent. Store only: every credential resolves exactly as before. See
+  `docs/IDENTITY.md` section 6.
+
+- **The `send_as` power (#740 S4).** An agent holding a `send_as` grant
+  sends as the human by naming the address as `from`: From is the human
+  with the human display name, `Sender:` is the agent, Reply-To is the
+  human, and the response reports `from` and `sender`. Each send writes a
+  `delegation.send_as` audit row before dispatch, fail closed. It needs a
+  transport that can set `Sender:`: on the default Cloudflare transport
+  the send is refused with `422 E_SEND_AS_UNSUPPORTED`, never sent
+  without one (Cloudflare feature request: #896). The relay `/dispatch`
+  body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
+
+### Changed
+
+- **The operator is named in the audit log (#854 M1).** Rows the admin
+  routes write now carry actor `service` / `svc_both` instead of
+  `operator` with no id. Older rows are unchanged.
+
+### Fixed
+
+- **Webmail shows attachment names with hidden characters made visible.**
+  Control and invisible format characters in an attachment filename are
+  shown as `[U+XXXX]`, the name is isolated left to right, and the
+  download name replaces each such character with `_`.
+
+- **The webmail remote-content notice counts every remote reference.**
+  SVG image, use and feImage links, CSS url() written with escapes,
+  @import of a plain string and image-set() strings are counted and
+  removed from the reading frame; a URL inside a CSS comment is not
+  counted.
+
+### Changed
+
+- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
+  The served CSP lists the sha256 of the page's one inline script, which
+  `npm run sync-webmail` computes, so a script that is not the page's
+  own does not run. `style-src 'unsafe-inline'` is unchanged.
+
 ## v1.11.0
 
 MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's

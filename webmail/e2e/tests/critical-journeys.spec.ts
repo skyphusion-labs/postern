@@ -8,6 +8,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const HTML = readFileSync(resolve(__dirname, "../../index.html"), "utf8");
+// The CSP the worker serves, read from the generated module, so every journey below runs
+// under the real script policy (scripts allowed by hash only).
+const CSP = (readFileSync(resolve(__dirname, "../../../inbound/src/webmail.ts"), "utf8")
+  .match(/^export const WEBMAIL_CSP = "([^"]+)";$/m) || [])[1];
+if (!CSP) throw new Error("WEBMAIL_CSP not found in inbound/src/webmail.ts");
 
 const SAMPLE_LIST = {
   ok: true,
@@ -76,7 +81,11 @@ async function installMocks(page: Page, mode: "token" | "session") {
     const method = req.method();
 
     if (path === "/webmail" || path === "/webmail/") {
-      await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: HTML });
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": CSP },
+        body: HTML,
+      });
       return;
     }
 
