@@ -3,8 +3,8 @@
 > Interface Control Document for delegated agent action on a human's mail. This file is
 > the contract for what is SHIPPED and the plan for what is not. Slice S1 is the grant
 > STORE and its operator routes. Slice S2 enforces the `read` and `organize` powers and
-> adds the `AGENT_READ_SCOPE` operator flag (section 4). `quote` and `send_as` are stored
-> but not enforced yet (S3, S4).
+> adds the `AGENT_READ_SCOPE` operator flag (section 4). Slice S3 enforces `quote`
+> (section 4.4). `send_as` is stored but not enforced yet (S4).
 
 ## 1. Why
 
@@ -37,7 +37,7 @@ one human address, and how.
 |---|---|---|
 | `read` | read the address's mail when the operator has set `AGENT_READ_SCOPE=granted` (Conrad's Q1 ruling) | S2, shipped |
 | `organize` | mark read, flags and move on the address's mail, each write audited | S2, shipped |
-| `quote` | quote the address's mail into a reply or forward | S3 |
+| `quote` | reply to, quote and forward the address's mail, each quote audited before it is sent | S3, shipped |
 | `send_as` | send with the address as From | S4 |
 
 **Every power implies `read`.** Filing, quoting or sending as mail you cannot read means
@@ -144,12 +144,34 @@ the batch rolls back and the write does not happen. A write that touches only th
 caller's own mail writes no audit row. Every field names a stable id, so a later
 identity layer (#854) can adopt these rows without rewriting them.
 
-### 4.4 Known limits of S2
+### 4.4 The `quote` power (S3)
+
+Under EITHER flag value (Conrad's S3 ruling, Q2), an active `quote` grant widens the
+mail a reply or forward may READ from the caller's own address (and its role queues) to
+that plus every address it holds `quote` on. #718 left this scope at the caller's own
+address even when it reads the estate, so the grant is the only thing that widens it.
+It covers every route that quotes, taken from the route table: `POST /api/send` and
+`/send` (`forwardMessageId`), `POST /api/reply` (the reply target, and its body with
+`quoteOriginal`), and a draft send of a `reply`, `replyAll` or `forward` draft.
+
+**Every quote of granted mail is audited BEFORE it is sent** (Conrad's S3 ruling, Q1):
+one `audit_log` row, action `delegation.quote`, `actor_kind` `agent`, `actor_id` the
+grantee's identity id, `target_kind` `message`, `target_id` the quoted message id, and
+`detail` `{op: "reply" | "forward", address}`. If that insert fails, nothing is sent.
+A reply counts whether or not it quotes the body: it reads the target's parties, subject
+and thread. A quote of the caller's own mail writes no row.
+
+**The row records an ATTEMPT, not a delivery.** The provider send is not a database write,
+so it cannot share a batch with the row. The row is written first; if the dispatch then
+fails, the row stays.
+
+### 4.5 Known limits of S2 and S3
 
 - **A refusal at the scope gate is not audited** (section 3 says the same for the
   operator routes). A `403` from the gate (a token without `organize`) never reaches a
   handler and writes no row.
-- **Reads are not audited.** Only organize writes are.
+- **Reads are not audited.** Organize writes and quotes are; a list, search or get of
+  granted mail is not.
 - **Per-message exclusion is not in v1** (Conrad's Q2 ruling). A grant covers all of the
   address's mail. Tracked in #853.
 - **`seen` with several granted addresses is one address per request.** `for` names one
@@ -157,7 +179,6 @@ identity layer (#854) can adopt these rows without rewriting them.
 
 ## 5. What is not built yet (the plan)
 
-- **S3, `quote`:** the reply and forward quote source widens on a `quote` grant.
 - **S4, `send_as`:** the send From may be an address the agent holds `send_as` on, and
   the send response reports the From it actually used (#847).
 - **S5:** a human reads their own audit log and makes and revokes grants on their own
@@ -181,5 +202,5 @@ identity layer (#854) can adopt these rows without rewriting them.
 | Store + routes | `inbound/src/delegations.ts`, `inbound/migrations/0017_delegation_grants.sql` |
 | Shared admin plumbing + audit writer | `inbound/src/adminkit.ts` |
 | S2 enforcement | `inbound/src/api.ts` (`agentEstateRead`, `readAccessScope`, `delegatedView`, `organizeWriteScope`), `inbound/src/store.ts` (`OrganizeAudit`) |
-| Tests | `inbound/delegations.test.ts`, `inbound/delegated-read.test.ts`, `inbound/delegated-organize.test.ts`, `deploy/test/installer.test.mjs` |
+| Tests | `inbound/delegations.test.ts`, `inbound/delegated-read.test.ts`, `inbound/delegated-organize.test.ts`, `inbound/delegated-quote.test.ts`, `deploy/test/installer.test.mjs` |
 | Route rows | `inbound/src/routes.ts` (`admin-delegations-*`), `contracts/api-routes.json` |
