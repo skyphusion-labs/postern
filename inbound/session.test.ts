@@ -103,7 +103,11 @@ function makeEnv(creds: CredRow[] = [], overrides: Record<string, unknown> = {})
     };
   }
   const env = {
-    DB: { prepare: (sql: string) => stmt(sql) },
+    DB: {
+      prepare: (sql: string) => stmt(sql),
+      // #854 M2: the per-user principal insert is a batch; this fake only needs it to run.
+      batch: async (s: Array<{ run(): Promise<unknown> }>) => Promise.all(s.map((x) => x.run())),
+    },
     ALLOWED_FROM_DOMAIN: "skyphusion.org",
     WEBMAIL_AUTH_BACKEND: "native",
     // The throttle is OFF in this endpoint suite: its SQL needs a real engine, and its

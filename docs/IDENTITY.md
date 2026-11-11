@@ -229,6 +229,22 @@ and also picks up rows a pre-M2 admin route wrote after M1 landed.
   as before; `inbound/principals.test.ts` asserts that across static, registry, runtime and
   session credentials, before and after a backfill.
 
+**M2, the part #740 S5 needs (shipped; the rest of M2 waits until after S5).**
+
+- **Every webmail session names its human principal.** Migration `0020` adds
+  `webmail_sessions.principal_id`. A sign-in looks the principal up by its live `password`
+  credential, and creates it on the spot (`ensureHumanPrincipal`, the same per-user code
+  the backfill runs) when the backfill has not reached that login yet. So the backfill and
+  the session cannot disagree. A session minted before `0020` resolves with `principalId`
+  null and simply gets one at its next sign-in.
+- **A grant and its audit row can name a human.** The grant and revoke paths take a
+  grantor: the operator by default (unchanged: `created_by` `operator`, actor `service` /
+  `svc_both`), or a human principal (`created_by` and the audit actor are its `prn_` id,
+  actor kind `human`) pinned to its own address. A human grantor may not name an address,
+  and revoking a grant on any other address is the same `404` as a missing id.
+- **Deferred until after S5:** resolution reading `credentials` first, the full dual-write
+  on every admin route, and the new credential types (M3).
+
 **Usernames.** `smtp_credentials.username` becomes the `lookup` of the principal's
 `password` credential. Renaming a login changes that credential, never the principal id,
 so sessions, grants and audit rows survive a rename.
