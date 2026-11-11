@@ -567,7 +567,12 @@ transport POSTs the `OutboundMessage` as JSON to `POST /dispatch`, gated by
 
 - Request body: the `OutboundMessage` JSON above, field-for-field (the relay decodes with
   unknown-field rejection, so the producer sends exactly these keys). `bcc` is envelope-only: it
-  rides in `OutboundMessage.bcc`, never in `headers`.
+  rides in `OutboundMessage.bcc`, never in `headers`. `sender` (`{email, name?}`, #740 S4) is
+  present only on a send_as send and is written as the `Sender:` header right after `From:`;
+  it is the only way a Sender reaches the wire (a caller `Sender` header stays reserved).
+- Transport capability: a transport declares `canSetSender`. `CfEmailTransport` cannot (Cloudflare
+  Email Sending has no Sender field or allowlisted header), so a send_as send on it is refused
+  `422 E_SEND_AS_UNSUPPORTED` before dispatch; `RelayTransport` can (DELEGATION.md section 4.5).
 - `200`: `{ "ok": true, "messageId": "<core id>", "providerMessageId": "<or empty>" }`.
 - `400`: `{ "ok": false, "error": "..." }` for a malformed body (bad JSON / no recipients / empty
   message / a `headers` name that is not an RFC 5322 field-name, is longer than 76 characters, or is
@@ -585,7 +590,8 @@ prefixes `Re:` (collapsing an existing prefix), and rebuilds `In-Reply-To` / `Re
 **stored state, not caller input**, so a reply cannot be pointed at an arbitrary thread.
 
 `send()`, `reply()`, and a forward (`forwardMessageId` on `send`) return
-`{ messageId, threadId, from, providerMessageId? }`. `from` is the address actually used,
+`{ messageId, threadId, from, sender?, providerMessageId? }` (`sender`, the agent identity,
+only on a send_as send, #740 S4). `from` is the address actually used,
 after identity binding and the domain check, and it is the same address stored on the
 outbound copy. A registry token that passed a different `from` still sees its bound
 address here (#804). `POST /api/send`, `POST /send`, `POST /api/reply`, and
