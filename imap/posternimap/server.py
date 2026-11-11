@@ -808,7 +808,7 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         if self._wire_trace_enabled():
             shown, tag = _trace_inbound(line, getattr(self, "_wire_credential_tag", None))
             if tag:
-                self._wire_credential_tag = tag
+                self._wire_credential_tag: Optional[bytes] = tag
             log.msg("wire C: " + shown.decode("latin-1", "replace"))
         return imap4.IMAP4Server.lineReceived(self, line)
 
