@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { htmlToText, ingest } from "./src/ingest";
+import { htmlToText, ingest, measureHtmlToTextWork, scanIndexOf } from "./src/ingest";
 import * as store from "./src/store";
 import { realEnv } from "./realdb";
 
@@ -36,40 +36,46 @@ function referenceHtmlToText(html: string): string {
 const SIZE = 160_000;
 const fill = (unit: string, size = SIZE) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
 
-// The running-time tests bound GROWTH, not wall time. A wall-clock budget fails on a
-// loaded machine while the code is fine (#911). What these exist to catch is a
-// quadratic regression, which is a property of the algorithm: over an 8x step,
-// t(8N) / t(N) is about 8 for linear work and about 64 for quadratic, whatever the load.
-// Samples of the two sizes alternate and the median of each is used, so a burst of load
-// hits both sides.
-// Measured 2026-11-11, three trials each at load average about 4 on a 6-core laptop: the
-// linear converter gives 7.7 to 10.5 on these shapes, and the quadratic reference gives
-// 46.5 to 59.3. 22 is the geometric middle of the extremes (sqrt(10.5 * 46.5)), so each
-// side has about 2.1x of headroom.
+// The running-time tests bound WORK, not wall time (#923). measureHtmlToTextWork counts
+// the characters that the converter's scans examine. That count is the same on every
+// run, so machine load cannot move it. Wall-clock ratios moved under load in both
+// directions, failing a linear converter and passing a quadratic one (#911, #923).
+// Over an 8x step the count grows about 8x for linear work and about 64x for
+// quadratic work. The quadratic control below is counted the same way.
+// Measured 2026-11-11: every shape below gives 7.998 to 8.001 (2.0 to 3.7 characters
+// examined per input character), and the quadratic control gives 63.9. The bound 16
+// leaves 2x over linear and 4x under quadratic; n log n work would give about 9.7.
 const STEP = 8;
-const MAX_GROWTH = 22;
-const CEILING_MS = 2000; // a backstop only: an absurd regression still fails outright
-const MIN_SAMPLE_MS = 10;
+const MAX_GROWTH = 16;
+const CEILING_MS = 2000; // a backstop only: one call on the 160 KB input, in wall time
 type Convert = (html: string) => string;
 
-// Mean time of one call, from repeating the call until MIN_SAMPLE_MS has passed, so a
-// sample is never one sub-millisecond call.
-function sampleMs(fn: Convert, input: string): number {
-  let reps = 0;
-  const t0 = performance.now();
-  let t = t0;
-  do { fn(input); reps++; t = performance.now(); } while (t - t0 < MIN_SAMPLE_MS);
-  return (t - t0) / reps;
-}
-function growth(fn: Convert, build: (n: number) => string, n: number): { ratio: number; bigMs: number } {
+function workGrowth(fn: Convert, build: (n: number) => string, n: number) {
   const small = build(n);
   const big = build(STEP * n);
-  fn(small.slice(0, 1000)); // warm the JIT
-  const a: number[] = [];
-  const b: number[] = [];
-  for (let i = 0; i < 5; i++) { a.push(sampleMs(fn, small)); b.push(sampleMs(fn, big)); }
-  const median = (xs: number[]) => [...xs].sort((x, y) => x - y)[2];
-  return { ratio: median(b) / median(a), bigMs: median(b) };
+  const smallWork = measureHtmlToTextWork(() => fn(small));
+  const bigWork = measureHtmlToTextWork(() => fn(big));
+  return { smallWork, bigWork, ratio: bigWork / smallWork };
+}
+
+// dropTags without its early return: on a "<" with no ">" after it, this version
+// moves on to the next "<" and scans to the end again. That is the quadratic
+// regression the counted bound exists to catch.
+function quadraticDropTags(src: string): string {
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const lt = scanIndexOf(src, "<", i);
+    if (lt === -1) return out + src.slice(i);
+    const gt = scanIndexOf(src, ">", lt + 1);
+    if (gt === -1 || gt === lt + 1) {
+      out += src.slice(i, lt + 1);
+      i = lt + 1;
+      continue;
+    }
+    out += src.slice(i, lt);
+    i = gt + 1;
+  }
 }
 
 describe("htmlToText running time", () => {
@@ -84,17 +90,22 @@ describe("htmlToText running time", () => {
   };
   for (const [name, build] of Object.entries(shapes)) {
     it(`grows linearly on ${name} (20 KB to 160 KB)`, () => {
-      const g = growth(htmlToText, build, SIZE / STEP);
-      expect(g.ratio, `t(8N)/t(N) = ${g.ratio.toFixed(2)}`).toBeLessThan(MAX_GROWTH);
-      expect(g.bigMs).toBeLessThan(CEILING_MS);
+      const n = SIZE / STEP;
+      const g = workGrowth(htmlToText, build, n);
+      // The counter is wired: every character is examined at least once.
+      expect(g.smallWork).toBeGreaterThanOrEqual(n);
+      expect(g.ratio, `work(8N)/work(N) = ${g.ratio.toFixed(2)}`).toBeLessThan(MAX_GROWTH);
+      const big = build(SIZE);
+      const t = performance.now();
+      htmlToText(big);
+      expect(performance.now() - t).toBeLessThan(CEILING_MS);
     });
   }
 
   it("control: the measurement flags a quadratic converter", () => {
-    // referenceHtmlToText is the previous, quadratic implementation (kept above for the
-    // output tests). If this ratio did not exceed the bound, the bound would prove nothing.
-    const g = growth(referenceHtmlToText, (n) => fill("<", n), 1000);
-    expect(g.ratio, `reference t(8N)/t(N) = ${g.ratio.toFixed(2)}`).toBeGreaterThan(MAX_GROWTH);
+    // If this ratio did not exceed the bound, the bound would prove nothing.
+    const g = workGrowth(quadraticDropTags, (n) => fill("<", n), 1000);
+    expect(g.ratio, `quadratic work(8N)/work(N) = ${g.ratio.toFixed(2)}`).toBeGreaterThan(MAX_GROWTH);
   });
 
   it("converts at most the first 512,000 characters", () => {
