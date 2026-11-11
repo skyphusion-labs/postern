@@ -7,16 +7,20 @@ import "fmt"
 // and JSON tags map 1:1 to the TS OutboundMessage so core's RelayTransport can
 // POST it here verbatim.
 type OutboundMessage struct {
-	MessageID string            `json:"messageId"` // core-generated, threads + stores the sent copy
-	To        []string          `json:"to"`
-	CC        []string          `json:"cc,omitempty"`
-	BCC       []string          `json:"bcc,omitempty"`
-	From      EmailAddress      `json:"from"` // already domain-checked by core's resolveFrom()
-	ReplyTo   *EmailAddress     `json:"replyTo,omitempty"`
-	Subject   string            `json:"subject"`
-	HTML      string            `json:"html,omitempty"`
-	Text      string            `json:"text,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"` // carries In-Reply-To / References on replies
+	MessageID string        `json:"messageId"` // core-generated, threads + stores the sent copy
+	To        []string      `json:"to"`
+	CC        []string      `json:"cc,omitempty"`
+	BCC       []string      `json:"bcc,omitempty"`
+	From      EmailAddress  `json:"from"` // already domain-checked by core's resolveFrom()
+	ReplyTo   *EmailAddress `json:"replyTo,omitempty"`
+	// Sender (#740 S4, send_as): the RFC 5322 Sender, who actually sent the message when
+	// that differs from From. Core sends it only on a send_as send. Written as its own
+	// header right after From, parsed and re-rendered like every address header.
+	Sender  *EmailAddress     `json:"sender,omitempty"`
+	Subject string            `json:"subject"`
+	HTML    string            `json:"html,omitempty"`
+	Text    string            `json:"text,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"` // carries In-Reply-To / References on replies
 	// Attachments (#92): present only when the send carries files. Mirrors the TS
 	// OutboundAttachment 1:1 so core's RelayTransport POSTs it verbatim. The relay's
 	// SMTP transport builds the multipart/mixed MIME (unlike the CF binding, which

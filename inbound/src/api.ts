@@ -27,6 +27,7 @@ import {
   type ReplyRequest,
   type MessageReadScope,
   type QuoteAudit,
+  type SendAs,
 } from "./mailbox";
 import { serveWebmail } from "./webmail";
 import { authenticate } from "./smtpcreds";
@@ -44,12 +45,13 @@ import {
   agentReadScope,
   ORGANIZE_AUDIT_ACTION,
   QUOTE_AUDIT_ACTION,
+  SEND_AS_AUDIT_ACTION,
   handleAdminDelegations,
   noDelegations,
   type AgentDelegations,
 } from "./delegations";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
-import { agentMessageAudit } from "./adminkit";
+import { agentAudit, agentMessageAudit } from "./adminkit";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
 // be an if-chain further down this file, which is precisely the knowledge every client
@@ -266,7 +268,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "POST" && (path === "/api/send" || path === "/send")) {
       const body = await readJson<SendRequest>(request);
       const q = await quoteScope(env, resolution);
-      const result = await send(env, body, ctx, resolution.identity, q.scope, q.audit);
+      const result = await send(env, body, ctx, resolution.identity, q.scope, q.audit, await sendAsOf(env, resolution));
       return json({ ok: true, ...result });
     }
 
@@ -274,7 +276,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "POST" && path === "/api/reply") {
       const body = await readJson<ReplyRequest>(request);
       const q = await quoteScope(env, resolution);
-      const result = await reply(env, body, ctx, resolution.identity, q.scope, q.audit);
+      const result = await reply(env, body, ctx, resolution.identity, q.scope, q.audit, await sendAsOf(env, resolution));
       return json({ ok: true, ...result });
     }
 
@@ -1165,6 +1167,35 @@ function sessionReadScope(env: Env, resolution: AuthResolution): string[] | unde
  * The quote is a read, and a per-function key that cannot read must not read through a
  * write route; replying to the people already on a thread is not a read of its content.
  */
+/** The send_as grants of a send or reply (#740 S4), or undefined when there are none.
+ *  Only a runtime agent identity holds a grant (delegationsOf), and only a live one. The
+ *  human's display name comes from their account, never the caller. Each send_as send
+ *  writes one `delegation.send_as` row, actor the identity, target the address, BEFORE
+ *  dispatch, and a row that does not land stops the send. Drafts take no caller `from`,
+ *  so a draft send always goes out as the identity itself. */
+async function sendAsOf(env: Env, resolution: AuthResolution): Promise<SendAs | undefined> {
+  const addresses = (await delegationsOf(env, resolution)).sendAs;
+  if (addresses.length === 0) return undefined;
+  const actor = resolution.identityId as string;
+  return {
+    addresses,
+    displayName: async (address) => {
+      const row = await env.DB.prepare(
+        "SELECT display_name FROM smtp_credentials WHERE lower(from_addr) = ? AND disabled = 0 " +
+          "AND display_name IS NOT NULL AND display_name <> '' ORDER BY username LIMIT 1",
+      )
+        .bind(address)
+        .first<{ display_name: string }>();
+      return row?.display_name ?? undefined;
+    },
+    record: async (address, op) => {
+      const res = await agentAudit(env, new Date().toISOString(), actor, SEND_AS_AUDIT_ACTION, { kind: "address", id: address }, { op }).run();
+      // Fail closed: no audit row, no send.
+      if ((res.meta?.changes ?? 0) !== 1) throw new Error("send_as audit row was not written");
+    },
+  };
+}
+
 /** The quote scope of a send, reply, forward or draft send, widened by quote grants
  *  (#740 S3). writeReadScope, plus every address the bound runtime identity holds an
  *  ACTIVE `quote` grant on (live grantee only), under either AGENT_READ_SCOPE value:
