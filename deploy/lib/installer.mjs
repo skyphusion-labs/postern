@@ -598,6 +598,7 @@ async function ensureWorker(ctx, pf) {
   const wasOwned = state.owned.worker;
   state.owned.worker = wasOwned || (pf.script ? "adopted" : "created");
   state.deploy = { hash, versionId: id };
+  ctx.deployedThisRun = true;
   saveState(opts, state);
   if (needToken) rep.created(`Worker secret POSTERN_API_TOKEN (value in ${paths.creds})`);
   (live.length ? rep.updated : rep.created)(`Worker ${opts.name} version ${id} on https://${opts.hostname}`);
@@ -765,6 +766,45 @@ async function ensureFirstAdmin(ctx, pf) {
   if (ctx.upgradeEntry?.d1Bookmark) ctx.upgradeEntry.adminCreatedAfterBookmark = true;
   saveState(opts, state);
   rep.created(`first admin ${opts.admin} (password in ${ctx.paths.creds})`);
+  ctx.adminCreatedThisRun = true;
+}
+
+// PRINCIPALS (#901, #854 M1): converge the principal tables after a deploy. The backfill
+// copies agent identities, human users and the static slots into them; it is idempotent,
+// and it cannot be migration SQL (the #112 gate refuses INSERT ... SELECT). It runs only
+// when this run deployed a Worker version or created the first admin, so a re-run with
+// nothing to do still makes no write. Right after an upgrade an edge can still answer with
+// the previous version, which has no such route, so a 404 is retried like /health.
+async function ensurePrincipals(ctx) {
+  const { opts, rep } = ctx;
+  if (opts.dryRun || !(ctx.deployedThisRun || ctx.adminCreatedThisRun)) return;
+  const creds = loadCreds(opts);
+  if (!creds.POSTERN_API_TOKEN) throw new Error(`no mailbox token in ${ctx.paths.creds}; cannot converge the principal tables`);
+  const url = `https://${opts.hostname}/api/admin/principals/backfill`;
+  let res;
+  let body = {};
+  for (let i = 0; i < ctx.healthTries; i++) {
+    res = await ctx.http(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${creds.POSTERN_API_TOKEN}`, "content-type": "application/json" },
+      body: "{}",
+    });
+    try { body = await res.json(); } catch { body = {}; }
+    if (res.status !== 404) break;
+    await ctx.sleep(ctx.healthDelayMs);
+  }
+  if (res.status !== 200) {
+    throw new Error(`converging the principal tables failed: POST /api/admin/principals/backfill answered HTTP ${res.status}${body.error ? ` ${body.error}` : ""}. The Worker is deployed; re-run the same command to finish.`);
+  }
+  const a = body.agents || {};
+  const h = body.humans || {};
+  const changed = (body.services?.added || 0) + (a.added || 0) + (a.synced || 0) + (h.added || 0) + (h.synced || 0) + (h.orphansRevoked || 0);
+  const conflicts = Array.isArray(body.addressConflicts) ? body.addressConflicts : [];
+  const what = `principal tables (services +${body.services?.added || 0}, agents +${a.added || 0} ~${a.synced || 0}, humans +${h.added || 0} ~${h.synced || 0}, orphans revoked ${h.orphansRevoked || 0})`;
+  (changed ? rep.updated : rep.unchanged)(what);
+  for (const c of conflicts) {
+    ctx.log(`  note: address ${c.address} is claimed by principal ${c.principalId} but already owned by ${c.ownerId}; it was left with its owner`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +927,7 @@ async function installRun(ctx, opts, mode) {
   await ensureRouting(ctx, pf);
   if (!opts.dryRun && ctx.state.deploy) await ensureFirstAdmin(ctx, pf);
   else if (opts.dryRun) ctx.rep.would(`create the first admin ${opts.admin}`);
+  await ensurePrincipals(ctx);
 
   if (ctx.upgradeEntry) {
     Object.assign(ctx.upgradeEntry, { toVersionId: ctx.state.deploy.versionId, complete: true });
