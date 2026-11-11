@@ -71,6 +71,21 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Fixed
 
+- **Submission deadlines.** The submission listener has a read timeout and a
+  write timeout (default 5 minutes each). The read timeout is an idle limit,
+  refreshed on each read. Open connections are capped globally
+  (`SUBMISSION_MAX_CONNECTIONS`, default 200) and per source address
+  (`SUBMISSION_MAX_CONNECTIONS_PER_IP`, default 20). Zero means no cap. The
+  per-source cap uses the address from a trusted PROXY header when one is
+  present. After that header is read, the door puts back the read deadline
+  the protocol had set.
+- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
+  (default 22 MiB, the same ceiling as the worker import) is refused before
+  the bytes are read. The tagged reply starts `NO [TOOBIG]`. `CAPABILITY`
+  advertises `APPENDLIMIT`.
+- **Door throttle key.** The throttle key is canonicalized like the Worker's:
+  the ECMAScript trim set, then lower-case. In system (PAM) mode the key is
+  the local part before `@`. native and ldap keep the whole trimmed name.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
