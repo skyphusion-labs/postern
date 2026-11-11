@@ -50,6 +50,11 @@ mismatched MCP tag fails before it publishes.
   Mail whose Date header is not a valid date is stored with the time it
   was received as its date. The IMAP APPEND import uses the same rule.
 
+- **Thread resolution looks up its candidates in one query.** A message's
+  thread is resolved from its In-Reply-To and its 20 most recent
+  References (`MAX_THREAD_REFERENCES`), deduplicated, in a single D1
+  query. The parent is chosen in the same order as before.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
