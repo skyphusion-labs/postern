@@ -21,3 +21,23 @@ export function vectorizeOf(env: Env): VectorizeIndex {
   }
   return index;
 }
+
+/**
+ * A D1-shaped `batch` over a node:sqlite database, for the suites that build their own
+ * real-sqlite env. TRANSACTIONAL, as D1's batch is: a statement that throws rolls back
+ * every statement before it (#854 M2: the per-user principal insert relies on that).
+ */
+export function sqliteBatch(db: { exec(sql: string): void }) {
+  return async (statements: Array<{ run(): Promise<unknown> }>) => {
+    db.exec("BEGIN");
+    try {
+      const out: unknown[] = [];
+      for (const s of statements) out.push(await s.run());
+      db.exec("COMMIT");
+      return out;
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  };
+}

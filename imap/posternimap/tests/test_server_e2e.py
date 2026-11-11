@@ -21,12 +21,14 @@ try:
     from twisted.internet import defer, reactor
     from twisted.internet.protocol import ClientCreator
     from twisted.mail import imap4
+    from twisted.protocols.basic import LineReceiver
     from twisted.trial import unittest as twisted_unittest
 
     HAVE_TWISTED = True
 except ImportError:  # pragma: no cover
     HAVE_TWISTED = False
     twisted_unittest = unittest  # type: ignore
+    LineReceiver = object  # type: ignore
 
 from posternimap.config import Config
 from posternimap.proxyproto import ProxyProtocolConfig, parse_trusted
@@ -2052,3 +2054,75 @@ class ServerMoveRFC6851E2ETest(twisted_unittest.TestCase):
             yield self.assertFailure(d, imap4.IMAP4Exception)
         finally:
             yield proto.logout()
+
+
+class _AppendLines(LineReceiver):
+    """Collect every reply line. A `+` continuation stays in the list."""
+
+    delimiter = b"\r\n"
+
+    def connectionMade(self):
+        self.lines = []
+        self._wait = {}
+        self.greeted = defer.Deferred()
+
+    def lineReceived(self, line):
+        self.lines.append(line)
+        if not self.greeted.called and line.startswith(b"* OK"):
+            self.greeted.callback(line)
+            return
+        tag = line.split(b" ", 1)[0]
+        pending = self._wait.get(tag)
+        if pending is not None and not pending.called:
+            pending.callback(line)
+
+    def ask(self, tag, command):
+        pending = defer.Deferred()
+        self._wait[tag] = pending
+        start = len(self.lines)
+        self.sendLine(tag + b" " + command)
+        pending.addCallback(lambda line: (line, list(self.lines[start:])))
+        return pending
+
+
+@unittest.skipUnless(HAVE_TWISTED, "Twisted not installed")
+class AppendLiteralWireTest(twisted_unittest.TestCase):
+    """Authenticated APPEND over the wire, refused before a continuation."""
+
+    timeout = 20
+
+    def setUp(self):
+        self.transport = FakeTransport([], expected_token="tok", page_size=2)
+        self.cfg = Config(
+            api_url="https://x",
+            auth_mode="token",
+            api_timeout=5.0,
+            imap_poll_seconds=0,
+            max_append_bytes=32,
+        )
+        self.factory, self._restore = _patched_factory(self.cfg, self.transport)
+        self.port = reactor.listenTCP(0, self.factory, interface="127.0.0.1")
+
+    def tearDown(self):
+        _restore_account(self._restore)
+        d = self.port.stopListening()
+        d.addCallback(lambda _r: wait_for_server_connections_to_close())
+        return d
+
+    @defer.inlineCallbacks
+    def test_over_limit_append_replies_no_toobig_without_continuation(self):
+        cc = ClientCreator(reactor, _AppendLines)
+        client = yield cc.connectTCP("127.0.0.1", self.port.getHost().port)
+        self.addCleanup(client.transport.loseConnection)
+        yield client.greeted
+        login, _span = yield client.ask(b"a1", b'LOGIN "u" "tok"')
+        self.assertTrue(login.startswith(b"a1 OK"), login)
+
+        # AUTH state: APPEND does not need a selected mailbox.
+        reply, span = yield client.ask(b"a2", b"APPEND Sent {1000}")
+        self.assertFalse(any(line.startswith(b"+") for line in span), span)
+        self.assertTrue(reply.startswith(b"a2 NO [TOOBIG]"), reply)
+
+        # The parser is still in command state.
+        bye, _span = yield client.ask(b"a3", b"LOGOUT")
+        self.assertTrue(bye.startswith(b"a3 OK"), bye)

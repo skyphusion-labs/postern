@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // authThrottle is the application-level online brute-force throttle for the
@@ -84,10 +85,34 @@ func newAuthThrottle(cfg ThrottleCfg, now func() time.Time) *authThrottle {
 	}
 }
 
-// throttleKey normalizes a username into the throttle's account key: lower-cased
-// and trimmed, so trivial case variations cannot multiply the failure budget.
+// isJSTrim reports a character that ECMAScript String.prototype.trim removes.
+// That is the trim inbound/src/smtpcreds.ts normalizeUsername uses. Go's
+// TrimSpace does not remove U+FEFF, and it does remove U+0085, which trim does not.
+func isJSTrim(r rune) bool {
+	switch r {
+	case '\t', '\v', '\f', ' ', '\u00a0', '\ufeff', '\n', '\r', '\u2028', '\u2029':
+		return true
+	}
+	return unicode.Is(unicode.Zs, r)
+}
+
+// canonicalThrottleKey is the account the backend will check.
+// native and ldap keep the worker's trim + lower of the whole username.
+// system (PAM) checks the local part before '@', so user@anything shares that
+// local part's key. See imap/posternimap/auth.py PAMAuthenticator.
+func canonicalThrottleKey(backend, username string) string {
+	key := strings.ToLower(strings.TrimFunc(username, isJSTrim))
+	if backend == "system" {
+		if i := strings.IndexByte(key, '@'); i >= 0 {
+			key = key[:i]
+		}
+	}
+	return key
+}
+
+// throttleKey is canonicalThrottleKey for a backend that keeps the whole name.
 func throttleKey(username string) string {
-	return strings.ToLower(strings.TrimSpace(username))
+	return canonicalThrottleKey("", username)
 }
 
 // allow reports whether an auth attempt for account may proceed to the backend. It

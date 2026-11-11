@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { WEBMAIL_HTML, serveWebmail } from "./src/webmail";
+import { createHash } from "node:crypto";
+import { WEBMAIL_HTML, WEBMAIL_CSP, WEBMAIL_SCRIPT_HASH, serveWebmail } from "./src/webmail";
 import { handleApi } from "./src/api";
 import { VERSION } from "./src/version";
 import { makeFakeEnv } from "./fakes";
@@ -23,22 +24,24 @@ describe("serveWebmail", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
     const csp = res.headers.get("content-security-policy") || "";
     // Assert the COMPLETE served policy, not just the strict directives (#343/D4).
-    // The docs must match this string exactly; the two 'unsafe-inline' directives
-    // are unavoidable (one inline script + one inline style) and are NOT hidden.
+    // The docs must match this string exactly. script-src allows the page's one inline
+    // script by its sha256; style-src keeps 'unsafe-inline' (inline <style> and style
+    // attributes), and that is not hidden.
     expect(csp).toBe(
-      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
+      "default-src 'none'; style-src 'unsafe-inline'; script-src '" + WEBMAIL_SCRIPT_HASH + "'; " +
         "connect-src 'self'; img-src 'self' data:; frame-src 'self'; " +
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     );
+    expect(csp).toBe(WEBMAIL_CSP);
     // connect-src 'self' is the anti-exfiltration control: a hijacked page
     // cannot ship the pasted token to another host.
     expect(csp).toContain("connect-src 'self'");
     expect(csp).toContain("default-src 'none'");
     // frame-src 'self' permits the sandboxed srcdoc iframe the body view uses.
     expect(csp).toContain("frame-src 'self'");
-    // The inline app forces 'unsafe-inline' for script and style; assert it so the
+    // Scripts are allowed by hash only; styles stay 'unsafe-inline'. Asserted so the
     // security docs cannot drift from the truth (#343/D4).
-    expect(csp).toContain("script-src 'unsafe-inline'");
+    expect(csp).not.toMatch(/script-src[^;]*'unsafe-inline'/);
     expect(csp).toContain("style-src 'unsafe-inline'");
     // img-src 'self' data: is why remote images are always blocked: the srcdoc
     // reading pane inherits this policy, so no https remote image can load.
@@ -46,6 +49,33 @@ describe("serveWebmail", () => {
     expect(csp).not.toContain("img-src 'self' data: https:");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+});
+
+describe("the script hash in the CSP is the hash of the page's script", () => {
+  // The browser hashes the text of the one inline <script> (after CR LF -> LF). If the
+  // page changes without npm run sync-webmail, this fails before the page would.
+  it("recomputes to WEBMAIL_SCRIPT_HASH", () => {
+    const scripts = [...WEBMAIL_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0][1].trim()).toBe("");
+    const text = scripts[0][2].replace(/\r\n?/g, "\n");
+    expect("sha256-" + createHash("sha256").update(text, "utf8").digest("base64")).toBe(WEBMAIL_SCRIPT_HASH);
+  });
+
+  it("a changed script would not match (the check can fail)", () => {
+    const scripts = [...WEBMAIL_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+    const changed = scripts[0][2] + " ";
+    expect("sha256-" + createHash("sha256").update(changed, "utf8").digest("base64")).not.toBe(WEBMAIL_SCRIPT_HASH);
+  });
+
+  it("the page has no inline event handler or javascript: URL the hash would not cover", () => {
+    const scripts = [...WEBMAIL_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+    expect(scripts).toHaveLength(1);
+    const at = scripts[0].index!;
+    const outside = WEBMAIL_HTML.slice(0, at) + WEBMAIL_HTML.slice(at + scripts[0][0].length);
+    expect(outside).not.toMatch(/<[a-z][^>]*\son[a-z]+\s*=/i);
+    expect(outside).not.toMatch(/javascript:/i);
   });
 });
 

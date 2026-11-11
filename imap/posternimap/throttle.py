@@ -26,14 +26,36 @@ from __future__ import annotations
 
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
+# Characters ECMAScript String.prototype.trim removes that are not Unicode Zs.
+# U+FEFF is the one Go TrimSpace and str.strip miss. U+0085 is the one they
+# remove and trim does not. This matches inbound/src/smtpcreds.ts normalizeUsername.
+_JS_TRIM_CHARS = frozenset("\t\v\f \u00a0\ufeff\n\r\u2028\u2029")
+
+
+def _is_js_trim(ch: str) -> bool:
+    return ch in _JS_TRIM_CHARS or unicodedata.category(ch) == "Zs"
+
+
+def js_trim(value: str) -> str:
+    start, end = 0, len(value)
+    while start < end and _is_js_trim(value[start]):
+        start += 1
+    while end > start and _is_js_trim(value[end - 1]):
+        end -= 1
+    return value[start:end]
+
 
 def throttle_key(username: str) -> str:
-    """Normalize a username into the throttle key: trimmed + lower-cased, so case
-    variations cannot multiply the failure budget (mirrors relay throttleKey)."""
-    return username.strip().lower()
+    """Normalize a username the way the worker's normalizeUsername does.
+
+    Trim with the ECMAScript trim set, then lower-case. Mirrors relay
+    canonicalThrottleKey for a backend that keeps the whole name.
+    """
+    return js_trim(username).lower()
 
 
 # The auth modes whose IMAP username is NOT a real account: in token mode it is a
@@ -46,8 +68,9 @@ CLIENT_KEYED_MODES = ("token", "fixed")
 def throttle_account(auth_mode: str, username: str, peer_host: Optional[str] = None) -> str:
     """The throttle key for one login attempt (#183).
 
-    Directory-backed modes (native/ldap/system) keep the per-account key: there
-    the username IS the account being attacked, and the edge historically
+    Directory-backed modes keep one key per account. native and ldap use the
+    worker's trim and lower of the whole username. system uses the local part
+    before @, which is what PAM checks. The edge historically
     presented one masqueraded source IP for everyone (#105). In token/fixed mode
     the key is instead the connection's SOURCE address -- on 993 the PROXY-
     protocol-recovered real client IP -- so a username-rotating attacker burns
@@ -59,7 +82,12 @@ def throttle_account(auth_mode: str, username: str, peer_host: Optional[str] = N
     """
     if auth_mode in CLIENT_KEYED_MODES:
         return f"ip:{peer_host}" if peer_host else "ip:*"
-    return throttle_key(username)
+    key = throttle_key(username)
+    # PAM authenticates the local part (auth.py PAMAuthenticator, and the Go
+    # system backend). user@anything is the same account.
+    if auth_mode == "system" and "@" in key:
+        key = key.split("@", 1)[0]
+    return key
 
 
 @dataclass

@@ -13,7 +13,23 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
+`0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. Run `POST /api/admin/principals/backfill` once after
+upgrading to copy existing identities and users in; it is safe to run again.
+
 ### Added
+
+- **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
+  `principal_addresses` tables, the six static token slots as service
+  principals, and `POST /api/admin/principals/backfill`, which copies agent
+  identities (keeping their `idn_` ids) and human users in. Idempotent and
+  convergent. Store only: every credential resolves exactly as before. See
+  `docs/IDENTITY.md` section 6.
+- **Webmail sessions name their human principal (#854 M2).** Each sign-in
+  records the principal behind it (created at sign-in if the backfill has
+  not reached that login), and a grant or audit row can name a human
+  principal as grantor and actor. Nothing new authorizes from it yet; it is
+  what #740 S5 builds on.
 
 - **The `send_as` power (#740 S4).** An agent holding a `send_as` grant
   sends as the human by naming the address as `from`: From is the human
@@ -25,6 +41,25 @@ mismatched MCP tag fails before it publishes.
   without one (Cloudflare feature request: #896). The relay `/dispatch`
   body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
 
+### Changed
+
+- **The operator is named in the audit log (#854 M1).** Rows the admin
+  routes write now carry actor `service` / `svc_both` instead of
+  `operator` with no id. Older rows are unchanged.
+- **CI refuses CHANGELOG lines added to a released section.** A new
+  `release-gate` step fails when a change adds a line inside an
+  already-released `## vX.Y.Z` section of `CHANGELOG.md`; entries belong
+  under `## Unreleased`. A clean merge after a release can put an entry
+  there with no conflict, which is what this catches. A deliberate edit to
+  released notes passes with the commit trailer
+  `Changelog-History-Edit: <reason>`.
+
+
+- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
+  The served CSP lists the sha256 of the page's one inline script, which
+  `npm run sync-webmail` computes, so a script that is not the page's
+  own does not run. `style-src 'unsafe-inline'` is unchanged.
+
 ### Fixed
 
 - **Submission deadlines.** The submission listener has a read timeout and a
@@ -35,10 +70,23 @@ mismatched MCP tag fails before it publishes.
   per-source cap uses the address from a trusted PROXY header when one is
   present. After that header is read, the door puts back the read deadline
   the protocol had set.
+- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
+  (default 22 MiB, the same ceiling as the worker import) is refused before
+  the bytes are read. The tagged reply starts `NO [TOOBIG]`. `CAPABILITY`
+  advertises `APPENDLIMIT`.
+- **Door throttle key.** The throttle key is canonicalized like the Worker's:
+  the ECMAScript trim set, then lower-case. In system (PAM) mode the key is
+  the local part before `@`. native and ldap keep the whole trimmed name.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
   download name replaces each such character with `_`.
+
+- **The webmail remote-content notice counts every remote reference.**
+  SVG image, use and feImage links, CSS url() written with escapes,
+  @import of a plain string and image-set() strings are counted and
+  removed from the reading frame; a URL inside a CSS comment is not
+  counted.
 
 ## v1.11.0
 
