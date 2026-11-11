@@ -229,3 +229,11 @@ Production receiving stays CF Email Routing to the inbound Worker.
   `$HOME`, own clone, own creds); commits/PRs land under `skyphusion-<member>`. **SEND is first-class for
   everyone via per-identity creds** -- a crew member sends as itself, never as a shared mailbox.
 - Operating memory for this repo: `~/.claude/projects/-home-conrad-dev-postern/memory/` (load before acting).
+
+## Release convention (bump-at-release)
+
+One convention for every skyphusion-labs repo (Conrad, ruled 2026-11-10, fleet-chezmoi#1766). A version moves ONLY in a release PR: bump the version, then assemble the changelog. Feature and fix PRs do not bump. Releases go through a PR (fleet-chezmoi#1622) and the tag goes on that PR's merge commit.
+
+- Version of record here: the version files the last release commit touched (clients/python/pyproject.toml, clients/python/postern_client/__init__.py and the package locks; read the last `chore(release)` commit).
+- Tag shape: `v*`.
+- Check before a release PR: does a tag already exist for the version currently in the manifest? Yes means the cycle is closed, so the release PR bumps. No means a bump already landed outside a release PR; stop and read why before bumping again.
