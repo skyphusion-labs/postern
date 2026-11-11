@@ -1508,7 +1508,13 @@ AND (m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr)
 Applied in ONE builder (`store.recipientWhere`, `store.accountWhere` for a bound session)
 shared by `list`, `fts`, and `substr`, and mirrored predicate-for-predicate by the
 `passesViewerScope` post-filter the score-ranked modes use. `lens=sent` is the sender-based
-Sent view (`lower(from_addr) = V`), never delivered-set based. Unscoped queries (no viewer)
+Sent view (`direction = 'outbound' AND lower(from_addr) = V`), never delivered-set based.
+**Authored by V** means exactly that predicate everywhere (read access, the account
+boundary, the Sent lens and folder count): a message postern SENT as V. The From header of
+inbound mail is written by the sender, so it never makes V the author; V reaches inbound
+mail only through the delivered set. `passesViewerScope` compares the stored `from_addr`
+the same way SQL does (ASCII `lower()`), never an address parsed out of a display name.
+Unscoped queries (no viewer)
 are unchanged. **Edge (accepted, documented):** a true self-send (V to V only) stays
 Sent-only for V, born seen; correct, you wrote it.
 

@@ -152,12 +152,24 @@ export class MailboxService extends WorkerEntrypoint<Env> {
 }
 
 /**
- * Back-compat RPC entrypoint for legacy send-only consumers (#190). Same isolate
- * and methods as MailboxService; prefer MailboxService for new bindings.
+ * Back-compat RPC entrypoint for legacy send-only consumers (#190). SEND-ONLY, as it is
+ * documented: it exposes `send` and `reply` and nothing else, so a binding to it holds no
+ * read of the mailbox. Prefer MailboxService for a consumer that needs to read.
+ *
+ * Its scope is `"addressing"` (mailbox.ts MessageReadScope), the same rule the static
+ * send-only token follows: a reply reaches the thread's existing parties and nothing is
+ * read back (no quote, no forward source, no caller cc/bcc on a reply).
  *
  *   { "binding": "EMAIL", "service": "postern", "entrypoint": "EmailService" }
  */
-export class EmailService extends MailboxService {}
+export class EmailService extends WorkerEntrypoint<Env> {
+  send(req: SendRequest): Promise<SendResult> {
+    return send(this.env, req, this.ctx, undefined, "addressing");
+  }
+  reply(req: ReplyRequest): Promise<SendResult> {
+    return reply(this.env, req, this.ctx, undefined, "addressing");
+  }
+}
 
 // Re-export the CF-transport helpers for any existing importer of this module.
 export { toArrayBuffer, extractSpfResult, extractDkimResult, extractDmarcResult } from "./headers";

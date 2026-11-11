@@ -27,6 +27,12 @@ mismatched MCP tag fails before it publishes.
   `bcc` or `quoteOriginal` is refused with `400`. Forwarding a stored
   message with that token stays not found.
 
+- **The legacy `EmailService` RPC entrypoint is send-only, as documented.**
+  It exposes `send` and `reply` only (no `get`, `thread`, `list` or
+  `search`) and follows the same rule as the send-only token: a reply
+  goes to the thread's existing parties, and nothing is quoted or
+  forwarded. `MailboxService` is unchanged.
+
 - **HTML-to-text conversion runs in one pass.** Mail with only an HTML
   body is converted to its stored text body by a single linear scan, and
   the converter reads at most the first 512,000 characters, the same bound
@@ -48,6 +54,13 @@ mismatched MCP tag fails before it publishes.
   thread is resolved from its In-Reply-To and its 20 most recent
   References (`MAX_THREAD_REFERENCES`), deduplicated, in a single D1
   query. The parent is chosen in the same order as before.
+
+- **"Authored by" means sent by postern.** Read access, the account
+  view, the Sent lens and the Sent folder count treat a message as
+  authored by V only when postern sent it as V (direction `outbound`).
+  An inbound message whose From header names V is reachable by V only
+  when it was delivered to V. Semantic and hybrid search apply the same
+  rule as the SQL paths.
 
 - **Thread resolution prefers a trusted message for a shared
   Message-ID.** A different message that arrives with a Message-ID already
