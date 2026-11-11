@@ -262,11 +262,16 @@ def _bool_param(value: bool) -> str:
     return "true" if value else "false"
 
 
-def _quote(value: str) -> str:
+def _quote_id(value: str) -> str:
     # `.` and `..` survive quoting and then change which route the path names.
     # Refuse them, and an empty id, before the path is built.
     if not value or value in (".", ".."):
         raise PosternError("id must not be empty, '.' or '..'")
+    return urllib.parse.quote(value, safe="")
+
+
+def _quote_header(value: str) -> str:
+    # A header value is not a path id. `.` and `..` are ordinary names here.
     return urllib.parse.quote(value, safe="")
 
 
@@ -469,7 +474,7 @@ class PosternClient:
             params["after"] = after
         if before:
             params["before"] = before
-        return self._json("GET", "/api/messages", params=params)
+        return self._json("GET", "/api/messages", params=params, cap_bodies=True)
 
     def count_messages(
         self,
@@ -556,7 +561,7 @@ class PosternClient:
         """
         scope: Any = None
         try:
-            body = self._json("GET", f"/api/messages/{_quote(message_id)}")
+            body = self._json("GET", f"/api/messages/{_quote_id(message_id)}", cap_bodies=True)
         except PosternError as e:
             if e.status == 404:
                 # The refusal BODY is the answer on this route, not just the status: it
@@ -623,7 +628,7 @@ class PosternClient:
             params["limit"] = str(limit)
         if cursor:
             params["cursor"] = cursor
-        body = self._json("GET", f"/api/threads/{_quote(thread_id)}", params=params)
+        body = self._json("GET", f"/api/threads/{_quote_id(thread_id)}", params=params, cap_bodies=True)
         msgs = body.get("messages", [])
         # Additive: a caller reading ["messages"] or ["cursor"] is untouched, which is why
         # this method needed no new sibling the way get_message did (#730).
@@ -708,11 +713,11 @@ class PosternClient:
         # See list_messages: an explicit empty list is forwarded so the worker refuses it.
         if fields is not None:
             params["fields"] = ",".join(fields)
-        return self._json("GET", "/api/search", params=params)
+        return self._json("GET", "/api/search", params=params, cap_bodies=True)
 
     def get_attachment(self, message_id: str, index: int) -> Attachment:
         """GET /api/messages/{id}/attachments/{i}. Returns the raw Attachment bytes."""
-        path = f"/api/messages/{_quote(message_id)}/attachments/{int(index)}"
+        path = f"/api/messages/{_quote_id(message_id)}/attachments/{int(index)}"
         status, hdrs, raw = self._request("GET", path, accept="*/*")
         if status == 401:
             raise PosternAuthError("Postern API rejected the token", status=401)
@@ -815,7 +820,7 @@ class PosternClient:
         Raises PosternError with status 403 when the token lacks the scope and
         404 when the message is not there.
         """
-        self._json("DELETE", f"/api/messages/{_quote(message_id)}")
+        self._json("DELETE", f"/api/messages/{_quote_id(message_id)}")
 
     # --- drafts (identity-owned) --------------------------------------------
     #
@@ -833,7 +838,7 @@ class PosternClient:
     def get_draft(self, draft_id: str) -> Optional[dict[str, Any]]:
         """GET /api/drafts/{id}. The draft dict, or None if absent."""
         try:
-            body = self._json("GET", f"/api/drafts/{_quote(draft_id)}")
+            body = self._json("GET", f"/api/drafts/{_quote_id(draft_id)}")
         except PosternError as e:
             if e.status == 404:
                 return None
@@ -898,11 +903,11 @@ class PosternClient:
         )
         if updated_at is not None:
             body["updatedAt"] = updated_at
-        return self._json("PUT", f"/api/drafts/{_quote(draft_id)}", body=body)
+        return self._json("PUT", f"/api/drafts/{_quote_id(draft_id)}", body=body)
 
     def delete_draft(self, draft_id: str) -> None:
         """DELETE /api/drafts/{id}."""
-        self._json("DELETE", f"/api/drafts/{_quote(draft_id)}")
+        self._json("DELETE", f"/api/drafts/{_quote_id(draft_id)}")
 
     def send_draft(self, draft_id: str) -> dict[str, Any]:
         """POST /api/drafts/{id}/send. Returns the SendResult.
@@ -914,11 +919,11 @@ class PosternClient:
         staged attachments and only then deletes the draft, so a failure leaves
         it retryable.
         """
-        return self._json("POST", f"/api/drafts/{_quote(draft_id)}/send")
+        return self._json("POST", f"/api/drafts/{_quote_id(draft_id)}/send")
 
     def list_draft_attachments(self, draft_id: str) -> list[dict[str, Any]]:
         """GET /api/drafts/{id}/attachments. The staged attachment metadata."""
-        body = self._json("GET", f"/api/drafts/{_quote(draft_id)}/attachments")
+        body = self._json("GET", f"/api/drafts/{_quote_id(draft_id)}/attachments")
         atts = body.get("attachments", [])
         return list(atts) if isinstance(atts, list) else []
 
@@ -938,15 +943,15 @@ class PosternClient:
         """
         headers = {"Content-Type": mime_type or "application/octet-stream"}
         if filename:
-            headers["X-Postern-Filename"] = _quote(filename)
-        path = f"/api/drafts/{_quote(draft_id)}/attachments"
+            headers["X-Postern-Filename"] = _quote_header(filename)
+        path = f"/api/drafts/{_quote_id(draft_id)}/attachments"
         body = self._json("POST", path, data=content, headers=headers)
         att = body.get("attachment")
         return att if isinstance(att, dict) else {}
 
     def delete_draft_attachment(self, draft_id: str, attachment_id: str) -> None:
         """DELETE /api/drafts/{id}/attachments/{attachmentId}."""
-        self._json("DELETE", f"/api/drafts/{_quote(draft_id)}/attachments/{_quote(attachment_id)}")
+        self._json("DELETE", f"/api/drafts/{_quote_id(draft_id)}/attachments/{_quote_id(attachment_id)}")
 
     # --- human user management (operator; needs the `both` token) ----------
     #
@@ -967,7 +972,7 @@ class PosternClient:
     def get_user(self, username: str) -> Optional[dict[str, Any]]:
         """GET /api/admin/users/{username}. The user dict, or None if absent."""
         try:
-            body = self._json("GET", f"/api/admin/users/{_quote(username)}")
+            body = self._json("GET", f"/api/admin/users/{_quote_id(username)}")
         except PosternError as e:
             if e.status == 404:
                 return None
@@ -1015,7 +1020,7 @@ class PosternClient:
             body["displayName"] = display_name
         if from_addr is not None:
             body["from"] = from_addr
-        return self._json("PATCH", f"/api/admin/users/{_quote(username)}", body=body)
+        return self._json("PATCH", f"/api/admin/users/{_quote_id(username)}", body=body)
 
     def reset_password(self, username: str, *, password: Optional[str] = None) -> dict[str, Any]:
         """POST /api/admin/users/{username}/password. Ends the user's sessions.
@@ -1025,11 +1030,11 @@ class PosternClient:
         body: dict[str, Any] = {}
         if password is not None:
             body["password"] = password
-        return self._json("POST", f"/api/admin/users/{_quote(username)}/password", body=body)
+        return self._json("POST", f"/api/admin/users/{_quote_id(username)}/password", body=body)
 
     def delete_user(self, username: str) -> dict[str, Any]:
         """DELETE /api/admin/users/{username}. Ends the user's sessions."""
-        return self._json("DELETE", f"/api/admin/users/{_quote(username)}")
+        return self._json("DELETE", f"/api/admin/users/{_quote_id(username)}")
 
     # --- runtime agent identities (#801) -------------------------------------
     #
@@ -1078,7 +1083,7 @@ class PosternClient:
 
     def revoke_identity(self, identity_id: str) -> dict[str, Any]:
         """DELETE /api/admin/identities/{id}. Effective on the next request."""
-        return self._json("DELETE", f"/api/admin/identities/{_quote(identity_id)}")
+        return self._json("DELETE", f"/api/admin/identities/{_quote_id(identity_id)}")
 
     # --- delegation grants (#740 S1) ---------------------------------------------
     #
@@ -1125,7 +1130,7 @@ class PosternClient:
 
     def revoke_delegation(self, delegation_id: str) -> dict[str, Any]:
         """DELETE /api/admin/delegations/{id}. Idempotent."""
-        return self._json("DELETE", f"/api/admin/delegations/{_quote(delegation_id)}")
+        return self._json("DELETE", f"/api/admin/delegations/{_quote_id(delegation_id)}")
 
     def list_audit(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
         """GET /api/admin/audit. The audit log, newest first: {items, cursor}."""
@@ -1185,6 +1190,7 @@ class PosternClient:
         body: Optional[dict[str, Any]] = None,
         data: Optional[bytes] = None,
         headers: Optional[Mapping[str, str]] = None,
+        cap_bodies: bool = False,
     ) -> dict[str, Any]:
         status, _hdrs, raw = self._request(
             method, path, params=params, body=body, data=data, headers=headers,
@@ -1212,7 +1218,10 @@ class PosternClient:
                 code=parsed.get("error"),
                 body=parsed,
             )
-        _cap_bodies(parsed, self._max_body_chars)
+        # Only message reads ask for this. Drafts, send and reply results, and
+        # admin responses keep every character the server sent.
+        if cap_bodies:
+            _cap_bodies(parsed, self._max_body_chars)
         return parsed
 
 

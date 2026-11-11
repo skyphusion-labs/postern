@@ -115,3 +115,61 @@ class BaseUrlTest(unittest.TestCase):
         with self.assertRaises(PosternError) as caught:
             PosternClient("https://user:sekret@postern.example", "tok")
         self.assertNotIn("sekret", str(caught.exception))
+
+
+class DraftBodyTest(unittest.TestCase):
+    def test_draft_over_the_cap_round_trips_intact(self):
+        text = "d" * (100 * 1024)
+        draft = {
+            "id": "d1",
+            "bodyText": text,
+            "updatedAt": "2026-11-10T00:00:00.000Z",
+            "subject": "notes",
+        }
+
+        class Transport:
+            def __init__(self) -> None:
+                self.calls: list = []
+
+            def __call__(self, req):
+                self.calls.append(req)
+                if req.get_method() == "PUT":
+                    sent = json.loads(req.data.decode("utf-8"))
+                    stored = dict(draft)
+                    stored["bodyText"] = sent.get("bodyText")
+                    stored["subject"] = sent.get("subject", draft["subject"])
+                    return 200, {}, json.dumps({"draft": stored}).encode()
+                return 200, {}, json.dumps({"draft": draft}).encode()
+
+        transport = Transport()
+        client = _client(transport)
+        got = client.get_draft("d1")
+        assert got is not None
+        self.assertEqual(got["bodyText"], text)
+        self.assertNotIn("bodyTruncated", got)
+        updated = client.update_draft(
+            "d1",
+            body_text=got["bodyText"],
+            subject="edited",
+            updated_at=got["updatedAt"],
+        )
+        sent = json.loads(transport.calls[-1].data.decode("utf-8"))
+        self.assertEqual(len(sent["bodyText"]), 100 * 1024)
+        self.assertEqual(sent["bodyText"], text)
+        self.assertEqual(updated["draft"]["bodyText"], text)
+
+
+class UploadNameTest(unittest.TestCase):
+    def test_dot_filename_is_a_header_value_not_a_path_id(self):
+        t = FakeTransport(body=b'{"attachment":{"id":"a1"}}')
+        client = _client(t)
+        for name in (".", ".."):
+            out = client.add_draft_attachment("draft-1", b"abc", filename=name)
+            self.assertEqual(out.get("id"), "a1")
+            headers = {k.lower(): v for k, v in t.last.headers.items()}
+            self.assertEqual(headers.get("x-postern-filename"), name)
+            self.assertTrue(t.last_path().endswith("/api/drafts/draft-1/attachments"))
+        t.calls.clear()
+        with self.assertRaises(PosternError):
+            client.add_draft_attachment(".", b"abc", filename="notes.txt")
+        self.assertEqual(t.calls, [])
