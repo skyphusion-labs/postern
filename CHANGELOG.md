@@ -13,6 +13,33 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Upgrade (#813).** Migration `0024` (`vector_ledger.embed_version`) is additive and is applied
+by the deploy. New mail embeds with the subject from the deploy on. To re-embed existing mail,
+run `node inbound/reindex.mjs --stale-only` (`--dry-run` first); it is resumable and search keeps
+working meanwhile. Cost: one bge-base embedding per chunk at $0.067 per million input tokens
+(at most about $1.40 for 61k chunks); Vectorize storage is unchanged (same ids, same count).
+
+### Added
+
+- **Semantic search embeds the subject and ranks template families (#813).** Chunk 0 now
+  carries `Subject: <subject>` (an empty-body message gets a subject chunk), recorded as
+  `vector_ledger.embed_version` 2. Near-identical notifications from one sender are ranked by
+  the query's exact tokens (a commit hash, an order number), then newest first.
+  `POST /api/admin/reindex` takes `staleOnly`, and reconcile reports `staleEmbedMessages`.
+  The MCP `mailbox_search` tool and the Python client take `collapse`. The recall eval behind
+  the defaults is in `inbound/eval/` (see its README).
+
+### Changed
+
+- **Semantic search collapses template families by default (#813).** A family of
+  near-identical notifications is one hit carrying `similar: {count, ids}` (its other
+  visible members). Pass `collapse=0` for one row per message. `collapse=1` outside
+  `mode=semantic` is refused (400); hybrid never collapses. The default follows the eval:
+  family coverage at 10 rose from 39% to 69% with no query family worse.
+- **Semantic search always retrieves to the ceiling (#813).** The family ranking acts after
+  retrieval, so an unfiltered semantic query now asks for `topK` 50 (it asked for `3 x limit`):
+  `retrievalCap` reads 50.
+
 ## v1.13.0
 
 MINOR. A human can mark a conversation human-only, so agents cannot reach it through

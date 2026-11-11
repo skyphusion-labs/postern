@@ -5,9 +5,11 @@
 //
 // Usage:
 //   POSTERN_API_BASE=https://mail.example POSTERN_API_TOKEN=<both-scoped> \
-//     node reindex.mjs [--dry-run] [--limit N] [--pause MS]
+//     node reindex.mjs [--dry-run] [--stale-only] [--limit N] [--pause MS]
 //
 // --dry-run  count the chunks/vectors WITHOUT embedding (exact cost up front)
+// --stale-only  re-embed only messages below the current embed recipe (#813), so an
+//               interrupted re-embed resumes without paying twice
 // --limit N  messages per page (server clamps to 1..50; default 25)
 // --pause MS sleep between pages (default 0); raise it if Workers AI rate-limits
 //
@@ -23,6 +25,7 @@ if (!base || !token) {
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
+const staleOnly = args.includes("--stale-only");
 const limit = numFlag("--limit");
 const pause = numFlag("--pause") ?? 0;
 
@@ -42,10 +45,11 @@ async function main() {
   let indexed = 0;
   let vectors = 0;
   let skipped = 0;
+  let current = 0;
   let page = 0;
 
   for (;;) {
-    const body = { dryRun };
+    const body = { dryRun, staleOnly };
     if (cursor) body.cursor = cursor;
     if (limit) body.limit = limit;
 
@@ -65,6 +69,7 @@ async function main() {
     indexed += r.indexed;
     vectors += r.vectors;
     skipped += r.skippedByGate;
+    current += r.skippedCurrent ?? 0;
 
     const pct = total ? ` (${Math.min(100, Math.round((processed / total) * 100))}%)` : "";
     console.log(
@@ -79,7 +84,8 @@ async function main() {
 
   console.log(
     `DONE${dryRun ? " (dry run -- nothing embedded)" : ""}: ${processed} messages, ` +
-      `${indexed} ${dryRun ? "would be " : ""}indexed, ${vectors} vectors, ${skipped} skipped by the allowlist.`,
+      `${indexed} ${dryRun ? "would be " : ""}indexed, ${vectors} vectors, ${skipped} skipped by the allowlist` +
+      (staleOnly ? `, ${current} already at the current recipe.` : "."),
   );
 }
 
