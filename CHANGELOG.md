@@ -44,6 +44,13 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Fixed
 
+- **Python client requests.** Authorization is not sent on a cross-origin
+  redirect. Returned `bodyText` and `bodyHtml` are capped (default 64 KiB,
+  `POSTERN_MAX_BODY_CHARS`) and flagged with `bodyTruncated`. An id that is
+  empty, `.`, or `..` is refused before a path is built. A base URL must be
+  https except on localhost, must not carry userinfo, and its query is not
+  kept.
+
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
@@ -97,12 +104,6 @@ deploy. A self-hosted install picks up the installer changes the next time it ru
 
 ### Fixed
 
-- **Python client requests.** Authorization is not sent on a cross-origin
-  redirect. Returned `bodyText` and `bodyHtml` are capped (default 64 KiB,
-  `POSTERN_MAX_BODY_CHARS`) and flagged with `bodyTruncated`. An id that is
-  empty, `.`, or `..` is refused before a path is built. A base URL must be
-  https except on localhost, must not carry userinfo, and its query is not
-  kept.
 - **The reply and forward quote follows the caller's read scope.** A
   static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
   quotes or forwards a stored message: the source is not found, as on the
