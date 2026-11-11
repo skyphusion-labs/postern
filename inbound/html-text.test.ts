@@ -33,32 +33,66 @@ function referenceHtmlToText(html: string): string {
   return out.trim();
 }
 
-const BUDGET_MS = 200;
 const SIZE = 160_000;
-const fill = (unit: string) => unit.repeat(Math.ceil(SIZE / unit.length)).slice(0, SIZE);
+const fill = (unit: string, size = SIZE) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
 
-function timed(input: string): number {
-  const t = performance.now();
-  htmlToText(input);
-  return performance.now() - t;
+// The running-time tests bound GROWTH, not wall time. A wall-clock budget fails on a
+// loaded machine while the code is fine (#911). What these exist to catch is a
+// quadratic regression, which is a property of the algorithm: t(4N) / t(N) is about 4
+// for linear work and about 16 for quadratic, whatever the load. Samples of the two
+// sizes alternate and the median of each is used, so a burst of load hits both sides.
+// Measured 2026-11-11 at load average about 17 on a 6-core laptop: the linear converter
+// gives 3.8 to 6.1 on these shapes, and the quadratic reference gives 14.3 to 18.9.
+// 10 sits between the two with room on both sides.
+const MAX_GROWTH = 10;
+const CEILING_MS = 2000; // a backstop only: an absurd regression still fails outright
+const MIN_SAMPLE_MS = 10;
+type Convert = (html: string) => string;
+
+// Mean time of one call, from repeating the call until MIN_SAMPLE_MS has passed, so a
+// sample is never one sub-millisecond call.
+function sampleMs(fn: Convert, input: string): number {
+  let reps = 0;
+  const t0 = performance.now();
+  let t = t0;
+  do { fn(input); reps++; t = performance.now(); } while (t - t0 < MIN_SAMPLE_MS);
+  return (t - t0) / reps;
+}
+function growth(fn: Convert, build: (n: number) => string, n: number): { ratio: number; bigMs: number } {
+  const small = build(n);
+  const big = build(4 * n);
+  fn(small.slice(0, 1000)); // warm the JIT
+  const a: number[] = [];
+  const b: number[] = [];
+  for (let i = 0; i < 5; i++) { a.push(sampleMs(fn, small)); b.push(sampleMs(fn, big)); }
+  const median = (xs: number[]) => [...xs].sort((x, y) => x - y)[2];
+  return { ratio: median(b) / median(a), bigMs: median(b) };
 }
 
 describe("htmlToText running time", () => {
-  const shapes: Record<string, string> = {
-    "open brackets": fill("<"),
-    "unclosed tags": fill("<a"),
-    "unclosed script tags": fill("<script>"),
-    "unclosed style tags": fill("<style "),
-    "near-miss end tags": "<script>" + fill("</scriptx>"),
-    "line breaks with long padding": fill("<br" + " ".repeat(40)),
-    "ordinary markup": fill("<b>x</b>"),
+  const shapes: Record<string, (n: number) => string> = {
+    "open brackets": (n) => fill("<", n),
+    "unclosed tags": (n) => fill("<a", n),
+    "unclosed script tags": (n) => fill("<script>", n),
+    "unclosed style tags": (n) => fill("<style ", n),
+    "near-miss end tags": (n) => "<script>" + fill("</scriptx>", n),
+    "line breaks with long padding": (n) => fill("<br" + " ".repeat(40), n),
+    "ordinary markup": (n) => fill("<b>x</b>", n),
   };
-  for (const [name, input] of Object.entries(shapes)) {
-    it(`converts ${SIZE / 1000} KB of ${name} within ${BUDGET_MS} ms`, () => {
-      htmlToText(input.slice(0, 1000)); // warm the JIT
-      expect(timed(input)).toBeLessThan(BUDGET_MS);
+  for (const [name, build] of Object.entries(shapes)) {
+    it(`grows linearly on ${name} (40 KB to 160 KB)`, () => {
+      const g = growth(htmlToText, build, SIZE / 4);
+      expect(g.ratio, `t(4N)/t(N) = ${g.ratio.toFixed(2)}`).toBeLessThan(MAX_GROWTH);
+      expect(g.bigMs).toBeLessThan(CEILING_MS);
     });
   }
+
+  it("control: the measurement flags a quadratic converter", () => {
+    // referenceHtmlToText is the previous, quadratic implementation (kept above for the
+    // output tests). If this ratio did not exceed the bound, the bound would prove nothing.
+    const g = growth(referenceHtmlToText, (n) => fill("<", n), 2000);
+    expect(g.ratio, `reference t(4N)/t(N) = ${g.ratio.toFixed(2)}`).toBeGreaterThan(MAX_GROWTH);
+  });
 
   it("converts at most the first 512,000 characters", () => {
     const tail = "<p>TAIL_MARKER</p>";
@@ -71,7 +105,7 @@ describe("htmlToText running time", () => {
     const { env, ctx } = realEnv();
     const t = performance.now();
     const r = await ingest(env, { messageId: "html-only-large@example.net", from: "a@example.net", to: "alice@skyphusion.org", html: fill("<") }, ctx);
-    expect(performance.now() - t).toBeLessThan(BUDGET_MS * 5);
+    expect(performance.now() - t).toBeLessThan(1000);
     expect(await store.get(env, r.messageId, ["alice@skyphusion.org"])).not.toBeNull();
   });
 });
