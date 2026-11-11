@@ -9,7 +9,7 @@
 // so there is no second path to an account. Scripted installers that hold the `both`
 // token can skip this and use POST /api/admin/users.
 
-import { attemptKeys, clearFailures, gateAttempt, recordFailure, type AttemptKeys } from "./auththrottle";
+import { attemptKeys, clearFailures, gateAttempt, recordFailure, releaseAttempt, type AttemptKeys } from "./auththrottle";
 import { readBodyCapped, PayloadTooLargeError } from "./body";
 import { sha256Hex } from "./sendidentity";
 import {
@@ -102,13 +102,24 @@ export async function handleSetup(request: Request, env: Env): Promise<Response>
     return sjson({ ok: false, error: "E_AUTH_FAILED" }, 401);
   }
 
-  const created = await createFirstUser(
-    env,
-    { username: user.username, fromAddr: user.fromAddr, displayName: user.displayName },
-    await hashSecret(user.password as string),
-    new Date().toISOString(),
-  );
-  if (!created) return complete(); // lost the race: the other request made the first user
+  let created;
+  try {
+    created = await createFirstUser(
+      env,
+      { username: user.username, fromAddr: user.fromAddr, displayName: user.displayName },
+      await hashSecret(user.password as string),
+      new Date().toISOString(),
+    );
+  } catch (err) {
+    await releaseAttempt(env, gate).catch(() => {});
+    throw err;
+  }
+  if (!created) {
+    // Lost the race: the other request made the first user. Not a token failure, so the
+    // reservation is given back.
+    await releaseAttempt(env, gate).catch(() => {});
+    return complete();
+  }
   try {
     await clearFailures(env, keys, gate);
   } catch {

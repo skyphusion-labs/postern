@@ -109,6 +109,21 @@ describe("handleApi", () => {
     expect(www.headers.get("location")).toBe("https://demo.posternonline.com/");
   });
 
+  it("keeps the apex redirect on the demo host for a path that starts with //", async () => {
+    const { env, ctx } = makeFakeEnv();
+    for (const [input, want] of [
+      ["https://posternonline.com//evil.example/login", "https://demo.posternonline.com//evil.example/login"],
+      ["https://www.posternonline.com//evil.example/x?q=1", "https://demo.posternonline.com//evil.example/x?q=1"],
+      ["https://posternonline.com///evil.example", "https://demo.posternonline.com///evil.example"],
+    ] as const) {
+      const res = await handleApi(new Request(input, { method: "GET" }), env, ctx);
+      expect(res.status).toBe(301);
+      const location = res.headers.get("location") ?? "";
+      expect(new URL(location).host).toBe("demo.posternonline.com");
+      expect(location).toBe(want);
+    }
+  });
+
   it("401s an API call with no/with a wrong token", async () => {
     const { env, ctx } = makeFakeEnv();
     expect((await handleApi(req("POST", "/api/send", { body: {} }), env, ctx)).status).toBe(401);

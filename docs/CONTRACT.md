@@ -979,6 +979,8 @@ POST /api/smtp-auth          Authorization: Bearer <POSTERN_TRANSPORT_TOKEN>
   { "username": "...", "secret": "..." }
   200 { "ok": true,  "from": "user@your-domain" }      // good credential
   200 { "ok": false }                                   // bad credential -> daemon answers 535
+  200 { "ok": false, "error": "E_AUTH_THROTTLED", "retryAfter": n }  // account locked (Worker throttle); a failure to the door
+  503 { "ok": false, "error": "E_SERVICE_UNAVAILABLE" }  // throttle store unreadable (fail-closed)
   401                                                    // wrong transport token (relay misconfig)
   400 { "ok": false, "error": "E_FIELD_MISSING" }      // missing username/secret
   500 { "ok": false, "error": "E_INTERNAL_SERVER_ERROR" }  // the check itself is unavailable (#442)
