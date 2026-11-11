@@ -117,6 +117,31 @@ export interface ParityReport {
 
 const SAMPLE = 20;
 
+/**
+ * The parity GATE (#854): pass, fail or unmeasured. A check that compared nothing cannot go
+ * red, so zero rows checked is NEVER a pass. Production read checked=0 for both kinds on
+ * 2026-11-11 while it had agents: they come from the env registry (POSTERN_SEND_IDENTITIES),
+ * which D-ID-8 leaves without principal ids, so the old tables were empty and parity had
+ * nothing to compare. `measured` says which kinds parity actually compared.
+ *   - fail: any diff, orphan or read-path miss;
+ *   - unmeasured: no diff, and no row of either kind was compared;
+ *   - pass: no diff, and at least one row was compared.
+ * M3b (retiring the fallback for a kind) needs a pass with that kind measured.
+ */
+export function parityGate(
+  report: ParityReport,
+  misses: { agent: number; human: number },
+): { gate: "pass" | "fail" | "unmeasured"; measured: { agents: boolean; humans: boolean }; reason: string } {
+  const measured = { agents: report.agents.checked > 0, humans: report.humans.checked > 0 };
+  const diffs = report.agents.diffs + report.humans.diffs + report.orphans.diffs + misses.agent + misses.human;
+  if (diffs > 0) return { gate: "fail", measured, reason: `${diffs} disagreement(s): diffs, orphans or read-path misses` };
+  if (!measured.agents && !measured.humans) {
+    return { gate: "unmeasured", measured, reason: "no agent_identities or smtp_credentials row exists, so nothing was compared" };
+  }
+  const missing = [!measured.agents && "agents", !measured.humans && "humans"].filter(Boolean).join(" and ");
+  return { gate: "pass", measured, reason: missing ? `no diffs; ${missing} had no rows to compare` : "no diffs; both kinds compared" };
+}
+
 /** Compare every old-table row with its principal and credential. Deterministic. */
 export async function principalParity(env: Env): Promise<ParityReport> {
   const agentDiff =

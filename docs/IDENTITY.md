@@ -274,6 +274,15 @@ never allow what the old table denies. A failure on the new side (the credential
 counter write, or the session mint's principal lookup) falls back to today's resolution and is
 logged; it never denies. `GET /api/admin/principals/parity` reports the miss counts.
 
+**The parity gate (#854, 2026-11-11).** The parity route answers `gate`: `fail` on any diff, orphan
+or read-path miss; `unmeasured` when no `agent_identities` or `smtp_credentials` row exists, so
+nothing was compared; else `pass`, with `measured` saying which kinds were compared. A check that
+compared nothing cannot go red, so zero rows is never a pass. Production read zero rows of both
+kinds on 2026-11-11 while it had agents: they come from the env registry, which D-ID-8 leaves
+without principal ids. `outOfScope` reports those sources (the registry entry count and the webmail
+auth backend), so a zero has a visible reason. M3b retires the fallback for a kind only on a
+`pass` with that kind measured.
+
 **How the fallback is retired.** It is the lead's call, made from the parity route (it needs
 no spend and is not a ruling). M3 (credentials become the authority, the old tables stop being
 written) happens only when all of these hold: the deploy backfill runs on every release (#901, #906); one full
