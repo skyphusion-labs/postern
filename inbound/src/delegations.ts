@@ -31,7 +31,9 @@ import { IDENTITY_ID_RE } from "./agentidentities";
 import {
   AdminError,
   EMAIL_RE,
+  OPERATOR_ACTOR,
   auditStatement,
+  type AuditActor,
   decodeCursor,
   encodeCursor,
   generateId,
@@ -123,13 +125,32 @@ function bodyAddress(body: Record<string, unknown>, domain: string): string {
 
 const LIVE_GRANTEE = "SELECT 1 FROM agent_identities WHERE id = ? AND revoked_at IS NULL";
 
-async function grant(request: Request, env: Env): Promise<Response> {
+/**
+ * Who makes or revokes a grant (#854 M2). The operator by default; a human principal for
+ * #740 S5 self-service, which also pins the grant to that human's OWN address. `actor` is
+ * what the audit row names; `createdBy` is what the grant row stores (the string
+ * `operator` for the operator, unchanged; the human's prn_ id for a human).
+ */
+export interface Grantor {
+  actor: AuditActor;
+  createdBy: string;
+  /** When set, the only address this grantor may grant or revoke on. */
+  ownAddress?: string;
+}
+export const OPERATOR_GRANTOR: Grantor = { actor: OPERATOR_ACTOR, createdBy: "operator" };
+
+export async function grant(request: Request, env: Env, grantor: Grantor = OPERATOR_GRANTOR): Promise<Response> {
   const body = await readBody(request);
   const domain = requireDomain(env);
   const rawGrantee = body.granteeId;
   if (typeof rawGrantee !== "string") throw new AdminError(400, "E_FIELD_MISSING", "granteeId is required", "granteeId");
   const granteeId = rawGrantee.trim();
-  const address = bodyAddress(body, domain);
+  // A self-service grantor grants on its own address and nowhere else: the address is not
+  // a field it may send at all, so a wrong one is refused rather than silently replaced.
+  if (grantor.ownAddress !== undefined && body.address !== undefined) {
+    throw new AdminError(400, "E_VALIDATION_ERROR", "address is your own and is not a field here", "address");
+  }
+  const address = grantor.ownAddress !== undefined ? grantor.ownAddress.trim().toLowerCase() : bodyAddress(body, domain);
   const powers = requestedPowers(body);
   const label = optLine(body, "label", LABEL_MAX);
 
@@ -160,13 +181,14 @@ async function grant(request: Request, env: Env): Promise<Response> {
   // Conditional on the grantee STILL being live, in the same statement as the write.
   const insert = env.DB.prepare(
     `INSERT INTO delegation_grants (id, grantee_id, address, powers, label, created_by, created_at) ` +
-      `SELECT ?, ?, ?, ?, ?, 'operator', ? WHERE EXISTS (${LIVE_GRANTEE})`,
-  ).bind(id, granteeId, address, JSON.stringify(powers), label, now, granteeId);
+      `SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${LIVE_GRANTEE})`,
+  ).bind(id, granteeId, address, JSON.stringify(powers), label, grantor.createdBy, now, granteeId);
   const audit = auditStatement(
     env,
     now,
     { action: "delegation.grant", targetKind: "delegation", targetId: id, outcome: "ok", detail: { granteeId, address, powers } },
     { sql: "SELECT 1 FROM delegation_grants WHERE id = ?", binds: [id] },
+    grantor.actor,
   );
   let results: Array<{ meta?: { changes?: number } }>;
   try {
@@ -182,7 +204,7 @@ async function grant(request: Request, env: Env): Promise<Response> {
     throw new AdminError(409, "E_GRANTEE_INVALID", "the grantee was revoked before the grant was written");
   }
   return json(
-    { ok: true, id, granteeId, address, powers, label, createdBy: "operator", createdAt: now, revokedAt: null },
+    { ok: true, id, granteeId, address, powers, label, createdBy: grantor.createdBy, createdAt: now, revokedAt: null },
     201,
   );
 }
@@ -229,10 +251,13 @@ async function list(url: URL, env: Env): Promise<Response> {
   return json({ ok: true, items: page.map(project), cursor: next });
 }
 
-async function revoke(env: Env, rawId: string): Promise<Response> {
+export async function revoke(env: Env, rawId: string, grantor: Grantor = OPERATOR_GRANTOR): Promise<Response> {
   const id = pathId(rawId, DELEGATION_ID_RE, "delegation");
   const row = await env.DB.prepare(`SELECT ${COLUMNS} FROM delegation_grants WHERE id = ?`).bind(id).first<GrantRow>();
-  if (!row) throw new AdminError(404, "E_NOT_FOUND", "no such delegation");
+  // A self-service grantor sees only grants on its own address: any other id is the same
+  // 404 as a missing one, so nothing says another address's grant exists.
+  const mine = grantor.ownAddress === undefined || (row && row.address === grantor.ownAddress.trim().toLowerCase());
+  if (!row || !mine) throw new AdminError(404, "E_NOT_FOUND", "no such delegation");
   const now = new Date().toISOString();
   const update = env.DB.prepare(
     "UPDATE delegation_grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
@@ -243,7 +268,7 @@ async function revoke(env: Env, rawId: string): Promise<Response> {
     targetId: id,
     outcome: "ok",
     detail: { alreadyRevoked: row.revoked_at !== null, granteeId: row.grantee_id, address: row.address },
-  });
+  }, undefined, grantor.actor);
   const results = await env.DB.batch([update, audit]);
   return json({ ok: true, id, revoked: results[0]?.meta?.changes ?? 0, alreadyRevoked: row.revoked_at !== null });
 }
