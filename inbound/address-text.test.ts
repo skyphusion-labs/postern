@@ -1,3 +1,4 @@
+// A refused address names the field. The value is not repeated.
 import { describe, expect, it } from "vitest";
 import { ingest } from "./src/ingest";
 import { reply, send } from "./src/mailbox";
