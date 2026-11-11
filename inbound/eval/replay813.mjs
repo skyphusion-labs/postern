@@ -2,14 +2,15 @@
 // re-embed. Read-only (GET /api/messages and GET /api/search). Run by the operator:
 //
 //   POSTERN_URL=https://mail.example POSTERN_TOKEN=... \
-//     node eval/replay813.mjs [--n 8] [--queries paraphrase.json] [--show] [--out result.json]
+//     node eval/replay813.mjs [--n 8] [--queries paraphrase.json] [--show] [--json] > result.txt
 //
 // Known-item probe: the N newest INBOUND messages, each searched by its own subject; a hit
 // is that messageId in the top 10 (strict), or folded into a top-10 hit's `similar` ids
 // (surfaced). --queries adds a file of [{ "q": "...", "gold": ["<messageId>", ...] }] for
 // paraphrased queries. Mail content stays local: the summary prints counts and latencies
-// only; --show also prints each probe's subject to THIS terminal. The token is never printed.
-import { readFileSync, writeFileSync } from "node:fs";
+// only; --show also prints each probe's subject to THIS terminal; --json also prints the per-probe
+// rows (ranks and latencies, no content) as JSON. The token is never printed.
+import { readFileSync } from "node:fs";
 
 const base = (process.env.POSTERN_URL ?? "").replace(/\/+$/, "");
 const token = process.env.POSTERN_TOKEN;
@@ -72,4 +73,4 @@ for (const [label] of MODES) {
     console.log(`| ${label} | ${family} | ${hit}/${rs.length} | ${sur}/${rs.length} | ${(ms / 1000).toFixed(2)}s |`);
   }
 }
-if (flag("--out")) writeFileSync(flag("--out"), JSON.stringify(rows.map(({ label, family, i, strict, surfaced, ms, error }) => ({ label, family, i, strict, surfaced, ms, error })), null, 1));
+if (args.includes("--json")) console.log(JSON.stringify(rows.map(({ label, family, i, strict, surfaced, ms, error }) => ({ label, family, i, strict, surfaced, ms, error }))));

@@ -8,7 +8,7 @@
 // chunks under BOTH recipes (embedtext.ts, the same function the store uses) plus the
 // query strings.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { buildCorpus } from "./corpus813.mjs";
 import { embedChunks } from "../src/embedtext.ts";
 
@@ -24,7 +24,13 @@ const { messages, queries } = buildCorpus();
 const texts = new Set();
 for (const m of messages) for (const v of [1, 2]) for (const t of embedChunks(m.subject, m.body, v)) texts.add(t);
 for (const q of queries) texts.add(q.q);
-const cache = existsSync(cachePath) ? JSON.parse(readFileSync(cachePath, "utf8")) : {};
+// Read once and treat "not there yet" as an empty cache: no check-then-read window.
+let cache = {};
+try {
+  cache = JSON.parse(readFileSync(cachePath, "utf8"));
+} catch (e) {
+  if (e?.code !== "ENOENT") throw e;
+}
 const missing = [...texts].filter((t) => !cache[sha(t)]);
 const chars = missing.reduce((n, t) => n + t.length, 0);
 console.log(`texts ${texts.size}, cached ${texts.size - missing.length}, to embed ${missing.length} (${chars} chars, about ${Math.ceil(chars / 4)} tokens)`);

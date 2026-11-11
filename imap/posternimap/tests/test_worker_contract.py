@@ -296,6 +296,14 @@ class ParityTest(unittest.TestCase):
     # the response projection, turning a precise statement into a vague one.
     NOT_A_ROW_READ = {"messages-list": {"countOnly"}}
 
+    # A FOURTH set, separate for the same reason. `collapse` (#813) acts ONLY in
+    # mode=semantic (it folds near-identical notifications into one hit), and the door
+    # never runs a semantic search: IMAP SEARCH maps to fts and substr, which are exact
+    # criteria. In those modes collapse=1 is refused and collapse=0 changes nothing, so
+    # there is nothing for the door to send. Not a filter evaluated locally, not a
+    # projection, not a count mode: a parameter of a mode the door does not use.
+    NOT_A_DOOR_MODE = {"search": {"collapse"}}
+
     def setUp(self) -> None:
         self.calls = _emitted()
 
@@ -316,6 +324,7 @@ class ParityTest(unittest.TestCase):
                 self.NOT_PUSHED_DOWN.get(row["id"], set())
                 | self.NOT_A_FILTER.get(row["id"], set())
                 | self.NOT_A_ROW_READ.get(row["id"], set())
+                | self.NOT_A_DOOR_MODE.get(row["id"], set())
             )
             gap = sorted(declared - self._reachable(row["path"]) - excluded)
             if gap:
@@ -328,7 +337,7 @@ class ParityTest(unittest.TestCase):
         # checked, or the newer one would be the unwatched half.
         stale = {}
         merged: dict[str, set[str]] = {}
-        for source in (self.NOT_PUSHED_DOWN, self.NOT_A_FILTER, self.NOT_A_ROW_READ):
+        for source in (self.NOT_PUSHED_DOWN, self.NOT_A_FILTER, self.NOT_A_ROW_READ, self.NOT_A_DOOR_MODE):
             for route_id, names in source.items():
                 merged.setdefault(route_id, set()).update(names)
         for route_id, names in merged.items():
@@ -361,6 +370,10 @@ class ParityTest(unittest.TestCase):
         # parameter the door has not wired. That is the failure mode every one of these
         # ledgers exists to prevent.
         self.assertEqual({"messages-list": {"countOnly"}}, self.NOT_A_ROW_READ)
+
+    def test_the_door_mode_exclusion_is_exactly_semantic_collapse(self):
+        # The fourth set's own pin: it must not become a place to drop any other parameter.
+        self.assertEqual({"search": {"collapse"}}, self.NOT_A_DOOR_MODE)
 
     def test_control_the_parity_check_can_fail(self):
         self.assertNotIn("nOtApArAm", self._reachable("/api/messages"))
