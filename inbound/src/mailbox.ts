@@ -354,8 +354,14 @@ function deriveBodyText(html?: string, text?: string): string {
  * array, so it cannot be reached by omission: a bare address is not assignable to this
  * type, and a member scope must be written as a one-element array. Every caller therefore
  * states which of the two it is.
+ *
+ * `"addressing"` is the third literal: a caller that may SEND but not READ (a static
+ * send-only token). It may reply to a stored message, because a reply goes to people
+ * already on that thread, but nothing from the message comes back out: the target is
+ * looked up only to address the reply, caller cc/bcc and quoteOriginal are refused, and a
+ * forward source is not found (a forward IS the body, sent where the caller chooses).
  */
-export type MessageReadScope = readonly string[] | "estate";
+export type MessageReadScope = readonly string[] | "estate" | "addressing";
 
 /**
  * Read the message a write path is about to quote, under that path's scope.
@@ -371,6 +377,8 @@ async function readQuotable(
   messageId: string,
   readScope: MessageReadScope,
 ): Promise<store.StoredMessage | null> {
+  // An addressing-only caller quotes nothing: the answer is the plain not-found.
+  if (readScope === "addressing") return null;
   return readScope === "estate"
     ? await store.getUnscoped(env, messageId)
     : await store.get(env, messageId, readScope);
@@ -476,7 +484,25 @@ export async function reply(
     throw new MailboxError("E_FIELD_MISSING", "at least one of html or text is required");
   }
 
-  const original = await readQuotable(env, req.messageId.replace(/[<>]/g, "").trim(), readScope);
+  // An addressing-only caller (see MessageReadScope) replies to the thread's existing
+  // parties and gets nothing read back. Its extra recipients and the quote are refused
+  // BEFORE the lookup, out loud (400), never silently dropped.
+  const addressingOnly = readScope === "addressing";
+  if (addressingOnly) {
+    if (asArray(req.cc).length > 0 || asArray(req.bcc).length > 0) {
+      throw new MailboxError(
+        "E_VALIDATION_ERROR",
+        "cc and bcc require read access: a reply from this credential goes only to the thread's existing parties",
+      );
+    }
+    if (req.quoteOriginal) {
+      throw new MailboxError("E_VALIDATION_ERROR", "quoteOriginal requires read access");
+    }
+  }
+  const targetId = req.messageId.replace(/[<>]/g, "").trim();
+  const original = addressingOnly
+    ? await store.getUnscoped(env, targetId)
+    : await readQuotable(env, targetId, readScope);
   if (!original) {
     throw new MailboxError("E_NOT_FOUND", `no stored message with id ${req.messageId}`, 404);
   }

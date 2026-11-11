@@ -1121,12 +1121,14 @@ function sessionReadScope(env: Env, resolution: AuthResolution): string[] | unde
  *
  * A resolution with no bound identity is a static token. It quotes the estate ONLY when
  * the gate would let it READ (a `both` or `read` token), and says so with the literal. Any
- * other static token, `send` above all, gets the EMPTY scope and quotes nothing: the quote
- * is a read, and a per-function key that cannot read must not read through a write route.
+ * other static token, `send` above all, is `"addressing"`: it may reply to the existing
+ * parties of a thread and gets nothing read back (no quote, no forward, no added cc/bcc).
+ * The quote is a read, and a per-function key that cannot read must not read through a
+ * write route; replying to the people already on a thread is not a read of its content.
  */
 function writeReadScope(env: Env, resolution: AuthResolution): MessageReadScope {
   const bound = resolution.identity?.from;
-  if (!bound) return authorize(resolution, "read") ? "estate" : [];
+  if (!bound) return authorize(resolution, "read") ? "estate" : "addressing";
   return [bound, ...rolesForViewer(env, bound)];
 }
 
