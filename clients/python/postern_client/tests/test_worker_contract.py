@@ -175,6 +175,9 @@ def _emitted() -> list[dict[str, Any]]:
     c.grant_delegation("idn_0", "a@x.com", ["organize"], label="l")
     c.list_delegations(grantee="idn_0", address="a@x.com", limit=5, cursor="c1", include_revoked=True)
     c.revoke_delegation("dlg_0")
+    # #854 M3a the principal layer, read only (operator).
+    c.list_principals(kind="human", limit=5, cursor="c1", include_disabled=True)
+    c.get_principal("prn_0")
 
     out: list[dict[str, Any]] = []
     for req in t.requests:

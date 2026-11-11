@@ -80,6 +80,9 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   // #854 M1 adds the principal backfill at `admin`, POST only.
   if (method === "POST" && path === "/api/admin/principals/backfill") return "admin";
   if (method === "GET" && path === "/api/admin/principals/parity") return "admin";
+  // #854 M3a adds the read-only principal list and show at `admin`, GET only; the bare
+  // item prefix is NOT claimed.
+  if (method === "GET" && (path === "/api/admin/principals" || /^\/api\/admin\/principals\/.+$/.test(path))) return "admin";
   // #740 S5 adds the human's own delegation and audit trail, at `read` (every session holds
   // it; the handler refuses Bearer callers).
   if (method === "GET" && (path === "/api/delegations/mine" || path === "/api/delegations/mine/grantees" || path === "/api/audit/mine")) return "read";
@@ -119,6 +122,7 @@ const CORPUS = [
   "/api/admin/delegations", "/api/admin/delegations/", "/api/admin/delegations/dlg_0123", "/api/admin/delegationsx",
   "/api/admin/principals/backfill", "/api/admin/principals", "/api/admin/principals/backfillx",
   "/api/admin/principals/parity", "/api/admin/principals/parityx",
+  "/api/admin/principals/", "/api/admin/principals/prn_0123", "/api/admin/principals/svc_both", "/api/admin/principalsx",
   "/api/delegations/mine", "/api/delegations/mine/", "/api/delegations/mine/grantees", "/api/delegations/mine/dlg_0123",
   "/api/delegations/minex", "/api/audit/mine", "/api/audit/minex",
   "/api/delegations/mine/exclusions", "/api/delegations/mine/exclusions/", "/api/delegations/mine/exclusions/exc_0123",

@@ -20,6 +20,12 @@ when no runtime agent identity and no native login exists (so there was nothing 
 and the webmail auth backend. Production read zero rows of both kinds while it had registry agents,
 which the old report showed as all zeros, the same as a clean pass.
 
+**New: the operator can read the principal layer (#854 M3a).** `GET /api/admin/principals` lists
+principals (humans, agents and the service slots), filtered by `kind`, enabled only unless
+`includeDisabled=1`. `GET /api/admin/principals/{id}` shows one with its credentials and
+addresses. Both are operator only, read only and audited. No response carries a credential's
+lookup or secret.
+
 **Fix: a session from before the principals migration can read mail again in webmail.**
 Since #853, the page loads the human-only list on its own right after sign-in. Such a session
 gets `E_REAUTH_REQUIRED` for that list, and the page signed it out at once, before the person
