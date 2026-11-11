@@ -13,6 +13,30 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Upgrade.** Migration `0023` (the `delegation_exclusions` table, #853) is additive and is
+applied by the deploy. Nothing changes until a human marks a thread.
+
+### Added
+
+- **A human can mark a thread human-only (#853).** From a webmail session:
+  `GET`/`POST /api/delegations/mine/exclusions` (list my marks; mark one
+  thread `{threadId}`, 201 on create, 200 on a repeat) and `DELETE
+  /api/delegations/mine/exclusions/{id}`. No agent then reads, quotes,
+  organizes or replies into the owner's mail in that thread, whatever its
+  grants: list, count, search (every mode), folders, get, attachments,
+  thread, seen/flags/move, reply, forward, drafts and the thread parent of a
+  send all treat it as absent, with the same 404. The agent's own mail is
+  never hidden; human sessions and static tokens are not affected. Marks are
+  audited (`delegation.exclude` / `delegation.unexclude`, actor human) and
+  show in `GET /api/audit/mine`. See `docs/DELEGATION.md` section 4.8.
+
+### Changed
+
+- **Estate deploys: a human-only mark also binds an estate agent (#853).**
+  Under `AGENT_READ_SCOPE=estate` (or unset) an agent still reads the whole
+  estate, except the owner's mail in a thread its owner marked human-only.
+  Before #853 no such mark existed, so nothing changes until one is made.
+
 ## v1.12.0
 
 MINOR. Delegation the address owner manages from webmail, and sending as the owner
@@ -44,22 +68,8 @@ client.
   - IMAP port 993 refuses plaintext: set a certificate, or use port 143.
   - The MCP server and the Python client require an https API URL, except on localhost.
 
-**Upgrade (#853).** Migration `0023` (the `delegation_exclusions` table) is additive and is
-applied by the deploy. Nothing changes until a human marks a thread.
-
 ### Added
 
-- **A human can mark a thread human-only (#853).** From a webmail session:
-  `GET`/`POST /api/delegations/mine/exclusions` (list my marks; mark one
-  thread `{threadId}`, 201 on create, 200 on a repeat) and `DELETE
-  /api/delegations/mine/exclusions/{id}`. No agent then reads, quotes,
-  organizes or replies into the owner's mail in that thread, whatever its
-  grants: list, count, search (every mode), folders, get, attachments,
-  thread, seen/flags/move, reply, forward, drafts and the thread parent of a
-  send all treat it as absent, with the same 404. The agent's own mail is
-  never hidden; human sessions and static tokens are not affected. Marks are
-  audited (`delegation.exclude` / `delegation.unexclude`, actor human) and
-  show in `GET /api/audit/mine`. See `docs/DELEGATION.md` section 4.8.
 - **A human manages delegation on their own address (#740 S5).** From a
   webmail session: `GET /api/delegations/mine/grantees` (the live agents a
   human may grant to), `GET`/`POST /api/delegations/mine`, `DELETE
@@ -108,10 +118,6 @@ applied by the deploy. Nothing changes until a human marks a thread.
 
 ### Changed
 
-- **Estate deploys: a human-only mark also binds an estate agent (#853).**
-  Under `AGENT_READ_SCOPE=estate` (or unset) an agent still reads the whole
-  estate, except the owner's mail in a thread its owner marked human-only.
-  Before #853 no such mark existed, so nothing changes until one is made.
 - **An organize audit row names whose mail it touched (#740 S5).** Its
   `detail` carries `address` (the granted human) instead of `granted` (every
   granted address); a message two granted humans both receive gets a row
