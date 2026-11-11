@@ -80,6 +80,13 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Fixed
 
+- **Python client requests.** Authorization is not sent on a cross-origin
+  redirect. Returned `bodyText` and `bodyHtml` are capped (default 64 KiB,
+  `POSTERN_MAX_BODY_CHARS`) and flagged with `bodyTruncated`. An id that is
+  empty, `.`, or `..` is refused before a path is built. A base URL must be
+  https except on localhost, must not carry userinfo, and its query is not
+  kept.
+
 - **MCP results mark every sender-written field as untrusted.** Search, list,
   get, thread, and attachment results name those fields and say they were
   written by the sender.
