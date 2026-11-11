@@ -24,6 +24,8 @@ const VARIANTS = [
   { name: "V1 + subject in chunk 0", recipe: 2, familyRank: false, collapse: false, modes: ["semantic", "hybrid"] },
   { name: "V2 + family tiebreak", recipe: 2, familyRank: true, collapse: false, modes: ["semantic", "hybrid"] },
   { name: "V3 + collapse", recipe: 2, familyRank: true, collapse: true, modes: ["semantic"] },
+  // #926: V3 plus the thread fold.
+  { name: "V4 + thread collapse", recipe: 2, familyRank: true, collapse: true, collapseThreads: true, modes: ["semantic"] },
 ];
 const FAMILIES = ["token", "latest", "subject", "paraphrase", "diversity"];
 
@@ -67,6 +69,13 @@ function score(corpus, query, items) {
   return { strict, surfaced };
 }
 
+/** #926: how many DIFFERENT threads the top 10 shows (a thread folded into one hit counts once). */
+function distinctThreads(corpus, items) {
+  const parent = new Map(corpus.messages.map((m) => [m.id, m.inReplyTo]));
+  const root = (id) => { let cur = id; while (parent.get(cur)) cur = parent.get(cur); return cur; };
+  return new Set(items.slice(0, 10).map((h) => root(h.message.messageId))).size;
+}
+
 function summarise(rows) {
   const out = {};
   for (const f of FAMILIES) {
@@ -95,19 +104,21 @@ it("#813 recall at k, before and after", async () => {
     for (const mode of v.modes) {
       const rows = [];
       for (const query of corpus.queries) {
-        const page = await store.search(env, { q: query.q, mode, limit: 10, collapse: v.collapse, familyRank: v.familyRank });
-        rows.push({ family: query.family, q: query.q, ...score(corpus, query, page.items) });
+        const page = await store.search(env, { q: query.q, mode, limit: 10, collapse: v.collapse, collapseThreads: v.collapseThreads === true, familyRank: v.familyRank });
+        rows.push({ family: query.family, q: query.q, ...score(corpus, query, page.items), threads10: distinctThreads(corpus, page.items) });
       }
       results.push({ variant: v.name, mode, summary: summarise(rows), rows });
     }
   }
   const pct = (x) => (x === undefined ? "" : `${Math.round(x * 100)}%`);
-  const lines = ["| variant | mode | token r@1 / r@10 | latest r@1 / r@10 | subject r@1 / r@10 | paraphrase r@1 / r@5 / r@10 | diversity coverage@10 | MRR (all single-gold) |", "|---|---|---|---|---|---|---|---|"];
+  const lines = ["| variant | mode | token r@1 / r@10 | latest r@1 / r@10 | subject r@1 / r@10 | paraphrase r@1 / r@5 / r@10 | diversity coverage@10 | MRR (all single-gold) | distinct threads@10, paraphrase |", "|---|---|---|---|---|---|---|---|---|"];
   for (const r of results) {
     const s = r.summary;
     const single = r.rows.filter((x) => x.family !== "diversity");
     const mrr = single.reduce((a, x) => a + (x.strict >= 0 && x.strict < 10 ? 1 / (x.strict + 1) : 0), 0) / single.length;
-    lines.push(`| ${r.variant} | ${r.mode} | ${pct(s.token.r1)} / ${pct(s.token.r10)} | ${pct(s.latest.r1)} / ${pct(s.latest.r10)} | ${pct(s.subject.r1)} / ${pct(s.subject.r10)} | ${pct(s.paraphrase.r1)} / ${pct(s.paraphrase.r5)} / ${pct(s.paraphrase.r10)} | ${pct(s.diversity.coverage10)} | ${mrr.toFixed(3)} |`);
+    const para = r.rows.filter((x) => x.family === "paraphrase");
+    const thr = (para.reduce((a, x) => a + x.threads10, 0) / para.length).toFixed(2);
+    lines.push(`| ${r.variant} | ${r.mode} | ${pct(s.token.r1)} / ${pct(s.token.r10)} | ${pct(s.latest.r1)} / ${pct(s.latest.r10)} | ${pct(s.subject.r1)} / ${pct(s.subject.r10)} | ${pct(s.paraphrase.r1)} / ${pct(s.paraphrase.r5)} / ${pct(s.paraphrase.r10)} | ${pct(s.diversity.coverage10)} | ${mrr.toFixed(3)} | ${thr} |`);
   }
   const table = lines.join("\n");
   console.log(`\n${corpus.messages.length} messages, ${corpus.queries.length} queries\n${table}\n`);
@@ -115,5 +126,5 @@ it("#813 recall at k, before and after", async () => {
     writeFileSync(`${outDir}/recall813-results.json`, JSON.stringify(results, null, 1));
     writeFileSync(`${outDir}/recall813-table.md`, table + "\n");
   }
-  expect(results.length).toBe(7);
+  expect(results.length).toBe(8);
 }, 600_000);

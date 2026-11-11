@@ -122,3 +122,28 @@ export function rankFamilies(
   }
   return out;
 }
+
+/**
+ * #926: fold hits that share a thread into the thread's FIRST (best-ranked) hit, which
+ * carries `threadHits` = the thread's other hits, in order (ids capped, count exact).
+ * Runs after `rankFamilies`, over the hits that are still top-level: a message already
+ * folded into a family's `similar` is not counted again. Input is scoped (see the head of
+ * this file), so the counts cover visible mail only.
+ */
+export function foldThreads(
+  items: readonly { id: string; thread: string }[],
+): Array<{ id: string; threadHits?: { count: number; ids: string[] } }> {
+  const firstOf = new Map<string, number>();
+  const others = new Map<string, string[]>();
+  items.forEach((it, i) => {
+    if (!firstOf.has(it.thread)) firstOf.set(it.thread, i);
+    else (others.get(it.thread) ?? others.set(it.thread, []).get(it.thread)!).push(it.id);
+  });
+  const out: Array<{ id: string; threadHits?: { count: number; ids: string[] } }> = [];
+  items.forEach((it, i) => {
+    if (firstOf.get(it.thread) !== i) return;
+    const rest = others.get(it.thread);
+    out.push(rest ? { id: it.id, threadHits: { count: rest.length, ids: rest.slice(0, SIMILAR_IDS_CAP) } } : { id: it.id });
+  });
+  return out;
+}

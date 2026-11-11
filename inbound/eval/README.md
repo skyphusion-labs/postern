@@ -41,19 +41,24 @@ EVAL_CACHE=/path/embeddings.json EVAL_OUT=/path/out npx vitest run --config eval
 
 **Metrics.** Recall at 1, 5 and 10 (strict: the gold id is a hit itself), and MRR over every single-gold query.
 
-## Result (2026-11-11, the #813 PR head)
+## Result (2026-11-11, with #926)
 
-| variant | mode | token r@1 / r@10 | latest r@1 / r@10 | subject r@1 / r@10 | paraphrase r@1 / r@5 / r@10 | diversity coverage@10 | MRR (all single-gold) |
-|---|---|---|---|---|---|---|---|
-| V0 today (body only, no tiebreak) | semantic | 85% / 100% | 0% / 50% | 32% / 56% | 35% / 70% / 78% | 44% | 0.556 |
-| V0 today (body only, no tiebreak) | hybrid | 100% / 100% | 50% / 100% | 100% / 100% | 35% / 70% / 78% | 44% | 0.771 |
-| V1 + subject in chunk 0 | semantic | 85% / 100% | 0% / 0% | 100% / 100% | 88% / 100% / 100% | 39% | 0.902 |
-| V1 + subject in chunk 0 | hybrid | 100% / 100% | 0% / 100% | 100% / 100% | 88% / 100% / 100% | 39% | 0.942 |
-| V2 + family tiebreak | semantic | 100% / 100% | 75% / 75% | 100% / 100% | 88% / 100% / 100% | 39% | 0.960 |
-| V2 + family tiebreak | hybrid | 100% / 100% | 75% / 100% | 100% / 100% | 88% / 100% / 100% | 39% | 0.962 |
-| V3 + collapse | semantic | 100% / 100% | 75% / 75% | 100% / 100% | 88% / 100% / 100% | 69% | 0.960 |
+| variant | mode | token r@1 / r@10 | latest r@1 / r@10 | subject r@1 / r@10 | paraphrase r@1 / r@5 / r@10 | diversity coverage@10 | MRR (all single-gold) | distinct threads@10, paraphrase |
+|---|---|---|---|---|---|---|---|---|
+| V0 today (body only, no tiebreak) | semantic | 85% / 100% | 0% / 50% | 32% / 56% | 35% / 70% / 78% | 44% | 0.556 | 9.25 |
+| V0 today (body only, no tiebreak) | hybrid | 100% / 100% | 50% / 100% | 100% / 100% | 35% / 70% / 78% | 44% | 0.771 | 9.25 |
+| V1 + subject in chunk 0 | semantic | 85% / 100% | 0% / 0% | 100% / 100% | 88% / 100% / 100% | 39% | 0.902 | 8.00 |
+| V1 + subject in chunk 0 | hybrid | 100% / 100% | 0% / 100% | 100% / 100% | 88% / 100% / 100% | 39% | 0.942 | 8.00 |
+| V2 + family tiebreak | semantic | 100% / 100% | 75% / 75% | 100% / 100% | 88% / 100% / 100% | 39% | 0.960 | 8.00 |
+| V2 + family tiebreak | hybrid | 100% / 100% | 75% / 100% | 100% / 100% | 88% / 100% / 100% | 39% | 0.962 | 8.00 |
+| V3 + collapse | semantic | 100% / 100% | 75% / 75% | 100% / 100% | 88% / 100% / 100% | 69% | 0.960 | 8.25 |
+| V4 + thread collapse | semantic | 100% / 100% | 75% / 75% | 100% / 100% | 88% / 100% / 100% | 69% | 0.960 | 9.75 |
 
-What ships: semantic is V3 (collapse on by default), and hybrid is V2.
+What ships: semantic is V3 (collapse on by default, `collapseThreads` off), and hybrid is V2.
+
+**#926 thread collapse (V4).** V4 against V3: every recall family is equal, and distinct threads in the top 10 for the paraphrase queries rise from 8.25 to 9.75 (today, V0: 9.25). Embedding the subject made the messages of one thread cluster; folding them recovers more than that. No recall family improved, and by the same rule as collapse a default changes only on a recall gain. So `collapseThreads` ships opt-in.
+
+The new metric is "distinct threads@10": the number of different threads among the top 10 hits, with a folded thread counted once.
 
 **Collapse default.** The lead's rule: default-on only if the collapse variant improves recall at k on the families and regresses none. V3 against V2 on semantic: diversity coverage rises from 39% to 69%, and every other family is equal. So it is on.
 

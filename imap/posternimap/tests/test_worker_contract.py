@@ -296,13 +296,14 @@ class ParityTest(unittest.TestCase):
     # the response projection, turning a precise statement into a vague one.
     NOT_A_ROW_READ = {"messages-list": {"countOnly"}}
 
-    # A FOURTH set, separate for the same reason. `collapse` (#813) acts ONLY in
-    # mode=semantic (it folds near-identical notifications into one hit), and the door
+    # A FOURTH set, separate for the same reason. `collapse` (#813) and `collapseThreads`
+    # (#926) act ONLY in
+    # mode=semantic (they fold a notification family or a thread into one hit), and the door
     # never runs a semantic search: IMAP SEARCH maps to fts and substr, which are exact
     # criteria. In those modes collapse=1 is refused and collapse=0 changes nothing, so
     # there is nothing for the door to send. Not a filter evaluated locally, not a
     # projection, not a count mode: a parameter of a mode the door does not use.
-    NOT_A_DOOR_MODE = {"search": {"collapse"}}
+    NOT_A_DOOR_MODE = {"search": {"collapse", "collapseThreads"}}
 
     def setUp(self) -> None:
         self.calls = _emitted()
@@ -373,7 +374,7 @@ class ParityTest(unittest.TestCase):
 
     def test_the_door_mode_exclusion_is_exactly_semantic_collapse(self):
         # The fourth set's own pin: it must not become a place to drop any other parameter.
-        self.assertEqual({"search": {"collapse"}}, self.NOT_A_DOOR_MODE)
+        self.assertEqual({"search": {"collapse", "collapseThreads"}}, self.NOT_A_DOOR_MODE)
 
     def test_control_the_parity_check_can_fail(self):
         self.assertNotIn("nOtApArAm", self._reachable("/api/messages"))

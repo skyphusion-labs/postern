@@ -5,7 +5,7 @@
 
 import { sha256hex, representableId } from "./ingest";
 import { EMBED_VERSION, embedChunks } from "./embedtext";
-import { queryTokens, rankFamilies, templateKey } from "./semrank";
+import { foldThreads, queryTokens, rankFamilies, templateKey } from "./semrank";
 import { PROJECTION_VERSION, projectRfc822Size } from "./rfc822Project";
 import { allowedFromDomain } from "./fromdomain";
 
@@ -214,6 +214,9 @@ export interface SearchQuery {
   /** #813, semantic mode only: fold each template family into one representative hit
    *  carrying `similar`. Absent = off. Hybrid never collapses. */
   collapse?: boolean;
+  /** #926, semantic mode only: fold the hits of one thread into its best hit, which
+   *  carries `threadHits`. Absent = off. Hybrid never folds threads. */
+  collapseThreads?: boolean;
   /** #813, INTERNAL (no API parameter sets it): `false` skips the template-family
    *  tiebreak, so the recall eval can measure the ranking as it was before #813. */
   familyRank?: boolean;
@@ -296,6 +299,10 @@ export interface SearchHit {
    *  family (near-identical mail from the same sender), best first. `ids` capped at 20,
    *  `count` exact. Absent when the hit stands alone. */
   similar?: { count: number; ids: string[] };
+  /** #926, semantic mode with collapseThreads: the OTHER visible hits of this hit's thread
+   *  (not already inside some hit's `similar`), best first. `ids` capped at 20, `count`
+   *  exact. Absent when the hit is its thread's only one. */
+  threadHits?: { count: number; ids: string[] };
 }
 
 const DEFAULT_LIMIT = 50;
@@ -3166,6 +3173,7 @@ function hasPostRetrievalFilter(q: SearchQuery): boolean {
       // #813: the family tiebreak and collapse act after retrieval, so they need the same
       // headroom: a family's newest member often ranks below the top `limit` by cosine.
       q.collapse ||
+      q.collapseThreads ||
       (q.mode === "semantic" && q.familyRank !== false),
   );
 }
@@ -3297,7 +3305,9 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   }
   // #813: near-ties inside a template family reorder by query-token overlap, then newest;
   // with collapse, each family folds into one hit. Runs on SCOPED items only (see semrank).
-  const ranked2 = q.familyRank === false ? items : await rankSemanticFamilies(env, items, q);
+  const ranked1 = q.familyRank === false ? items : await rankSemanticFamilies(env, items, q);
+  // #926: thread fold over what is still top-level (scoped hits only, like the families).
+  const ranked2 = q.collapseThreads === true ? foldThreadHits(ranked1) : ranked1;
   // Slice AFTER filtering, so `limit` bounds the ANSWER rather than the candidate pool.
   const page = ranked2.slice(0, limit);
   // A vector index has no offset, so there is no continuation to hand back either way. What
@@ -3314,6 +3324,15 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
       "more matching messages were retrieved than `limit` allows, and a score-ranked mode has no cursor to resume from: raise limit or narrow the query";
   }
   return out;
+}
+
+/** #926: fold scoped hits of one thread into its first (best) hit. */
+function foldThreadHits(items: SearchHit[]): SearchHit[] {
+  const byId = new Map(items.map((h) => [h.message.messageId, h]));
+  return foldThreads(items.map((h) => ({ id: h.message.messageId, thread: h.message.threadId || h.message.messageId }))).map((r) => {
+    const hit = byId.get(r.id) as SearchHit;
+    return r.threadHits ? { ...hit, threadHits: r.threadHits } : hit;
+  });
 }
 
 /** #813: the template-family tiebreak (and collapse) over scoped semantic hits. Bodies are
@@ -3383,7 +3402,7 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const [ftsPage, semPage] = await Promise.all([
     ftsSearch(env, { ...shared, mode: "fts" }),
     // #813: hybrid stays one row per message, so its semantic half never collapses.
-    semanticSearch(env, { ...shared, mode: "semantic", collapse: false }),
+    semanticSearch(env, { ...shared, mode: "semantic", collapse: false, collapseThreads: false }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();

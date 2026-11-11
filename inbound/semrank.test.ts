@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { templateKey, queryTokens, overlap, rankFamilies, NEAR_TIE, SIMILAR_IDS_CAP, type RankInput } from "./src/semrank";
+import { templateKey, queryTokens, overlap, rankFamilies, foldThreads, NEAR_TIE, SIMILAR_IDS_CAP, type RankInput } from "./src/semrank";
 import { embedChunks, EMBED_VERSION, SUBJECT_CAP, CHUNK_SIZE } from "./src/embedtext";
 
 // #813: the pure halves, so the recall eval and the store run the same code.
@@ -97,5 +97,20 @@ describe("#813 embedChunks: the embed recipe", () => {
   it("the subject is whitespace-normalized and capped", () => {
     expect(embedChunks("  a\n\tb  ", "body")[0]).toBe("Subject: a b\n\nbody");
     expect(embedChunks("s".repeat(500), "body")[0]).toBe(`Subject: ${"s".repeat(SUBJECT_CAP)}\n\nbody`);
+  });
+});
+
+describe("#926 foldThreads", () => {
+  it("keeps each thread's first hit in place with the rest in threadHits; single-hit threads untouched", () => {
+    const out = foldThreads([
+      { id: "a1", thread: "A" }, { id: "b1", thread: "B" }, { id: "a2", thread: "A" }, { id: "c1", thread: "C" }, { id: "a3", thread: "A" },
+    ]);
+    expect(out).toEqual([{ id: "a1", threadHits: { count: 2, ids: ["a2", "a3"] } }, { id: "b1" }, { id: "c1" }]);
+  });
+  it("caps ids, counts exactly", () => {
+    const out = foldThreads(Array.from({ length: 30 }, (_, i) => ({ id: `m${i}`, thread: "T" })));
+    expect(out).toHaveLength(1);
+    expect(out[0].threadHits?.count).toBe(29);
+    expect(out[0].threadHits?.ids).toHaveLength(SIMILAR_IDS_CAP);
   });
 });
