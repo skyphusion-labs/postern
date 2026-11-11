@@ -11,7 +11,14 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
-## Unreleased
+## v1.10.1
+
+PATCH. Fixes across inbound, the installer and CI. Upgrade to pick them up; no config change
+is needed.
+
+**Upgrade.** Migration `0018` (adds `messages.claimed_id`) is additive and is applied by the
+deploy. A self-hosted install picks up the installer changes the next time it runs
+`node deploy/postern.mjs`.
 
 ### Fixed
 
@@ -76,6 +83,17 @@ mismatched MCP tag fails before it publishes.
   When a bound identity or session sends with In-Reply-To or
   References, the parent is looked up among messages it can read; any
   other id starts a new thread, as an unknown id does.
+
+### Changed
+
+- **Installer inputs are checked strictly (#873).** `--hostname` must be a plain hostname
+  under the domain, a second run waits on a per-install lock, an interrupted run leaves no
+  secrets file behind, and the documented token no longer asks for Email Routing Addresses.
+- **Uninstall removes the `_dmarc` record that install created (#863)**, and only if it is
+  unchanged since; an existing DMARC record is never touched.
+- **CI:** every GitHub Action is pinned to a full commit sha (#868); the production deploy
+  job runs in the `production` environment (#885); the one-off unscoped-package deprecation
+  workflow is removed (#883).
 
 ## v1.10.0
 
