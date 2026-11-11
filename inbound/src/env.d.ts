@@ -279,6 +279,17 @@ interface Env {
   WEBMAIL_SESSION_IDLE_SECONDS?: string;
   /** Session absolute lifetime cap in seconds. Default 43200 (12 h). Config var. */
   WEBMAIL_SESSION_ABSOLUTE_SECONDS?: string;
+  /**
+   * Test-only PBKDF2 iteration override (#909). Production configs must not set
+   * this. Unset, empty, or not an integer from 1 to 100000, new hashes use
+   * 100000 (the Workers cap). The vitest suite sets it so sign-in tests stay
+   * inside the default 5000ms timeout. Honored only when the vitest setup
+   * marker is present; otherwise hashing ignores it. The tagged deploy and the
+   * installer refuse if the name appears in wrangler vars or Worker secrets.
+   * Not a secret and not an operator tuning knob: a lower count weakens every
+   * stored password.
+   */
+  POSTERN_TEST_PBKDF2_ITERATIONS?: string;
 
   // --- Session-mint brute-force throttle (#409; inbound/src/auththrottle.ts) ---
   /**

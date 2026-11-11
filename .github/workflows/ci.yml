@@ -249,6 +249,8 @@ jobs:
         run: bash .github/scripts/tests/check-dead-topology-prose.test.sh
       - name: forwarding preflight verdict logic (#611)
         run: bash .github/scripts/tests/forwarding-preflight.test.sh
+      - name: test-only PBKDF2 override deploy gate (#909)
+        run: bash .github/scripts/tests/test-only-var-preflight.test.sh
       - name: post-deploy principals backfill verdict logic (#901)
         run: bash .github/scripts/tests/principals-backfill.test.sh
       - name: relay Go pin skew detection (#704)

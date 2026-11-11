@@ -19,6 +19,7 @@ import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readdi
 import { join } from "node:path";
 import { CfError } from "./cf.mjs";
 import { renderConfig } from "./config.mjs";
+import { testOnlyVarRefusal } from "./test-only-var.mjs";
 
 export const EXIT = { OK: 0, FAILED: 1, USAGE: 2, REFUSED: 3 };
 
@@ -263,6 +264,14 @@ async function preflight(ctx) {
   const cfgBad = configRefusals({ ...opts, vars: { ...(state.vars || {}), ...(opts.vars || {}) } });
   if (cfgBad.length) throw new Refused(cfgBad);
 
+  // #909: the rendered config is what wrangler deploy will ship. Catch the
+  // test-only hashing override here, before any API write, whether it arrived
+  // as --var, persisted state, or the inbound template.
+  const mergedVars = { ...(state.vars || {}), ...(opts.vars || {}) };
+  const rendered = renderConfig({ repoRoot: ctx.repoRoot, state: { ...state, vars: mergedVars }, opts });
+  const varHit = testOnlyVarRefusal(rendered.vars, []);
+  if (varHit) throw new Refused([varHit]);
+
   let zones;
   try {
     zones = await cf.list("look up the zone", P.zone, `/zones?name=${encodeURIComponent(opts.domain)}`);
@@ -375,6 +384,17 @@ async function preflight(ctx) {
   const adoptable = [];
   const script = await cf.call("read the Worker", P.workers, "GET", `/accounts/${a}/workers/scripts/${opts.name}/settings`, undefined, { allow404: true });
   if (script && !state.owned.worker) adoptable.push(`a Worker named "${opts.name}"`);
+  // #909: secrets persist across deploys. A test-only hashing override put with
+  // `wrangler secret put` would survive a clean config, so list names and refuse.
+  let secretsBody;
+  try {
+    secretsBody = await cf.call("list the Worker secrets", P.workers, "GET", `/accounts/${a}/workers/scripts/${opts.name}/secrets`, undefined, { allow404: true });
+  } catch (e) {
+    if (e instanceof CfError) refusals.push(e.message);
+    else throw e;
+  }
+  const secretHit = testOnlyVarRefusal({}, secretsBody?.result || []);
+  if (secretHit) refusals.push(secretHit);
   const dbs = await cf.list("list D1 databases", P.d1, `/accounts/${a}/d1/database?name=${encodeURIComponent(opts.d1Name)}`);
   const db = dbs.find((d) => d.name === opts.d1Name);
   if (db && !state.owned.d1) adoptable.push(`a D1 database named "${opts.d1Name}"`);

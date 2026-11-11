@@ -8,6 +8,7 @@ import {
   PBKDF2_ITERATIONS,
   PBKDF2_TARGET_HASH,
   PBKDF2_TARGET_TAG,
+  pbkdf2Iterations,
   verifySecret,
 } from "./src/smtpcreds";
 import { realEnv } from "./realdb";
@@ -62,9 +63,9 @@ describe("#828 the target is PBKDF2-HMAC-SHA512 at the cap", () => {
     expect(PBKDF2_ITERATIONS).toBeLessThanOrEqual(CAP);
   });
 
-  it("hashSecret writes pbkdf2-sha512$100000$, a 16-byte salt and a 64-byte output", async () => {
+  it("hashSecret writes pbkdf2-sha512 at the active target, a 16-byte salt and a 64-byte output", async () => {
     const [tag, iters, salt, out] = (await hashSecret(PASSWORD)).split("$");
-    expect([tag, iters]).toEqual(["pbkdf2-sha512", "100000"]);
+    expect([tag, iters]).toEqual(["pbkdf2-sha512", String(pbkdf2Iterations())]);
     expect(unb64(salt).length).toBe(16);
     expect(unb64(out).length).toBe(64);
   });
@@ -72,16 +73,17 @@ describe("#828 the target is PBKDF2-HMAC-SHA512 at the cap", () => {
   it("the stored bytes ARE SHA-512 (independent derivation), and NOT SHA-256 (control)", async () => {
     const [, , saltB64, outB64] = (await hashSecret(PASSWORD)).split("$");
     const salt = unb64(saltB64);
-    expect(b64(await derive(PASSWORD, salt, CAP, "SHA-512", 512))).toBe(outB64);
+    const count = pbkdf2Iterations();
+    expect(b64(await derive(PASSWORD, salt, count, "SHA-512", 512))).toBe(outB64);
     // The same instrument on the other PRF must disagree, so the match above discriminates.
-    const sha256 = await derive(PASSWORD, salt, CAP, "SHA-256", 512);
+    const sha256 = await derive(PASSWORD, salt, count, "SHA-256", 512);
     expect(b64(sha256)).not.toBe(outB64);
   });
 });
 
 describe("#828 legacy SHA-256 rows keep verifying and are upgraded on sign-in", () => {
   it("a legacy row verifies at its own KDF", async () => {
-    const legacy = await legacyRow(PASSWORD, CAP);
+    const legacy = await legacyRow(PASSWORD, pbkdf2Iterations());
     expect(hashPrf(legacy)).toBe("SHA-256");
     expect(await verifySecret(PASSWORD, legacy)).toBe(true);
     expect(await verifySecret("not-the-password", legacy)).toBe(false);
@@ -90,25 +92,27 @@ describe("#828 legacy SHA-256 rows keep verifying and are upgraded on sign-in", 
   it("a legacy row AT the target count is re-hashed to SHA-512 on a successful sign-in", async () => {
     // The pre-#828 rule upgraded only a LOWER count, so this row would have stayed SHA-256.
     const s = setup();
-    s.seed(await legacyRow(PASSWORD, CAP));
+    const count = pbkdf2Iterations();
+    s.seed(await legacyRow(PASSWORD, count));
     expect((await s.signIn()).status).toBe(200);
     const after = s.stored();
-    expect(after.startsWith("pbkdf2-sha512$100000$")).toBe(true);
+    expect(after.startsWith("pbkdf2-sha512$" + count + "$")).toBe(true);
     expect(hashPrf(after)).toBe("SHA-512");
     expect((await s.signIn()).status).toBe(200); // same password, new hash
   });
 
   it("a legacy row at a lower count is re-hashed to SHA-512 at the target, never above", async () => {
     const s = setup();
-    s.seed(await legacyRow(PASSWORD, 1000));
+    s.seed(await legacyRow(PASSWORD, 1));
     expect((await s.signIn()).status).toBe(200);
-    expect(hashIterations(s.stored())).toBe(CAP);
+    expect(hashIterations(s.stored())).toBe(pbkdf2Iterations());
+    expect(hashIterations(s.stored())).toBeLessThanOrEqual(CAP);
     expect(hashPrf(s.stored())).toBe("SHA-512");
   });
 
   it("a failed sign-in never rewrites a legacy row", async () => {
     const s = setup();
-    const legacy = await legacyRow(PASSWORD, CAP);
+    const legacy = await legacyRow(PASSWORD, pbkdf2Iterations());
     s.seed(legacy);
     expect((await s.signIn("wrong-password-xyz")).status).toBe(401);
     expect(s.stored()).toBe(legacy);
@@ -124,7 +128,7 @@ describe("#828 legacy SHA-256 rows keep verifying and are upgraded on sign-in", 
 
   it("the upgrade is compare-and-set: a reset that lands mid-sign-in wins", async () => {
     const s = setup();
-    const legacy = await legacyRow(PASSWORD, CAP);
+    const legacy = await legacyRow(PASSWORD, pbkdf2Iterations());
     s.seed(legacy);
     const reset = await hashSecret("an-operator-reset-pw");
     // Land the reset right after the sign-in has READ the row, before the upgrade writes.
@@ -150,11 +154,11 @@ describe("#828 legacy SHA-256 rows keep verifying and are upgraded on sign-in", 
   });
 
   it("needsRehash: any KDF other than the target, or a lower count; never a malformed row", async () => {
-    expect(needsRehash(await legacyRow(PASSWORD, CAP))).toBe(true);
-    expect(needsRehash(await legacyRow(PASSWORD, 1000))).toBe(true);
+    expect(needsRehash(await legacyRow(PASSWORD, pbkdf2Iterations()))).toBe(true);
+    expect(needsRehash(await legacyRow(PASSWORD, 1))).toBe(true);
     expect(needsRehash(await hashSecret(PASSWORD))).toBe(false);
     const [, , salt, out] = (await hashSecret(PASSWORD)).split("$");
-    expect(needsRehash(["pbkdf2-sha512", "1000", salt, out].join("$"))).toBe(true);
+    expect(needsRehash(["pbkdf2-sha512", "1", salt, out].join("$"))).toBe(true);
     for (const bad of ["", "pbkdf2", "pbkdf2-sha1$100000$AA==$AA==", "pbkdf2-sha512$x$AA==$AA=="]) {
       expect(needsRehash(bad), bad).toBe(false);
     }
@@ -164,12 +168,12 @@ describe("#828 legacy SHA-256 rows keep verifying and are upgraded on sign-in", 
 describe("#828 malformed rows fail closed and never throw", () => {
   it("an unknown tag, or an output the wrong length for its tag, never verifies", async () => {
     const [, , salt, out64] = (await hashSecret(PASSWORD)).split("$");
-    const legacy = (await legacyRow(PASSWORD, CAP)).split("$");
+    const legacy = (await legacyRow(PASSWORD, pbkdf2Iterations())).split("$");
     // A 64-byte SHA-512 output re-tagged as legacy, and a 32-byte SHA-256 output re-tagged
     // as SHA-512: both carry real bytes for the right password, so only the tag rule refuses.
-    expect(await verifySecret(PASSWORD, ["pbkdf2", "100000", salt, out64].join("$"))).toBe(false);
+    expect(await verifySecret(PASSWORD, ["pbkdf2", "1", salt, out64].join("$"))).toBe(false);
     expect(await verifySecret(PASSWORD, ["pbkdf2-sha512", legacy[1], legacy[2], legacy[3]].join("$"))).toBe(false);
-    expect(await verifySecret(PASSWORD, ["pbkdf2-sha1", "100000", salt, out64].join("$"))).toBe(false);
+    expect(await verifySecret(PASSWORD, ["pbkdf2-sha1", "1", salt, out64].join("$"))).toBe(false);
     expect(await verifySecret(PASSWORD, "garbage")).toBe(false);
   });
 
@@ -186,7 +190,7 @@ describe("#828 malformed rows fail closed and never throw", () => {
 });
 
 describe("#828 timing: the dummy hash is at the new target", () => {
-  it("an unknown user costs the same derive (SHA-512 at the cap) as a wrong password on a current row", async () => {
+  it("an unknown user costs the same derive (SHA-512 at the active target) as a wrong password on a current row", async () => {
     const s = setup();
     s.seed(await hashSecret(PASSWORD));
     const proto = Object.getPrototypeOf(crypto.subtle) as { deriveBits: (...a: unknown[]) => Promise<ArrayBuffer> };
@@ -201,7 +205,7 @@ describe("#828 timing: the dummy hash is at the new target", () => {
       spy.mockClear();
       expect((await s.signIn("wrong-password-xyz")).status).toBe(401);
       const wrong = work();
-      expect(wrong).toEqual([["SHA-512", CAP, 512]]);
+      expect(wrong).toEqual([["SHA-512", pbkdf2Iterations(), 512]]);
       expect(unknown).toEqual(wrong);
     } finally {
       spy.mockRestore();

@@ -624,7 +624,7 @@ async function handleChangePassword(request: Request, env: Env, url: URL, rawId:
   let ok: boolean;
   try {
     cred = await lookup(env, resolved.username);
-    ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash, cred.username) : false;
+    ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash, cred.username, env) : false;
   } catch (err) {
     await releaseAttempt(env, gate).catch(() => {});
     throw err;
@@ -642,7 +642,7 @@ async function handleChangePassword(request: Request, env: Env, url: URL, rawId:
   } catch {
     return unavailable();
   }
-  const changed = await setPassword(env, cred.username, await hashSecret(next), new Date().toISOString(), cred.secretHash);
+  const changed = await setPassword(env, cred.username, await hashSecret(next, env), new Date().toISOString(), cred.secretHash);
   if (!changed) {
     // An operator reset landed between our verify and our write: theirs wins.
     return sjson({ ok: false, error: "E_AUTH_FAILED" }, 401);

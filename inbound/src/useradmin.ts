@@ -222,7 +222,7 @@ async function create(request: Request, env: Env): Promise<Response> {
   const { username, fromAddr, displayName: name, password: chosen } = parseNewUser(env, body, false);
   const password = chosen ?? generateSecret();
 
-  const created = await createUser(env, { username, fromAddr, displayName: name }, await hashSecret(password), now());
+  const created = await createUser(env, { username, fromAddr, displayName: name }, await hashSecret(password, env), now());
   if (!created) throw new AdminError(409, "E_CONFLICT", "a user with that username already exists", "username");
   const user = await getUser(env, username);
   const out: Record<string, unknown> = { ok: true, user };
@@ -260,7 +260,7 @@ async function resetPassword(request: Request, env: Env, username: string): Prom
   const before = await lookup(env, username);
   if (!before) throw notFound();
   const password = chosen ?? generateSecret();
-  if (!(await setPassword(env, username, await hashSecret(password), now()))) throw notFound();
+  if (!(await setPassword(env, username, await hashSecret(password, env), now()))) throw notFound();
   const sessionsEnded = await endUserSessions(env, username, before.fromAddr);
   // "I am locked out" has an operator fix: clear the ACCOUNT lockout only, never an IP row.
   await env.DB.prepare("DELETE FROM webmail_auth_failures WHERE scope_key = ?").bind("a:" + username).run();
@@ -301,7 +301,7 @@ export async function handleCredentialUpsert(request: Request, env: Env): Promis
     }
     if (!chosen) chosen = generateSecret();
     const before = await lookup(env, username);
-    await upsert(env, username, fromAddr, await hashSecret(chosen), now());
+    await upsert(env, username, fromAddr, await hashSecret(chosen, env), now());
     if (before) await endUserSessions(env, username, before.fromAddr);
     return json({ ok: true, username, from: fromAddr, secret: chosen });
   } catch (err) {
