@@ -77,6 +77,8 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   // #740 S1 adds delegation grants at `admin`, same deliberate-act rule.
   if ((method === "GET" || method === "POST") && path === "/api/admin/delegations") return "admin";
   if (method === "DELETE" && /^\/api\/admin\/delegations\/.+$/.test(path)) return "admin";
+  // #854 M1 adds the principal backfill at `admin`, POST only.
+  if (method === "POST" && path === "/api/admin/principals/backfill") return "admin";
   if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
   // #650 adds GET /api/whoami at `read` scope (the Bearer-reachable self-identity call).
   if (method === "GET" && path === "/api/whoami") return "read";
@@ -107,6 +109,7 @@ const CORPUS = [
   "/api/admin/identities", "/api/admin/identities/", "/api/admin/identities/idn_0123", "/api/admin/identitiesx",
   "/api/admin/audit", "/api/admin/auditx",
   "/api/admin/delegations", "/api/admin/delegations/", "/api/admin/delegations/dlg_0123", "/api/admin/delegationsx",
+  "/api/admin/principals/backfill", "/api/admin/principals", "/api/admin/principals/backfillx",
   "/api/identities", "/api/identities/idn_0123",
   // Pre-gate rows: they never reach the gate, and the table says so.
   "/health", "/", "/robots.txt", "/sitemap.xml", "/webmail", "/.well-known/mta-sts.txt", "/api/smtp-auth", "/api/session",

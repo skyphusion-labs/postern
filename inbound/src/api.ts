@@ -51,7 +51,8 @@ import {
   type AgentDelegations,
 } from "./delegations";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
-import { agentAudit, agentMessageAudit } from "./adminkit";
+import { agentAudit, agentMessageAudit, auditStatement } from "./adminkit";
+import { backfillPrincipals } from "./principals";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
 // be an if-chain further down this file, which is precisely the knowledge every client
@@ -447,6 +448,24 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (path === "/api/admin/audit") {
       const ares = await handleAudit(request, env, url);
       if (ares) return ares;
+    }
+    // #854 M1: the principal backfill. Operator only, POST only (its one route row).
+    if (request.method === "POST" && path === "/api/admin/principals/backfill") {
+      const report = await backfillPrincipals(env);
+      await auditStatement(env, new Date().toISOString(), {
+        action: "principals.backfill",
+        outcome: "ok",
+        detail: {
+          services: report.services.added,
+          agentsAdded: report.agents.added,
+          agentsSynced: report.agents.synced,
+          humansAdded: report.humans.added,
+          humansSynced: report.humans.synced,
+          orphansRevoked: report.humans.orphansRevoked,
+          addressConflicts: report.addressConflicts.length,
+        },
+      }).run();
+      return json({ ok: true, ...report });
     }
 
     // --- admin: human user management (#790, contract 1.10.4) ---
