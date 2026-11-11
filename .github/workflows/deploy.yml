@@ -31,7 +31,7 @@ name: deploy
 # to push-to-main (never a fork PR) and runs on the fork-safe hosted runner
 # (matches ci.yml and the GitHub-hosted policy for public repos).
 #
-# Required repo secrets (Settings -> Secrets and variables -> Actions):
+# Required ENVIRONMENT secrets (Settings -> Environments -> production):
 #   CLOUDFLARE_API_TOKEN   -- CF API token, Workers Scripts:Edit on the account
 #                             (plus D1 + Vectorize + R2 edit for the inbound store).
 #   CLOUDFLARE_ACCOUNT_ID  -- the Cloudflare account ID.
@@ -124,6 +124,11 @@ jobs:
     name: Deploy workers to Cloudflare
     needs: preflight
     runs-on: ubuntu-latest
+    # The Cloudflare deploy credentials (CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID,
+    # POSTERN_INBOUND_WRANGLER) live in the GitHub Environment `production`, whose
+    # deployment policy admits only v* tags and main. A job outside that environment
+    # cannot read them. The POSTERN_SMOKE_* secrets stay repository secrets.
+    environment: production
     timeout-minutes: 20
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

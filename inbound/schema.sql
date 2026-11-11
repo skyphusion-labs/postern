@@ -69,7 +69,12 @@ CREATE TABLE IF NOT EXISTS messages (
   flagged     INTEGER NOT NULL DEFAULT 0,
   answered    INTEGER NOT NULL DEFAULT 0,
   mailbox     TEXT,
-  trashed_at  TEXT
+  trashed_at  TEXT,
+  -- Migration 0018. The Message-ID this row arrived with, set only when a DIFFERENT
+  -- message already held it and this row was stored under a derived id (store.put).
+  -- store.resolveThreadId prefers a trusted message for an id among the holder and
+  -- these claimants.
+  claimed_id  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_from ON messages(from_addr);
@@ -77,6 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_date ON messages(date);
 CREATE INDEX IF NOT EXISTS idx_trusted ON messages(trusted, received_at);
 CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
 CREATE INDEX IF NOT EXISTS idx_messages_mailbox ON messages(mailbox);
+CREATE INDEX IF NOT EXISTS idx_claimed_id ON messages(claimed_id) WHERE claimed_id IS NOT NULL;
 
 -- Attachments: bytes stored in R2 (ATTACHMENTS bucket), metadata + key here.
 CREATE TABLE IF NOT EXISTS attachments (
