@@ -80,6 +80,11 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Fixed
 
+- **Attachment download.** `postern attachment` without `-o` writes only the
+  final path segment of the remote name, refuses an empty or hidden name, and
+  does not replace a file that already exists. `-o` still writes the path you
+  name.
+
 - **Submission deadlines.** The submission listener has a read timeout and a
   write timeout (default 5 minutes each). The read timeout is an idle limit,
   refreshed on each read. Open connections are capped globally
