@@ -27,6 +27,9 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **Door throttle key.** The throttle key is canonicalized like the Worker's:
+  the ECMAScript trim set, then lower-case. In system (PAM) mode the key is
+  the local part before `@`. native and ldap keep the whole trimmed name.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
@@ -67,9 +70,6 @@ deploy. A self-hosted install picks up the installer changes the next time it ru
 
 ### Fixed
 
-- **Door throttle key.** IMAP and submission now trim and lower-case a username
-  the way the worker does. In system (PAM) mode the key is the local part
-  before `@`, which is the account PAM checks.
 - **The reply and forward quote follows the caller's read scope.** A
   static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
   quotes or forwards a stored message: the source is not found, as on the
