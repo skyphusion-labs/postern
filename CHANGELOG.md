@@ -35,6 +35,11 @@ upgrading to copy existing identities and users in; it is safe to run again.
   the send is refused with `422 E_SEND_AS_UNSUPPORTED`, never sent
   without one (Cloudflare feature request: #896). The relay `/dispatch`
   body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
+- **Webmail: agent access to your mail, and activity on it (#740 S5).**
+  Signed in with a session, a person sees in Settings which agents may act
+  on their own address and what each may do, gives or removes that access,
+  and reads the audit rows about their address. Not offered in token
+  mode; hidden on a server without the routes.
 
 ### Changed
 
