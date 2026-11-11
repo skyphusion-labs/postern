@@ -19,6 +19,9 @@ class RelayError extends Error {
 }
 
 export class RelayTransport implements Transport {
+  // The relay renders the MIME itself and writes `Sender:` from msg.sender
+  // (relay/smtp_transport.go renderMIME).
+  readonly canSetSender = true;
   private readonly url: string;
   private readonly token: string;
 

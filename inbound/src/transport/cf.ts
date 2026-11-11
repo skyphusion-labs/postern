@@ -17,9 +17,18 @@ function base64ToBytes(b64: string): Uint8Array {
 }
 
 export class CfEmailTransport implements Transport {
+  // Cloudflare Email Sending has no `sender` field, and `Sender` is not on its header
+  // allowlist (a disallowed header rejects the whole send): it cannot set one.
+  // Measured against the Email Service headers reference, 2026-11-09.
+  readonly canSetSender = false;
   constructor(private readonly env: Env) {}
 
   async dispatch(msg: OutboundMessage): Promise<DispatchResult> {
+    // Defense in depth: the mailbox refuses send_as before it gets here. A Sender this
+    // transport would drop must never be dropped silently.
+    if (msg.sender) {
+      throw Object.assign(new Error("this transport cannot set a Sender header"), { code: "E_SEND_AS_UNSUPPORTED" });
+    }
     // BCC is envelope-only: include it as a recipient, never as a header (the
     // mailbox builds headers without bcc). cc IS a visible header on CF send.
     const message: SendEmailMessage = {

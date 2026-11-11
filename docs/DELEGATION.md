@@ -4,7 +4,8 @@
 > the contract for what is SHIPPED and the plan for what is not. Slice S1 is the grant
 > STORE and its operator routes. Slice S2 enforces the `read` and `organize` powers and
 > adds the `AGENT_READ_SCOPE` operator flag (section 4). Slice S3 enforces `quote`
-> (section 4.4). `send_as` is stored but not enforced yet (S4).
+> (section 4.4). Slice S4 enforces `send_as` (section 4.5), on a transport that can set
+> the `Sender:` header only.
 
 ## 1. Why
 
@@ -38,7 +39,7 @@ one human address, and how.
 | `read` | read the address's mail when the operator has set `AGENT_READ_SCOPE=granted` (Conrad's Q1 ruling) | S2, shipped |
 | `organize` | mark read, flags and move on the address's mail, each write audited | S2, shipped |
 | `quote` | reply to, quote and forward the address's mail, each quote audited before it is sent | S3, shipped |
-| `send_as` | send with the address as From | S4 |
+| `send_as` | send with the address as From (the agent named as Sender), each send audited before dispatch; needs a Sender-capable transport | S4, shipped |
 
 **Every power implies `read`.** Filing, quoting or sending as mail you cannot read means
 nothing, so a grant of `["organize"]` is stored, returned and audited as
@@ -165,7 +166,39 @@ and thread. A quote of the caller's own mail writes no row.
 so it cannot share a batch with the row. The row is written first; if the dispatch then
 fails, the row stays.
 
-### 4.5 Known limits of S2 and S3
+### 4.5 The `send_as` power (S4)
+
+An agent holding an active `send_as` grant sends as the human by naming the address as
+`from` on `POST /api/send`, `/send` or `POST /api/reply` (Conrad's S4 ruling, RFC 5322
+as designed):
+
+| header | value |
+|---|---|
+| `From:` | the granted address, with the HUMAN's display name (from their account). The caller does not choose this name. |
+| `Sender:` | the agent identity's own address and display name: who actually sent it. A client that shows "on behalf of" is honest about it. |
+| `Reply-To:` | the human. A caller `replyTo` is accepted only if it is the granted address (`400` otherwise). |
+
+The send response reports both: `from` is the human and `sender` is the agent (#847's
+`from` field, plus `sender`, present only on a send_as send). A draft send takes no
+caller `from`, so it always goes out as the identity itself. Without the grant, a `from`
+naming another address is overridden by the identity's own, as before.
+
+**Each send_as send is audited BEFORE dispatch**, fail closed: one `audit_log` row,
+action `delegation.send_as`, `actor_kind` `agent`, `actor_id` the grantee's identity id,
+`target_kind` `address`, `target_id` the granted address, `detail` `{op: "send" | "reply"}`.
+If that insert fails, nothing is sent. As with `quote`, the row records an attempt.
+
+**send_as needs a transport that can set the `Sender:` header.** The default Cloudflare
+Email Sending transport cannot: it has no `sender` field, and `Sender` is not on its
+header allowlist, which rejects the whole send rather than drop the header (measured
+against the Email Service headers reference, 2026-11-09). So on that transport a send_as
+send is refused, before the audit row and before any dispatch, with
+`422 E_SEND_AS_UNSUPPORTED` and a message that says why. It is never sent without a
+Sender and never silently sent as the agent instead (Conrad's ruling, fail closed). The
+SMTP relay transport (`OUTBOUND_TRANSPORT=relay`) writes `Sender:` and supports it.
+Cloudflare support for `Sender` on the allowlist is a feature request (#896).
+
+### 4.6 Known limits of S2 to S4
 
 - **A refusal at the scope gate is not audited** (section 3 says the same for the
   operator routes). A `403` from the gate (a token without `organize`) never reaches a
@@ -179,8 +212,6 @@ fails, the row stays.
 
 ## 5. What is not built yet (the plan)
 
-- **S4, `send_as`:** the send From may be an address the agent holds `send_as` on, and
-  the send response reports the From it actually used (#847).
 - **S5:** a human reads their own audit log and makes and revokes grants on their own
   address from webmail. That is what makes the trail a product feature rather than an
   operator log.
@@ -202,5 +233,5 @@ fails, the row stays.
 | Store + routes | `inbound/src/delegations.ts`, `inbound/migrations/0017_delegation_grants.sql` |
 | Shared admin plumbing + audit writer | `inbound/src/adminkit.ts` |
 | S2 enforcement | `inbound/src/api.ts` (`agentEstateRead`, `readAccessScope`, `delegatedView`, `organizeWriteScope`), `inbound/src/store.ts` (`OrganizeAudit`) |
-| Tests | `inbound/delegations.test.ts`, `inbound/delegated-read.test.ts`, `inbound/delegated-organize.test.ts`, `inbound/delegated-quote.test.ts`, `deploy/test/installer.test.mjs` |
+| Tests | `inbound/delegations.test.ts`, `inbound/delegated-read.test.ts`, `inbound/delegated-organize.test.ts`, `inbound/delegated-quote.test.ts`, `inbound/delegated-send-as.test.ts`, `relay/sender_dispatch_test.go`, `deploy/test/installer.test.mjs` |
 | Route rows | `inbound/src/routes.ts` (`admin-delegations-*`), `contracts/api-routes.json` |
