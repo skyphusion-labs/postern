@@ -5,6 +5,7 @@
 //   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs upgrade --domain example.com
 //   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs rollback --domain example.com [--restore-db]
 //   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs routing --domain example.com
+//   CLOUDFLARE_API_TOKEN=... node deploy/postern.mjs uninstall --domain example.com [--delete-data --confirm-delete example.com]
 //
 // Add --dry-run to any command to see what it would change and change nothing.
 // The full guide, the token permissions, and every refusal are in DEPLOY.md.
@@ -14,10 +15,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CfError, cfClient } from "./lib/cf.mjs";
-import { EXIT, Refused, install, rollback } from "./lib/installer.mjs";
+import { EXIT, Refused, install, rollback, uninstall } from "./lib/installer.mjs";
 import { checkRouting, formatRoutingReport } from "./lib/routing.mjs";
 
-const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|routing> --domain <domain> [options]
+const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|routing|uninstall> --domain <domain> [options]
 
   status is a read-only report: what exists, what install or upgrade would change. It
   starts with the routing report.
@@ -25,10 +26,13 @@ const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|r
   every address that does NOT reach the Worker. Exit 0 when every address reaches it,
   1 when one does not (or a reading could not be made), 3 when the token cannot read it.
   Token: Zone Read, Email Routing Rules Read, Zone Settings Read.
+  uninstall removes what this installer recorded creating. It keeps your mail (D1, R2)
+  unless you pass --delete-data --confirm-delete <domain>, and it never turns Email
+  Routing off (that deletes the zone's MX, SPF and DKIM records).
 
   --domain <d>        the domain Postern receives and sends for (required)
-  --hostname <h>      where the API and webmail answer (default mail.<domain>)
-  --admin <address>   the first admin login (default admin@<domain>)
+  --hostname <h>      where the API and webmail answer (default mail.<domain>; a re-run keeps the recorded one)
+  --admin <address>   the first admin login (default admin@<domain>; a re-run keeps the recorded one)
   --name <n>          Worker name (default postern); also names D1 and R2
   --prefix <p>        put <p> in front of the Worker, D1 and R2 names (e.g. a test prefix)
   --var KEY=VALUE     set a Worker var; remembered for later upgrades (repeatable)
@@ -36,13 +40,15 @@ const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|r
   --state-dir <dir>   where the install state lives (default ./.postern)
   --adopt             manage a same-named Worker / D1 / R2 this installer did not create
   --restore-db        (rollback) also restore D1 to the pre-upgrade bookmark
+  --delete-data       (uninstall) also delete D1 and R2; D1 is exported to a file first
+  --confirm-delete <d> (uninstall) required with --delete-data: the domain, typed out
   --dry-run           print the plan; change nothing
 
 The Cloudflare API token is read from CLOUDFLARE_API_TOKEN and is never printed.`;
 
 export function parseArgs(argv) {
   const [cmd, ...rest] = argv;
-  const o = { cmd, vars: {}, adopt: false, dryRun: false, restoreDb: false };
+  const o = { cmd, vars: {}, adopt: false, dryRun: false, restoreDb: false, deleteData: false };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     const val = () => {
@@ -65,12 +71,17 @@ export function parseArgs(argv) {
     } else if (a === "--adopt") o.adopt = true;
     else if (a === "--dry-run") o.dryRun = true;
     else if (a === "--restore-db") o.restoreDb = true;
+    else if (a === "--delete-data") o.deleteData = true;
+    else if (a === "--confirm-delete") o.confirmDelete = val().toLowerCase();
     else throw new Error(`unknown option ${a}`);
   }
-  if (!["install", "upgrade", "status", "rollback", "routing"].includes(cmd)) throw new Error(cmd ? `unknown command ${cmd}` : "no command");
+  if (!["install", "upgrade", "status", "rollback", "routing", "uninstall"].includes(cmd)) throw new Error(cmd ? `unknown command ${cmd}` : "no command");
   if (!o.domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(o.domain)) throw new Error("--domain is required (for example --domain example.com)");
   o.name = `${o.prefix ?? ""}${o.name ?? "postern"}`;
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(o.name)) throw new Error("--name must be lower-case letters, digits and dashes");
+  // Which of these the operator typed. A re-run keeps the recorded value for one that was
+  // not typed (#855); the default below is for a first install.
+  o.given = { hostname: o.hostname !== undefined, admin: o.admin !== undefined };
   o.hostname ??= `mail.${o.domain}`;
   o.admin ??= `admin@${o.domain}`;
   if (!o.hostname.endsWith(`.${o.domain}`) && o.hostname !== o.domain) throw new Error("--hostname must be inside --domain");
@@ -155,6 +166,7 @@ async function main(argv) {
   };
   try {
     if (opts.cmd === "rollback") await rollback(deps, opts);
+    else if (opts.cmd === "uninstall") await uninstall(deps, opts);
     else await install(deps, opts, opts.cmd === "status" ? "install" : opts.cmd);
     return EXIT.OK;
   } catch (e) {
