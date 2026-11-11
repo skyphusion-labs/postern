@@ -176,7 +176,7 @@ describe("message read scope holds on every path that reads a stored message", (
     });
   });
 
-  describe("a static send-only token quotes only what it may read, which is nothing", () => {
+  describe("a static send-only token replies to a thread's parties and reads nothing back", () => {
     // POSTERN_API_TOKEN_SEND is refused on every read route. The quote on reply and forward
     // is a read, so it is held to the same answer: the source is not found, and nothing is
     // dispatched. Each refusal is paired with a control on the SAME token (a plain send
@@ -217,15 +217,48 @@ describe("message read scope holds on every path that reads a stored message", (
       expect(sent).toHaveLength(0);
     });
 
-    it("reply with bcc and quoteOriginal: the target is not found and nothing is dispatched", async () => {
+    // A reply goes to the people already on the thread, so the token may reply. Nothing
+    // from the stored message may come back out: no quote, and no recipient the caller
+    // adds. Each of those is refused with 400 BEFORE the lookup, never silently dropped.
+    it("a plain reply goes to the original sender only, carries none of the stored body, and is dispatched", async () => {
       const { e, ctx, sent } = await sendEnv();
-      const res = await handleApi(
-        sendReq("/api/reply", { messageId: "theirs@x", text: "hi", quoteOriginal: true, bcc: ["someone@example.net"] }),
-        e,
-        ctx,
-      );
+      const res = await handleApi(sendReq("/api/reply", { messageId: "theirs@x", from: AGENT, text: "thanks" }), e, ctx);
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].to).toEqual([OUTSIDER]);
+      expect(JSON.stringify(sent[0])).not.toContain(SECRET_BODY);
+      // Nothing of the stored message in the response either, beyond the thread it joined.
+      expect(await res.text()).not.toContain(SECRET_BODY);
+    });
+
+    it("replyAll reaches only the original parties", async () => {
+      const { e, ctx, sent } = await sendEnv();
+      const res = await handleApi(sendReq("/api/reply", { messageId: "theirs@x", from: AGENT, text: "all", mode: "replyAll" }), e, ctx);
+      expect(res.status, await res.clone().text()).toBe(200);
+      const wire = sent[0] as unknown as { to: string[]; cc?: string[]; bcc?: string[] };
+      const everyone = [...wire.to, ...(wire.cc ?? []), ...(wire.bcc ?? [])];
+      expect(everyone.every((a) => [OUTSIDER, OTHER].includes(a)), JSON.stringify(everyone)).toBe(true);
+    });
+
+    for (const [arm, extra] of [
+      ["bcc", { bcc: ["someone@example.net"] }],
+      ["cc", { cc: ["someone@example.net"] }],
+      ["quoteOriginal", { quoteOriginal: true }],
+      ["bcc and quoteOriginal together", { quoteOriginal: true, bcc: ["someone@example.net"] }],
+    ] as const) {
+      it(`a reply with ${arm} is refused 400 and nothing is dispatched`, async () => {
+        const { e, ctx, sent } = await sendEnv();
+        const res = await handleApi(sendReq("/api/reply", { messageId: "theirs@x", from: AGENT, text: "hi", ...extra }), e, ctx);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ ok: false, error: "E_VALIDATION_ERROR" });
+        expect(sent).toHaveLength(0);
+      });
+    }
+
+    it("a reply to an id that does not exist is still not found", async () => {
+      const { e, ctx, sent } = await sendEnv();
+      const res = await handleApi(sendReq("/api/reply", { messageId: "nope@x", from: AGENT, text: "hi" }), e, ctx);
       expect(res.status).toBe(404);
-      expect(await res.json()).toMatchObject({ ok: false, error: "E_NOT_FOUND" });
       expect(sent).toHaveLength(0);
     });
 

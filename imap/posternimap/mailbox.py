@@ -30,6 +30,7 @@ import email
 import email.utils
 import re
 import uuid
+from bisect import bisect_right
 from datetime import datetime, timedelta, timezone
 from email.message import Message as PyMessage
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
@@ -141,6 +142,29 @@ def _body_text(msg: PyMessage) -> str:
         return payload.decode(charset, "replace")
     text = msg.get_payload(decode=False)
     return text if isinstance(text, str) else ""
+
+
+def _limit_message_set(messages, present: List[int]) -> None:
+    """Point a MessageSet at the ids that exist.
+
+    Twisted's default step is ``prev + 1``, so an explicit range is walked one
+    number at a time even when the snapshot holds a handful of ids. ``getnext``
+    jumps to the next id in the sorted snapshot. Past the last id it returns
+    infinity, which ends the range without stepping through the gap.
+    """
+    ordered = sorted(present)
+
+    def getnext(prev):
+        try:
+            prev_n = int(prev)
+        except (TypeError, ValueError):
+            prev_n = -1
+        i = bisect_right(ordered, prev_n)
+        if i >= len(ordered):
+            return float("inf")
+        return ordered[i]
+
+    messages.getnext = getnext
 
 
 def _same_stored_message(existing: Message, parsed: PyMessage) -> bool:
@@ -592,6 +616,7 @@ class PosternMailbox:
         if uid:
             by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
             messages.last = self._summaries[-1].uid
+            _limit_message_set(messages, [s.uid for s in self._summaries])
             for num in messages:
                 if num is None:
                     continue
@@ -601,6 +626,7 @@ class PosternMailbox:
                 yield self._wrap(seq)
         else:
             messages.last = n
+            _limit_message_set(messages, list(range(1, n + 1)))
             for num in messages:
                 if num is None or num < 1 or num > n:
                     continue
@@ -693,10 +719,12 @@ class PosternMailbox:
         if uid:
             by_uid = {s.uid: i + 1 for i, s in enumerate(self._summaries)}
             messages.last = self._summaries[-1].uid if self._summaries else 0
+            _limit_message_set(messages, [s.uid for s in self._summaries])
             seqs = [by_uid[num] for num in messages if num is not None and num in by_uid]
         else:
             n = len(self._summaries)
             messages.last = n
+            _limit_message_set(messages, list(range(1, n + 1)))
             seqs = [num for num in messages if num is not None and 1 <= num <= n]
         if not seqs:
             return {}
