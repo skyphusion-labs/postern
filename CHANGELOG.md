@@ -13,8 +13,20 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
-**Upgrade.** Migration `0023` (the `delegation_exclusions` table, #853) is additive and is
-applied by the deploy. Nothing changes until a human marks a thread.
+## v1.13.0
+
+MINOR. A human can mark a conversation human-only, so agents cannot reach it through
+that person's address (#853, API and webmail), and the htmlToText running-time tests
+no longer depend on machine load (#923).
+
+**Upgrade.**
+
+- Migration `0023` (the `delegation_exclusions` table, #853) is additive and is applied
+  by the deploy. Nothing changes until a human marks a thread.
+- Behaviour change on estate deploys (`AGENT_READ_SCOPE=estate`, or unset): an owner's
+  human-only mark applies there too. An agent that reaches a marked thread only through
+  that owner's address no longer reads it. With no mark on the deploy, agent reads are
+  unchanged.
 
 **Upgrade (#813).** Migration `0024` (`vector_ledger.embed_version`) is additive and is applied
 by the deploy. New mail embeds with the subject from the deploy on. To re-embed existing mail,
@@ -63,6 +75,13 @@ working meanwhile. Cost: one bge-base embedding per chunk at $0.067 per million 
   estate, except mail in a thread a human marked human-only that it reaches
   only through that human's address. Before #853 no such mark existed, so
   nothing changes until one is made.
+
+### Fixed
+
+- **The htmlToText running-time tests count work instead of timing it
+  (#923).** They bound how many characters the converter's scans examine,
+  which is the same on every run, so a loaded machine no longer fails them.
+  A quadratic control is counted the same way and still fails the bound.
 
 ## v1.12.0
 
