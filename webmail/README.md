@@ -85,6 +85,7 @@ sign-in shot.
   previous message, `/` search, `c` compose, `Esc` closes a panel or goes back.
   Loads and errors are announced through a live region.
 - **Change password** in Settings when signed in with a session (below).
+- **Agent access and activity** in Settings when signed in with a session (below).
 
 ## Auth (#32): bring your own token
 
@@ -153,6 +154,24 @@ other session of the account is signed out and this tab stays signed in. It is n
 offered in token mode, where there is no person and no password. Directory
 (`ldap`/`system`) sign-in is designed but deferred and out of this phase; those
 deployments keep using BYO-token webmail.
+
+**Agent access to your mail (#740 S5).** A signed-in person manages which agents may
+act on their OWN address, in **Settings**:
+
+- the agents that have access, with what each may do (read is always included;
+  organize = mark read, flag and move; quote = reply to, quote and forward; send as you
+  = you are the From and the agent is named as Sender), who gave it (you or the admin),
+  and a two-step **Remove access** (no browser dialog);
+- **Give an agent access**: choose an agent from the deploy's live agents, tick what it
+  may do, add an optional note. An agent that already has access is shown but not
+  selectable; to change what it may do, remove its access and give it again;
+- **Activity on your mail**: the audit rows about your address (grants, removals, and
+  what agents did with their access), newest first, with **Show older**.
+
+It uses `GET /api/delegations/mine/grantees`, `GET`/`POST /api/delegations/mine`,
+`DELETE /api/delegations/mine/{id}` and `GET /api/audit/mine`, cookie session only, with
+the CSRF header on every write. It is not offered in token mode, and it hides itself on a
+server without those routes. Covered by `webmail/e2e/tests/agent-access.spec.ts`.
 
 **First run (no accounts yet).** A fresh manual deploy can create its first account
 from the browser. The page shows **Create the first account** only when ALL three hold
