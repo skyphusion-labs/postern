@@ -8,7 +8,8 @@ This eval measures recall at k for semantic and hybrid search, before and after 
 | `embed813.mjs` | Embeds every text the eval needs with the real model (`@cf/baai/bge-base-en-v1.5`, Workers AI REST) into a JSON cache keyed by sha256 of the text. It fetches only what is missing. |
 | `recall813.eval.mjs` | For each variant: builds a fresh real-sqlite postern, stores the corpus through `store.put`, fills an in-memory index with the cached vectors, and runs every query through `store.search`. |
 | `vitest.eval.config.ts` | The only config that runs the eval. |
-| `replay813.mjs` | The live replay for an operator: the issue's known-item probe against a real deploy. It is read-only, and its summary prints counts and latencies, not mail content. |
+| `replay813.mjs` | The live replay for an operator: the issue's known-item probe against a real deploy. It is read-only, and its summary prints counts and latencies, not mail content. Its primary known-item metric is FOUND (the gold is a top-10 row or folded into a top-10 hit's `similar`); STRICT (a top-10 row only) is printed beside it, and known-item probes are split by whether their template family repeats (#940). |
+| `shape813.mjs` | The template-family key the replay splits probes by: a copy of `src/semrank.ts` `templateKey`, held equal by `semrank-shape-parity.test.ts`. |
 
 ## Run
 
