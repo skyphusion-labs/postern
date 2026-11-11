@@ -175,6 +175,7 @@ For production, use `"command": "npx", "args": ["-y", "@skyphusion/postern-mcp"]
 | `POSTERN_MCP_ORGANIZE` | no | (unset) | Set to `1` to register organize tools using `POSTERN_API_TOKEN` as the organize credential (for a single registry token with `scopes: ["read","organize"]`, or a `both` token). Only the literal `1` enables it. |
 | `POSTERN_API_TIMEOUT_MS` | no | `15000` | per-request timeout (ms) |
 | `POSTERN_MCP_MAX_ATTACHMENT_BYTES` | no | `5242880` (5 MiB) | max bytes `mailbox_get_attachment` will return; a larger attachment is **refused with a clear error, never truncated**. Raise it (up to the API-side 25 MiB ceiling) for hosts that tolerate bigger tool results. |
+| `POSTERN_MCP_MAX_BODY_CHARS` | no | `65536` | max characters of `bodyText` and `bodyHtml` returned by `mailbox_get` and `mailbox_thread`. Longer text is cut and the result sets `bodyTruncated`. |
 
 Every request carries a custom `User-Agent` (`postern-mcp ...`). The API sits behind
 Cloudflare, which 403s default bot user-agents ("error 1010"), so this is mandatory.
