@@ -25,6 +25,7 @@ sign-out was sent.
 - `inbound/reindex.mjs` tries a failed page (a network error, including mid-body, or HTTP 5xx) up to 6 times (5 retries, waits 2 s to 32 s), prints each page's cursor, and resumes from `--cursor`. A long `--stale-only` run (#813) no longer restarts at page 0 after one connection reset.
 - **docs(release):** the release procedure gains step 3, move postern-demo and postern-site to the new tag (#934). Both drifted unseen: the demo served v1.8.0 and the site linked v1.9.0 while v1.14.0 was current.
 - **fix(inbound):** the landing page names its write-up "identity-bound credentials (since v1.4.1)". The old "Postern v1.4.1 identity-bound credentials" sat on a page every instance serves, so it read as the running version (#934).
+- **feat(search):** hybrid no longer drops the family members its cap leaves off. They ride on the family's best kept hit as `similar: { count, ids }`, the same shape and meaning as in semantic (#940). The rows are unchanged, so hybrid still never folds, and a known item that is a family's third member is now one expand away instead of missing.
 
 ## v1.14.0
 
