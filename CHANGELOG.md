@@ -44,6 +44,10 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Fixed
 
+- **A refused address names the field.** An invalid to, cc, bcc, from, or
+  reply-to value is reported by field name. A reply whose stored address
+  cannot be used names the header it came from.
+
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
