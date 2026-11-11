@@ -38,13 +38,16 @@ const fill = (unit: string, size = SIZE) => unit.repeat(Math.ceil(size / unit.le
 
 // The running-time tests bound GROWTH, not wall time. A wall-clock budget fails on a
 // loaded machine while the code is fine (#911). What these exist to catch is a
-// quadratic regression, which is a property of the algorithm: t(4N) / t(N) is about 4
-// for linear work and about 16 for quadratic, whatever the load. Samples of the two
-// sizes alternate and the median of each is used, so a burst of load hits both sides.
-// Measured 2026-11-11 at load average about 17 on a 6-core laptop: the linear converter
-// gives 3.8 to 6.1 on these shapes, and the quadratic reference gives 14.3 to 18.9.
-// 10 sits between the two with room on both sides.
-const MAX_GROWTH = 10;
+// quadratic regression, which is a property of the algorithm: over an 8x step,
+// t(8N) / t(N) is about 8 for linear work and about 64 for quadratic, whatever the load.
+// Samples of the two sizes alternate and the median of each is used, so a burst of load
+// hits both sides.
+// Measured 2026-11-11, three trials each at load average about 4 on a 6-core laptop: the
+// linear converter gives 7.7 to 10.5 on these shapes, and the quadratic reference gives
+// 46.5 to 59.3. 22 is the geometric middle of the extremes (sqrt(10.5 * 46.5)), so each
+// side has about 2.1x of headroom.
+const STEP = 8;
+const MAX_GROWTH = 22;
 const CEILING_MS = 2000; // a backstop only: an absurd regression still fails outright
 const MIN_SAMPLE_MS = 10;
 type Convert = (html: string) => string;
@@ -60,7 +63,7 @@ function sampleMs(fn: Convert, input: string): number {
 }
 function growth(fn: Convert, build: (n: number) => string, n: number): { ratio: number; bigMs: number } {
   const small = build(n);
-  const big = build(4 * n);
+  const big = build(STEP * n);
   fn(small.slice(0, 1000)); // warm the JIT
   const a: number[] = [];
   const b: number[] = [];
@@ -80,9 +83,9 @@ describe("htmlToText running time", () => {
     "ordinary markup": (n) => fill("<b>x</b>", n),
   };
   for (const [name, build] of Object.entries(shapes)) {
-    it(`grows linearly on ${name} (40 KB to 160 KB)`, () => {
-      const g = growth(htmlToText, build, SIZE / 4);
-      expect(g.ratio, `t(4N)/t(N) = ${g.ratio.toFixed(2)}`).toBeLessThan(MAX_GROWTH);
+    it(`grows linearly on ${name} (20 KB to 160 KB)`, () => {
+      const g = growth(htmlToText, build, SIZE / STEP);
+      expect(g.ratio, `t(8N)/t(N) = ${g.ratio.toFixed(2)}`).toBeLessThan(MAX_GROWTH);
       expect(g.bigMs).toBeLessThan(CEILING_MS);
     });
   }
@@ -90,8 +93,8 @@ describe("htmlToText running time", () => {
   it("control: the measurement flags a quadratic converter", () => {
     // referenceHtmlToText is the previous, quadratic implementation (kept above for the
     // output tests). If this ratio did not exceed the bound, the bound would prove nothing.
-    const g = growth(referenceHtmlToText, (n) => fill("<", n), 2000);
-    expect(g.ratio, `reference t(4N)/t(N) = ${g.ratio.toFixed(2)}`).toBeGreaterThan(MAX_GROWTH);
+    const g = growth(referenceHtmlToText, (n) => fill("<", n), 1000);
+    expect(g.ratio, `reference t(8N)/t(N) = ${g.ratio.toFixed(2)}`).toBeGreaterThan(MAX_GROWTH);
   });
 
   it("converts at most the first 512,000 characters", () => {
