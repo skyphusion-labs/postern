@@ -11,7 +11,10 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
-## Unreleased
+## v1.11.0
+
+MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's
+mail under an explicit, audited grant (#740 S2 and S3).
 
 **Upgrade.** Unset `AGENT_READ_SCOPE` means `estate`: an upgraded deploy keeps the
 estate-wide agent read until the operator sets `AGENT_READ_SCOPE = "granted"`. The
@@ -26,7 +29,7 @@ installer writes `granted` for a new install and does not add it on upgrade.
   read, flags and move to the granted address's mail, and every such
   write is audited in the same batch. `GET /api/whoami` reports
   `delegations`. See `docs/DELEGATION.md` section 4.
-- **The `quote` power (#740 S3).** A `quote` grant lets an agent reply
+- **The `quote` power (#740 S3, #892).** A `quote` grant lets an agent reply
   to, quote and forward the granted address's mail, under either
   `AGENT_READ_SCOPE` value. Each such quote writes a `delegation.quote`
   audit row before it is sent, and nothing is sent if that row cannot be
