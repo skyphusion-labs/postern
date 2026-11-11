@@ -15,12 +15,66 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
-- **Write scope binds to the bound identity.** An identity's write scope
-  (flags, move, seen) now binds to its bound address whatever its other
-  caps; previously a token without `read` could organize outside its own
-  address. Applies to runtime agent identities and
-  `POSTERN_SEND_IDENTITIES` entries alike. Static tokens and webmail
-  sessions are unchanged.
+- **The reply and forward quote follows the caller's read scope.** A
+  static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
+  quotes or forwards a stored message: the source is not found, as on the
+  read routes. `both` and `read` tokens and bound identities are
+  unchanged.
+
+## v1.10.0
+
+MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
+uninstall command and an Email Routing report for the installer, PBKDF2-SHA512 for native
+credentials, and write-scope and redirect fixes.
+
+**Upgrade.** Migrations `0016` (agent identities, audit log) and `0017` (delegation grants) are
+additive and are applied by the deploy. Nothing changes for an existing deploy until an operator
+mints an identity or a grant. Existing SHA-256 password hashes keep verifying and are upgraded to
+SHA-512 on the next successful sign-in. The MCP changes below ship on the separate
+`postern-mcp-v*` track, not with this tag.
+
+### Added
+
+- **Runtime agent identities (#846, #801).** `POST`, `GET` and `DELETE /api/admin/identities`
+  mint, list and revoke agent credentials without a redeploy. The token is returned once and
+  only its hash is stored. A revoke takes effect on the next request, and every mint, list and
+  revoke is written to the new `audit_log` (`GET /api/admin/audit`). The Python client gains
+  `mint_identity`, `list_identities`, `revoke_identity` and `list_audit`.
+- **Delegation grants (#852, #740 S1).** `POST`, `GET` and `DELETE /api/admin/delegations` record
+  which agent may act on which address, with the powers `read`, `organize`, `quote` and
+  `send_as` (every grant includes `read`). The grantee must be a live identity. Grants are
+  stored and audited; enforcement arrives in a later release. Python client:
+  `grant_delegation`, `list_delegations`, `revoke_delegation`.
+- **Send results report the From used (#847, #804).** Send, reply, forward, draft send and the
+  `/send` alias return `from`, the address actually used (a bound identity overrides the
+  caller's).
+- **`postern uninstall` (#849, #831).** Removes a self-hosted install. It never disables Email
+  Routing (that would delete the zone's MX, SPF and DKIM); it disables only a catch-all that
+  points at its own Worker. Mail is kept by default; `--delete-data --confirm-delete <domain>`
+  exports D1 to a mode-600 file first. Every printed line and error is redacted.
+- **`postern routing` (#848, #802).** A read-only report naming every Email Routing address
+  that does not reach the Worker, with a weekly workflow when `ROUTING_REPORT_DOMAIN` is set.
+- **MCP `mailbox_recipients_recent` (#845, #805)**, on the `postern-mcp-v*` track.
+- **Identity design (#861, #854).** `docs/IDENTITY.md`: one principal layer for humans and
+  agents. Design only; the rulings are recorded on #854.
+
+### Changed
+
+- **Native credentials hash with PBKDF2-SHA512 (#851, #828)** at the 100,000-iteration Workers
+  cap; legacy SHA-256 rows verify and are re-hashed on the next successful sign-in.
+- **Installer re-run keeps the recorded hostname and admin (#862, #855)** unless they are
+  passed explicitly.
+- **Live docs no longer describe retired infrastructure (#850, #806).**
+
+### Fixed
+
+- **Write scope binds to the bound identity (#857).** An identity's write scope (flags, move,
+  seen) now binds to its bound address whatever its other caps; previously a token without
+  `read` could organize outside its own address. Applies to runtime agent identities and
+  `POSTERN_SEND_IDENTITIES` entries alike. Static tokens and webmail sessions are unchanged.
+- **The posternonline.com apex redirect keeps the demo host for every request path (#859).**
+- **The installer's routing checks name the permission they need (#848):** Zone Settings, not
+  Email Routing Rules.
 
 - **HTML-to-text conversion runs in one pass.** Mail with only an HTML
   body is converted to its stored text body by a single linear scan, and

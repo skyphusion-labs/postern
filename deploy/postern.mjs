@@ -31,8 +31,8 @@ const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|r
   Routing off (that deletes the zone's MX, SPF and DKIM records).
 
   --domain <d>        the domain Postern receives and sends for (required)
-  --hostname <h>      where the API and webmail answer (default mail.<domain>)
-  --admin <address>   the first admin login (default admin@<domain>)
+  --hostname <h>      where the API and webmail answer (default mail.<domain>; a re-run keeps the recorded one)
+  --admin <address>   the first admin login (default admin@<domain>; a re-run keeps the recorded one)
   --name <n>          Worker name (default postern); also names D1 and R2
   --prefix <p>        put <p> in front of the Worker, D1 and R2 names (e.g. a test prefix)
   --var KEY=VALUE     set a Worker var; remembered for later upgrades (repeatable)
@@ -79,6 +79,9 @@ export function parseArgs(argv) {
   if (!o.domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(o.domain)) throw new Error("--domain is required (for example --domain example.com)");
   o.name = `${o.prefix ?? ""}${o.name ?? "postern"}`;
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(o.name)) throw new Error("--name must be lower-case letters, digits and dashes");
+  // Which of these the operator typed. A re-run keeps the recorded value for one that was
+  // not typed (#855); the default below is for a first install.
+  o.given = { hostname: o.hostname !== undefined, admin: o.admin !== undefined };
   o.hostname ??= `mail.${o.domain}`;
   o.admin ??= `admin@${o.domain}`;
   if (!o.hostname.endsWith(`.${o.domain}`) && o.hostname !== o.domain) throw new Error("--hostname must be inside --domain");

@@ -1116,13 +1116,16 @@ function sessionReadScope(env: Env, resolution: AuthResolution): string[] | unde
  * one. Holding no permission to read is not a reason to read wider.
  *
  * Role queues are included so a member replying to mail delivered to a queue it belongs to
- * still resolves, matching what the read route grants that same member (#425). A
- * resolution with no bound identity is a static operator/IMAP token, estate-wide by
- * construction, and says so with the literal rather than by omission.
+ * still resolves, matching what the read route grants that same member (#425).
+ *
+ * A resolution with no bound identity is a static token. It quotes the estate ONLY when
+ * the gate would let it READ (a `both` or `read` token), and says so with the literal. Any
+ * other static token, `send` above all, gets the EMPTY scope and quotes nothing: the quote
+ * is a read, and a per-function key that cannot read must not read through a write route.
  */
 function writeReadScope(env: Env, resolution: AuthResolution): MessageReadScope {
   const bound = resolution.identity?.from;
-  if (!bound) return "estate";
+  if (!bound) return authorize(resolution, "read") ? "estate" : [];
   return [bound, ...rolesForViewer(env, bound)];
 }
 
@@ -2386,7 +2389,12 @@ function isPosternonlineZone(hostname: string): boolean {
 function redirectApexToDemo(url: URL): Response | null {
   const host = url.hostname.toLowerCase();
   if (host !== "posternonline.com" && host !== "www.posternonline.com") return null;
-  const target = new URL(url.pathname + url.search, DEMO_CANONICAL_ORIGIN);
+  // Build on a FIXED origin and set the path, never resolve the request path as a
+  // relative reference: a path starting with "//" is scheme-relative and would put
+  // its first segment in the authority, sending the visitor to another host.
+  const target = new URL(DEMO_CANONICAL_ORIGIN);
+  target.pathname = url.pathname;
+  target.search = url.search;
   return Response.redirect(target.toString(), 301);
 }
 
