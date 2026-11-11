@@ -299,6 +299,10 @@ export interface StoreInput {
   date: string; // ISO
   inReplyTo?: string | null;
   references?: string[];
+  /** Whose mail the thread parent may come from. A bound member's send passes its read
+   *  scope, so a parent it cannot read is treated like an id that does not exist.
+   *  Absent means the whole store: inbound mail has no caller to scope to. */
+  threadScope?: AccessScope;
   bodyText: string;
   /** Original HTML body to persist, if any (null/undefined when text-only). */
   bodyHtml?: string | null;
@@ -360,11 +364,15 @@ export interface PutResult {
  */
 export const MAX_THREAD_REFERENCES = 20;
 
+/** D1's limit on bound values in one query (developers.cloudflare.com/d1/platform/limits). */
+const D1_MAX_BOUND = 100;
+
 async function resolveThreadId(
   db: D1Database,
   messageId: string,
   inReplyTo: string | null | undefined,
   references: string[] | undefined,
+  scope: AccessScope = "estate",
 ): Promise<string> {
   const quoted = new Set<string>();
   if (inReplyTo) quoted.add(stripAngle(inReplyTo));
@@ -379,14 +387,23 @@ async function resolveThreadId(
     candidates.add(await representableId(id));
   }
   if (candidates.size === 0) return messageId;
-  const ids = [...candidates];
+  // A scoped lookup reads only rows the scope may read (the store.get predicate). Its
+  // binds share D1's per-query limit with the candidates, so the lowest-priority
+  // candidates are dropped to make room.
+  const access = accessClause(scope);
+  if (access.sql === "1=0") return messageId;
+  const room = Math.floor((D1_MAX_BOUND - access.binds.length) / 2);
+  const ids = [...candidates].slice(0, Math.max(0, room));
+  if (ids.length === 0) return messageId;
   const marks = ids.map(() => "?").join(", ");
   type Row = { id: number; message_id: string; claimed_id: string | null; thread_id: string | null; trusted: number | null };
   const { results } = await db
     .prepare(
-      `SELECT id, message_id, claimed_id, thread_id, trusted FROM messages WHERE message_id IN (${marks}) OR claimed_id IN (${marks})`,
+      access.sql
+        ? `SELECT id, message_id, claimed_id, thread_id, trusted FROM messages WHERE (message_id IN (${marks}) OR claimed_id IN (${marks})) AND ${access.sql}`
+        : `SELECT id, message_id, claimed_id, thread_id, trusted FROM messages WHERE message_id IN (${marks}) OR claimed_id IN (${marks})`,
     )
-    .bind(...ids, ...ids)
+    .bind(...ids, ...ids, ...access.binds)
     .all<Row>();
   const wanted = new Set(ids);
   const holder = new Map<string, Row>();
@@ -527,7 +544,7 @@ async function putRow(
   claimedId: string | null = null,
 ): Promise<PutResult> {
   const receivedAt = new Date().toISOString();
-  const threadId = await resolveThreadId(env.DB, input.messageId, input.inReplyTo, input.references);
+  const threadId = await resolveThreadId(env.DB, input.messageId, input.inReplyTo, input.references, input.threadScope ?? "estate");
 
   // Envelope semantics (#178): the deduped, bare lower-cased set this delivery is
   // FOR, wrapped ",a,b," so membership is one delimiter-safe LIKE. Derived from

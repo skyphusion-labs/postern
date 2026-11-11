@@ -461,7 +461,15 @@ export async function send(
     attachments,
     inReplyTo: headers["In-Reply-To"] ?? null,
     references: parseReferences(headers["References"]),
+    threadScope: threadScopeOf(readScope),
   });
+}
+
+/** The thread-parent scope for a send. A bound member resolves its caller-supplied
+ *  In-Reply-To / References only among mail it can read. "estate" stays estate. The
+ *  send-only "addressing" token keeps the whole-store lookup it has always had. */
+function threadScopeOf(readScope: MessageReadScope): store.AccessScope {
+  return readScope === "estate" || readScope === "addressing" ? "estate" : readScope;
 }
 
 /**
@@ -560,6 +568,7 @@ export async function reply(
     inReplyTo,
     references,
     forcedThreadId: original.threadId,
+    threadScope: threadScopeOf(readScope),
   });
 }
 
@@ -577,6 +586,8 @@ interface DispatchInput {
   inReplyTo: string | null;
   references: string[];
   forcedThreadId?: string;
+  /** Whose mail the thread parent may come from (store.StoreInput.threadScope). */
+  threadScope: store.AccessScope;
 }
 
 async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInput): Promise<SendResult> {
@@ -617,6 +628,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       date: new Date().toISOString(),
       inReplyTo: d.inReplyTo,
       references: d.references,
+      threadScope: d.threadScope,
       bodyText: deriveBodyText(safeHtml, d.text),
       bodyHtml: safeHtml ?? null,
       // The sent copy carries its attachments too (#470). We handed the transport the

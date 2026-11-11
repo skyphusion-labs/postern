@@ -159,6 +159,15 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
 2. Else if any id in `references` matches an existing row, inherit that `thread_id`.
 3. Else start a new thread: `thread_id = this.message_id`.
 
+Only `in_reply_to` and the most recent `MAX_THREAD_REFERENCES` (20) entries of `references`
+are read, newest first, and every candidate is looked up in one query. For a Message-ID that
+more than one row has claimed, a trusted message is preferred (10.x). **Whose rows count:**
+a send by a bound member (`/api/send` and `/api/reply` under an agent identity or a
+session) resolves its parent only among messages that member can read, the same scope
+`GET /api/messages/:id` applies; a parent outside it is treated like an id that does not
+exist, and the message starts its own thread. Inbound mail, estate callers and the
+send-only token resolve across the whole store.
+
 **The references asymmetry (resolved).** Inbound carries threading as a typed
 `ParsedInbound.references: string[]` (the parser already split the `References` header); outbound
 carries it inside `OutboundMessage.headers` as the wire `In-Reply-To` / `References` strings

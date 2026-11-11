@@ -59,6 +59,11 @@ mismatched MCP tag fails before it publishes.
   this, and the MCP `mailbox_get` description tells agents to check
   `trusted`.
 
+- **A member's send threads only through mail that member can read.**
+  When a bound identity or session sends with In-Reply-To or
+  References, the parent is looked up among messages it can read; any
+  other id starts a new thread, as an unknown id does.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
