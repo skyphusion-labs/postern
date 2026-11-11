@@ -16,8 +16,9 @@ import (
 )
 
 // submissionDebug, set by SUBMISSION_DEBUG, turns on per-session diagnostic logging
-// (connection, auth username + OUTCOME, and auth-required rejections). It NEVER logs
-// the password or the raw AUTH line. Off by default; a deploy-time troubleshooting aid.
+// (connection, auth outcome, and auth-required rejections). It logs the username
+// length, never the username itself: people sometimes type a password there.
+// It NEVER logs the password or the raw AUTH line. Off by default.
 var submissionDebug = os.Getenv("SUBMISSION_DEBUG") != ""
 
 // MaxParts caps the number of MIME attachment/inline parts a submission may
@@ -113,7 +114,7 @@ func (s *submissionSession) authenticate(username, password string) error {
 	account := throttleKey(username)
 	if !s.throttle.allow(account) {
 		if submissionDebug {
-			log.Printf("submission auth THROTTLED user=%q (too many recent failures)", username)
+			log.Printf("submission auth THROTTLED user_len=%d (too many recent failures)", len(username))
 		}
 		return smtp.ErrAuthFailed
 	}
@@ -123,11 +124,12 @@ func (s *submissionSession) authenticate(username, password string) error {
 		if err != errAuthFailed {
 			// Infra error (backend down): NOT a password guess, so it must not
 			// count toward the throttle, else an outage locks every user out.
-			log.Printf("submission auth infra error user=%q: %v", username, err)
+			// The username is not logged: it is sometimes a mistyped password.
+			log.Printf("submission auth infra error user_len=%d: %v", len(username), err)
 		} else {
 			s.throttle.fail(account)
 			if submissionDebug {
-				log.Printf("submission auth REJECTED user=%q (backend returned auth-failed)", username)
+				log.Printf("submission auth REJECTED user_len=%d (backend returned auth-failed)", len(username))
 			}
 		}
 		return smtp.ErrAuthFailed
@@ -136,7 +138,7 @@ func (s *submissionSession) authenticate(username, password string) error {
 	s.authed = true
 	s.boundFrom = identity
 	if submissionDebug {
-		log.Printf("submission auth OK user=%q -> identity=%q", username, identity)
+		log.Printf("submission auth OK user_len=%d -> identity=%q", len(username), identity)
 	}
 	return nil
 }

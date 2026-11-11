@@ -578,6 +578,29 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(stored[0]["bodyText"].strip(), "my real body")
         self.assertEqual(stored[0].get("mailbox"), "trash")
 
+    def test_append_placement_does_not_move_another_viewers_row(self):
+        """A matching payload does not move a row that belongs to someone else."""
+        msgs = [
+            make_message(
+                self._COLLIDING_ID,
+                direction="inbound",
+                body="my real body\r\n",
+                **{
+                    "from": "a@example.com",
+                    "to": "bob@example.org",
+                    "subject": "the message the user filed",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                    "deliveredTo": ["bob@example.org"],
+                },
+            )
+        ]
+        mb, transport = self._trash_mailbox_with_import(msgs, identity="alice@example.org")
+        mb._viewer = "alice@example.org"
+        raw = self._colliding_raw("the message the user filed", "my real body")
+        self._append_ok(mb, raw)
+        self.assertIsNone(transport.last_move_payload)
+
     def test_append_placement_same_message_still_moves(self):
         """Positive control: when the id match IS the same message, the APPEND is a
         placement of that row; nothing is imported and nothing is duplicated."""

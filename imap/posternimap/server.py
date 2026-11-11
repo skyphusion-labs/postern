@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import re
 import sys
+from typing import Optional
 
 from twisted.cred import credentials
 from twisted.cred.error import UnauthorizedLogin
@@ -87,16 +88,33 @@ _SEARCH_BYTES_ARG1 = frozenset(
 _WIRE_TRACE_REDACT = re.compile(rb"^(\s*\S+\s+(?:LOGIN|AUTHENTICATE))\b.*$", re.IGNORECASE)
 
 
+_CRED_CMD = re.compile(rb"^\s*(\S+)\s+(?:LOGIN|AUTHENTICATE)\b", re.IGNORECASE)
+
+
+def _trace_inbound(line: bytes, open_tag: Optional[bytes]) -> tuple[bytes, Optional[bytes]]:
+    """Redact one received line for the wire trace.
+
+    A LOGIN or AUTHENTICATE line is redacted and opens a credential command.
+    Every received line until that command's tagged response is replaced, so a
+    password that arrives on the following line is not written out.
+    """
+    if open_tag:
+        return b"<REDACTED>", open_tag
+    match = _CRED_CMD.match(line)
+    tag = match.group(1) if match else None
+    return _redact_wire_trace(line), tag
+
+
 def _redact_wire_trace(line: bytes) -> bytes:
     """Redact a credential-bearing IMAP command line for the wire trace (#218).
 
     Keeps only `<tag> LOGIN` / `<tag> AUTHENTICATE` and replaces everything after the
     command word with ` <REDACTED>`; any non-credential line passes through unchanged.
     Note: this door advertises no SASL mechanism and known clients (iOS Mail included)
-    send LOGIN as inline quoted strings, which this catches. A LOGIN that used IMAP
-    literals for its arguments would carry the password on a raw literal continuation
-    delivered via rawDataReceived, NOT lineReceived, so it never reaches this trace at
-    all (the trace only hooks lineReceived + sendLine). Redaction happens AT CAPTURE."""
+    send LOGIN as inline quoted strings, which this catches. A LOGIN that splits an
+    argument into a literal leaves the rest of the command on the next received line.
+    `_trace_inbound` redacts that line too, until the tagged response. Redaction
+    happens AT CAPTURE."""
     return _WIRE_TRACE_REDACT.sub(rb"\1 <REDACTED>", line)
 
 
@@ -788,7 +806,10 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         parser, so auth is unaffected. OFF => a pure passthrough (zero behavior
         change), so the un-instrumented read path is byte-for-byte preserved."""
         if self._wire_trace_enabled():
-            log.msg("wire C: " + _redact_wire_trace(line).decode("latin-1", "replace"))
+            shown, tag = _trace_inbound(line, getattr(self, "_wire_credential_tag", None))
+            if tag:
+                self._wire_credential_tag = tag
+            log.msg("wire C: " + shown.decode("latin-1", "replace"))
         return imap4.IMAP4Server.lineReceived(self, line)
 
     def sendLine(self, line):
@@ -796,6 +817,11 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         no credential). OFF => pure passthrough."""
         if self._wire_trace_enabled():
             log.msg("wire S: " + line.decode("latin-1", "replace"))
+            tag = getattr(self, "_wire_credential_tag", None)
+            if tag and line.startswith(tag + b" "):
+                rest = line[len(tag) + 1:]
+                if re.match(rb"(?i)(OK|NO|BAD)\b", rest):
+                    self._wire_credential_tag = None
         return imap4.IMAP4Server.sendLine(self, line)
 
     def capabilities(self):

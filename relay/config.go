@@ -118,7 +118,7 @@ type ThrottleCfg struct {
 	MaxFailures  int           // AUTH_THROTTLE_MAX_FAILURES, per-account consecutive failures before lockout (default 5)
 	Lockout      time.Duration // AUTH_THROTTLE_LOCKOUT_SECONDS, base per-account lockout, doubles per failure past the threshold (default 60)
 	MaxLockout   time.Duration // AUTH_THROTTLE_MAX_LOCKOUT_SECONDS, cap on the per-account backoff (default 900)
-	GlobalMax    int           // AUTH_THROTTLE_GLOBAL_MAX_FAILURES, aggregate failures within the window before a global cooldown, 0 = off (default 100)
+	GlobalMax    int           // AUTH_THROTTLE_GLOBAL_MAX_FAILURES, aggregate failures within the window before a global cooldown, 0 = off (default 0)
 	GlobalWindow time.Duration // AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS, the aggregate window + cooldown (default 60)
 }
 
@@ -255,7 +255,7 @@ func loadConfig() (Config, error) {
 				MaxFailures:  envInt("AUTH_THROTTLE_MAX_FAILURES", 5),
 				Lockout:      time.Duration(envInt("AUTH_THROTTLE_LOCKOUT_SECONDS", 60)) * time.Second,
 				MaxLockout:   time.Duration(envInt("AUTH_THROTTLE_MAX_LOCKOUT_SECONDS", 900)) * time.Second,
-				GlobalMax:    envInt("AUTH_THROTTLE_GLOBAL_MAX_FAILURES", 100),
+				GlobalMax:    envInt("AUTH_THROTTLE_GLOBAL_MAX_FAILURES", 0),
 				GlobalWindow: time.Duration(envInt("AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS", 60)) * time.Second,
 			},
 			ProxyProtocol: ProxyProtocolCfg{

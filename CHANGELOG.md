@@ -15,6 +15,12 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **Door session edges.** The IMAP wire trace redacts every received line of a
+  LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
+  port 993; set a certificate, or use port 143. Submission backend errors log
+  the username length, not the username. An APPEND moves a stored row only
+  when that row's recipients include the session's viewer. The global auth
+  cooldown is off unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set.
 - **Write scope binds to the bound identity.** An identity's write scope
   (flags, move, seen) now binds to its bound address whatever its other
   caps; previously a token without `read` could organize outside its own
