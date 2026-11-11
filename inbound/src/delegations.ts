@@ -276,6 +276,8 @@ export type AgentReadScope = "estate" | "granted";
 export const ORGANIZE_AUDIT_ACTION = "delegation.organize";
 /** The audit_log action of an agent quoting a granted address's mail (#740 S3). */
 export const QUOTE_AUDIT_ACTION = "delegation.quote";
+/** The audit_log action of an agent sending as a granted address (#740 S4). */
+export const SEND_AS_AUDIT_ACTION = "delegation.send_as";
 
 let readScopeConfigLogged: string | undefined;
 
@@ -311,12 +313,14 @@ export interface AgentDelegations {
   organize: string[];
   /** The subset whose grant carries quote (#740 S3). */
   quote: string[];
+  /** The subset whose grant carries send_as (#740 S4). */
+  sendAs: string[];
   /** The active grants themselves, as GET /api/whoami reports them. */
   grants: Array<{ id: string; address: string; powers: DelegationPower[] }>;
 }
 
 export function noDelegations(): AgentDelegations {
-  return { read: [], organize: [], quote: [], grants: [] };
+  return { read: [], organize: [], quote: [], sendAs: [], grants: [] };
 }
 
 /**
@@ -351,6 +355,7 @@ export async function activeDelegations(env: Env, granteeId: string): Promise<Ag
     if (!out.read.includes(address)) out.read.push(address);
     if (powers.includes("organize") && !out.organize.includes(address)) out.organize.push(address);
     if (powers.includes("quote") && !out.quote.includes(address)) out.quote.push(address);
+    if (powers.includes("send_as") && !out.sendAs.includes(address)) out.sendAs.push(address);
   }
   return out;
 }
