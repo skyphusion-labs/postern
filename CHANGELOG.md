@@ -38,6 +38,13 @@ mismatched MCP tag fails before it publishes.
   Mail whose Date header is not a valid date is stored with the time it
   was received as its date. The IMAP APPEND import uses the same rule.
 
+- **"Authored by" means sent by postern.** Read access, the account
+  view, the Sent lens and the Sent folder count treat a message as
+  authored by V only when postern sent it as V (direction `outbound`).
+  An inbound message whose From header names V is reachable by V only
+  when it was delivered to V. Semantic and hybrid search apply the same
+  rule as the SQL paths.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
