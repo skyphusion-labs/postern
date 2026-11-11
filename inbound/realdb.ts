@@ -34,18 +34,33 @@ export function realEnv(
           const r = stmt.run(...(bound as never[]));
           return { meta: { changes: Number(r.changes) } };
         },
+        // How `batch` executes this statement: rows back for a SELECT or a RETURNING
+        // write, as D1's batch result carries them, and the change count otherwise.
+        batchRun() {
+          if (/^\s*SELECT\b/i.test(sql) || /\bRETURNING\b/i.test(sql)) {
+            const rows = stmt.all(...(bound as never[]));
+            return { results: rows, meta: { changes: rows.length } };
+          }
+          const r = stmt.run(...(bound as never[]));
+          return { results: [], meta: { changes: Number(r.changes) } };
+        },
       };
     },
     // D1 `batch` over the same engine. The store uses it wherever two writes must
-    // land together (moveMessages), so a suite that omits it cannot measure those
-    // paths at all: the call throws before the predicate under test is ever
-    // evaluated, and the failure reads like a defect in the predicate. Sequential
-    // rather than transactional, which is the one way this differs from D1; no
-    // caller here depends on rollback.
-    async batch(statements: { run(): Promise<{ meta: { changes: number } }> }[]) {
-      const out = [];
-      for (const s of statements) out.push(await s.run());
-      return out;
+    // land together (moveMessages, and an organize write with its audit row, #740 S2),
+    // so a suite that omits it cannot measure those paths at all. TRANSACTIONAL, as
+    // D1's batch is: a statement that throws rolls back every statement before it, so
+    // "the write fails if its audit row fails" is measurable here, not assumed.
+    async batch(statements: { batchRun(): { results: unknown[]; meta: { changes: number } } }[]) {
+      db.exec("BEGIN");
+      try {
+        const out = statements.map((s) => s.batchRun());
+        db.exec("COMMIT");
+        return out;
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
     },
   };
   const env = {
