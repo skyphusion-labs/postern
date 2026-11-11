@@ -37,6 +37,10 @@ version or created the first admin. A manual run is still safe: it is idempotent
   mail. Its audit rows name the `svc_admin` service principal. Set and rotate
   it with `wrangler secret put POSTERN_API_TOKEN_ADMIN`; unset changes
   nothing.
+- **The principal tables are dual-written (#854 M2).** Every user and agent
+  identity write updates the principal, credential and address tables in
+  the same batch. `GET /api/admin/principals/parity` reports any row where
+  the two disagree. Reads are unchanged.
 - **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
   `principal_addresses` tables, the six static token slots as service
   principals, and `POST /api/admin/principals/backfill`, which copies agent
@@ -95,6 +99,10 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Fixed
 
+- **A sign-in survives a failure on the principal side (#854).** If the
+  principal lookup at sign-in fails, the session is minted without one
+  (the self-service routes then ask for a fresh sign-in) instead of the
+  sign-in failing with a 500.
 - **A refused address names the field.** An invalid to, cc, bcc, from, or
   reply-to value is reported by field name. A reply whose stored address
   cannot be used names the header it came from.

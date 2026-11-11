@@ -79,6 +79,7 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   if (method === "DELETE" && /^\/api\/admin\/delegations\/.+$/.test(path)) return "admin";
   // #854 M1 adds the principal backfill at `admin`, POST only.
   if (method === "POST" && path === "/api/admin/principals/backfill") return "admin";
+  if (method === "GET" && path === "/api/admin/principals/parity") return "admin";
   // #740 S5 adds the human's own delegation and audit trail, at `read` (every session holds
   // it; the handler refuses Bearer callers).
   if (method === "GET" && (path === "/api/delegations/mine" || path === "/api/delegations/mine/grantees" || path === "/api/audit/mine")) return "read";
@@ -115,6 +116,7 @@ const CORPUS = [
   "/api/admin/audit", "/api/admin/auditx",
   "/api/admin/delegations", "/api/admin/delegations/", "/api/admin/delegations/dlg_0123", "/api/admin/delegationsx",
   "/api/admin/principals/backfill", "/api/admin/principals", "/api/admin/principals/backfillx",
+  "/api/admin/principals/parity", "/api/admin/principals/parityx",
   "/api/delegations/mine", "/api/delegations/mine/", "/api/delegations/mine/grantees", "/api/delegations/mine/dlg_0123",
   "/api/delegations/minex", "/api/audit/mine", "/api/audit/minex",
   "/api/identities", "/api/identities/idn_0123",

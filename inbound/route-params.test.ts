@@ -434,7 +434,7 @@ describe("#417 the two contract files join", () => {
       "admin-smtp-credential-delete", "admin-roles", "imap-roles",
       "admin-user-get", "admin-user-delete",
       "admin-identity-revoke", "admin-delegation-revoke",
-      "admin-principals-backfill",
+      "admin-principals-backfill", "admin-principals-parity",
       "self-delegation-grantees", "self-delegations-list", "self-delegation-revoke",
     ];
     const withRows = new Set(Object.keys(PARAMS.params));
