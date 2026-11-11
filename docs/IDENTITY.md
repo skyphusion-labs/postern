@@ -1,10 +1,11 @@
 # Identity: one principal layer for humans and agents (#854)
 
-Status: **design proposal. Nothing here is built.** It answers #854 and waits for
-Conrad's ruling on the decisions in section 9. No code lands until he rules. Where
-this file and a shipped contract (AUTH-CONTRACT.md, CONTRACT.md,
-`docs/design/webmail-v2-contracts.md` 1.10, DELEGATION.md) disagree, the shipped
-contract wins.
+Status: **ruled; phase M1 shipped.** Conrad accepted all ten recommendations in section 9
+as written (2026-11-10, recorded on #854). M1 (section 6) is built: the tables, the
+service-principal seeds, and the idempotent backfill. M2 and M3 are not built. Where this
+file and a shipped contract (AUTH-CONTRACT.md, CONTRACT.md,
+`docs/design/webmail-v2-contracts.md` 1.10, DELEGATION.md) disagree, the shipped contract
+wins.
 
 Conrad, 2026-11-10: *"we need to figure out how we can have a nice integrated idp for
 both agents and humans that can link both api keys and usernames and passwords for both
@@ -200,6 +201,33 @@ Every phase is additive and can stop. Nothing is dropped in this design.
 
 The backfill is idempotent (`INSERT ... WHERE NOT EXISTS`), so it runs on every deploy
 and also picks up rows a pre-M2 admin route wrote after M1 landed.
+
+**M1 as shipped.**
+
+- **Migration `0019_principals.sql`** creates the three tables and seeds the six `service`
+  principals (`svc_both`, `svc_read`, `svc_send`, `svc_delete`, `svc_imap`,
+  `svc_organize`). It is additive, so the #112 gate applies it unmarked.
+- **The backfill is a function, not migration SQL.** A copy from `smtp_credentials` and
+  `agent_identities` is an `INSERT ... SELECT`, which the #112 gate refuses. It is
+  `backfillPrincipals()` (`inbound/src/principals.ts`), run by
+  `POST /api/admin/principals/backfill` (operator only, audited `principals.backfill`).
+  Running it after each deploy is a deploy-pipeline step, not built yet.
+- **Idempotent AND convergent.** A second run inserts and changes nothing. A run after the
+  source changed mirrors exactly that change: a revoked identity disables its principal
+  and revokes its credential; a disabled or re-enabled user, a password change, and a
+  display-name change are mirrored; a deleted user's password credential is revoked and
+  its principal disabled. No row is ever deleted.
+- **Ids.** An agent principal keeps its `idn_` id; its credential is `crd_` plus the same
+  24 hex. A human principal gets a fresh `prn_` id once, keyed on its live `password`
+  credential's `lookup` (the username).
+- **One owner per address.** An address another principal already owns is reported in
+  `addressConflicts` and left with its owner.
+- **The operator is no longer anonymous in the audit log** (D-ID-5): rows the admin routes
+  write now name `actor_kind` `service`, `actor_id` `svc_both`. Older rows keep `operator` +
+  NULL. `delegation_grants.created_by` is still the string `operator` until M2.
+- **Nothing reads the new tables to authorize anything.** Every credential resolves exactly
+  as before; `inbound/principals.test.ts` asserts that across static, registry, runtime and
+  session credentials, before and after a backfill.
 
 **Usernames.** `smtp_credentials.username` becomes the `lookup` of the principal's
 `password` credential. Renaming a login changes that credential, never the principal id,

@@ -567,7 +567,12 @@ transport POSTs the `OutboundMessage` as JSON to `POST /dispatch`, gated by
 
 - Request body: the `OutboundMessage` JSON above, field-for-field (the relay decodes with
   unknown-field rejection, so the producer sends exactly these keys). `bcc` is envelope-only: it
-  rides in `OutboundMessage.bcc`, never in `headers`.
+  rides in `OutboundMessage.bcc`, never in `headers`. `sender` (`{email, name?}`, #740 S4) is
+  present only on a send_as send and is written as the `Sender:` header right after `From:`;
+  it is the only way a Sender reaches the wire (a caller `Sender` header stays reserved).
+- Transport capability: a transport declares `canSetSender`. `CfEmailTransport` cannot (Cloudflare
+  Email Sending has no Sender field or allowlisted header), so a send_as send on it is refused
+  `422 E_SEND_AS_UNSUPPORTED` before dispatch; `RelayTransport` can (DELEGATION.md section 4.5).
 - `200`: `{ "ok": true, "messageId": "<core id>", "providerMessageId": "<or empty>" }`.
 - `400`: `{ "ok": false, "error": "..." }` for a malformed body (bad JSON / no recipients / empty
   message / a `headers` name that is not an RFC 5322 field-name, is longer than 76 characters, or is
@@ -585,7 +590,8 @@ prefixes `Re:` (collapsing an existing prefix), and rebuilds `In-Reply-To` / `Re
 **stored state, not caller input**, so a reply cannot be pointed at an arbitrary thread.
 
 `send()`, `reply()`, and a forward (`forwardMessageId` on `send`) return
-`{ messageId, threadId, from, providerMessageId? }`. `from` is the address actually used,
+`{ messageId, threadId, from, sender?, providerMessageId? }` (`sender`, the agent identity,
+only on a send_as send, #740 S4). `from` is the address actually used,
 after identity binding and the domain check, and it is the same address stored on the
 outbound copy. A registry token that passed a different `from` still sees its bound
 address here (#804). `POST /api/send`, `POST /send`, `POST /api/reply`, and
@@ -638,7 +644,8 @@ none touches D1 directly (#25, #26).
 | DELETE | `/api/admin/identities/{id}` | revoke an identity; the next request with its token is `401`. Idempotent | #801 |
 | GET/POST | `/api/admin/delegations` | list delegation grants (keyset `limit`/`cursor`, `includeRevoked=1`, `grantee=`, `address=`) or grant one `{granteeId, address, powers, label?}`: the grantee must be a LIVE agent identity (`400 E_GRANTEE_INVALID`), powers from `read`, `organize`, `quote`, `send_as` (every power implies `read`), one active grant per (grantee, address) (`409 E_CONFLICT`). Stored only; nothing enforces a grant yet. See DELEGATION.md | #740 S1 |
 | DELETE | `/api/admin/delegations/{id}` | revoke a grant. Idempotent | #740 S1 |
-| GET | `/api/admin/audit` | the audit log, newest first (keyset `limit`/`cursor`): actor, action, target, outcome, detail; refusals included | #801 |
+| GET | `/api/admin/audit` | the audit log, newest first (keyset `limit`/`cursor`): actor, action, target, outcome, detail; refusals included. The operator is actor `{kind: "service", id: "svc_both"}` since #854 M1 (older rows: `operator`, `null`) | #801 |
+| POST | `/api/admin/principals/backfill` | copy agent identities, human users and the static slots into the principal tables; idempotent and convergent; returns `{services, agents, humans, addressConflicts}`. Store only: nothing authorizes from these tables yet (IDENTITY.md section 6) | #854 M1 |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 | POST | `/api/admin/reproject` | refill `projected_size` after a `PROJECTION_VERSION` bump (one keyset page; body: `cursor?`, `limit?`, `dryRun?`, `countOnly?`) | #507 / #520 |
 | POST | `/api/admin/reconcile` | read-only orphan-vector audit (admin; spans the estate) | #134 |
