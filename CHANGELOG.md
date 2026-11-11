@@ -67,6 +67,11 @@ version or created the first admin. A manual run is still safe: it is idempotent
   on their own address and what each may do, gives or removes that access,
   and reads the audit rows about their address. Not offered in token
   mode; hidden on a server without the routes.
+- **Webmail: mark a conversation human-only (#853).** Signed in with a
+  session, a person marks a whole conversation human-only from the
+  message view, so no agent can read, organize, quote or reply to it,
+  whatever access it has. Settings lists those conversations and undoes a
+  mark in two clicks; the activity list shows each mark and unmark.
 
 ### Changed
 

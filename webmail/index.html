@@ -322,6 +322,9 @@
   .audit-list li { font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .audit-list .when { color: var(--muted); display: block; }
   .settings-panel .sub { margin: var(--sp-3) 0 0; font-size: var(--fs-sm); }
+  .tag.human-only { border-color: var(--accent); color: var(--accent); }
+  .exc-list { list-style: none; padding: 0; margin: var(--sp-2) 0 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+  .exc-list li { border: 1px solid var(--line); border-radius: 6px; padding: var(--sp-2); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .settings-panel fieldset.powers { border: 0; padding: 0; margin: var(--sp-3) 0 0; }
   .settings-panel fieldset.powers legend { font-size: var(--fs-sm); color: var(--muted); padding: 0; }
   .settings-panel label.check { display: flex; gap: var(--sp-2); align-items: center; color: var(--fg); margin: var(--sp-1) 0; }
@@ -561,6 +564,14 @@
     </form>
     <div class="err" id="grantErr" role="alert" aria-live="assertive"></div>
     <p class="note-ok" id="grantNote" role="status"></p>
+  </div>
+  <!-- Human-only conversations (#853): session mode only -->
+  <div id="excSection" style="display:none">
+    <h3 id="excTitle">Human-only conversations</h3>
+    <p class="hint">No agent can read, organize, quote or reply to these, whatever access it has. Mark one from the message view with "Make human-only".</p>
+    <ul id="excList" class="exc-list" aria-labelledby="excTitle"></ul>
+    <p class="hint" id="excEmpty">None yet.</p>
+    <div class="err" id="excErr" role="alert"></div>
   </div>
   <!-- Activity on my mail (#740 S5): session mode only -->
   <div id="auditSection" style="display:none">
@@ -1499,7 +1510,9 @@
         (state.identity.displayName ? " (" + state.identity.displayName + ")" : "");
       $("pwSection").style.display = "";
       access.available = true; access.cursor = null;
+      access.excAvailable = true; access.exclusions = [];
       setAccessVisible(true);
+      loadExclusions();
     } else {
       $("identity").textContent = "";
       $("who").textContent = state.origin;
@@ -1748,9 +1761,11 @@
     "delegation.revoke": "removed access",
     "delegation.organize": "organized your mail",
     "delegation.quote": "used your mail in a reply or forward",
-    "delegation.send_as": "sent as you"
+    "delegation.send_as": "sent as you",
+    "delegation.exclude": "marked a conversation human-only",
+    "delegation.unexclude": "made a conversation visible to agents again"
   };
-  var access = { names: {}, cursor: null, available: true, seq: 0 };
+  var access = { names: {}, cursor: null, available: true, seq: 0, excAvailable: true, exclusions: [] };
 
   // Session-only call for these routes: the cookie rides, writes add the CSRF header,
   // there is no Bearer fallback, and the error keeps the server's code for the wording.
@@ -1790,6 +1805,7 @@
   function setAccessVisible(on) {
     $("accessSection").style.display = on ? "" : "none";
     $("auditSection").style.display = on ? "" : "none";
+    $("excSection").style.display = on && access.excAvailable ? "" : "none";
   }
   function accessFailed(e, errNode) {
     if (e.status === 401) { accessUnauthorized(e); return; }
@@ -1812,7 +1828,7 @@
       grants.forEach(function (g) { access.names[g.granteeId] = agentName(g.granteeName, g.granteeFrom, g.granteeId); });
       renderGrants(grants);
       renderGrantees(grantees, grants);
-      return loadAudit(false);
+      return loadExclusions().then(function () { return loadAudit(false); });
     }).catch(function (e) { accessFailed(e, $("grantErr")); });
   }
   function renderGrants(grants) {
@@ -1915,6 +1931,11 @@
     } else if (d.op) {
       text += " (" + String(d.op) + ")";
     }
+    if ((row.action === "delegation.exclude" || row.action === "delegation.unexclude") && row.target && row.target.kind === "thread") {
+      // The row carries no subject; name the conversation only while it is still marked.
+      var still = exclusionFor(row.target.id);
+      if (still) text += ": " + (still.subject || "(no subject)");
+    }
     if (row.outcome && row.outcome !== "ok") text += ": " + String(row.outcome);
     return text;
   }
@@ -1936,6 +1957,86 @@
       $("auditMore").style.display = access.cursor ? "" : "none";
       $("auditEmpty").style.display = ul.childNodes.length > 0 ? "none" : "";
     }).catch(function (e) { accessFailed(e, $("auditErr")); });
+  }
+
+  // --- Human-only conversations (#853): session mode only ------------------------
+  // The owner marks a whole conversation human-only. No agent can then read, organize,
+  // quote or reply to it, whatever access it holds. The page keeps the owner's list (one
+  // GET at sign-in, again after each change) and matches the open message on threadId.
+  function exclusionFor(threadId) {
+    if (!threadId) return null;
+    for (var i = 0; i < access.exclusions.length; i++) if (access.exclusions[i].threadId === threadId) return access.exclusions[i];
+    return null;
+  }
+  function loadExclusions() {
+    if (state.authMode !== "session" || !access.available || !access.excAvailable) return Promise.resolve();
+    return sessionCall("GET", "/api/delegations/mine/exclusions").then(function (body) {
+      access.exclusions = body.items || [];
+      renderExclusions();
+      if (state.selected) renderReading(state.selected);
+    }).catch(function (e) {
+      if (e.status === 401) { accessUnauthorized(e); return; }
+      // A server without the route answers 404: no mark button, no section.
+      if (e.status === 404) {
+        access.excAvailable = false; access.exclusions = [];
+        $("excSection").style.display = "none";
+        if (state.selected) renderReading(state.selected);
+        return;
+      }
+      $("excErr").textContent = "Could not load: " + e.message;
+    });
+  }
+  function excErrorText(e) {
+    if (e.status === 404) return "That conversation is not in your mailbox.";
+    if (e.code === "E_CSRF") return "Your session needs a refresh. Reload the page and try again.";
+    return e.message;
+  }
+  function renderExclusions() {
+    var ul = $("excList");
+    clear(ul);
+    $("excEmpty").style.display = access.exclusions.length ? "none" : "";
+    access.exclusions.forEach(function (x) {
+      var btn = el("button", { type: "button", class: "link", text: "Let agents see it" });
+      btn.addEventListener("click", function () { unmarkHumanOnly(x, btn, "Let agents see it"); });
+      var when = whenText(x.createdAt);
+      ul.appendChild(el("li", {}, [
+        el("div", { class: "grant-who", text: x.subject || "(no subject)" }),
+        el("div", { class: "hint", text: "Human only" + (when ? " since " + when : "") }),
+        btn
+      ]));
+    });
+  }
+  function markHumanOnly(threadId, btn) {
+    btn.disabled = true;
+    sessionCall("POST", "/api/delegations/mine/exclusions", { threadId: threadId }).then(function () {
+      toast("Marked human-only. No agent can see this conversation.");
+      return loadExclusions();
+    }).catch(function (e) {
+      if (e.status === 401) { accessUnauthorized(e); return; }
+      toast(excErrorText(e), true);
+      btn.disabled = false;
+    });
+  }
+  // Unmarking widens what agents can see, so it takes two clicks, like Remove access.
+  function unmarkHumanOnly(x, btn, label) {
+    if (!btn.getAttribute("data-armed")) {
+      btn.setAttribute("data-armed", "1");
+      btn.textContent = "Confirm: let agents see it";
+      setTimeout(function () {
+        if (btn.isConnected && btn.getAttribute("data-armed")) { btn.removeAttribute("data-armed"); btn.textContent = label; }
+      }, 5000);
+      return;
+    }
+    btn.disabled = true;
+    sessionCall("DELETE", "/api/delegations/mine/exclusions/" + encodeURIComponent(x.id)).then(function () {
+      toast("Agents with access can see this conversation again.");
+      return loadExclusions();
+    }).catch(function (e) {
+      if (e.status === 401) { accessUnauthorized(e); return; }
+      toast(excErrorText(e), true);
+      btn.disabled = false;
+      if (e.status === 404) loadExclusions();
+    });
   }
 
   function changePassword() {
@@ -2886,6 +2987,8 @@
     var trustKids = [
       el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted sender" : "untrusted sender" })
     ];
+    var humanOnly = state.authMode === "session" && access.excAvailable ? exclusionFor(m.threadId) : null;
+    if (humanOnly) trustKids.push(el("span", { class: "tag human-only", text: "Human only", title: "No agent can see this conversation." }));
     if (m.auth) {
       trustKids.push(el("details", { class: "auth-detail" }, [
         el("summary", { text: "Authentication" }),
@@ -2958,6 +3061,19 @@
           });
         });
         return btn;
+      }
+      if (state.authMode === "session" && access.available && access.excAvailable && m.threadId) {
+        var hoBtn = el("button", {
+          type: "button",
+          "aria-pressed": humanOnly ? "true" : "false",
+          text: humanOnly ? "Let agents see it" : "Make human-only",
+          title: humanOnly ? "Agents with access can see this conversation again." : "Hide this whole conversation from every agent."
+        });
+        hoBtn.addEventListener("click", function () {
+          if (humanOnly) unmarkHumanOnly(humanOnly, hoBtn, "Let agents see it");
+          else markHumanOnly(m.threadId, hoBtn);
+        });
+        actions.push(hoBtn);
       }
       if (m.mailbox === "trash" || m.mailbox === "junk" || m.mailbox === "archive") {
         actions.push(moveTo(null, "Restore"));

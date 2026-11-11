@@ -90,6 +90,8 @@ reply calls. All addresses are `example` domains.
   Loads and errors are announced through a live region.
 - **Change password** in Settings when signed in with a session (below).
 - **Agent access and activity** in Settings when signed in with a session (below).
+- **Human-only conversations** (#853): mark a whole conversation so that no agent can
+  see it, from the message view; listed and undone in Settings.
 
 ## Auth (#32): bring your own token
 
