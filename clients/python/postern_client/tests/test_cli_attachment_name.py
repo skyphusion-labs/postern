@@ -113,3 +113,31 @@ class AttachmentNameTest(unittest.TestCase):
                 self.assertEqual(fh.read(), "original\n")
             with open(chosen, "rb") as fh:
                 self.assertEqual(fh.read(), b"chosen-body")
+
+    def test_controls_are_stripped_from_the_name_and_the_note(self):
+        t = _attachment("notes\x1b[0m.txt\x85\x7f", b"abc")
+        with tempfile.TemporaryDirectory() as root:
+            with _cwd(root):
+                code, _, err = _run(["attachment", "m1", "0"], t)
+            self.assertEqual(code, 0, err)
+            for ch in ("\x1b", "\x85", "\x7f"):
+                self.assertNotIn(ch, err)
+                self.assertFalse(any(ch in name for name in os.listdir(root)))
+            written = os.path.join(root, "notes[0m.txt")
+            self.assertTrue(os.path.isfile(written))
+            with open(written, "rb") as fh:
+                self.assertEqual(fh.read(), b"abc")
+
+    def test_controls_are_stripped_from_a_chosen_path_and_the_note(self):
+        t = _attachment("ignored.txt", b"abc")
+        with tempfile.TemporaryDirectory() as root:
+            chosen = os.path.join(root, "out\x07.bin")
+            with _cwd(root):
+                code, _, err = _run(["attachment", "m1", "0", "-o", chosen], t)
+            self.assertEqual(code, 0, err)
+            self.assertNotIn("\x07", err)
+            self.assertFalse(os.path.exists(chosen))
+            written = os.path.join(root, "out.bin")
+            self.assertTrue(os.path.isfile(written))
+            with open(written, "rb") as fh:
+                self.assertEqual(fh.read(), b"abc")

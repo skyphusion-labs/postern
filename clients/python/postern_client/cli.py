@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Optional, Sequence
 
@@ -24,18 +25,33 @@ from .client import (
 )
 
 
+# C0, DEL, and C1. These do not belong in a filename or in the stderr note.
+_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _strip_controls(value: str) -> str:
+    return _CONTROLS.sub("", value)
+
+
 def _attachment_destination(remote_name: Optional[str], chosen: Optional[str]) -> tuple[str, bool]:
     """Path to write, and whether that path must be created exclusively.
 
-    A caller-supplied ``-o`` path is used as given. Otherwise the remote name is
-    reduced to its final path segment. An empty segment, ``.``, ``..``, or a
-    hidden name (a leading dot) is refused: pass ``-o`` to choose a filename.
-    The exclusive flag is what stops a remote name from replacing a file that
-    is already in the working directory.
+    A caller-supplied ``-o`` path is used as given, after control characters
+    are removed. Otherwise the remote name is reduced to its final path
+    segment. An empty segment, ``.``, ``..``, or a hidden name (a leading
+    dot) is refused: pass ``-o`` to choose a filename. The exclusive flag is
+    what stops a remote name from replacing a file that is already in the
+    working directory.
     """
     if chosen:
-        return chosen, False
-    raw = (remote_name or "").replace("\\", "/").replace("\x00", "")
+        cleaned = _strip_controls(chosen)
+        if not cleaned:
+            raise PosternError(
+                "refusing to write this attachment: its name is empty or hidden. "
+                "Pass -o to choose a filename."
+            )
+        return cleaned, False
+    raw = _strip_controls((remote_name or "").replace("\\", "/"))
     base = os.path.basename(raw)
     if not base or base in {".", ".."} or base.startswith("."):
         raise PosternError(
@@ -654,7 +670,7 @@ def _run(client: PosternClient, args: argparse.Namespace) -> int:
             )
             return 1
         # Metadata to stderr so stdout stays clean if a caller pipes it.
-        print(f"wrote {len(att.body)} bytes to {out} ({att.mime})", file=sys.stderr)
+        print(_strip_controls(f"wrote {len(att.body)} bytes to {out} ({att.mime})"), file=sys.stderr)
         return 0
 
     if cmd == "folders":
