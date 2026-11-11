@@ -11,6 +11,16 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+### Fixed
+
+- **The reply and forward quote follows the caller's read scope.** A
+  static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
+  quotes or forwards a stored message: the source is not found, as on the
+  read routes. `both` and `read` tokens and bound identities are
+  unchanged.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
