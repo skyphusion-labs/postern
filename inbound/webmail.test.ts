@@ -56,7 +56,7 @@ describe("the script hash in the CSP is the hash of the page's script", () => {
   // The browser hashes the text of the one inline <script> (after CR LF -> LF). If the
   // page changes without npm run sync-webmail, this fails before the page would.
   it("recomputes to WEBMAIL_SCRIPT_HASH", () => {
-    const scripts = [...WEBMAIL_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+    const scripts = [...WEBMAIL_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
     expect(scripts).toHaveLength(1);
     expect(scripts[0][1].trim()).toBe("");
     const text = scripts[0][2].replace(/\r\n?/g, "\n");
@@ -64,13 +64,16 @@ describe("the script hash in the CSP is the hash of the page's script", () => {
   });
 
   it("a changed script would not match (the check can fail)", () => {
-    const scripts = [...WEBMAIL_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+    const scripts = [...WEBMAIL_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
     const changed = scripts[0][2] + " ";
     expect("sha256-" + createHash("sha256").update(changed, "utf8").digest("base64")).not.toBe(WEBMAIL_SCRIPT_HASH);
   });
 
   it("the page has no inline event handler or javascript: URL the hash would not cover", () => {
-    const outside = WEBMAIL_HTML.replace(/<script\b[^>]*>[\s\S]*?<\/script>/i, "");
+    const scripts = [...WEBMAIL_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
+    expect(scripts).toHaveLength(1);
+    const at = scripts[0].index!;
+    const outside = WEBMAIL_HTML.slice(0, at) + WEBMAIL_HTML.slice(at + scripts[0][0].length);
     expect(outside).not.toMatch(/<[a-z][^>]*\son[a-z]+\s*=/i);
     expect(outside).not.toMatch(/javascript:/i);
   });

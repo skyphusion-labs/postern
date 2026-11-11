@@ -26,16 +26,19 @@ if (html.includes("`") || html.includes("${")) {
 // javascript: URL) does not run. Refuse any page shape the hash cannot cover: a
 // second <script>, a script with attributes, an inline on*= handler, or a javascript:
 // URL would be blocked by the CSP and break the page silently.
-const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+// The end tag is matched the way a browser ends a script: "</script" then whitespace,
+// "/" or ">".
+const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)];
 if (scripts.length !== 1 || scripts[0][1].trim() !== "") {
   console.error("sync-webmail: webmail/index.html must contain exactly one <script> with no attributes");
   process.exit(1);
 }
-if (/<[a-z][^>]*\son[a-z]+\s*=/i.test(html.replace(scripts[0][0], ""))) {
+const outside = html.slice(0, scripts[0].index) + html.slice(scripts[0].index + scripts[0][0].length);
+if (/<[a-z][^>]*\son[a-z]+\s*=/i.test(outside)) {
   console.error("sync-webmail: webmail/index.html has an inline on*= event handler; the script CSP would block it");
   process.exit(1);
 }
-if (/javascript:/i.test(html.replace(scripts[0][0], ""))) {
+if (/javascript:/i.test(outside)) {
   console.error("sync-webmail: webmail/index.html has a javascript: URL; the script CSP would block it");
   process.exit(1);
 }
