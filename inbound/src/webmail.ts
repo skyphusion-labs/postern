@@ -279,6 +279,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md); overflow-wrap: anywhere;
   }
   .attachments .dl { min-height: 30px; flex-shrink: 0; }
+  .att-name { unicode-bidi: isolate; }
   .thread { margin-top: var(--sp-5); }
   .thread .t-item {
     padding: var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md);
@@ -704,6 +705,23 @@ export const WEBMAIL_HTML = `<!doctype html>
     return n;
   }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  // Attachment filenames are written by the sender. Control and invisible format
+  // characters (bidi overrides and isolates, zero-width characters, C0/C1 controls,
+  // line and paragraph separators) can make a name read differently from what it is,
+  // so the shown name marks each one as a visible [U+XXXX] and the name handed to the
+  // download replaces each one with "_". Shown names also sit in an LTR isolate.
+  var FILENAME_HIDDEN = /[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]/gu;
+  function codePointLabel(ch) {
+    var hex = ch.codePointAt(0).toString(16).toUpperCase();
+    while (hex.length < 4) hex = "0" + hex;
+    return "[U+" + hex + "]";
+  }
+  function shownFileName(name) { return String(name).replace(FILENAME_HIDDEN, codePointLabel); }
+  function savedFileName(name) { return String(name).replace(FILENAME_HIDDEN, "_"); }
+  function fileNameNode(name) {
+    return el("span", { class: "att-name", dir: "ltr", text: shownFileName(name) });
+  }
   function $(id) { return document.getElementById(id); }
 
   // --- session state ---------------------------------------------------------
@@ -1012,7 +1030,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     }).then(function (blob) {
       var obj = URL.createObjectURL(blob);
       var a = document.createElement("a");
-      a.href = obj; a.download = filename || ("attachment-" + index);
+      a.href = obj; a.download = savedFileName(filename || ("attachment-" + index));
       document.body.appendChild(a); a.click(); a.remove();
       // Revoke on the next tick so the download has started.
       setTimeout(function () { URL.revokeObjectURL(obj); }, 0);
@@ -2385,7 +2403,7 @@ export const WEBMAIL_HTML = `<!doctype html>
           }).catch(function (e) { err.textContent = e.message; remove.disabled = false; });
         });
         fileList.appendChild(el("li", {}, [
-          el("span", { text: (a.filename || "attachment") + " (" + fmtSize(a.size) + ")" }), remove
+          el("span", {}, [fileNameNode(a.filename || "attachment"), " (" + fmtSize(a.size) + ")"]), remove
         ]));
       });
     }
@@ -2656,7 +2674,7 @@ export const WEBMAIL_HTML = `<!doctype html>
         var btn = el("button", { class: "dl", text: "Download" });
         btn.addEventListener("click", function () { downloadAttachment(m.messageId, i, name, btn); });
         ul.appendChild(el("li", {}, [
-          el("span", {}, [icon("clip"), document.createTextNode(" " + name + " "),
+          el("span", {}, [icon("clip"), " ", fileNameNode(name), " ",
             el("span", { class: "sender-addr", text: (a.mime || "?") + ", " + fmtSize(a.size) })]),
           btn
         ]));
@@ -2867,7 +2885,7 @@ export const WEBMAIL_HTML = `<!doctype html>
 `;
 
 // sha256 of the page's one inline <script>, computed by scripts/sync-webmail.mjs.
-export const WEBMAIL_SCRIPT_HASH = "sha256-nGAz9vThgGmaGABV/4DP/fD5nQCYg/Y/6GYUDb6YPPI=";
+export const WEBMAIL_SCRIPT_HASH = "sha256-zmv5px0SMK9y/7lQ9D/lEC1AloMZEPxP10GzMos9ODI=";
 
 // The page CSP. It loads no third-party anything and only talks to the same origin
 // (its own API): connect-src 'self' means a hijacked page cannot send the pasted token
@@ -2876,7 +2894,7 @@ export const WEBMAIL_SCRIPT_HASH = "sha256-nGAz9vThgGmaGABV/4DP/fD5nQCYg/Y/6GYUD
 // the reading pane uses to render message bodies (sandbox="" = no scripts, no
 // same-origin), so stored body content can never execute or reach the API.
 // style-src keeps 'unsafe-inline' for the inline <style> and style attributes.
-export const WEBMAIL_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-nGAz9vThgGmaGABV/4DP/fD5nQCYg/Y/6GYUDb6YPPI='; connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+export const WEBMAIL_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-zmv5px0SMK9y/7lQ9D/lEC1AloMZEPxP10GzMos9ODI='; connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",

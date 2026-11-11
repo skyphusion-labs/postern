@@ -245,6 +245,12 @@ XSS is the main surface. The page is built to neutralize it:
   an object URL; the token is never placed in a URL. The endpoint returns the
   bytes with `Content-Disposition: attachment`, a sanitized filename, and
   `nosniff`, so attachments are never rendered inline.
+- **Attachment names are shown as they are.** A filename comes from the sender,
+  so control and invisible format characters in it (bidi overrides and isolates,
+  zero-width characters, C0/C1 controls, line and paragraph separators) are shown
+  as a visible `[U+XXXX]` marker, the name sits in a left-to-right isolate, and the
+  name given to the download replaces each such character with `_`. Covered by
+  `webmail/e2e/tests/attachment-names.spec.ts`.
 - The token rides as a header, with `credentials: omit` (no ambient cookies) and
   `referrer-policy: no-referrer`.
 
