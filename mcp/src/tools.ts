@@ -547,7 +547,11 @@ export const READ_TOOLS: ToolDef[] = [
       "'identityScope' is the same projection mailbox_list and mailbox_search report. " +
       "'roleQueues' are shared queues you may ALSO read by passing that address as 'to'; an " +
       "empty list means none, never 'unknown'. 'capabilities' is what the gate will actually " +
-      "honour, so a capability absent from it WILL be refused.",
+      "honour, so a capability absent from it WILL be refused. 'delegations' lists the human " +
+      "addresses an operator has granted you, each with its powers: where reads are narrowed " +
+      "to granted addresses, read one by passing it as 'to'; 'organize' lets you mark its mail " +
+      "read (for: that address), flag it and move it. An empty list means none; the field is " +
+      "absent only from a server too old to have grants.",
     inputSchema: {},
     handler: async (client) => client.whoami(),
   },
