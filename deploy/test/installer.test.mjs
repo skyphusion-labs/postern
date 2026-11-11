@@ -626,3 +626,59 @@ describe("upgrade record survives a failed upgrade", () => {
     assert.equal(st.history.at(-1).complete, false);
   });
 });
+
+describe("re-run keeps the recorded hostname and admin (#855)", () => {
+  const custom = ["--hostname", "post.acme-mail.test", "--admin", "boss@acme-mail.test"];
+  const rerun = (c, args = []) => parseArgs(["install", "--domain", "acme-mail.test", "--state-dir", c.opts.stateDir, ...args]);
+  const routes = (c) => JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.wrangler.json"), "utf8")).routes.map((r) => r.pattern);
+  const state = (c) => JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.json"), "utf8"));
+
+  test("a re-run with no --hostname / --admin keeps the recorded ones, and never touches mail.<domain>", async () => {
+    const c = setup({ args: custom });
+    await install(c.deps, c.opts);
+    c.out.length = 0;
+    const o = rerun(c);
+    await install(c.deps, o);
+    assert.equal(o.hostname, "post.acme-mail.test");
+    assert.equal(o.admin, "boss@acme-mail.test");
+    assert.deepEqual(routes(c), ["post.acme-mail.test"]);
+    assert.equal(state(c).hostname, "post.acme-mail.test");
+    assert.ok(!c.m.domains.some((d) => d.hostname === "mail.acme-mail.test"), "the re-run attached mail.<domain>");
+    assert.ok(!c.m.dns.some((r) => r.name === "mail.acme-mail.test"), "the re-run created DNS for mail.<domain>");
+    assert.match(c.out.join("\n"), /-> Worker postern on https:\/\/post\.acme-mail\.test/);
+  });
+
+  test("a resume before the admin exists keeps the admin login the first run chose", async () => {
+    const c = setup({ args: custom });
+    // The live failure: this machine could not resolve the new hostname yet, so the
+    // first run stopped before it created the admin.
+    const realHttp = c.deps.http;
+    c.deps.http = async () => { const e = new Error("getaddrinfo ENOTFOUND"); e.code = "ENOTFOUND"; throw e; };
+    await assert.rejects(install(c.deps, c.opts), /cannot resolve post\.acme-mail\.test/);
+    assert.equal(state(c).admin, undefined);
+    c.deps.http = realHttp;
+    const o = rerun(c);
+    await install(c.deps, o);
+    assert.equal(o.admin, "boss@acme-mail.test");
+    assert.deepEqual(Object.keys(c.m.admins), ["boss@acme-mail.test"]);
+  });
+
+  test("an explicit, different --hostname is honoured and said out loud", async () => {
+    const c = setup({ args: custom });
+    await install(c.deps, c.opts);
+    c.out.length = 0;
+    const o = rerun(c, ["--hostname", "mx.acme-mail.test"]);
+    await install(c.deps, o);
+    assert.equal(o.hostname, "mx.acme-mail.test");
+    assert.deepEqual(routes(c), ["mx.acme-mail.test"]);
+    assert.match(c.out.join("\n"), /note: --hostname mx\.acme-mail\.test replaces the recorded post\.acme-mail\.test, because it was passed\./);
+  });
+
+  test("a first install still defaults to mail.<domain> and admin@<domain>", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    assert.equal(c.opts.hostname, "mail.acme-mail.test");
+    assert.equal(state(c).hostname, "mail.acme-mail.test");
+    assert.equal(state(c).admin, "admin@acme-mail.test");
+  });
+});
