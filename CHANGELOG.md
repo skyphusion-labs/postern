@@ -13,7 +13,18 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Upgrade.** Migration `0019` (the principal tables and six service-principal seeds) is
+additive and is applied by the deploy. Run `POST /api/admin/principals/backfill` once after
+upgrading to copy existing identities and users in; it is safe to run again.
+
 ### Added
+
+- **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
+  `principal_addresses` tables, the six static token slots as service
+  principals, and `POST /api/admin/principals/backfill`, which copies agent
+  identities (keeping their `idn_` ids) and human users in. Idempotent and
+  convergent. Store only: every credential resolves exactly as before. See
+  `docs/IDENTITY.md` section 6.
 
 - **The `send_as` power (#740 S4).** An agent holding a `send_as` grant
   sends as the human by naming the address as `from`: From is the human
@@ -25,15 +36,11 @@ mismatched MCP tag fails before it publishes.
   without one (Cloudflare feature request: #896). The relay `/dispatch`
   body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
 
-### Fixed
-
-- **Webmail shows attachment names with hidden characters made visible.**
-  Control and invisible format characters in an attachment filename are
-  shown as `[U+XXXX]`, the name is isolated left to right, and the
-  download name replaces each such character with `_`.
-
 ### Changed
 
+- **The operator is named in the audit log (#854 M1).** Rows the admin
+  routes write now carry actor `service` / `svc_both` instead of
+  `operator` with no id. Older rows are unchanged.
 - **CI refuses CHANGELOG lines added to a released section.** A new
   `release-gate` step fails when a change adds a line inside an
   already-released `## vX.Y.Z` section of `CHANGELOG.md`; entries belong
@@ -41,6 +48,19 @@ mismatched MCP tag fails before it publishes.
   there with no conflict, which is what this catches. A deliberate edit to
   released notes passes with the commit trailer
   `Changelog-History-Edit: <reason>`.
+
+### Fixed
+
+- **Webmail shows attachment names with hidden characters made visible.**
+  Control and invisible format characters in an attachment filename are
+  shown as `[U+XXXX]`, the name is isolated left to right, and the
+  download name replaces each such character with `_`.
+
+- **The webmail remote-content notice counts every remote reference.**
+  SVG image, use and feImage links, CSS url() written with escapes,
+  @import of a plain string and image-set() strings are counted and
+  removed from the reading frame; a URL inside a CSS comment is not
+  counted.
 
 ## v1.11.0
 
