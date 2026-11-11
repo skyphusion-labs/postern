@@ -108,6 +108,13 @@ export function fakeFetch(m) {
       }
     }
 
+    if ((mm = new RegExp(`^${z}/dns_records/([^/]+)$`).exec(p))) {
+      const rec = m.dns.find((x) => x.id === mm[1]);
+      if (!rec) return fail(404, 81044, "Record does not exist.");
+      if (method === "GET") return ok(rec);
+      if (method === "DELETE") { m.dns = m.dns.filter((x) => x !== rec); return ok({ id: rec.id }); }
+    }
+
     if (p === `${z}/email/routing` && method === "GET") return ok(m.routing);
     if (p === `${z}/email/routing/disable` && method === "POST") {
       // measured 2026-11-10: disabling Routing deletes the MX / SPF / DKIM it manages

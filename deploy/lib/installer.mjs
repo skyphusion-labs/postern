@@ -15,7 +15,7 @@
 // replaces the token and every secret this installer generated or stored.
 
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CfError } from "./cf.mjs";
 import { renderConfig } from "./config.mjs";
@@ -49,7 +49,92 @@ export class Refused extends Error {
 
 function statePaths(opts) {
   const base = join(opts.stateDir, `${opts.name}.${opts.domain}`);
-  return { state: `${base}.json`, creds: `${base}.credentials.env`, config: `${base}.wrangler.json`, build: `${base}.build` };
+  return {
+    state: `${base}.json`, creds: `${base}.credentials.env`, config: `${base}.wrangler.json`, build: `${base}.build`,
+    lock: `${base}.lock`, secretsPrefix: `.${opts.name}.${opts.domain}.secrets-`,
+  };
+}
+
+// ONE RUN AT A TIME per install. Two runs on one state directory could each generate a
+// mailbox token and leave the credentials file holding one the Worker does not. The lock
+// holds the PID. A lock whose process is gone (a crash, Ctrl-C, a kill) is taken over, so
+// an interrupted run never blocks the next one.
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+}
+// The PID in a lock file, read through one descriptor; NaN when it is unreadable or empty.
+function lockPid(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    return parseInt(readFileSync(fd, "utf8"), 10);
+  } catch {
+    return NaN;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+export function takeLock(opts, log = () => {}) {
+  ensureStateDir(opts);
+  const p = statePaths(opts).lock;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(p, "wx", 0o600);
+      writeFileSync(fd, `${process.pid}\n`);
+      closeSync(fd);
+      return () => rmSync(p, { force: true });
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+    const pid = lockPid(p);
+    if (pidAlive(pid)) {
+      throw new Refused([`another postern run (PID ${pid}) is working on this install (lock ${p}). Wait for it to finish. If no other run is going, delete that file and re-run.`]);
+    }
+    // Take over a stale lock without racing another run doing the same: move it to a name
+    // only this run knows, then check the moved file is the stale lock that was judged. If a
+    // live run replaced it in between, put that lock back (link never overwrites) and stop.
+    const moved = `${p}.stale-${process.pid}-${randomBytes(6).toString("hex")}`;
+    try {
+      renameSync(p, moved);
+    } catch (e) {
+      if (e.code === "ENOENT") continue; // another run already moved it; try to create again
+      throw e;
+    }
+    const movedPid = lockPid(moved);
+    if (movedPid !== pid && !(Number.isNaN(movedPid) && Number.isNaN(pid)) && pidAlive(movedPid)) {
+      try { linkSync(moved, p); } catch { /* a third run holds p now; it keeps it */ }
+      rmSync(moved, { force: true });
+      throw new Refused([`another postern run (PID ${movedPid}) took the lock ${p} a moment ago. Wait for it to finish, then re-run.`]);
+    }
+    rmSync(moved, { force: true });
+    log(`  note: removed a stale lock from an earlier run that did not finish (PID ${Number.isNaN(pid) ? "unknown" : pid})`);
+  }
+  throw new Refused([`could not take the lock ${p}. Delete it if no other run is going, and re-run.`]);
+}
+
+// An interrupted deploy (Ctrl-C, a kill) skips the cleanup of its temporary secrets file.
+// Remove this install's leftovers before writing a new one; the lock means no other run of
+// this install is using them. Files from an older installer (unscoped .secrets-*.json) are
+// removed only when over an hour old, since a deploy never takes that long.
+function sweepSecretsFiles(ctx) {
+  const { opts, paths } = ctx;
+  let names = [];
+  try { names = readdirSync(opts.stateDir); } catch { return; }
+  const now = Date.now();
+  for (const n of names) {
+    const mine = n.startsWith(paths.secretsPrefix) && n.endsWith(".json");
+    const legacy = /^\.secrets-[0-9a-f]{24}\.json$/.test(n);
+    if (!mine && !legacy) continue;
+    const f = join(opts.stateDir, n);
+    if (legacy) {
+      let age = 0;
+      try { age = now - statSync(f).mtimeMs; } catch { continue; }
+      if (age < 3600e3) continue;
+    }
+    rmSync(f, { force: true });
+    ctx.log(`  note: removed ${n}, a temporary secrets file an interrupted run left behind`);
+  }
 }
 
 function loadState(opts) {
@@ -493,7 +578,8 @@ async function ensureWorker(ctx, pf) {
     }
     // Unpredictable name, exclusive create: never write the token through a
     // file or symlink that was already sitting at that path.
-    secretsFile = join(opts.stateDir, `.secrets-${randomBytes(12).toString("hex")}.json`);
+    sweepSecretsFiles(ctx);
+    secretsFile = join(opts.stateDir, `${ctx.paths.secretsPrefix}${randomBytes(12).toString("hex")}.json`);
     writeFileSync(secretsFile, JSON.stringify({ POSTERN_API_TOKEN: creds.POSTERN_API_TOKEN }), { mode: 0o600, flag: "wx" });
     args.push("--secrets-file", secretsFile);
   }
@@ -517,9 +603,11 @@ async function ensureWorker(ctx, pf) {
   (live.length ? rep.updated : rep.created)(`Worker ${opts.name} version ${id} on https://${opts.hostname}`);
 }
 
+// Returns the records this call created, each with the id Cloudflare gave it.
 async function ensureDnsRecords(ctx, pf, wants, label) {
   const { cf, opts, rep } = ctx;
   const records = await cf.list("read DNS records", P.dns, `/zones/${pf.zone.id}/dns_records`);
+  const created = [];
   for (const w of wants) {
     const s = dnsSatisfied(records, w);
     const what = `DNS ${w.type} ${w.name} (${label})`;
@@ -528,10 +616,12 @@ async function ensureDnsRecords(ctx, pf, wants, label) {
     if (opts.dryRun) { rep.would(`create ${what}`); continue; }
     const body = { type: w.type, name: w.name, content: w.content, ttl: w.ttl || 1, comment: "postern installer" };
     if (w.priority !== undefined) body.priority = w.priority;
-    await cf.call(`create ${what}`, P.dns, "POST", `/zones/${pf.zone.id}/dns_records`, body);
+    const res = await cf.call(`create ${what}`, P.dns, "POST", `/zones/${pf.zone.id}/dns_records`, body);
     records.push(body);
+    created.push({ ...body, id: res?.result?.id });
     rep.created(what);
   }
+  return created;
 }
 
 async function ensureSending(ctx, pf) {
@@ -592,8 +682,15 @@ async function ensureDmarc(ctx, pf) {
   const records = await cf.list("read DNS records", P.dns, `/zones/${pf.zone.id}/dns_records?type=TXT`);
   const have = records.find((r) => r.type === "TXT" && norm(r.name) === norm(name) && /^v=DMARC1/i.test(unquote(r.content)));
   if (have) return rep.kept(`DNS TXT ${name} (your existing DMARC policy is left as it is)`);
-  await ensureDnsRecords(ctx, pf, [{ type: "TXT", name, content: `v=DMARC1; p=${opts.dmarcPolicy}` }], "DMARC");
+  const content = `v=DMARC1; p=${opts.dmarcPolicy}`;
+  const made = await ensureDnsRecords(ctx, pf, [{ type: "TXT", name, content }], "DMARC");
   ctx.dmarcWritten = !opts.dryRun;
+  // Recorded so that uninstall removes it (#856). Only a record this run CREATED is recorded;
+  // a DMARC the domain already had is never ours.
+  if (made[0]?.id) {
+    ctx.state.owned.dmarc = { id: made[0].id, content };
+    saveState(opts, ctx.state);
+  }
   if (opts.dmarcPolicy !== "reject") {
     ctx.log(`  note: Cloudflare Email Sending recommends p=reject. If only Postern sends as ${opts.domain}, use --dmarc reject (a new install only; an existing DMARC is never changed).`);
   }
@@ -736,12 +833,17 @@ function writeConfig(ctx) {
 // Every error leaves through here, redacted: a wrangler failure's tail() can carry
 // whatever wrangler printed, and a refusal can quote API text.
 async function guarded(ctx, fn) {
+  // A dry run (and status) writes nothing, so it takes no lock.
+  let release = null;
   try {
+    if (!ctx.opts.dryRun) release = takeLock(ctx.opts, ctx.log);
     return await fn();
   } catch (e) {
     if (e && typeof e.message === "string") e.message = ctx.redact(e.message);
     if (e && Array.isArray(e.reasons)) e.reasons = e.reasons.map(ctx.redact);
     throw e;
+  } finally {
+    if (release) release();
   }
 }
 
@@ -944,6 +1046,27 @@ async function uninstallRun(ctx, opts) {
       rep.removed(`Email Sending for ${opts.domain}`);
     }
   } else rep.kept(`Email Sending for ${opts.domain}: this installer did not record enabling it, so it is left as it is`);
+
+  // 3b. The DMARC record, only if this installer created it (#856), and only while it still
+  //     holds the value the installer wrote. A record the operator has edited is theirs.
+  if (owned.dmarc) {
+    const name = `_dmarc.${opts.domain}`;
+    const rec = (await cf.call("read the DMARC record", P.dns, "GET", `/zones/${z}/dns_records/${owned.dmarc.id}`, undefined, { allow404: true }))?.result;
+    const forget = () => { if (!dry) { delete owned.dmarc; saveState(opts, state); } };
+    if (!rec) {
+      rep.unchanged(`DNS TXT ${name} (already gone)`);
+      forget();
+    } else if (unquote(rec.content) !== owned.dmarc.content) {
+      rep.kept(`DNS TXT ${name}: it was changed after install, so it is yours now and is left as it is`);
+      forget();
+    } else if (dry) {
+      rep.would(`delete DNS TXT ${name} (the DMARC record this installer created)`);
+    } else {
+      await cf.call("delete the DMARC record", P.dns, "DELETE", `/zones/${z}/dns_records/${owned.dmarc.id}`, undefined, { allow404: true });
+      forget();
+      rep.removed(`DNS TXT ${name} (the DMARC record this installer created)`);
+    }
+  }
 
   // 4. Data: kept unless asked, exported before it is deleted.
   if (!opts.deleteData) {
