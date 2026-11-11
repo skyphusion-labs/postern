@@ -44,6 +44,11 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Fixed
 
+- **Attachment download.** `postern attachment` without `-o` writes only the
+  final path segment of the remote name, refuses an empty or hidden name, and
+  does not replace a file that already exists. `-o` still writes the path you
+  name.
+
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
@@ -97,10 +102,6 @@ deploy. A self-hosted install picks up the installer changes the next time it ru
 
 ### Fixed
 
-- **Attachment download.** `postern attachment` without `-o` writes only the
-  final path segment of the remote name, refuses an empty or hidden name, and
-  does not replace a file that already exists. `-o` still writes the path you
-  name.
 - **The reply and forward quote follows the caller's read scope.** A
   static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
   quotes or forwards a stored message: the source is not found, as on the
