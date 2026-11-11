@@ -44,6 +44,11 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Fixed
 
+- **MCP bounds the API URL, path ids, and returned bodies.** The API URL must
+  be https, or http on localhost. An id that is empty, `.`, or `..` is
+  refused. A long message body is cut and marked truncated, and the startup
+  line shows only the API origin.
+
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
