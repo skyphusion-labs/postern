@@ -110,7 +110,7 @@ func (s *submissionSession) authenticate(username, password string) error {
 	// attempt returns the SAME generic auth failure as a wrong password, so it
 	// never reveals whether the account exists -- and we do NOT touch the backend,
 	// so a guess against a locked account costs the attacker nothing useful.
-	account := throttleKey(username)
+	account := canonicalThrottleKey(s.cfg.Submission.Backend, username)
 	if !s.throttle.allow(account) {
 		if submissionDebug {
 			log.Printf("submission auth THROTTLED user=%q (too many recent failures)", username)
