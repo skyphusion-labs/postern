@@ -17,6 +17,12 @@ mismatched MCP tag fails before it publishes.
 `0020` (`webmail_sessions.principal_id`) and `0021` (the `svc_admin` seed) are additive and
 are applied by the deploy. Run `POST /api/admin/principals/backfill` once after
 upgrading to copy existing identities and users in; it is safe to run again.
+**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
+`0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. The
+backfill that copies existing identities and users in now runs automatically after each
+deploy: the release workflow calls `POST /api/admin/principals/backfill` once the new version
+answers (#901), and the self-host installer calls it after any run that deployed a Worker
+version or created the first admin. A manual run is still safe: it is idempotent.
 
 ### Added
 
@@ -49,12 +55,46 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Changed
 
+- **Deploy runs the principals backfill (#901).** `.github/workflows/deploy.yml` calls it after
+  the deployed artifact is verified, waits until `/health` reports the tag, and fails the release
+  on a missing `POSTERN_DEPLOY_ADMIN_TOKEN`, a non-200 or a malformed report. Address conflicts
+  are warnings that name principal ids, never addresses (Actions logs are public).
+  `deploy/postern.mjs install` and `upgrade` make the same call with the install's own token.
+
 - **The operator is named in the audit log (#854 M1).** Rows the admin
   routes write now carry actor `service` / `svc_both` instead of
   `operator` with no id. Older rows are unchanged.
+- **CI refuses CHANGELOG lines added to a released section.** A new
+  `release-gate` step fails when a change adds a line inside an
+  already-released `## vX.Y.Z` section of `CHANGELOG.md`; entries belong
+  under `## Unreleased`. A clean merge after a release can put an entry
+  there with no conflict, which is what this catches. A deliberate edit to
+  released notes passes with the commit trailer
+  `Changelog-History-Edit: <reason>`.
+
+
+- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
+  The served CSP lists the sha256 of the page's one inline script, which
+  `npm run sync-webmail` computes, so a script that is not the page's
+  own does not run. `style-src 'unsafe-inline'` is unchanged.
 
 ### Fixed
 
+- **Submission deadlines.** The submission listener has a read timeout and a
+  write timeout (default 5 minutes each). The read timeout is an idle limit,
+  refreshed on each read. Open connections are capped globally
+  (`SUBMISSION_MAX_CONNECTIONS`, default 200) and per source address
+  (`SUBMISSION_MAX_CONNECTIONS_PER_IP`, default 20). Zero means no cap. The
+  per-source cap uses the address from a trusted PROXY header when one is
+  present. After that header is read, the door puts back the read deadline
+  the protocol had set.
+- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
+  (default 22 MiB, the same ceiling as the worker import) is refused before
+  the bytes are read. The tagged reply starts `NO [TOOBIG]`. `CAPABILITY`
+  advertises `APPENDLIMIT`.
+- **Door throttle key.** The throttle key is canonicalized like the Worker's:
+  the ECMAScript trim set, then lower-case. In system (PAM) mode the key is
+  the local part before `@`. native and ldap keep the whole trimmed name.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
@@ -65,13 +105,6 @@ upgrading to copy existing identities and users in; it is safe to run again.
   @import of a plain string and image-set() strings are counted and
   removed from the reading frame; a URL inside a CSS comment is not
   counted.
-
-### Changed
-
-- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
-  The served CSP lists the sha256 of the page's one inline script, which
-  `npm run sync-webmail` computes, so a script that is not the page's
-  own does not run. `style-src 'unsafe-inline'` is unchanged.
 
 ## v1.11.0
 

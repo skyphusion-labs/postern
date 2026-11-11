@@ -218,6 +218,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # HEAD^1 is needed by the CHANGELOG placement check below.
+          fetch-depth: 2
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -246,8 +249,21 @@ jobs:
         run: bash .github/scripts/tests/check-dead-topology-prose.test.sh
       - name: forwarding preflight verdict logic (#611)
         run: bash .github/scripts/tests/forwarding-preflight.test.sh
+      - name: post-deploy principals backfill verdict logic (#901)
+        run: bash .github/scripts/tests/principals-backfill.test.sh
       - name: relay Go pin skew detection (#704)
         run: bash .github/scripts/tests/assert-relay-go-pin.test.sh
+      - name: CHANGELOG placement suite
+        run: bash .github/scripts/tests/changelog-placement.test.sh
+      # A change must not add lines inside an already-released "## vX.Y.Z" section.
+      # On a pull_request, HEAD is the merge commit and HEAD^1 the base tip, so this
+      # checks what the merge would add to main, including a clean merge that lands an
+      # entry in a section a release has just renamed. On a push it checks the commit.
+      - name: CHANGELOG entries are not added to released sections
+        run: |
+          set -euo pipefail
+          git rev-parse --verify --quiet HEAD^1 >/dev/null || { echo "::error::HEAD^1 is not available; CHANGELOG placement NOT measured"; exit 1; }
+          node .github/scripts/changelog-placement.mjs HEAD^1 HEAD
 
   # The self-host installer (deploy/postern.mjs) against a stubbed Cloudflare
   # account: idempotency, resume after a partial failure, and every refusal.
