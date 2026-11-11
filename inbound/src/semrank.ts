@@ -147,3 +147,13 @@ export function foldThreads(
   });
   return out;
 }
+
+/** #930: keep at most `n` items per key, in order (the rest are dropped, nothing folded). */
+export function capPerKey<T extends { key: string }>(items: readonly T[], n: number): T[] {
+  const seen = new Map<string, number>();
+  return items.filter((it) => {
+    const k = (seen.get(it.key) ?? 0) + 1;
+    seen.set(it.key, k);
+    return k <= n;
+  });
+}

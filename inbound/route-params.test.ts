@@ -367,6 +367,8 @@ const SEARCH_PROBES: Record<string, Probe> = {
   collapse: async (e, c) => refuses(e, c, "/api/search?q=keyword&mode=semantic&collapse=maybe"),
   // #926: what it CHANGES is proved in search-collapse.test.ts; here, the strict refusal.
   collapseThreads: async (e, c) => refuses(e, c, "/api/search?q=keyword&mode=semantic&collapseThreads=maybe"),
+  // #930: what it CHANGES is proved in search-collapse.test.ts; here, the strict refusal.
+  familyCap: async (e, c) => refuses(e, c, "/api/search?q=keyword&mode=hybrid&familyCap=11"),
   seenFor: async (e, c) => refuses(e, c, "/api/search?q=keyword&seenFor=not-an-address"),
   hasAttachment: async (e, c) => {
     await refuses(e, c, "/api/search?q=keyword&hasAttachment=maybe");

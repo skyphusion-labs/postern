@@ -26,6 +26,11 @@ const VARIANTS = [
   { name: "V3 + collapse", recipe: 2, familyRank: true, collapse: true, modes: ["semantic"] },
   // #926: V3 plus the thread fold.
   { name: "V4 + thread collapse", recipe: 2, familyRank: true, collapse: true, collapseThreads: true, modes: ["semantic"] },
+  // #930: the two hybrid options against V2 hybrid (no cap, as #813 shipped). H3 ships.
+  { name: "H1 hybrid + family fold", recipe: 2, familyRank: true, collapse: false, hybridFamilies: "fold", modes: ["hybrid"] },
+  { name: "H2 hybrid + cap 1 per family", recipe: 2, familyRank: true, collapse: false, familyCap: 1, modes: ["hybrid"] },
+  { name: "H3 hybrid + cap 2 per family", recipe: 2, familyRank: true, collapse: false, familyCap: 2, modes: ["hybrid"] },
+  { name: "H4 hybrid + cap 3 per family", recipe: 2, familyRank: true, collapse: false, familyCap: 3, modes: ["hybrid"] },
 ];
 const FAMILIES = ["token", "latest", "subject", "paraphrase", "diversity"];
 
@@ -104,7 +109,7 @@ it("#813 recall at k, before and after", async () => {
     for (const mode of v.modes) {
       const rows = [];
       for (const query of corpus.queries) {
-        const page = await store.search(env, { q: query.q, mode, limit: 10, collapse: v.collapse, collapseThreads: v.collapseThreads === true, familyRank: v.familyRank });
+        const page = await store.search(env, { q: query.q, mode, limit: 10, collapse: v.collapse, collapseThreads: v.collapseThreads === true, familyRank: v.familyRank, hybridFamilies: v.hybridFamilies, familyCap: v.familyCap ?? 0 });
         rows.push({ family: query.family, q: query.q, ...score(corpus, query, page.items), threads10: distinctThreads(corpus, page.items) });
       }
       results.push({ variant: v.name, mode, summary: summarise(rows), rows });
@@ -126,5 +131,5 @@ it("#813 recall at k, before and after", async () => {
     writeFileSync(`${outDir}/recall813-results.json`, JSON.stringify(results, null, 1));
     writeFileSync(`${outDir}/recall813-table.md`, table + "\n");
   }
-  expect(results.length).toBe(8);
+  expect(results.length).toBe(VARIANTS.reduce((n, v) => n + v.modes.length, 0));
 }, 600_000);

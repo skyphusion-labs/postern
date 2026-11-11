@@ -21,11 +21,12 @@ working meanwhile. Cost: one bge-base embedding per chunk at $0.067 per million 
 
 ### Added
 
-- **Semantic search can fold a thread into one hit (#926).** `collapseThreads=1` (semantic only)
-  keeps a thread's best hit and lists its other visible hits as `threadHits: {count, ids}`.
-  Off by default: in the recall eval it raised the distinct threads in the top 10 from 8.25 to
-  9.75 but moved no recall family, and a default changes only on a recall gain. Refused outside
-  `mode=semantic`; hybrid never folds threads. MCP `mailbox_search` and the Python client take it.
+- **Semantic search folds a thread into one hit (#926).** `collapseThreads` (semantic only, on by
+  default) keeps a thread's best hit and lists its other visible hits as `threadHits: {count,
+  ids}`; `collapseThreads=0` lists them all. Re-judged on the larger #930 eval corpus: diversity
+  coverage at 10 rose 67% to 71% and MRR rose, with no recall family worse (on the smaller #813
+  corpus it moved no recall family, and it was briefly off). Refused outside `mode=semantic`;
+  hybrid never folds threads. MCP `mailbox_search` and the Python client take it.
 - **Semantic search embeds the subject and ranks template families (#813).** Chunk 0 now
   carries `Subject: <subject>` (an empty-body message gets a subject chunk), recorded as
   `vector_ledger.embed_version` 2. Near-identical notifications from one sender are ranked by
@@ -36,6 +37,13 @@ working meanwhile. Cost: one bge-base embedding per chunk at $0.067 per million 
 
 ### Changed
 
+- **Hybrid search caps each notification family at 2 hits by default (#930).** Hybrid (the MCP
+  default mode) shows at most `familyCap` hits per family of near-identical notifications from
+  one sender; `familyCap=0` lists them all. A page the cap shortened says `complete: false` and
+  names how many rows it left off. Chosen by the eval: diversity coverage at 10 rose 53% to 64%
+  and MRR rose, with no recall family worse; folding families in hybrid, or a cap of 1, made
+  `latest` worse. The 44% to 39% drop #930 was opened for did not reproduce on 15 diversity
+  queries (51% before #813, 53% after).
 - **Semantic search collapses template families by default (#813).** A family of
   near-identical notifications is one hit carrying `similar: {count, ids}` (its other
   visible members). Pass `collapse=0` for one row per message. `collapse=1` outside
