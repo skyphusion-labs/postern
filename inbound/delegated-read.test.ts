@@ -241,6 +241,6 @@ describe("#740 S2 a grant counts only while its grantee identity is live", () =>
     await s.grant(["organize"]);
     expect((await activeDelegations(s.env, s.agent.id)).grants.length, "live: counts").toBe(1);
     expect((await s.call("DELETE", `/api/admin/identities/${s.agent.id}`, ADMIN)).status).toBe(200);
-    expect(await activeDelegations(s.env, s.agent.id)).toEqual({ read: [], organize: [], quote: [], grants: [] });
+    expect(await activeDelegations(s.env, s.agent.id)).toEqual({ read: [], organize: [], quote: [], sendAs: [], grants: [] });
   });
 });
