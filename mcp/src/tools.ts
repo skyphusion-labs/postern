@@ -293,6 +293,11 @@ export const READ_TOOLS: ToolDef[] = [
         + "(2026-01-31, which covers that WHOLE day through 23:59:59.999) or a full "
         + "timestamp. Both ends are inclusive. A bogus value is REFUSED, never silently ignored."),
       hasAttachment: z.boolean().optional().describe("true = only messages with >=1 attachment; false = only messages with none"),
+      collapse: z.boolean().optional().describe(
+        "mode semantic only (#813): fold near-identical notifications from one sender into ONE hit carrying " +
+          "`similar: {count, ids}`. Defaults to true in semantic mode; false lists every member. " +
+          "Refused in any other mode (hybrid never collapses).",
+      ),
       seen: z.boolean().optional().describe("filter on read state: true = seen, false = unread"),
       seenFor: z.string().optional().describe(
         "whose read state seen/results render (the message rows returned are unchanged): " +
@@ -341,6 +346,12 @@ export const READ_TOOLS: ToolDef[] = [
       // It is refused BEFORE the request, so no unrestricted search runs under a name the
       // caller would misread. `mode` defaults to hybrid, so `{ query, field }` with no
       // mode at all is the likeliest way in, and it is refused too.
+      if (a.collapse === true && mode !== "semantic") {
+        throw new PosternError(
+          `collapse folds template families in mode semantic and mode is "${mode}": ` +
+            "pass mode=semantic, or remove collapse",
+        );
+      }
       if (field !== undefined && mode !== "substr") {
         throw new PosternError(
           `field selects the column for mode substr and mode is "${mode}": ` +
@@ -361,6 +372,7 @@ export const READ_TOOLS: ToolDef[] = [
         after: a.after,
         before: a.before,
         hasAttachment: a.hasAttachment,
+        collapse: a.collapse,
         seen: a.seen,
         seenFor: a.seenFor,
         fields: a.fields,
@@ -383,6 +395,8 @@ export const READ_TOOLS: ToolDef[] = [
         after: a.after ?? null,
         before: a.before ?? null,
         hasAttachment: a.hasAttachment ?? null,
+        // Only where it means something (semantic): its default there is true.
+        ...(mode === "semantic" ? { collapse: a.collapse ?? true } : {}),
         seen: a.seen ?? null,
         seenFor: a.seenFor ?? null,
         // Echo the projection that was APPLIED, so a reader of this result can tell a

@@ -337,23 +337,8 @@ export async function sha256hex(input: string): Promise<string> {
 // Split text into overlapping windows (~chunk chars, overlap chars carried over)
 // on whitespace boundaries where possible. bge-base handles ~512 tokens, so a
 // 1200-char window stays comfortably under the limit.
-export function chunkText(text: string, chunk: number, overlap: number): string[] {
-  const t = text.trim();
-  if (t.length <= chunk) return t.length ? [t] : [];
-  const out: string[] = [];
-  let start = 0;
-  while (start < t.length) {
-    let end = Math.min(start + chunk, t.length);
-    if (end < t.length) {
-      const ws = t.lastIndexOf(" ", end);
-      if (ws > start + chunk * 0.5) end = ws;
-    }
-    out.push(t.slice(start, end).trim());
-    if (end >= t.length) break;
-    start = end - overlap;
-  }
-  return out.filter(Boolean);
-}
+// Moved to embedtext.ts (#813) so the offline recall eval can import it with no other module.
+export { chunkText } from "./embedtext";
 
 /**
  * Extract the bare address from a From value that may carry a display name

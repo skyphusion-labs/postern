@@ -910,6 +910,25 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
+      // #813: fold template families in semantic mode. Validated on every mode; it changes
+      // only semantic (hybrid stays one row per message, fts and substr are unranked).
+      const collapseParam = url.searchParams.get("collapse");
+      if (collapseParam !== null && collapseParam !== "0" && collapseParam !== "1" &&
+          collapseParam !== "true" && collapseParam !== "false") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "collapse must be 0|1|true|false" },
+          400,
+        );
+      }
+      // Asking a mode that never collapses to collapse is refused, not ignored (the #651
+      // rule): the caller would read the answer as collapsed. "Do not collapse" is true
+      // of every mode, so 0/false is accepted anywhere.
+      if ((collapseParam === "1" || collapseParam === "true") && modeParam !== "semantic") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "collapse folds template families in mode semantic only; remove it or pass mode=semantic" },
+          400,
+        );
+      }
       // The response projection (#646), validated here with the other query parameters
       // so a bogus `fields` is refused before any retrieval runs. It narrows hit.message
       // only; `score` and the page envelope are untouched.
@@ -963,6 +982,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         before,
         hasAttachment: hasAttParam === null ? undefined : hasAttParam === "1" || hasAttParam === "true",
         seen: seenParam === null ? undefined : seenParam === "1" || seenParam === "true",
+        collapse: modeParam !== "semantic" ? false : collapseParam === null ? SEMANTIC_COLLAPSE_DEFAULT : collapseParam === "1" || collapseParam === "true",
         // A role read drops the account viewer: the queue IS the scope, and the account
         // boundary would otherwise intersect it down to the member own mail (#425).
         viewer: role ? undefined : sessionIdentity,
@@ -1300,6 +1320,12 @@ async function quoteScope(
     },
   };
 }
+
+/** #813: whether semantic search folds template families when `collapse` is absent.
+ *  Decided by the recall eval (inbound/eval/), per the lead's rule: default-on because the
+ *  collapse variant improved family coverage at 10 (39% to 69%) and regressed no query
+ *  family against the same ranking without it. */
+const SEMANTIC_COLLAPSE_DEFAULT = true;
 
 /** The #853 guard: set for an AGENT reader only, i.e. a Bearer bound to an identity (a
  *  runtime agent identity or a registry entry). A webmail session is the human and a
@@ -2193,7 +2219,7 @@ async function smtpAuthResponse(request: Request, env: Env): Promise<Response> {
 // done:true. Body: { cursor?, limit?, dryRun? }. Idempotent (deterministic vector
 // ids overwrite); dryRun totals the chunk count WITHOUT embedding.
 async function handleReindex(request: Request, env: Env): Promise<Response> {
-  let body: { cursor?: unknown; limit?: unknown; dryRun?: unknown } = {};
+  let body: { cursor?: unknown; limit?: unknown; dryRun?: unknown; staleOnly?: unknown } = {};
   try {
     const text = await readBodyCapped(request, MAX_BODY_BYTES);
     if (text) body = JSON.parse(text) as typeof body;
@@ -2206,7 +2232,9 @@ async function handleReindex(request: Request, env: Env): Promise<Response> {
   const cursor = typeof body.cursor === "string" ? body.cursor : undefined;
   const limit = typeof body.limit === "number" ? body.limit : undefined;
   const dryRun = body.dryRun === true;
-  const result = await store.reindexPage(env, { cursor, limit, dryRun });
+  // #813: re-embed only messages below the current recipe, so a re-embed can resume.
+  const staleOnly = body.staleOnly === true;
+  const result = await store.reindexPage(env, { cursor, limit, dryRun, staleOnly });
   return json({ ok: true, ...result });
 }
 

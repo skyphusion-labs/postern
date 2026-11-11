@@ -131,7 +131,9 @@ CREATE TABLE IF NOT EXISTS vector_ledger (
   vector_id   TEXT PRIMARY KEY,
   message_id  TEXT NOT NULL,
   chunk       INTEGER NOT NULL,
-  indexed_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  indexed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  -- #813 (migration 0024): the embed recipe (embedtext.ts EMBED_VERSION). 1 = body only.
+  embed_version INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_vector_ledger_message ON vector_ledger(message_id);
 

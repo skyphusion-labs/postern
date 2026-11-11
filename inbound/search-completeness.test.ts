@@ -120,15 +120,19 @@ describe("a filtered score-ranked search is not thinned by a pre-filter slice (#
 describe("the score-ranked modes stop claiming exhaustion they cannot deliver (#632 F2)", () => {
   it("semantic omits the cursor and reports complete:false when retrieval hit its ceiling", async () => {
     const { env, ctx, settle } = makeFakeEnv({ VECTORIZE_FOR: "" });
-    // limit 10 with no filter asks for topK 30; 60 messages means the index had more to give.
+    // #813: semantic ranks template families after retrieval, so it always asks for the
+    // ceiling (topK 50); 60 messages means the index had more to give.
     await seed(env, ctx, onTopic(60, "2026-01-10T00:00:00.000Z"));
     await settle();
 
     const res = await store.search(env, { q: "invoice payment billing money", mode: "semantic", limit: 10 });
 
     expect(res.complete).toBe(false);
-    expect(res.retrievalCap).toBe(30);
+    expect(res.retrievalCap).toBe(50);
     expect(res.cursor).toBeUndefined();
+    // The narrow path (limit 10 asks for topK 30) is still what an unranked read uses.
+    const narrow = await store.search(env, { q: "invoice payment billing money", mode: "semantic", limit: 10, familyRank: false });
+    expect([narrow.complete, narrow.retrievalCap]).toEqual([false, 30]);
   });
 
   it("CONTROL: an exhausted candidate set still reports complete:true with cursor:null", async () => {
