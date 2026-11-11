@@ -288,8 +288,8 @@ describe("htmlToText", () => {
   });
 
   it("strips nested/obfuscated tags that defeat a single pass", () => {
-    // js/incomplete-multi-character-sanitization: stripping the inner tag once
-    // could re-form an outer tag; looping to a fixpoint leaves no live tag. We
+    // js/incomplete-multi-character-sanitization: stripping an inner tag must not
+    // re-form an outer tag (htmlToText strips in one pass that leaves none). We
     // assert the security property (no surviving <script/<style/< marker), not
     // an exact string on these pathological inputs.
     const a = htmlToText("x<scr<script>ipt>alert(1)y");
