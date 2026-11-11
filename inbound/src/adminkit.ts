@@ -176,6 +176,29 @@ export function auditStatement(
 }
 
 /**
+ * One audit_log row PER MESSAGE an agent's organize write touches on a granted address
+ * (#740 S2). An INSERT ... SELECT over `messages m`, so it names exactly the rows the
+ * caller's predicate matches, and it runs in the SAME D1 batch as the write it records:
+ * if this insert fails the batch rolls back and the write does not happen.
+ *
+ * The actor is the grantee's stable agent_identities id and the target is the message
+ * id: both stable ids, so a later identity layer can adopt these rows unchanged.
+ */
+export function agentMessageAudit(
+  env: Env,
+  at: string,
+  actorId: string,
+  action: string,
+  detail: Record<string, unknown>,
+  where: { sql: string; binds: unknown[] },
+) {
+  return env.DB.prepare(
+    "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
+      `SELECT ?, 'agent', ?, ?, 'message', m.message_id, 'ok', ? FROM messages m WHERE ${where.sql}`,
+  ).bind(at, actorId, action, JSON.stringify(detail), ...where.binds);
+}
+
+/**
  * Record a refusal. Best effort BY DESIGN: the refusal already happened and its answer
  * is the same either way, so a failed write is logged and the refusal is still returned.
  */

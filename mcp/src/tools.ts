@@ -457,7 +457,9 @@ export const READ_TOOLS: ToolDef[] = [
       "your own slice, so a miss means 'not in your slice' and a wider credential may still " +
       "find it. Only under kind 'estate' is a miss evidence about the mailbox as a whole. " +
       "The answer is deliberately the same whether a message is absent or withheld, so " +
-      "never read a miss as a statement that some particular message does or does not exist." +
+      "never read a miss as a statement that some particular message does or does not exist. " +
+      "A message id belongs to the FIRST message stored under it: if you key on a structured " +
+      "id (such as a GitHub notification id), check the result's `trusted` field." +
       UNTRUSTED_FIELD_NOTE,
     inputSchema: {
       message_id: z.string().min(1).describe("the message id (as returned by search/list)"),
@@ -586,7 +588,11 @@ export const READ_TOOLS: ToolDef[] = [
       "'identityScope' is the same projection mailbox_list and mailbox_search report. " +
       "'roleQueues' are shared queues you may ALSO read by passing that address as 'to'; an " +
       "empty list means none, never 'unknown'. 'capabilities' is what the gate will actually " +
-      "honour, so a capability absent from it WILL be refused.",
+      "honour, so a capability absent from it WILL be refused. 'delegations' lists the human " +
+      "addresses an operator has granted you, each with its powers: where reads are narrowed " +
+      "to granted addresses, read one by passing it as 'to'; 'organize' lets you mark its mail " +
+      "read (for: that address), flag it and move it. An empty list means none; the field is " +
+      "absent only from a server too old to have grants.",
     inputSchema: {},
     handler: async (client) => client.whoami(),
   },

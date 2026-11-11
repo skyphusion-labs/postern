@@ -249,6 +249,16 @@ interface Env {
    */
   WEBMAIL_AUTH_BACKEND?: string;
   /**
+   * How far an AGENT credential reads (#740 S2, Conrad's Q1 ruling). "estate" keeps the
+   * #718 estate-wide agent read; "granted" narrows an agent to its own address (plus its
+   * role queues) and the addresses it holds an active delegation grant on. UNSET means
+   * "estate", so an upgraded deploy keeps today's behaviour; the installer writes
+   * "granted" for a new install. Any other value (a typo, another case, an empty string)
+   * fails CLOSED to "granted" and logs a config error. Webmail sessions and static tokens
+   * are unaffected. Config VAR, not a secret.
+   */
+  AGENT_READ_SCOPE?: string;
+  /**
    * First-run setup secret (contract 1.10.7, #791). With WEBMAIL_AUTH_BACKEND explicitly
    * "native" and NO smtp_credentials row, POST /api/setup with this value creates the
    * first user and signs them in. At least 32 characters, else treated as unset. Inert

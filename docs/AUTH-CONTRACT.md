@@ -224,6 +224,30 @@ LDAP path carries NO secret of its own (no bind password; the leaf pin is a
 non-secret public value). The Python proxy additionally has
 `POSTERN_API_TIMEOUT` for the store API.
 
+## 5d. The canonical username (one throttle key on every door)
+
+Every door that throttles logins keys its per-account counter on the **canonical
+username**, so two spellings that reach the same account share one budget. The canonical
+form is exactly what the Worker's credential lookup applies (`normalizeUsername` in
+`inbound/src/smtpcreds.ts`):
+
+1. **Trim** leading and trailing characters in the ECMAScript `WhiteSpace` and
+   `LineTerminator` sets, as `String.prototype.trim` does: U+0009, U+000A, U+000B, U+000C,
+   U+000D, U+0020, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F,
+   U+3000, and **U+FEFF**.
+2. **Lowercase** with the Unicode default (locale-independent) case mapping, as
+   `String.prototype.toLowerCase` does.
+
+Nothing else: no Unicode normalization (NFC/NFKC), and no removal of interior characters.
+A zero-width character other than U+FEFF (U+200B, U+200C, U+200D) is NOT removed, so it
+names a different account (one that does not exist), not the same one.
+
+The standard library trims in the doors are NOT this set: Go `strings.TrimSpace` and
+Python `str.strip()` both leave U+FEFF in place. A door must trim the full set above
+before keying its counter, or a U+FEFF prefix gives an attacker a fresh budget at that
+door. The Worker also throttles `/api/smtp-auth` itself (section 7), keyed on this same
+function, so a door that diverges multiplies only its OWN budget, never the Worker's.
+
 ## 6. TLS-to-directory (only for direct-LDAP)
 
 If your directory publishes plaintext 389 only and the direct-LDAP backend
@@ -308,11 +332,11 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 |---|---|---|
 | `POSTERN_API_TOKEN` | `both` | read + send + delete + credential-admin (the egalitarian single-key default) |
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...`, plus `GET /api/whoami` (#650) |
-| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
+| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity). It cannot read, so it reads nothing through a write route either: `forwardMessageId` is not found (`404 E_NOT_FOUND`). `/api/reply` reaches only the thread's existing parties: the target is looked up to address the reply and nothing else, recipients come from the stored message (`mode: "replyAll"` included), and a caller `cc`, `bcc` or `quoteOriginal` is refused `400 E_VALIDATION_ERROR` |
 | `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
 | `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import`, plus the `organize` routes (#685); the authenticated door asserts the account identity |
 | `POSTERN_API_TOKEN_ORGANIZE` | `organize` | `POST /api/messages/seen`/`flags`/`move` only (#692). NOT `GET /api/folders`, which is a read. Cannot read, send, hard-delete, reach admin, or write through the `imap` seam |
-| `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read` (#718): **estate-wide**, the same reach a static read token has; `to=` becomes an ordinary filter. The bound identity still fixes the send From and still bounds every WRITE. `organize` (#685): mark read / flags / move, still forced to that identity. Never delete/admin. |
+| `POSTERN_SEND_IDENTITIES` (registry, #28/#544; config VAR, not a secret -- hashes only) | caps from entry `scopes` (default `["send"]`) + bound identity | `send`: send/reply + own-draft CRUD as that From. `read` (#718): **estate-wide** while `AGENT_READ_SCOPE` is unset or `estate`, the same reach a static read token has; `to=` becomes an ordinary filter. Under `AGENT_READ_SCOPE=granted` (#740 S2) it is its own address plus its role queues, plus, for a runtime identity, the addresses it holds a delegation grant on (DELEGATION.md section 4). The bound identity still fixes the send From and still bounds every WRITE. `organize` (#685): mark read / flags / move, still forced to that identity. Never delete/admin. |
 | runtime agent identities (#801; D1 `agent_identities`, hashes only) | the same caps (`read` / `send` / `organize`) + bound identity | Minted and revoked at runtime by a `both` token via `/api/admin/identities` (no deploy; a revoke is effective on the next request). Never `admin`: a runtime identity cannot reach any `/api/admin/*` route. See SEND-IDENTITIES.md section 10 |
 | delegation grants (#740 S1; D1 `delegation_grants`) | not a credential: a record that an agent identity may act on a human address with `read` / `organize` / `quote` / `send_as` (each implies `read`) | Operator-made via `/api/admin/delegations`. **Stored only in S1; no gate reads a grant yet.** See DELEGATION.md |
 
@@ -430,7 +454,13 @@ cookie session minted from the worker-native `smtp_credentials` store
 (`POST /api/session`; `WEBMAIL_AUTH_BACKEND` unset = OFF, `native` = explicit
 operator opt-in). Sessions carry the caps `read`/`send`/`delete`, never admin; a
 Bearer token always wins over a cookie on the same request; state-changing
-session requests are CSRF-gated. Since #409 the mint carries the same
+session requests are CSRF-gated. `/api/smtp-auth` is throttled at the Worker too,
+keyed on the canonical username only (section 5d; no client-IP layer, because its
+caller is a door), sharing the account counter with the session mint: one credential,
+one budget, whichever door is guessed at. A throttled check answers
+`200 {ok: false, error: "E_AUTH_THROTTLED", retryAfter}`, which a door treats as an
+auth failure. Every throttled path reserves the attempt atomically before the verify,
+so concurrent attempts are each counted. Since #409 the mint carries the same
 brute-force posture the two doors above do (`relay/throttle.go`,
 `imap/posternimap/throttle.py`): keyed per-account counters, enumeration-safe,
 fail-closed, backoff with temporary lockout, so no door undercuts the others'
