@@ -706,6 +706,17 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
           }));
           return { results: results as unknown as T[] };
         }
+        // store.resolveThreadId: every thread candidate in one IN (...) query. Like SQL,
+        // it returns the matching rows in no promised order; the store picks by
+        // candidate order.
+        if (/SELECT message_id, thread_id FROM messages WHERE message_id IN \(/i.test(sql)) {
+          const ids = new Set(bound as string[]);
+          const results = rows
+            .filter((r) => ids.has(r.message_id))
+            .reverse()
+            .map((r) => ({ message_id: r.message_id, thread_id: r.thread_id }));
+          return { results: results as unknown as T[] };
+        }
         if (/FROM messages WHERE thread_id = \?/i.test(sql)) {
           const id = bound[0] as string;
           const matched = rows
