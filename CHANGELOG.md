@@ -90,6 +90,10 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Fixed
 
+- **A sign-in survives a failure on the principal side (#854).** If the
+  principal lookup at sign-in fails, the session is minted without one
+  (the self-service routes then ask for a fresh sign-in) instead of the
+  sign-in failing with a 500.
 - **A refused address names the field.** An invalid to, cc, bcc, from, or
   reply-to value is reported by field name. A reply whose stored address
   cannot be used names the header it came from.
