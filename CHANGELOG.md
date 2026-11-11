@@ -13,6 +13,13 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Fix: the principal parity check no longer reads as a pass when it compared nothing (#854).**
+`GET /api/admin/principals/parity` now answers a `gate`: `fail` on any disagreement, `unmeasured`
+when no runtime agent identity and no native login exists (so there was nothing to compare), else
+`pass`, plus which kinds were compared. It also names what it cannot see: the env-registry agents
+and the webmail auth backend. Production read zero rows of both kinds while it had registry agents,
+which the old report showed as all zeros, the same as a clean pass.
+
 **Fix: a session from before the principals migration can read mail again in webmail.**
 Since #853, the page loads the human-only list on its own right after sign-in. Such a session
 gets `E_REAUTH_REQUIRED` for that list, and the page signed it out at once, before the person
