@@ -2843,7 +2843,7 @@ function serveDemoLanding(url: URL): Response {
     <p>Self-hostable mailbox on Cloudflare for humans and agents. One store, one API, webmail and IMAP doors, MCP for agents.</p>
     <p><a class="btn" href="${webmail}">Open webmail</a>
        <a class="sec" href="https://github.com/skyphusion-labs/postern">Source on GitHub</a></p>
-    <p>Write-up: <a class="sec" href="https://skyphusion.net/blog/postern-identity-bound/">Postern v1.4.1 identity-bound credentials</a>.
+    <p>Write-up: <a class="sec" href="https://skyphusion.net/blog/postern-identity-bound/">identity-bound credentials (since v1.4.1)</a>.
        Health probe: <code>GET /health</code>.</p>
   </main>
 </body>

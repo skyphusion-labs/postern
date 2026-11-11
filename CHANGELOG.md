@@ -13,6 +13,9 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+- **docs(release):** the release procedure gains step 3, move postern-demo and postern-site to the new tag (#934). Both drifted unseen: the demo served v1.8.0 and the site linked v1.9.0 while v1.14.0 was current.
+- **fix(inbound):** the landing page names its write-up "identity-bound credentials (since v1.4.1)". The old "Postern v1.4.1 identity-bound credentials" sat on a page every instance serves, so it read as the running version (#934).
+
 ## v1.14.0
 
 MINOR. Semantic search embeds the subject and folds template families and threads, and

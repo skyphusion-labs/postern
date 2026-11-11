@@ -169,6 +169,19 @@ The workflow applies `wrangler d1 migrations apply` first, then `wrangler deploy
 ships with its code. `release.yml` also opens the GitHub Release; PyPI publish rides the same `v*`
 track via `publish-pypi.yml`.
 
+3. **After the tag is live, move the demo and the site to it.** Both are separate repos with their
+   own pins, and neither follows a release by itself (on 2026-11-11 the demo was six releases behind
+   and the site linked a release five behind, #934):
+   - **postern-demo**: a PR per its README, "Upgrade the demo". Set `POSTERN_VERSION` to the tag and
+     `POSTERN_COMMIT` to its commit (`git ls-remote https://github.com/skyphusion-labs/postern.git
+     'refs/tags/vX.Y.Z^{}'`). Add any binding or var the release's `inbound/wrangler.jsonc` added;
+     the release notes' Upgrade section names the migrations the demo deploy applies. The merge
+     deploys, and the deploy fails unless `/health` reports the new version. The demo's daily
+     `version-check` workflow goes red while its pin is behind the latest release.
+   - **postern-site**: a PR that moves every `skyphusion-labs/postern/.../vX.Y.Z` link and the
+     install command to the tag, then a site tag. The site's `ci` fails until this is done
+     (`scripts/check-postern-version.mjs`, also run daily).
+
 ### MCP package track (separate)
 
 `mcp/package.json` versions on its own **`postern-mcp-v*`** tag track (`npm-mcp.yml`). A `v*` Worker
