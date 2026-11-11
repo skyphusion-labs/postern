@@ -187,6 +187,14 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
 > authorization gate. See `docs/AUTH-CONTRACT.md` section 5b and `imap/README.md`;
 > the two doors share one login by design (#75).
 
+### Submission deadlines
+
+The submission listener sets `ReadTimeout` and `WriteTimeout` (default 300
+seconds, `SUBMISSION_READ_TIMEOUT_SECONDS` and
+`SUBMISSION_WRITE_TIMEOUT_SECONDS`). go-smtp treats zero as no deadline, including
+the implicit-TLS handshake, so the defaults are the deadline. `SUBMISSION_MAX_CONNECTIONS`
+(default 200, `0` means no cap) closes a connection once that many are already open.
+
 ### Online brute-force throttle (`AUTH_THROTTLE_*`, #105)
 
 PBKDF2 + dummy-hash timing equalization defeat OFFLINE cracking and user

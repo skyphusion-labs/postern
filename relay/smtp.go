@@ -10,6 +10,8 @@ import (
 	"net/mail"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/emersion/go-smtp"
 	"github.com/jhillyerd/enmime"
@@ -336,6 +338,7 @@ func startSubmission(cfg Config, listeners []submissionListener, errc chan error
 		if err != nil {
 			return fmt.Errorf("submission listen %s: %w", l.Addr, err)
 		}
+		ln = newCappedListener(ln, cfg.Submission.MaxConns)
 		ln = wrapProxyListener(ln, proxyCfg)
 		if l.Implicit {
 			ln = tls.NewListener(ln, tlsCfg)
@@ -360,6 +363,51 @@ func submissionBackendName(cfg Config) string {
 // ONLY over TLS: on a STARTTLS listener the client must upgrade first, on an
 // implicit-TLS listener the whole connection is TLS; a cleartext AUTH is answered
 // 523 (TLS required). GetCertificate picks up a renewed cert without a restart.
+// cappedListener accepts at most max connections at once. A connection past
+// the cap is closed inside Accept, so it does not become a server goroutine.
+// max <= 0 leaves the inner listener unchanged.
+type cappedListener struct {
+	net.Listener
+	slots chan struct{}
+}
+
+func newCappedListener(inner net.Listener, max int) net.Listener {
+	if max <= 0 {
+		return inner
+	}
+	return &cappedListener{Listener: inner, slots: make(chan struct{}, max)}
+}
+
+func (l *cappedListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case l.slots <- struct{}{}:
+			return &trackedConn{Conn: c, release: func() { <-l.slots }}, nil
+		default:
+			c.Close()
+		}
+	}
+}
+
+type trackedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *trackedConn) Close() error {
+	c.once.Do(func() {
+		if c.release != nil {
+			c.release()
+		}
+	})
+	return c.Conn.Close()
+}
+
 func newSubmissionServer(be smtp.Backend, tlsCfg *tls.Config, cfg Config) *smtp.Server {
 	srv := smtp.NewServer(be)
 	srv.Domain = cfg.Submission.Hostname
@@ -367,5 +415,16 @@ func newSubmissionServer(be smtp.Backend, tlsCfg *tls.Config, cfg Config) *smtp.
 	srv.AllowInsecureAuth = false
 	srv.MaxMessageBytes = cfg.MaxSize
 	srv.MaxRecipients = MaxRecipients
+	// go-smtp treats a zero timeout as "no deadline", including the implicit-TLS
+	// handshake it runs on the accepted connection. Keep a deadline unless the
+	// operator set one.
+	srv.ReadTimeout = cfg.Submission.ReadTimeout
+	srv.WriteTimeout = cfg.Submission.WriteTimeout
+	if srv.ReadTimeout <= 0 {
+		srv.ReadTimeout = 5 * time.Minute
+	}
+	if srv.WriteTimeout <= 0 {
+		srv.WriteTimeout = 5 * time.Minute
+	}
 	return srv
 }

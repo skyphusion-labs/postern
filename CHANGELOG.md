@@ -15,6 +15,9 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **Submission deadlines.** The submission listener has a read timeout and a
+  write timeout (default 5 minutes each) and a cap on concurrent connections
+  (default 200, `SUBMISSION_MAX_CONNECTIONS`; 0 means no cap).
 - **Write scope binds to the bound identity.** An identity's write scope
   (flags, move, seen) now binds to its bound address whatever its other
   caps; previously a token without `read` could organize outside its own
