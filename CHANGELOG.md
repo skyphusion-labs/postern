@@ -26,6 +26,10 @@ mismatched MCP tag fails before it publishes.
   the converter reads at most the first 512,000 characters, the same bound
   as the stored HTML. Output on ordinary HTML is unchanged.
 
+- **A Date header that does not parse falls back to the receive time.**
+  Mail whose Date header is not a valid date is stored with the time it
+  was received as its date. The IMAP APPEND import uses the same rule.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
