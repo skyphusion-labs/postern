@@ -25,6 +25,13 @@ mismatched MCP tag fails before it publishes.
   without one (Cloudflare feature request: #896). The relay `/dispatch`
   body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
 
+### Fixed
+
+- **Webmail shows attachment names with hidden characters made visible.**
+  Control and invisible format characters in an attachment filename are
+  shown as `[U+XXXX]`, the name is isolated left to right, and the
+  download name replaces each such character with `_`.
+
 ## v1.11.0
 
 MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's
