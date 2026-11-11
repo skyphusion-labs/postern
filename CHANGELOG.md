@@ -21,6 +21,11 @@ mismatched MCP tag fails before it publishes.
   read routes. `both` and `read` tokens and bound identities are
   unchanged.
 
+- **HTML-to-text conversion runs in one pass.** Mail with only an HTML
+  body is converted to its stored text body by a single linear scan, and
+  the converter reads at most the first 512,000 characters, the same bound
+  as the stored HTML. Output on ordinary HTML is unchanged.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
