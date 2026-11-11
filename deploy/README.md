@@ -44,6 +44,12 @@ sets `WEBMAIL_AUTH_BACKEND=native`, so the first admin can sign in at once. An e
 Worker keeps what it has: `upgrade` never adds the var, and `--adopt` carries the live
 value (or its absence) over. Change it with `--var WEBMAIL_AUTH_BACKEND=...`.
 
+**Agent reads.** An unset `AGENT_READ_SCOPE` means an agent credential reads the whole
+deployment (as before #740). A NEW install sets `AGENT_READ_SCOPE=granted`, so an agent
+reads its own address plus the addresses an operator grants it. `upgrade` never adds the
+var, and `--adopt` carries the live value over, the same as `WEBMAIL_AUTH_BACKEND`. See
+[DELEGATION.md](../docs/DELEGATION.md) section 4.
+
 Every line of output says `created`, `updated`, `unchanged` or `kept`, and names the
 resource. Secrets go to `.postern/postern.<domain>.credentials.env` (mode 600). The output
 prints that path, never the values.
@@ -85,11 +91,12 @@ account and the one zone, with:
 | Account | D1: Edit                     |
 | Account | Workers R2 Storage: Edit     |
 | Account | Email Sending: Edit          |
-| Account | Email Routing Addresses: Edit|
 | Account | Account Settings: Read       |
 
-A token with exactly this set was measured (2026-11-10) on a full install, its re-runs,
-an upgrade that applied a migration, and the teardown. A smaller set may work; that has not been measured. Email Sending
+A token with this set plus Account: Email Routing Addresses: Edit was measured (2026-11-10) on
+a full install, its re-runs, an upgrade that applied a migration, and the teardown. No command
+reads or writes Email Routing destination addresses, so that permission is not needed and is
+left out here. A smaller set may work; that has not been measured. Email Sending
 is an ACCOUNT permission, even though it is enabled per domain. Scope the zone
 permissions to your mail domain only.
 

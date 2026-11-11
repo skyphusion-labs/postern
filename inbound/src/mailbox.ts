@@ -62,6 +62,9 @@ export interface ReplyRequest {
 export interface SendResult {
   messageId: string;
   threadId: string;
+  /** Present only on a send_as send (#740 S4): the agent identity that actually sent
+   *  it, written as the RFC 5322 `Sender:` header, while `from` is the human. */
+  sender?: string;
   /**
    * The From address this send actually used, after identity binding (#804).
    * A registry token's bound address wins over any caller-supplied from, and
@@ -354,8 +357,95 @@ function deriveBodyText(html?: string, text?: string): string {
  * array, so it cannot be reached by omission: a bare address is not assignable to this
  * type, and a member scope must be written as a one-element array. Every caller therefore
  * states which of the two it is.
+ *
+ * `"addressing"` is the third literal: a caller that may SEND but not READ (a static
+ * send-only token). It may reply to a stored message, because a reply goes to people
+ * already on that thread, but nothing from the message comes back out: the target is
+ * looked up only to address the reply, caller cc/bcc and quoteOriginal are refused, and a
+ * forward source is not found (a forward IS the body, sent where the caller chooses).
  */
-export type MessageReadScope = readonly string[] | "estate";
+export type MessageReadScope = readonly string[] | "estate" | "addressing";
+
+/**
+ * The audit half of a quote that reaches a GRANTED address (#740 S3). `addresses` are the
+ * quote-granted addresses the caller's scope was widened by. When the stored message a
+ * reply or forward resolves to is reachable through one of them, `record` writes one
+ * audit row BEFORE dispatch and throws if it cannot, so no audit means no send. The row
+ * records an ATTEMPT: a dispatch that then fails leaves it in place.
+ */
+export interface QuoteAudit {
+  addresses: readonly string[];
+  record: (messageId: string, op: "reply" | "forward", address: string) => Promise<void>;
+}
+
+/**
+ * The send_as half of a send or reply (#740 S4). `addresses` are the addresses the
+ * caller's identity holds an ACTIVE `send_as` grant on. When the caller names one of
+ * them as `from`, the mail goes out with From = that address and the HUMAN's display
+ * name (never the caller's), Sender = the identity itself, and Reply-To = the human.
+ * `displayName` looks up the human's name; `record` writes the audit row BEFORE
+ * dispatch and throws if it cannot (no audit, no send).
+ */
+export interface SendAs {
+  addresses: readonly string[];
+  displayName: (address: string) => Promise<string | undefined>;
+  record: (address: string, op: "send" | "reply") => Promise<void>;
+}
+
+interface Delegated {
+  from: EmailAddress;
+  sender: EmailAddress;
+  address: string;
+}
+
+/** Resolve a send_as From, or null for an ordinary send (resolveFrom then applies). */
+async function delegatedFrom(
+  env: Env,
+  requested: SendRequest["from"],
+  identity: BoundIdentity | undefined,
+  sendAs: SendAs | undefined,
+): Promise<Delegated | null> {
+  if (!identity || !sendAs || requested === undefined) return null;
+  const email = (typeof requested === "string" ? requested : requested.email ?? "").trim().toLowerCase();
+  if (!email || email === identity.from.trim().toLowerCase()) return null;
+  if (!sendAs.addresses.includes(email)) return null;
+  // The transport must be able to say who really sent it. Refused here, before the
+  // audit row and before any dispatch, never sent without a Sender (Conrad's S4 ruling).
+  if (!selectTransport(env).canSetSender) {
+    throw new MailboxError(
+      "E_SEND_AS_UNSUPPORTED",
+      "send_as needs an outbound transport that can set the Sender header; the Cloudflare Email " +
+        "Sending transport cannot (it has no Sender field or allowlisted header). Use " +
+        "OUTBOUND_TRANSPORT=relay, or send as your own address",
+      422,
+    );
+  }
+  const name = await sendAs.displayName(email);
+  // The same shape, domain and CRLF checks every From gets, with no bound override.
+  const from = resolveFrom(env, name ? { email, name } : email, undefined);
+  const sender = resolveFrom(
+    env,
+    identity.displayName ? { email: identity.from, name: identity.displayName } : identity.from,
+    undefined,
+  );
+  return { from, sender, address: email };
+}
+
+/** Record the quote when the message is reachable through a granted address. */
+async function auditQuote(
+  env: Env,
+  messageId: string,
+  op: "reply" | "forward",
+  audit: QuoteAudit | undefined,
+): Promise<void> {
+  if (!audit) return;
+  for (const address of audit.addresses) {
+    if (await store.messageAccessible(env, messageId, [address])) {
+      await audit.record(messageId, op, address);
+      return;
+    }
+  }
+}
 
 /**
  * Read the message a write path is about to quote, under that path's scope.
@@ -371,6 +461,8 @@ async function readQuotable(
   messageId: string,
   readScope: MessageReadScope,
 ): Promise<store.StoredMessage | null> {
+  // An addressing-only caller quotes nothing: the answer is the plain not-found.
+  if (readScope === "addressing") return null;
   return readScope === "estate"
     ? await store.getUnscoped(env, messageId)
     : await store.get(env, messageId, readScope);
@@ -387,6 +479,8 @@ export async function send(
   ctx: ExecutionContext,
   identity: BoundIdentity | undefined,
   readScope: MessageReadScope,
+  quoteAudit?: QuoteAudit,
+  sendAs?: SendAs,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object") {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be an object");
@@ -420,7 +514,8 @@ export async function send(
     throw new MailboxError("E_TOO_MANY_RECIPIENTS", `combined to/cc/bcc exceeds ${MAX_RECIPIENTS}`);
   }
 
-  const from = resolveFrom(env, req.from, identity);
+  const delegated = await delegatedFrom(env, req.from, identity, sendAs);
+  const from = delegated ? delegated.from : resolveFrom(env, req.from, identity);
   const attachments = validateAttachments(req.attachments);
 
   let replyTo: EmailAddress | undefined;
@@ -432,6 +527,13 @@ export async function send(
     }
     if (replyTo?.name !== undefined) rejectCRLF("replyTo name", replyTo.name);
   }
+  if (delegated) {
+    // Under send_as, Reply-To is the human. A caller may set it only inside the grant.
+    if (replyTo && replyTo.email.trim().toLowerCase() !== delegated.address) {
+      throw new MailboxError("E_VALIDATION_ERROR", "under send_as, replyTo may only be the granted address");
+    }
+    replyTo = delegated.from;
+  }
 
   const headers = validateHeaders(req.headers);
   const body = original ? appendQuote(original, req.html, req.text, true) : { html: req.html, text: req.text };
@@ -440,11 +542,16 @@ export async function send(
     : req.subject!;
   rejectCRLF("subject", subject);
 
+  // #740 S3: the audit row for a forward of granted mail, written BEFORE dispatch.
+  if (original) await auditQuote(env, original.messageId, "forward", quoteAudit);
+  // #740 S4: the send_as audit row, also BEFORE dispatch, fail closed.
+  if (delegated) await sendAs!.record(delegated.address, "send");
   return dispatchAndStore(env, ctx, {
     to,
     cc,
     bcc,
     from,
+    sender: delegated?.sender,
     replyTo,
     subject,
     html: body.html,
@@ -453,7 +560,15 @@ export async function send(
     attachments,
     inReplyTo: headers["In-Reply-To"] ?? null,
     references: parseReferences(headers["References"]),
+    threadScope: threadScopeOf(readScope),
   });
+}
+
+/** The thread-parent scope for a send. A bound member resolves its caller-supplied
+ *  In-Reply-To / References only among mail it can read. "estate" stays estate. The
+ *  send-only "addressing" token keeps the whole-store lookup it has always had. */
+function threadScopeOf(readScope: MessageReadScope): store.AccessScope {
+  return readScope === "estate" || readScope === "addressing" ? "estate" : readScope;
 }
 
 /**
@@ -468,6 +583,8 @@ export async function reply(
   ctx: ExecutionContext,
   identity: BoundIdentity | undefined,
   readScope: MessageReadScope,
+  quoteAudit?: QuoteAudit,
+  sendAs?: SendAs,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object" || typeof req.messageId !== "string" || !req.messageId.trim()) {
     throw new MailboxError("E_FIELD_MISSING", "messageId is required");
@@ -476,7 +593,25 @@ export async function reply(
     throw new MailboxError("E_FIELD_MISSING", "at least one of html or text is required");
   }
 
-  const original = await readQuotable(env, req.messageId.replace(/[<>]/g, "").trim(), readScope);
+  // An addressing-only caller (see MessageReadScope) replies to the thread's existing
+  // parties and gets nothing read back. Its extra recipients and the quote are refused
+  // BEFORE the lookup, out loud (400), never silently dropped.
+  const addressingOnly = readScope === "addressing";
+  if (addressingOnly) {
+    if (asArray(req.cc).length > 0 || asArray(req.bcc).length > 0) {
+      throw new MailboxError(
+        "E_VALIDATION_ERROR",
+        "cc and bcc require read access: a reply from this credential goes only to the thread's existing parties",
+      );
+    }
+    if (req.quoteOriginal) {
+      throw new MailboxError("E_VALIDATION_ERROR", "quoteOriginal requires read access");
+    }
+  }
+  const targetId = req.messageId.replace(/[<>]/g, "").trim();
+  const original = addressingOnly
+    ? await store.getUnscoped(env, targetId)
+    : await readQuotable(env, targetId, readScope);
   if (!original) {
     throw new MailboxError("E_NOT_FOUND", `no stored message with id ${req.messageId}`, 404);
   }
@@ -484,7 +619,8 @@ export async function reply(
   // Route replies from stored state, never caller input. Inbound: Reply-To or From
   // (RFC 5322 fidelity, #189). Outbound sent copy: the original To, since From is
   // us and excluding the sender would leave no recipient (smoke-staging #25).
-  const from = resolveFrom(env, req.from, identity);
+  const delegated = await delegatedFrom(env, req.from, identity, sendAs);
+  const from = delegated ? delegated.from : resolveFrom(env, req.from, identity);
   const primary =
     original.direction === "outbound"
       ? firstAddress(original.to)
@@ -521,11 +657,18 @@ export async function reply(
   };
 
   const body = req.quoteOriginal ? appendQuote(original, req.html, req.text) : { html: req.html, text: req.text };
+  // #740 S3: a reply to granted mail reads it (its parties, subject and thread, and the
+  // body when quoted), so it is audited BEFORE dispatch, quoted or not.
+  await auditQuote(env, original.messageId, "reply", quoteAudit);
+  // #740 S4: the send_as audit row, BEFORE dispatch, fail closed.
+  if (delegated) await sendAs!.record(delegated.address, "reply");
   return dispatchAndStore(env, ctx, {
     to,
     cc,
     bcc,
     from,
+    sender: delegated?.sender,
+    replyTo: delegated?.from,
     subject: replySubject,
     html: body.html,
     text: body.text,
@@ -534,6 +677,7 @@ export async function reply(
     inReplyTo,
     references,
     forcedThreadId: original.threadId,
+    threadScope: threadScopeOf(readScope),
   });
 }
 
@@ -542,6 +686,8 @@ interface DispatchInput {
   cc: string[];
   bcc: string[];
   from: EmailAddress;
+  /** RFC 5322 Sender, on a send_as send only (#740 S4). */
+  sender?: EmailAddress;
   replyTo?: EmailAddress;
   subject: string;
   html?: string;
@@ -551,6 +697,8 @@ interface DispatchInput {
   inReplyTo: string | null;
   references: string[];
   forcedThreadId?: string;
+  /** Whose mail the thread parent may come from (store.StoreInput.threadScope). */
+  threadScope: store.AccessScope;
 }
 
 async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInput): Promise<SendResult> {
@@ -568,6 +716,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
   if (d.cc.length) outbound.cc = d.cc;
   if (d.bcc.length) outbound.bcc = d.bcc;
   if (d.replyTo) outbound.replyTo = d.replyTo;
+  if (d.sender) outbound.sender = d.sender;
   if (safeHtml) outbound.html = safeHtml;
   if (d.text) outbound.text = d.text;
   if (d.attachments && d.attachments.length) outbound.attachments = d.attachments;
@@ -591,6 +740,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       date: new Date().toISOString(),
       inReplyTo: d.inReplyTo,
       references: d.references,
+      threadScope: d.threadScope,
       bodyText: deriveBodyText(safeHtml, d.text),
       bodyHtml: safeHtml ?? null,
       // The sent copy carries its attachments too (#470). We handed the transport the
@@ -637,7 +787,8 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
   // `from` is the address resolveFrom settled on, the same string store.put
   // wrote to from_addr above. Reporting it is how a caller sees a substitution
   // a bound identity made (#804), instead of echoing the from they asked for.
-  return { messageId, threadId, from: d.from.email, providerMessageId };
+  // Under send_as, `sender` reports the identity that really sent it (#740 S4).
+  return { messageId, threadId, from: d.from.email, ...(d.sender ? { sender: d.sender.email } : {}), providerMessageId };
 }
 
 function validateHeaders(headers: Record<string, string> | undefined): Record<string, string> {

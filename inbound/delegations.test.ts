@@ -295,8 +295,8 @@ describe("#740 S1 every authority path is operator only (derived from the route 
   });
 });
 
-describe("#740 S1 changes no behaviour: a grant does not yet widen its grantee", () => {
-  it("a grantee with organize cannot mark a granted address's mail read, with or without the grant", async () => {
+describe("#740 S1 a grant widens only what it names, and only where S2 enforces it", () => {
+  it("seen without `for` stays the grantee's OWN read state: the grant does not reach it (S2 needs `for`)", async () => {
     const s = setup();
     const a = await s.identity(["read", "organize"]);
     await putInbound(s.env, s.ctx, { id: "<m1@example.com>", from: "x@example.com", to: HUMAN });
@@ -312,7 +312,7 @@ describe("#740 S1 changes no behaviour: a grant does not yet widen its grantee",
     expect((await s.call("POST", "/api/messages/seen", ADMIN, { ids: [id], seen: true })).body.updated).toBe(1);
   });
 
-  it("a grantee with send still sends as ITSELF, never as a granted address, with or without the grant", async () => {
+  it("without send_as a grantee sends as ITSELF; with it, the default CF transport REFUSES rather than downgrade (S4)", async () => {
     const sent: Array<{ from: unknown }> = [];
     const s = setup({ EMAIL: { async send(m: { from: unknown }) { sent.push(m); return { messageId: "provider-1" }; } } });
     const a = await s.identity(["read", "send"]);
@@ -325,10 +325,12 @@ describe("#740 S1 changes no behaviour: a grant does not yet widen its grantee",
     expect(before.status, before.text).toBe(200);
     expect(await s.grant(a.id, ["send_as"])).toMatchObject({ status: 201 });
     const after = await s.call("POST", "/api/send", a.token, ask);
-    expect(after.status, after.text).toBe(200);
-    // The send really happened (2 dispatches), and both used the agent's own address.
-    expect(sent.length).toBe(2);
-    expect([before.body.from, after.body.from]).toEqual([AGENT, AGENT]);
+    // Cloudflare Email Sending cannot set a Sender header, so a send_as send is refused
+    // out loud (Conrad's S4 ruling), never sent as the agent and never sent without one.
+    expect(after.status, after.text).toBe(422);
+    expect(after.body.error).toBe("E_SEND_AS_UNSUPPORTED");
+    expect(sent.length, "only the pre-grant send was dispatched").toBe(1);
+    expect(before.body.from).toBe(AGENT);
     expect(wire()).toBe(AGENT);
   });
 });

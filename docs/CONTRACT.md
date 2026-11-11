@@ -159,6 +159,18 @@ CREATE INDEX IF NOT EXISTS idx_thread ON messages(thread_id, date);
 2. Else if any id in `references` matches an existing row, inherit that `thread_id`.
 3. Else start a new thread: `thread_id = this.message_id`.
 
+Only `in_reply_to` and the most recent `MAX_THREAD_REFERENCES` (20) entries of `references`
+are read, newest first, and every candidate is looked up in one query. For a Message-ID that
+more than one row has claimed, a trusted message is preferred (10.x). **Whose rows count:**
+a send by a bound member (`/api/send` and `/api/reply` under an agent identity or a
+session) resolves its parent only among messages that member can read, the same scope
+`GET /api/messages/:id` applies; a parent outside it is treated like an id that does not
+exist, and the message starts its own thread. Inbound mail, estate callers and the
+send-only token resolve across the whole store. The send-only token stays whole-store on
+purpose: it cannot read, so a scoped lookup would never find a parent and its sent copies
+would never join a thread, and thread resolution hands it back only a thread id, no
+message content.
+
 **The references asymmetry (resolved).** Inbound carries threading as a typed
 `ParsedInbound.references: string[]` (the parser already split the `References` header); outbound
 carries it inside `OutboundMessage.headers` as the wire `In-Reply-To` / `References` strings
@@ -555,7 +567,12 @@ transport POSTs the `OutboundMessage` as JSON to `POST /dispatch`, gated by
 
 - Request body: the `OutboundMessage` JSON above, field-for-field (the relay decodes with
   unknown-field rejection, so the producer sends exactly these keys). `bcc` is envelope-only: it
-  rides in `OutboundMessage.bcc`, never in `headers`.
+  rides in `OutboundMessage.bcc`, never in `headers`. `sender` (`{email, name?}`, #740 S4) is
+  present only on a send_as send and is written as the `Sender:` header right after `From:`;
+  it is the only way a Sender reaches the wire (a caller `Sender` header stays reserved).
+- Transport capability: a transport declares `canSetSender`. `CfEmailTransport` cannot (Cloudflare
+  Email Sending has no Sender field or allowlisted header), so a send_as send on it is refused
+  `422 E_SEND_AS_UNSUPPORTED` before dispatch; `RelayTransport` can (DELEGATION.md section 4.5).
 - `200`: `{ "ok": true, "messageId": "<core id>", "providerMessageId": "<or empty>" }`.
 - `400`: `{ "ok": false, "error": "..." }` for a malformed body (bad JSON / no recipients / empty
   message / a `headers` name that is not an RFC 5322 field-name, is longer than 76 characters, or is
@@ -573,7 +590,8 @@ prefixes `Re:` (collapsing an existing prefix), and rebuilds `In-Reply-To` / `Re
 **stored state, not caller input**, so a reply cannot be pointed at an arbitrary thread.
 
 `send()`, `reply()`, and a forward (`forwardMessageId` on `send`) return
-`{ messageId, threadId, from, providerMessageId? }`. `from` is the address actually used,
+`{ messageId, threadId, from, sender?, providerMessageId? }` (`sender`, the agent identity,
+only on a send_as send, #740 S4). `from` is the address actually used,
 after identity binding and the domain check, and it is the same address stored on the
 outbound copy. A registry token that passed a different `from` still sees its bound
 address here (#804). `POST /api/send`, `POST /send`, `POST /api/reply`, and
@@ -607,7 +625,7 @@ none touches D1 directly (#25, #26).
 | POST | `/api/messages/flags` | set durable `{ids, set: {flagged?, answered?}}` flags (read-scoped organize operation) | webmail v2 (#352) |
 | POST | `/api/messages/move` | move/restore `{ids, mailbox: "archive"\|"trash"\|"junk"\|null}`; Trash is soft-delete | webmail v2 (#352) |
 | GET | `/api/folders` | authoritative Inbox/Sent/All/Drafts/Trash/Junk/Archive counts + unread counts; durable folders also return `uidValidity` | webmail v2 (#352) |
-| GET | `/api/whoami` | the caller identity and the scope the SERVER imposes on its reads: `{identity, identityId, identityScope, roleQueues, capabilities, via}` (`identityId` is the stable id of a runtime agent identity, #801, else `null`). `read`-scoped and Bearer-reachable, which `/api/session` is not. `identityScope` is the SAME projection the two read routes emit; `capabilities` is derived by asking the live gate about each scope. Takes no parameters, so it reports the scope a BARE read would get | #650 |
+| GET | `/api/whoami` | the caller identity and the scope the SERVER imposes on its reads: `{identity, identityId, identityScope, roleQueues, delegations, capabilities, via}` (`identityId` is the stable id of a runtime agent identity, #801, else `null`; `delegations` is its active grants `[{id, address, powers}]`, #740 S2, `[]` when none). `read`-scoped and Bearer-reachable, which `/api/session` is not. `identityScope` is the SAME projection the two read routes emit; `capabilities` is derived by asking the live gate about each scope. Takes no parameters, so it reports the scope a BARE read would get | #650 |
 | GET/POST | `/api/drafts` | list or create an identity-owned server-side draft | webmail v2 (#352) |
 | GET/PUT/DELETE | `/api/drafts/{id}` | read, optimistic-concurrency replace, or discard own draft | webmail v2 (#352) |
 | GET/POST | `/api/drafts/{id}/attachments` | list or stage raw attachment bytes for an identity-owned draft | webmail v2 (#353) |
@@ -979,6 +997,8 @@ POST /api/smtp-auth          Authorization: Bearer <POSTERN_TRANSPORT_TOKEN>
   { "username": "...", "secret": "..." }
   200 { "ok": true,  "from": "user@your-domain" }      // good credential
   200 { "ok": false }                                   // bad credential -> daemon answers 535
+  200 { "ok": false, "error": "E_AUTH_THROTTLED", "retryAfter": n }  // account locked (Worker throttle); a failure to the door
+  503 { "ok": false, "error": "E_SERVICE_UNAVAILABLE" }  // throttle store unreadable (fail-closed)
   401                                                    // wrong transport token (relay misconfig)
   400 { "ok": false, "error": "E_FIELD_MISSING" }      // missing username/secret
   500 { "ok": false, "error": "E_INTERNAL_SERVER_ERROR" }  // the check itself is unavailable (#442)
@@ -1155,6 +1175,15 @@ attempt, and `store.put()` returns the id it actually wrote in `PutResult.messag
 **Callers must place and reference the row by `result.messageId`, never by the id they
 passed in.** If the derived id ALSO collides with a different message, `put` throws rather
 than drop the message or widen a `delivered_to` to place it. Refs GHSA-pjv6-4xmx-29cw.
+
+**A Message-ID is first-writer-wins.** The first message stored under an id holds it, and
+a read by that id (`GET /api/messages/:id`, MCP `mailbox_get`) returns that message. A
+later, DIFFERENT message that arrives with the same id is stored under its derived id with
+`claimed_id` set to the id it arrived with (migration 0018; rows forked before 0018 carry
+NULL). **A consumer that keys on a structured Message-ID, such as a GitHub notification id,
+must check `trusted` on the message it reads.** Thread resolution (section 1) prefers a
+trusted message for an id: the holder when it is trusted, else the earliest trusted
+claimant, else the holder. An untrusted claimant is never chosen as a parent.
 
 - `store.put()` returns `{ stored: false, merged: true, threadId }` on a merge;
   `{ stored: false, merged: false }` stays the true-dedup (retry/loop) result. Attachments,
@@ -1485,7 +1514,13 @@ AND (m.direction = 'inbound' OR (m.direction = 'outbound' AND lower(m.from_addr)
 Applied in ONE builder (`store.recipientWhere`, `store.accountWhere` for a bound session)
 shared by `list`, `fts`, and `substr`, and mirrored predicate-for-predicate by the
 `passesViewerScope` post-filter the score-ranked modes use. `lens=sent` is the sender-based
-Sent view (`lower(from_addr) = V`), never delivered-set based. Unscoped queries (no viewer)
+Sent view (`direction = 'outbound' AND lower(from_addr) = V`), never delivered-set based.
+**Authored by V** means exactly that predicate everywhere (read access, the account
+boundary, the Sent lens and folder count): a message postern SENT as V. The From header of
+inbound mail is written by the sender, so it never makes V the author; V reaches inbound
+mail only through the delivered set. `passesViewerScope` compares the stored `from_addr`
+the same way SQL does (ASCII `lower()`), never an address parsed out of a display name.
+Unscoped queries (no viewer)
 are unchanged. **Edge (accepted, documented):** a true self-send (V to V only) stays
 Sent-only for V, born seen; correct, you wrote it.
 
