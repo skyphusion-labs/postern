@@ -473,7 +473,9 @@ describe("lead rulings: placeholder defaults, prefix, status, AUTH seam", () => 
     const c = setup();
     await install(c.deps, c.opts);
     const calls = c.m.requests.filter((r) => r.path.startsWith("https://") && r.path.includes("/api/admin/"));
-    assert.deepEqual(calls.map((r) => r.path), ["https://mail.acme-mail.test/api/admin/users"]);
+    // #901 adds the principals backfill AFTER the admin; still no smtp-credentials call.
+    assert.deepEqual(calls.map((r) => r.path), ["https://mail.acme-mail.test/api/admin/users", "https://mail.acme-mail.test/api/admin/principals/backfill"]);
+    assert.ok(!calls.some((r) => /smtp-credentials/.test(r.path)));
     const body = JSON.parse(calls[0].body);
     assert.deepEqual(Object.keys(body).sort(), ["from", "password", "username"]);
   });
@@ -680,5 +682,50 @@ describe("re-run keeps the recorded hostname and admin (#855)", () => {
     assert.equal(c.opts.hostname, "mail.acme-mail.test");
     assert.equal(state(c).hostname, "mail.acme-mail.test");
     assert.equal(state(c).admin, "admin@acme-mail.test");
+  });
+});
+
+describe("principals backfill after a deploy (#901)", () => {
+  test("install converges the principal tables once, after the first admin", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    assert.equal(c.m.backfills, 1);
+    const posts = c.m.requests.filter((r) => r.method === "POST" && /\/api\/admin\//.test(r.path)).map((r) => r.path.replace(/^https:\/\/[^/]+/, ""));
+    assert.deepEqual(posts, ["/api/admin/users", "/api/admin/principals/backfill"], "the backfill must follow the admin it copies");
+    assert.match(c.out.join("\n"), /~ updated   principal tables \(services \+3, agents \+0 ~0, humans \+1 ~0, orphans revoked 0\)/);
+  });
+
+  test("a re-run with nothing to deploy does not call it (no write of any kind)", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    c.m.requests.length = 0;
+    await install(c.deps, c.opts);
+    assert.equal(c.m.backfills, 1);
+    assert.ok(!c.m.requests.some((r) => /principals\/backfill/.test(r.path)));
+  });
+
+  test("a 404 (an edge still on the old version) is retried; a 500 fails the run by status", async () => {
+    const c = setup();
+    let n404 = 1;
+    const realHttp = c.deps.http;
+    c.deps.http = async (url, init) => {
+      if (/principals\/backfill/.test(url) && n404-- > 0) return new Response(JSON.stringify({ ok: false }), { status: 404 });
+      return realHttp(url, init);
+    };
+    await install(c.deps, c.opts);
+    assert.equal(c.m.backfills, 1);
+    const d = setup();
+    d.m.backfillStatus = 500;
+    await assert.rejects(install(d.deps, d.opts), /principals\/backfill answered HTTP 500 E_INTERNAL/);
+  });
+
+  test("an address conflict is reported and does not fail the run; dry run never calls it", async () => {
+    const c = setup();
+    c.m.backfillConflicts = [{ address: "dup@acme-mail.test", principalId: "prn_a", ownerId: "idn_b" }];
+    await install(c.deps, c.opts);
+    assert.match(c.out.join("\n"), /note: address dup@acme-mail\.test is claimed by principal prn_a but already owned by idn_b/);
+    const d = setup({ args: ["--dry-run"] });
+    await install(d.deps, d.opts);
+    assert.equal(d.m.backfills, undefined);
   });
 });
