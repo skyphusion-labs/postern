@@ -13,13 +13,36 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
-**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds),
-`0020` (`webmail_sessions.principal_id`), `0021` (the `svc_admin` seed) and `0022` (the
-principal read-miss counter) are additive and are applied by the deploy. The backfill that
-copies existing identities and users in runs automatically after each deploy: the release
-workflow calls `POST /api/admin/principals/backfill` once the new version answers (#901), and
-the self-host installer calls it after any run that deployed a Worker version or created the
-first admin. A manual run is still safe: it is idempotent.
+## v1.12.0
+
+MINOR. Delegation the address owner manages from webmail, and sending as the owner
+(#740 S4 and S5); the principal layer (#854 M1 and M2); an admin-only token slot (#904);
+and fixes across webmail, the IMAP and submission doors, the MCP server and the Python
+client.
+
+**Upgrade.**
+
+- Migrations `0019` (the principal tables and six service-principal seeds), `0020`
+  (`webmail_sessions.principal_id`), `0021` (the `svc_admin` seed) and `0022` (the
+  principal read-miss counter) are additive and are applied by the deploy.
+- The principals backfill runs after each deploy. The release workflow calls
+  `POST /api/admin/principals/backfill` once the new version answers (#901), and the
+  self-host installer calls it after any run that deployed a Worker version or created
+  the first admin. A manual run is safe: it is idempotent.
+- New Worker secret `POSTERN_API_TOKEN_ADMIN`: the admin-only token (#904). It reaches the
+  admin routes and nothing else. Set it with `wrangler secret put POSTERN_API_TOKEN_ADMIN`.
+  Unset changes nothing for a deploy that does not use the release workflow.
+- New deploy secret `POSTERN_DEPLOY_ADMIN_TOKEN`, in the GitHub environment `production`:
+  the bearer the release workflow uses for the backfill. It must hold the same value as
+  the Worker's `POSTERN_API_TOKEN_ADMIN`, never `POSTERN_API_TOKEN`. Set both before you
+  tag: without them the release fails at the backfill step, by name.
+- A webmail session that started before `0020` is asked to sign in again before it can
+  use the new Settings sections.
+- Behaviour changes:
+  - The global auth cooldown in the IMAP and submission doors is now off unless
+    `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set.
+  - IMAP port 993 refuses plaintext: set a certificate, or use port 143.
+  - The MCP server and the Python client require an https API URL, except on localhost.
 
 **Upgrade (#853).** Migration `0023` (the `delegation_exclusions` table) is additive and is
 applied by the deploy. Nothing changes until a human marks a thread.
@@ -41,7 +64,7 @@ applied by the deploy. Nothing changes until a human marks a thread.
   webmail session: `GET /api/delegations/mine/grantees` (the live agents a
   human may grant to), `GET`/`POST /api/delegations/mine`, `DELETE
   /api/delegations/mine/{id}`, and `GET /api/audit/mine` (the audit rows
-  about the human own address). Session only: a token is refused. Grants
+  about the human's own address). Session only: a token is refused. Grants
   are audited with the human as actor. See `docs/DELEGATION.md` section 4.6.
 - **Sign-ins compare the principal tables with the old ones (#854 M2).**
   Agent tokens and password checks also read the new `credentials` table,
@@ -68,7 +91,6 @@ applied by the deploy. Nothing changes until a human marks a thread.
   not reached that login), and a grant or audit row can name a human
   principal as grantor and actor. Nothing new authorizes from it yet; it is
   what #740 S5 builds on.
-
 - **The `send_as` power (#740 S4).** An agent holding a `send_as` grant
   sends as the human by naming the address as `from`: From is the human
   with the human display name, `Sender:` is the agent, Reply-To is the
@@ -99,7 +121,6 @@ applied by the deploy. Nothing changes until a human marks a thread.
   on a missing `POSTERN_DEPLOY_ADMIN_TOKEN`, a non-200 or a malformed report. Address conflicts
   are warnings that name principal ids, never addresses (Actions logs are public).
   `deploy/postern.mjs install` and `upgrade` make the same call with the install's own token.
-
 - **The operator is named in the audit log (#854 M1).** Rows the admin
   routes write now carry actor `service` / `svc_both` instead of
   `operator` with no id. Older rows are unchanged.
@@ -110,8 +131,6 @@ applied by the deploy. Nothing changes until a human marks a thread.
   there with no conflict, which is what this catches. A deliberate edit to
   released notes passes with the commit trailer
   `Changelog-History-Edit: <reason>`.
-
-
 - **The webmail page allows its script by hash, not `'unsafe-inline'`.**
   The served CSP lists the sha256 of the page's one inline script, which
   `npm run sync-webmail` computes, so a script that is not the page's
@@ -130,7 +149,6 @@ applied by the deploy. Nothing changes until a human marks a thread.
 - **A refused address names the field.** An invalid to, cc, bcc, from, or
   reply-to value is reported by field name. A reply whose stored address
   cannot be used names the header it came from.
-
 - **Door session edges.** The IMAP wire trace redacts every received line of a
   LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
   port 993; set a certificate, or use port 143. Submission backend errors log
@@ -144,11 +162,9 @@ applied by the deploy. Nothing changes until a human marks a thread.
   empty, `.`, or `..` is refused before a path is built. A base URL must be
   https except on localhost, must not carry userinfo, and its query is not
   kept.
-
 - **MCP results mark every sender-written field as untrusted.** Search, list,
   get, thread, and attachment results name those fields and say they were
   written by the sender.
-
 - **Attachment download.** `postern attachment` without `-o` writes only the
   final path segment of the remote name, refuses an empty or hidden name, and
   does not replace a file that already exists. `-o` still writes the path you
@@ -172,7 +188,6 @@ applied by the deploy. Nothing changes until a human marks a thread.
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
   download name replaces each such character with `_`.
-
 - **The webmail remote-content notice counts every remote reference.**
   SVG image, use and feImage links, CSS url() written with escapes,
   @import of a plain string and image-set() strings are counted and
