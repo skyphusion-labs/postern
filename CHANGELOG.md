@@ -146,6 +146,9 @@ version or created the first admin. A manual run is still safe: it is idempotent
   @import of a plain string and image-set() strings are counted and
   removed from the reading frame; a URL inside a CSS comment is not
   counted.
+- **Webmail: the agent-access checkboxes sit beside their text.** In
+  Settings, each "It may" checkbox showed above and to the left of its
+  label, because the general input height applied to it.
 
 ## v1.11.0
 

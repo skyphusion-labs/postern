@@ -113,6 +113,26 @@ test.describe("agent access and activity (#740 S5)", () => {
     expect(violations).toEqual([]);
   });
 
+  test("each power checkbox sits on the same line as its text", async ({ page }) => {
+    const s = server();
+    await open(page, s);
+    await openSettings(page);
+    for (const p of ["read", "organize", "quote", "send_as"]) {
+      // Measured in one pass in the page, so a scroll between two readings cannot skew it.
+      const m = await page.locator("#grantPower_" + p).evaluate((i) => {
+        const b = i.getBoundingClientRect();
+        const r = document.createRange();
+        r.selectNodeContents(i.parentElement!);
+        r.setStartAfter(i);
+        const rects = Array.from(r.getClientRects()).filter((x) => x.width > 0 && x.height > 0);
+        const first = rects[0];
+        return { boxMid: b.top + b.height / 2, boxHeight: b.height, textMid: first ? first.top + first.height / 2 : NaN };
+      });
+      expect(Math.abs(m.boxMid - m.textMid), p).toBeLessThan(6);
+      expect(m.boxHeight, p).toBeLessThan(24);
+    }
+  });
+
   test("gives access with the chosen powers, the CSRF header and a note", async ({ page }) => {
     const s = server();
     await open(page, s);

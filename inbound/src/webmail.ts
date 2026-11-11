@@ -342,8 +342,10 @@ export const WEBMAIL_HTML = `<!doctype html>
   .settings-panel .sub { margin: var(--sp-3) 0 0; font-size: var(--fs-sm); }
   .settings-panel fieldset.powers { border: 0; padding: 0; margin: var(--sp-3) 0 0; }
   .settings-panel fieldset.powers legend { font-size: var(--fs-sm); color: var(--muted); padding: 0; }
-  .settings-panel label.check { display: flex; gap: var(--sp-2); align-items: baseline; color: var(--fg); margin: var(--sp-1) 0; }
-  .settings-panel label.check input { width: auto; }
+  .settings-panel label.check { display: flex; gap: var(--sp-2); align-items: center; color: var(--fg); margin: var(--sp-1) 0; }
+  /* The global input rule gives every input a 38px min-height; a checkbox kept in that box
+     sits at its top while the label text drops below it. */
+  .settings-panel label.check input { width: auto; min-height: 0; height: auto; margin: 0; flex: none; }
   .ac-wrap { position: relative; }
   .ac-list {
     position: absolute; left: 0; right: 0; top: 100%; z-index: 5;
