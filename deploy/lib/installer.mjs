@@ -665,9 +665,27 @@ async function ensureFirstAdmin(ctx, pf) {
 // ---------------------------------------------------------------------------
 // entry points
 
+// #855. A re-run keeps the hostname and admin this install recorded, unless the operator
+// passes --hostname / --admin. Measured 2026-11-10: a re-run without --hostname took the
+// default mail.<domain>, and the deploy moved the live custom domain there. The admin is
+// recorded once it exists (state.admin); before that, the credentials file holds the login
+// the run is creating. Returns the note lines to print.
+export function settleRecorded(opts, state, creds) {
+  const recorded = { hostname: state.hostname, admin: state.admin || creds.POSTERN_ADMIN_USERNAME };
+  const notes = [];
+  for (const [k, flag] of [["hostname", "--hostname"], ["admin", "--admin"]]) {
+    const was = recorded[k];
+    if (!was) continue;
+    if (!opts.given?.[k]) opts[k] = was;
+    else if (opts[k] !== was) notes.push(`  note: ${flag} ${opts[k]} replaces the recorded ${was}, because it was passed.`);
+  }
+  return notes;
+}
+
 function makeCtx(deps, opts, mode) {
   const paths = statePaths(opts);
   const state = loadState(opts);
+  const settled = settleRecorded(opts, state, loadCreds(opts));
   // Every secret this run knows: the Cloudflare token, each one it generates, and each
   // SECRET value in the credentials file (read at print time, since a run writes it
   // midway). The file also holds the API URL and the admin login, which are not secret.
@@ -677,6 +695,7 @@ function makeCtx(deps, opts, mode) {
   const redact = (text) => redactText(text, [deps.token, ...generated, ...storedSecrets()]);
   const log = (s) => deps.log(redact(s));
   const rep = reporter(log);
+  for (const s of settled) log(s);
   const ctx = {
     ...deps,
     log,
