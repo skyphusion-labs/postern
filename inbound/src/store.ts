@@ -3,7 +3,9 @@
 // (#22) and mailbox.send()/reply() for the sent copy (#27) -- so threads are
 // complete and the data model has a single owner.
 
-import { sha256hex, chunkText, representableId } from "./ingest";
+import { sha256hex, representableId } from "./ingest";
+import { EMBED_VERSION, embedChunks } from "./embedtext";
+import { foldThreads, queryTokens, rankFamilies, templateKey } from "./semrank";
 import { PROJECTION_VERSION, projectRfc822Size } from "./rfc822Project";
 import { allowedFromDomain } from "./fromdomain";
 
@@ -209,6 +211,15 @@ export type SearchField = "subject" | "body" | "text";
 
 export interface SearchQuery {
   q: string;
+  /** #813, semantic mode only: fold each template family into one representative hit
+   *  carrying `similar`. Absent = off. Hybrid never collapses. */
+  collapse?: boolean;
+  /** #926, semantic mode only: fold the hits of one thread into its best hit, which
+   *  carries `threadHits`. Absent = off. Hybrid never folds threads. */
+  collapseThreads?: boolean;
+  /** #813, INTERNAL (no API parameter sets it): `false` skips the template-family
+   *  tiebreak, so the recall eval can measure the ranking as it was before #813. */
+  familyRank?: boolean;
   /** #853: the same guard as ListQuery.agentGuard, in every search mode. */
   agentGuard?: AgentGuard;
   mode?: "fts" | "substr" | "semantic" | "hybrid"; // substr = #212; semantic/hybrid = M4
@@ -284,6 +295,14 @@ export interface Page<T> {
 export interface SearchHit {
   message: StoredMessageSummary;
   score?: number;
+  /** #813, semantic mode with collapse: the OTHER visible members of this hit's template
+   *  family (near-identical mail from the same sender), best first. `ids` capped at 20,
+   *  `count` exact. Absent when the hit stands alone. */
+  similar?: { count: number; ids: string[] };
+  /** #926, semantic mode with collapseThreads: the OTHER visible hits of this hit's thread
+   *  (not already inside some hit's `similar`), best first. `ids` capped at 20, `count`
+   *  exact. Absent when the hit is its thread's only one. */
+  threadHits?: { count: number; ids: string[] };
 }
 
 const DEFAULT_LIMIT = 50;
@@ -738,7 +757,9 @@ async function putRow(
     ctx.waitUntil(storeAttachments(env, input.messageId, attachments, receivedAt));
   }
 
-  if (input.vectorize && input.bodyText.length > 0) {
+  // The same count reindex and reconcile use (#813): an empty body with a subject is one
+  // subject chunk, so it is indexed here too and reconcile does not see it as missing.
+  if (input.vectorize && plannedChunks(input.bodyText, input.subject) > 0) {
     ctx.waitUntil(indexVectors(env, input));
   }
 
@@ -824,12 +845,8 @@ export async function refreshProjectedSize(env: Env, messageId: string): Promise
     .run();
 }
 
-// Chunking parameters: ONE place so the live index path and the backfill (#116
-// ws4) chunk identically, which (with the deterministic vector id) makes a
-// backfilled vector byte-identical to the live one for the same message.
-const CHUNK_SIZE = 1200;
-const CHUNK_OVERLAP = 150;
-const MAX_CHUNKS = 24; // bound embed cost on huge mail
+// Chunking parameters and the embedded text live in embedtext.ts (#813): ONE recipe
+// for the live index path, the backfill, reconcile, delete and the recall eval.
 
 /** The fields embedAndUpsert needs from a message (a subset of StoreInput, also
  *  reconstructable from a stored row for the backfill). */
@@ -845,9 +862,8 @@ export interface VectorizeFields {
 
 /** plannedChunks is how many chunk-vectors a body WOULD produce, without
  *  embedding -- used by the reindex dry run to total the cost up front. */
-export function plannedChunks(bodyText: string): number {
-  if (bodyText.length === 0) return 0;
-  return chunkText(bodyText, CHUNK_SIZE, CHUNK_OVERLAP).slice(0, MAX_CHUNKS).length;
+export function plannedChunks(bodyText: string, subject = ""): number {
+  return embedChunks(subject, bodyText).length;
 }
 
 /** Deterministic Vectorize ids for a message (sha256hex(messageId)[:56].chunk). */
@@ -868,8 +884,7 @@ export async function vectorIdsForMessage(messageId: string, chunkCount: number)
  */
 export async function embedAndUpsert(env: Env, f: VectorizeFields): Promise<number> {
   if (!env.AI || !env.VECTORIZE) return 0;
-  if (f.bodyText.length === 0) return 0;
-  const chunks = chunkText(f.bodyText, CHUNK_SIZE, CHUNK_OVERLAP).slice(0, MAX_CHUNKS);
+  const chunks = embedChunks(f.subject, f.bodyText);
   if (chunks.length === 0) return 0;
   const ids = await vectorIdsForMessage(f.messageId, chunks.length);
   const embed = (await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks })) as { data: number[][] };
@@ -900,9 +915,9 @@ async function syncVectorLedger(env: Env, messageId: string, vectorIds: string[]
   await env.DB.prepare("DELETE FROM vector_ledger WHERE message_id = ?").bind(messageId).run();
   for (let i = 0; i < vectorIds.length; i++) {
     await env.DB.prepare(
-      "INSERT INTO vector_ledger (vector_id, message_id, chunk, indexed_at) VALUES (?, ?, ?, datetime('now'))",
+      "INSERT INTO vector_ledger (vector_id, message_id, chunk, indexed_at, embed_version) VALUES (?, ?, ?, datetime('now'), ?)",
     )
-      .bind(vectorIds[i], messageId, i)
+      .bind(vectorIds[i], messageId, i, EMBED_VERSION)
       .run();
   }
 }
@@ -1954,7 +1969,7 @@ async function deleteVectorIds(env: Env, ids: string[]): Promise<void> {
 }
 
 /** Vector ids to tombstone on delete: ledger first, else computed from body (#279). */
-async function vectorIdsForDelete(env: Env, messageId: string, bodyText: string): Promise<string[]> {
+async function vectorIdsForDelete(env: Env, messageId: string, bodyText: string, subject: string): Promise<string[]> {
   if (env.DB) {
     const res = await env.DB.prepare(
       "SELECT vector_id FROM vector_ledger WHERE message_id = ? ORDER BY chunk",
@@ -1964,7 +1979,7 @@ async function vectorIdsForDelete(env: Env, messageId: string, bodyText: string)
     const rows = res.results ?? [];
     if (rows.length > 0) return rows.map((r) => r.vector_id);
   }
-  const chunks = plannedChunks(bodyText);
+  const chunks = plannedChunks(bodyText, subject);
   return vectorIdsForMessage(messageId, chunks);
 }
 
@@ -1980,12 +1995,12 @@ export async function deleteMessage(
   ctx?: ExecutionContext,
 ): Promise<boolean> {
   if (!env.DB) return false;
-  const row = await env.DB.prepare("SELECT body_text FROM messages WHERE message_id = ? LIMIT 1")
+  const row = await env.DB.prepare("SELECT body_text, subject FROM messages WHERE message_id = ? LIMIT 1")
     .bind(messageId)
-    .first<{ body_text: string }>();
+    .first<{ body_text: string; subject: string | null }>();
   if (!row) return false;
 
-  const vectorIds = await vectorIdsForDelete(env, messageId, row.body_text);
+  const vectorIds = await vectorIdsForDelete(env, messageId, row.body_text, row.subject ?? "");
   await deleteVectorIds(env, vectorIds);
   await env.DB.prepare("DELETE FROM vector_ledger WHERE message_id = ?").bind(messageId).run();
   await env.DB.prepare("DELETE FROM message_seen_by WHERE message_id = ?").bind(messageId).run();
@@ -3154,7 +3169,12 @@ function hasPostRetrievalFilter(q: SearchQuery): boolean {
       q.from ||
       q.viewer ||
       q.lens ||
-      q.direction,
+      q.direction ||
+      // #813: the family tiebreak and collapse act after retrieval, so they need the same
+      // headroom: a family's newest member often ranks below the top `limit` by cosine.
+      q.collapse ||
+      q.collapseThreads ||
+      (q.mode === "semantic" && q.familyRank !== false),
   );
 }
 
@@ -3283,15 +3303,20 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
     if (!passesCommonSearchFilters(message, q)) continue;
     items.push({ message, score: r.score });
   }
+  // #813: near-ties inside a template family reorder by query-token overlap, then newest;
+  // with collapse, each family folds into one hit. Runs on SCOPED items only (see semrank).
+  const ranked1 = q.familyRank === false ? items : await rankSemanticFamilies(env, items, q);
+  // #926: thread fold over what is still top-level (scoped hits only, like the families).
+  const ranked2 = q.collapseThreads === true ? foldThreadHits(ranked1) : ranked1;
   // Slice AFTER filtering, so `limit` bounds the ANSWER rather than the candidate pool.
-  const page = items.slice(0, limit);
+  const page = ranked2.slice(0, limit);
   // A vector index has no offset, so there is no continuation to hand back either way. What
   // differs is the CLAIM: null asserts exhaustion, and we may only assert it on two conditions
   // together -- the index ran out of candidates before our ceiling did, AND filtering did not
   // leave more matches than this page carries. Either one alone would be a claim we cannot
   // support, so the cursor is OMITTED and the truncation is stated, and a caller cannot read
   // exhaustion out of this response at all.
-  const more = items.length > page.length;
+  const more = ranked2.length > page.length;
   if (exhausted && !more) return { items: page, cursor: null, complete: true };
   const out: Page<SearchHit> = { items: page, complete: false, retrievalCap: topK };
   if (more) {
@@ -3299,6 +3324,58 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
       "more matching messages were retrieved than `limit` allows, and a score-ranked mode has no cursor to resume from: raise limit or narrow the query";
   }
   return out;
+}
+
+/** #926: fold scoped hits of one thread into its first (best) hit. */
+function foldThreadHits(items: SearchHit[]): SearchHit[] {
+  const byId = new Map(items.map((h) => [h.message.messageId, h]));
+  return foldThreads(items.map((h) => ({ id: h.message.messageId, thread: h.message.threadId || h.message.messageId }))).map((r) => {
+    const hit = byId.get(r.id) as SearchHit;
+    return r.threadHits ? { ...hit, threadHits: r.threadHits } : hit;
+  });
+}
+
+/** #813: the template-family tiebreak (and collapse) over scoped semantic hits. Bodies are
+ *  read only for members of a family of two or more, in one query per 90 ids. */
+async function rankSemanticFamilies(env: Env, items: SearchHit[], q: SearchQuery): Promise<SearchHit[]> {
+  if (items.length < 2) return items;
+  const inputs = items.map((h) => ({
+    id: h.message.messageId,
+    key: templateKey(h.message.from, h.message.subject),
+    score: h.score ?? 0,
+    date: h.message.date,
+  }));
+  const sizes = new Map<string, number>();
+  for (const i of inputs) sizes.set(i.key, (sizes.get(i.key) ?? 0) + 1);
+  const multi = inputs.filter((i) => (sizes.get(i.key) ?? 0) > 1).map((i) => i.id);
+  const bodies = new Map<string, string>();
+  for (let i = 0; i < multi.length; i += 90) {
+    const chunk = multi.slice(i, i + 90);
+    const { results } = await env.DB.prepare(
+      `SELECT message_id, substr(body_text, 1, 8000) AS body FROM messages WHERE message_id IN (${chunk.map(() => "?").join(", ")})`,
+    )
+      .bind(...chunk)
+      .all<{ message_id: string; body: string | null }>();
+    for (const r of results ?? []) bodies.set(r.message_id, r.body ?? "");
+  }
+  const byId = new Map(items.map((h) => [h.message.messageId, h]));
+  const bestOfFamily = new Map<string, number>();
+  for (const i of inputs) if (!bestOfFamily.has(i.key)) bestOfFamily.set(i.key, i.score);
+  const keyOf = new Map(inputs.map((i) => [i.id, i.key]));
+  const ranked = rankFamilies(
+    inputs,
+    queryTokens(q.q ?? ""),
+    (id) => `${byId.get(id)?.message.subject ?? ""}\n${bodies.get(id) ?? ""}`,
+    { collapse: q.collapse === true },
+  );
+  // Scores follow the new order: a hit takes the score of the slot it now holds (the
+  // family's best, for a collapsed representative). Hybrid re-sorts its semantic half by
+  // score, so without this the tiebreak would be undone there.
+  return ranked.map((r, k) => {
+    const hit = byId.get(r.id) as SearchHit;
+    const score = q.collapse === true ? (bestOfFamily.get(keyOf.get(r.id) as string) as number) : inputs[k].score;
+    return r.similar ? { ...hit, score, similar: r.similar } : { ...hit, score };
+  });
 }
 
 async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
@@ -3319,11 +3396,13 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     viewer: q.viewer,
     // #853: both halves carry the guard; a field left off here would leak through hybrid.
     agentGuard: q.agentGuard,
+    familyRank: q.familyRank,
     limit,
   };
   const [ftsPage, semPage] = await Promise.all([
     ftsSearch(env, { ...shared, mode: "fts" }),
-    semanticSearch(env, { ...shared, mode: "semantic" }),
+    // #813: hybrid stays one row per message, so its semantic half never collapses.
+    semanticSearch(env, { ...shared, mode: "semantic", collapse: false, collapseThreads: false }),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();
@@ -3498,9 +3577,28 @@ export interface ReindexResult {
   indexed: number; // messages actually embedded this page (0 on a dry run)
   vectors: number; // chunk-vectors written this page (or that WOULD be, on a dry run)
   skippedByGate: number; // inbound messages excluded by the VECTORIZE_FOR allowlist
+  skippedCurrent: number; // staleOnly: messages already embedded by the current recipe (#813)
   nextCursor: string | null;
   done: boolean;
   dryRun: boolean;
+  embedVersion: number; // the recipe this page embedded with (embedtext.ts EMBED_VERSION)
+}
+
+/** The ids among `ids` whose every ledger row is at the current recipe (#813). A message
+ *  with no ledger row is not current (it was never embedded, or predates the ledger). */
+async function currentEmbedded(env: Env, ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (let i = 0; i < ids.length; i += 90) {
+    const chunk = ids.slice(i, i + 90);
+    const { results } = await env.DB.prepare(
+      `SELECT message_id FROM vector_ledger WHERE message_id IN (${chunk.map(() => "?").join(", ")}) ` +
+        "GROUP BY message_id HAVING MIN(embed_version) >= ?",
+    )
+      .bind(...chunk, EMBED_VERSION)
+      .all<{ message_id: string }>();
+    for (const r of results ?? []) out.add(r.message_id);
+  }
+  return out;
 }
 
 /** countMessages totals the store, for the runner's progress denominator. */
@@ -3594,15 +3692,20 @@ async function pageForReindex(
  */
 export async function reindexPage(
   env: Env,
-  opts: { cursor?: string; limit?: number; dryRun?: boolean },
+  opts: { cursor?: string; limit?: number; dryRun?: boolean; staleOnly?: boolean },
 ): Promise<ReindexResult> {
   const dryRun = opts.dryRun === true;
+  const staleOnly = opts.staleOnly === true;
   const allowlist = vectorizeAllowlist(env);
   const { rows, nextCursor } = await pageForReindex(env, opts.cursor, clampReindexLimit(opts.limit));
+  // #813: with staleOnly, a message whose ledger rows are all at the current recipe is
+  // already done, so an interrupted re-embed resumes without paying twice.
+  const current = staleOnly ? await currentEmbedded(env, rows.map((r) => r.message_id)) : new Set<string>();
 
   let indexed = 0;
   let vectors = 0;
   let skippedByGate = 0;
+  let skippedCurrent = 0;
 
   for (const r of rows) {
     const direction = r.direction === "outbound" ? "outbound" : "inbound";
@@ -3610,8 +3713,12 @@ export async function reindexPage(
       skippedByGate++;
       continue;
     }
-    const chunks = plannedChunks(r.body_text);
-    if (chunks === 0) continue; // empty body: nothing to embed (not an allowlist skip)
+    const chunks = plannedChunks(r.body_text, r.subject ?? "");
+    if (chunks === 0) continue; // nothing to embed (not an allowlist skip)
+    if (current.has(r.message_id)) {
+      skippedCurrent++;
+      continue;
+    }
     if (dryRun) {
       vectors += chunks;
       continue;
@@ -3633,9 +3740,11 @@ export async function reindexPage(
     indexed,
     vectors,
     skippedByGate,
+    skippedCurrent,
     nextCursor,
     done: nextCursor === null,
     dryRun,
+    embedVersion: EMBED_VERSION,
   };
   if (!opts.cursor) result.total = await countMessages(env);
   return result;
@@ -3850,6 +3959,8 @@ export interface ReconcileResult {
   ledgerVectors: number; // rows in vector_ledger (0 when never backfilled)
   computedVectors: number; // D1-derived expected count (always computed for drift)
   ledgerDrift: number; // computedVectors - ledgerVectors when ledger is in use
+  embedVersion: number; // the current recipe (embedtext.ts EMBED_VERSION, #813)
+  staleEmbedMessages: number; // messages with a ledger row below embedVersion: re-embed with reindex staleOnly
   // --- Vectorize side: what is actually in the index ---
   liveVectorCount: number; // describe(): vectors actually present (may lag, eventually-consistent)
   verified: boolean; // whether the getByIds presence check ran
@@ -3898,7 +4009,7 @@ async function expectedVectorIds(env: Env): Promise<{
       liveMetaKeys.add(metaKey(r.date, r.subject));
       const direction = r.direction === "outbound" ? "outbound" : "inbound";
       if (!shouldVectorize(allowlist, direction, parseRecipients(r.to_addr))) continue;
-      const chunks = plannedChunks(r.body_text);
+      const chunks = plannedChunks(r.body_text, r.subject ?? "");
       if (chunks === 0) continue;
       gatedMessages++;
       const vids = await vectorIdsForMessage(r.message_id, chunks);
@@ -3908,6 +4019,14 @@ async function expectedVectorIds(env: Env): Promise<{
     cursor = nextCursor;
   }
   return { messages, gatedMessages, ids, liveMessageIds, liveMetaKeys };
+}
+
+/** Messages with any ledger row below the current recipe (#813). */
+async function staleEmbedCount(env: Env): Promise<number> {
+  const row = await env.DB.prepare("SELECT COUNT(DISTINCT message_id) AS n FROM vector_ledger WHERE embed_version < ?")
+    .bind(EMBED_VERSION)
+    .first<{ n: number }>();
+  return Number(row?.n ?? 0);
 }
 
 /** Load every vector_id recorded by embedAndUpsert (#279). Pages by vector_id. */
@@ -4130,6 +4249,8 @@ export async function reconcile(env: Env, opts: ReconcileOpts = {}): Promise<Rec
     expectedVectors,
     expectedSource,
     ledgerVectors,
+    embedVersion: EMBED_VERSION,
+    staleEmbedMessages: await staleEmbedCount(env),
     computedVectors,
     ledgerDrift,
     liveVectorCount: live,

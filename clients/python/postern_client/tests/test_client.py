@@ -358,6 +358,15 @@ class ListSearchTest(unittest.TestCase):
         self.assertNotIn("seen", t.last_query())
         self.assertNotIn("hasAttachment", t.last_query())
 
+    def test_search_collapse_is_tri_state(self):
+        # #813: False must be SENT (one row per message); None leaves the worker default.
+        t = FakeTransport(body=b'{"ok":true,"items":[]}')
+        c = _client(t)
+        c.search("q", mode="semantic", collapse=False)
+        self.assertEqual(t.last_query()["collapse"], ["false"])
+        c.search("q", mode="semantic")
+        self.assertNotIn("collapse", t.last_query())
+
     def test_search_lens_and_direction_are_passed_as_given(self):
         t = FakeTransport(body=b'{"ok":true,"items":[]}')
         _client(t).search("q", lens="sent", to="me@x.com")

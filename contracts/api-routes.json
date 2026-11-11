@@ -459,7 +459,8 @@
       "path": "/api/admin/reindex",
       "match": "exact",
       "scope": "admin",
-      "auth": "bearer"
+      "auth": "bearer",
+      "note": "#813: staleOnly re-embeds only messages whose ledger rows are below the current embed recipe (EMBED_VERSION); skippedCurrent counts the rest"
     },
     {
       "id": "admin-reproject",

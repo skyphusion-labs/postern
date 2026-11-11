@@ -156,7 +156,7 @@ The whole pass uses D1 + Vectorize `describe`/`getByIds`/`query` only. **It neve
 
 ```
 messages, gatedMessages, expectedVectors, expectedSource, ledgerVectors, computedVectors, ledgerDrift,
-liveVectorCount, verified, presentExpected, missingExpected, missingExpectedSample,
+liveVectorCount, verified, presentExpected, missingExpected, missingExpectedSample, embedVersion, staleEmbedMessages,
 orphanCount, enumerable: false,
 sample: { probes, matchesInspected, distinctOrphans, causeA, causeB, unknown, orphanIds },
 causeDetermination, note
