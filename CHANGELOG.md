@@ -101,6 +101,10 @@ first admin. A manual run is still safe: it is idempotent.
 
 ### Fixed
 
+- **MCP bounds the API URL, path ids, and returned bodies.** The API URL must
+  be https, or http on localhost. An id that is empty, `.`, or `..` is
+  refused. A long message body is cut and marked truncated, and the startup
+  line shows only the API origin.
 - **A sign-in survives a failure on the principal side (#854).** If the
   principal lookup at sign-in fails, the session is minted without one
   (the self-service routes then ask for a fresh sign-in) instead of the
@@ -156,6 +160,9 @@ first admin. A manual run is still safe: it is idempotent.
   @import of a plain string and image-set() strings are counted and
   removed from the reading frame; a URL inside a CSS comment is not
   counted.
+- **Webmail: the agent-access checkboxes sit beside their text.** In
+  Settings, each "It may" checkbox showed above and to the left of its
+  label, because the general input height applied to it.
 
 ## v1.11.0
 
