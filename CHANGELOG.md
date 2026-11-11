@@ -60,6 +60,13 @@ upgrading to copy existing identities and users in; it is safe to run again.
   removed from the reading frame; a URL inside a CSS comment is not
   counted.
 
+### Changed
+
+- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
+  The served CSP lists the sha256 of the page's one inline script, which
+  `npm run sync-webmail` computes, so a script that is not the page's
+  own does not run. `style-src 'unsafe-inline'` is unchanged.
+
 ## v1.11.0
 
 MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's
