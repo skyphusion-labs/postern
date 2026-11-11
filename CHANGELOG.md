@@ -22,6 +22,8 @@ reason. A session that is gone still signs out. The webmail-e2e case that raced 
 turned main red at the v1.14.0 release commit, now waits for the answer and checks that no
 sign-out was sent.
 
+- `inbound/reindex.mjs` retries a failed page (network error or HTTP 5xx) up to 6 times with backoff, prints each page's cursor, and resumes from `--cursor`. A long `--stale-only` run (#813) no longer restarts at page 0 after one connection reset.
+
 ## v1.14.0
 
 MINOR. Semantic search embeds the subject and folds template families and threads, and
