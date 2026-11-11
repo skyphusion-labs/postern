@@ -57,7 +57,7 @@ describe("thread lookup query count", () => {
 });
 
 describe("thread lookup bounds", () => {
-  it("binds at most two forms of In-Reply-To plus MAX_THREAD_REFERENCES References", async () => {
+  it("binds two forms of In-Reply-To plus MAX_THREAD_REFERENCES References, for message_id and claimed_id", async () => {
     const { env, ctx } = realEnv();
     const db = env.DB as unknown as { prepare: (sql: string) => { bind: (...v: unknown[]) => unknown } };
     const orig = db.prepare.bind(db);
@@ -71,7 +71,8 @@ describe("thread lookup bounds", () => {
     };
     await ingest(env, inbound("bound@example.net", { inReplyTo: "irt\u00e9@example.net", references: refs(2000, "\u00e9") }), ctx);
     expect(MAX_THREAD_REFERENCES).toBe(20);
-    expect(bound).toBe(2 * (1 + MAX_THREAD_REFERENCES));
+    expect(bound).toBe(2 * 2 * (1 + MAX_THREAD_REFERENCES));
+    expect(bound).toBeLessThanOrEqual(100);
   });
 
   it("a parent older than the most recent MAX_THREAD_REFERENCES References is not used", async () => {

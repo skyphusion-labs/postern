@@ -34,6 +34,7 @@ interface Row {
   answered: number;
   mailbox: string | null;
   trashed_at: string | null;
+  claimed_id?: string | null;
 }
 
 interface AttRow {
@@ -559,12 +560,13 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         // true-dedup no-op (recipient already a member -> WHERE false -> no row).
         // Bind order (#342): delivered_set(15), cc(16), bcc(17), sender(18),
         // reply_to(19), wire_size(20), projected_size(21), projection_version(22),
-        // seen(23), merge_rcpt(24), where-rcpt(25), is_fresh cmp = delivered_set(26).
+        // seen(23), claimed_id(24), merge_rcpt(25), where-rcpt(26), is_fresh cmp =
+        // delivered_set(27).
         if (/INSERT INTO messages/i.test(sql) && /ON CONFLICT/i.test(sql)) {
           const b = bound as unknown[];
           const message_id = b[0] as string;
           const delivered_set = b[15] as string;
-          const merge_rcpt = b[24] as string;
+          const merge_rcpt = b[25] as string;
           const existing = rows.find((r) => r.message_id === message_id);
           if (!existing) {
             rows.push({
@@ -597,6 +599,7 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
               answered: 0,
               mailbox: null,
               trashed_at: null,
+              claimed_id: b[24] as string | null,
             });
             return { results: [{ thread_id: b[14] as string | null, is_fresh: 1 }] as unknown as T[] };
           }
@@ -709,12 +712,12 @@ export function makeFakeEnv(overrides: Partial<Record<string, unknown>> = {}): F
         // store.resolveThreadId: every thread candidate in one IN (...) query. Like SQL,
         // it returns the matching rows in no promised order; the store picks by
         // candidate order.
-        if (/SELECT message_id, thread_id FROM messages WHERE message_id IN \(/i.test(sql)) {
+        if (/SELECT id, message_id, claimed_id, thread_id, trusted FROM messages WHERE message_id IN \(/i.test(sql)) {
           const ids = new Set(bound as string[]);
           const results = rows
-            .filter((r) => ids.has(r.message_id))
+            .filter((r) => ids.has(r.message_id) || (r.claimed_id != null && ids.has(r.claimed_id)))
             .reverse()
-            .map((r) => ({ message_id: r.message_id, thread_id: r.thread_id }));
+            .map((r) => ({ id: r.id, message_id: r.message_id, claimed_id: r.claimed_id ?? null, thread_id: r.thread_id, trusted: r.trusted }));
           return { results: results as unknown as T[] };
         }
         if (/FROM messages WHERE thread_id = \?/i.test(sql)) {

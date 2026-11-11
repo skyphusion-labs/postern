@@ -62,6 +62,16 @@ mismatched MCP tag fails before it publishes.
   when it was delivered to V. Semantic and hybrid search apply the same
   rule as the SQL paths.
 
+- **Thread resolution prefers a trusted message for a shared
+  Message-ID.** A different message that arrives with a Message-ID already
+  held by another is still stored under its derived id, and now records
+  the id it arrived with (`claimed_id`, migration `0018`, additive,
+  applied by the deploy). For that id, threading picks the holder when it
+  is trusted, else a trusted claimant, else the holder. A read by id still
+  returns the first message stored under it: `docs/CONTRACT.md` states
+  this, and the MCP `mailbox_get` description tells agents to check
+  `trusted`.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an

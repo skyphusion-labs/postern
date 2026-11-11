@@ -1158,6 +1158,15 @@ attempt, and `store.put()` returns the id it actually wrote in `PutResult.messag
 passed in.** If the derived id ALSO collides with a different message, `put` throws rather
 than drop the message or widen a `delivered_to` to place it. Refs GHSA-pjv6-4xmx-29cw.
 
+**A Message-ID is first-writer-wins.** The first message stored under an id holds it, and
+a read by that id (`GET /api/messages/:id`, MCP `mailbox_get`) returns that message. A
+later, DIFFERENT message that arrives with the same id is stored under its derived id with
+`claimed_id` set to the id it arrived with (migration 0018; rows forked before 0018 carry
+NULL). **A consumer that keys on a structured Message-ID, such as a GitHub notification id,
+must check `trusted` on the message it reads.** Thread resolution (section 1) prefers a
+trusted message for an id: the holder when it is trusted, else the earliest trusted
+claimant, else the holder. An untrusted claimant is never chosen as a parent.
+
 - `store.put()` returns `{ stored: false, merged: true, threadId }` on a merge;
   `{ stored: false, merged: false }` stays the true-dedup (retry/loop) result. Attachments,
   FTS, and Vectorize run ONLY on first insert (`stored: true`) -- a merge touches one column.
