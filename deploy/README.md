@@ -11,6 +11,7 @@ node deploy/postern.mjs install --domain example.com --dry-run   # the plan, no 
 node deploy/postern.mjs install --domain example.com
 node deploy/postern.mjs status  --domain example.com             # read-only report, any time
 node deploy/postern.mjs routing --domain example.com             # does every address reach the Worker?
+node deploy/postern.mjs uninstall --domain example.com           # remove it; your mail is kept
 ```
 
 (`example.com` stands for your own domain here. The installer refuses the documentation
@@ -174,6 +175,41 @@ arriving. If you ever disable Routing yourself, first save what
 problem. Most rollbacks need only the Worker. Migrations are additive, so the older Worker
 runs against the newer schema. After a rollback, check out the older tag before the next
 `install` or `upgrade`, or that run deploys the newer code again.
+
+## Uninstall
+
+```bash
+node deploy/postern.mjs uninstall --domain example.com --dry-run   # what it would remove
+node deploy/postern.mjs uninstall --domain example.com             # keeps your mail
+node deploy/postern.mjs uninstall --domain example.com --delete-data --confirm-delete example.com
+```
+
+Uninstall removes only what this installer's state file records creating (or adopting with
+`--adopt`). In order:
+
+1. **The catch-all rule** stops pointing at the Worker (it is disabled, action drop).
+   **Email Routing itself stays ON.** Turning Routing off makes Cloudflare delete the zone's
+   MX, SPF and DKIM records (measured in pt1110), which would also take away mail you may
+   want to receive some other way. Turn it off yourself, knowing that, if you mean to.
+2. **The Worker's custom domain**, then **the Worker**.
+3. **Email Sending** for the domain, but only if this installer enabled it. Cloudflare's
+   DELETE also removes the Sending DNS records it added (per the API reference).
+4. **Your mail (D1 and R2) is kept** unless you pass `--delete-data` AND
+   `--confirm-delete <domain>`, with the domain typed out. Then D1 is first exported with
+   `wrangler d1 export` to `<state-dir>/<name>.<domain>.export-<time>.sql` (mode 600).
+   D1 is deleted only after that file exists and is not empty. An R2 bucket is deleted only
+   if it is empty (Cloudflare refuses otherwise). If it still holds attachments, uninstall
+   says so and keeps it.
+
+It never changes your DMARC record or any DNS record it did not create. A second run changes
+nothing. The credentials file stays; delete it yourself when you no longer need it.
+
+## Output never carries a secret
+
+Every line the installer prints, and every error message, passes through one redactor. It
+replaces the Cloudflare token, every secret the run generated, and every token or password
+in the credentials file with `[redacted]`. So "never printed" does not depend on what
+wrangler or the API happens to echo back.
 
 ## State
 
