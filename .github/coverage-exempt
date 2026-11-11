@@ -1,0 +1,1 @@
+No root package.json or go.mod: postern's tests run in the ci.yml jobs (inbound, relay, imap, clients-python, mcp, webmail-e2e, release-gate) behind the ci aggregate, so a separate coverage run here would only duplicate them.
