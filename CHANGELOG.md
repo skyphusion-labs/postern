@@ -21,6 +21,11 @@ mismatched MCP tag fails before it publishes.
   read routes. `both` and `read` tokens and bound identities are
   unchanged.
 
+- **Thread resolution looks up its candidates in one query.** A message's
+  thread is resolved from its In-Reply-To and its 20 most recent
+  References (`MAX_THREAD_REFERENCES`), deduplicated, in a single D1
+  query. The parent is chosen in the same order as before.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
