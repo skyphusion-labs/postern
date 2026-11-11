@@ -11,6 +11,15 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+### Fixed
+
+- **Webmail shows attachment names with hidden characters made visible.**
+  Control and invisible format characters in an attachment filename are
+  shown as `[U+XXXX]`, the name is isolated left to right, and the
+  download name replaces each such character with `_`.
+
 ## v1.11.0
 
 MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's
@@ -34,13 +43,6 @@ installer writes `granted` for a new install and does not add it on upgrade.
   `AGENT_READ_SCOPE` value. Each such quote writes a `delegation.quote`
   audit row before it is sent, and nothing is sent if that row cannot be
   written. See `docs/DELEGATION.md` section 4.4.
-
-### Fixed
-
-- **Webmail shows attachment names with hidden characters made visible.**
-  Control and invisible format characters in an attachment filename are
-  shown as `[U+XXXX]`, the name is isolated left to right, and the
-  download name replaces each such character with `_`.
 
 ## v1.10.1
 
