@@ -338,10 +338,9 @@ refusal). A successful mint or revoke and its row are written in ONE D1 batch, s
 action cannot land without its record. A list writes its row before it answers, and
 fails if it cannot. A refusal's row is best effort: the refusal is returned either way.
 
-Every actor today is `operator` (a static `both` token, which carries no id, so the
-log cannot tell two `both` tokens apart). The table is generic on purpose: #740 adds
-agent actions on another identity's mail to the same log, with the agent's id as the
-actor, rather than starting a second one.
+The operator's rows name the `svc_both` service principal (`actor_kind` `service`, #854
+M1); rows written before M1 say `operator` with no id. Agent actions on another
+identity's mail (#740) are in the same log, with the agent's id as the actor.
 
 ### 10.4 Rotation and revocation
 
