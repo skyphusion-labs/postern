@@ -166,7 +166,10 @@ a send by a bound member (`/api/send` and `/api/reply` under an agent identity o
 session) resolves its parent only among messages that member can read, the same scope
 `GET /api/messages/:id` applies; a parent outside it is treated like an id that does not
 exist, and the message starts its own thread. Inbound mail, estate callers and the
-send-only token resolve across the whole store.
+send-only token resolve across the whole store. The send-only token stays whole-store on
+purpose: it cannot read, so a scoped lookup would never find a parent and its sent copies
+would never join a thread, and thread resolution hands it back only a thread id, no
+message content.
 
 **The references asymmetry (resolved).** Inbound carries threading as a typed
 `ParsedInbound.references: string[]` (the parser already split the `References` header); outbound
