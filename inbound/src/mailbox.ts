@@ -364,6 +364,34 @@ function deriveBodyText(html?: string, text?: string): string {
 export type MessageReadScope = readonly string[] | "estate" | "addressing";
 
 /**
+ * The audit half of a quote that reaches a GRANTED address (#740 S3). `addresses` are the
+ * quote-granted addresses the caller's scope was widened by. When the stored message a
+ * reply or forward resolves to is reachable through one of them, `record` writes one
+ * audit row BEFORE dispatch and throws if it cannot, so no audit means no send. The row
+ * records an ATTEMPT: a dispatch that then fails leaves it in place.
+ */
+export interface QuoteAudit {
+  addresses: readonly string[];
+  record: (messageId: string, op: "reply" | "forward", address: string) => Promise<void>;
+}
+
+/** Record the quote when the message is reachable through a granted address. */
+async function auditQuote(
+  env: Env,
+  messageId: string,
+  op: "reply" | "forward",
+  audit: QuoteAudit | undefined,
+): Promise<void> {
+  if (!audit) return;
+  for (const address of audit.addresses) {
+    if (await store.messageAccessible(env, messageId, [address])) {
+      await audit.record(messageId, op, address);
+      return;
+    }
+  }
+}
+
+/**
  * Read the message a write path is about to quote, under that path's scope.
  *
  * `"estate"` means there is no bound member to scope to: a static operator/IMAP token, or
@@ -395,6 +423,7 @@ export async function send(
   ctx: ExecutionContext,
   identity: BoundIdentity | undefined,
   readScope: MessageReadScope,
+  quoteAudit?: QuoteAudit,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object") {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be an object");
@@ -448,6 +477,8 @@ export async function send(
     : req.subject!;
   rejectCRLF("subject", subject);
 
+  // #740 S3: the audit row for a forward of granted mail, written BEFORE dispatch.
+  if (original) await auditQuote(env, original.messageId, "forward", quoteAudit);
   return dispatchAndStore(env, ctx, {
     to,
     cc,
@@ -484,6 +515,7 @@ export async function reply(
   ctx: ExecutionContext,
   identity: BoundIdentity | undefined,
   readScope: MessageReadScope,
+  quoteAudit?: QuoteAudit,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object" || typeof req.messageId !== "string" || !req.messageId.trim()) {
     throw new MailboxError("E_FIELD_MISSING", "messageId is required");
@@ -555,6 +587,9 @@ export async function reply(
   };
 
   const body = req.quoteOriginal ? appendQuote(original, req.html, req.text) : { html: req.html, text: req.text };
+  // #740 S3: a reply to granted mail reads it (its parties, subject and thread, and the
+  // body when quoted), so it is audited BEFORE dispatch, quoted or not.
+  await auditQuote(env, original.messageId, "reply", quoteAudit);
   return dispatchAndStore(env, ctx, {
     to,
     cc,

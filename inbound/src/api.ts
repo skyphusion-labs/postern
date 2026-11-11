@@ -26,6 +26,7 @@ import {
   type SendRequest,
   type ReplyRequest,
   type MessageReadScope,
+  type QuoteAudit,
 } from "./mailbox";
 import { serveWebmail } from "./webmail";
 import { authenticate } from "./smtpcreds";
@@ -42,6 +43,7 @@ import {
   activeDelegations,
   agentReadScope,
   ORGANIZE_AUDIT_ACTION,
+  QUOTE_AUDIT_ACTION,
   handleAdminDelegations,
   noDelegations,
   type AgentDelegations,
@@ -263,14 +265,16 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // --- write: send ---
     if (request.method === "POST" && (path === "/api/send" || path === "/send")) {
       const body = await readJson<SendRequest>(request);
-      const result = await send(env, body, ctx, resolution.identity, writeReadScope(env, resolution));
+      const q = await quoteScope(env, resolution);
+      const result = await send(env, body, ctx, resolution.identity, q.scope, q.audit);
       return json({ ok: true, ...result });
     }
 
     // --- write: reply ---
     if (request.method === "POST" && path === "/api/reply") {
       const body = await readJson<ReplyRequest>(request);
-      const result = await reply(env, body, ctx, resolution.identity, writeReadScope(env, resolution));
+      const q = await quoteScope(env, resolution);
+      const result = await reply(env, body, ctx, resolution.identity, q.scope, q.audit);
       return json({ ok: true, ...result });
     }
 
@@ -667,6 +671,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           ...(attachment.filename ? { filename: attachment.filename } : {}),
           ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
         }));
+        // #740 S3: the same quote scope and audit the send and reply routes use.
+        const draftQuote = await quoteScope(env, resolution);
         let result;
         if ((draft.composeMode === "reply" || draft.composeMode === "replyAll") && draft.sourceMessageId) {
           result = await reply(env, {
@@ -677,7 +683,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             html: draft.bodyHtml ?? undefined,
             bcc: draft.bcc ? splitRecipientInput(draft.bcc) : undefined,
             attachments,
-          }, ctx, resolution.identity, writeReadScope(env, resolution));
+          }, ctx, resolution.identity, draftQuote.scope, draftQuote.audit);
         } else {
           if (!draft.to) throw new MailboxError("E_FIELD_MISSING", "draft recipient required");
           result = await send(env, {
@@ -691,7 +697,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             ...(draft.composeMode === "forward" && draft.sourceMessageId
               ? { forwardMessageId: draft.sourceMessageId }
               : {}),
-          }, ctx, resolution.identity, writeReadScope(env, resolution));
+          }, ctx, resolution.identity, draftQuote.scope, draftQuote.audit);
         }
         // Delete only after dispatch + sent-copy storage succeeds. Every validation,
         // transport, or storage failure leaves the draft and staged bytes retryable.
@@ -1159,6 +1165,37 @@ function sessionReadScope(env: Env, resolution: AuthResolution): string[] | unde
  * The quote is a read, and a per-function key that cannot read must not read through a
  * write route; replying to the people already on a thread is not a read of its content.
  */
+/** The quote scope of a send, reply, forward or draft send, widened by quote grants
+ *  (#740 S3). writeReadScope, plus every address the bound runtime identity holds an
+ *  ACTIVE `quote` grant on (live grantee only), under either AGENT_READ_SCOPE value:
+ *  #718 left the quote at the caller's own address even when it reads the estate, so a
+ *  grant is the only thing that widens it. A widened scope carries a QuoteAudit, so a
+ *  quote of granted mail is audited before dispatch, fail closed. */
+async function quoteScope(
+  env: Env,
+  resolution: AuthResolution,
+): Promise<{ scope: MessageReadScope; audit?: QuoteAudit }> {
+  const scope = writeReadScope(env, resolution);
+  if (scope === "estate" || scope === "addressing") return { scope };
+  const granted = (await delegationsOf(env, resolution)).quote.filter((a) => !scope.includes(a));
+  if (granted.length === 0) return { scope };
+  const actor = resolution.identityId as string;
+  return {
+    scope: [...scope, ...granted],
+    audit: {
+      addresses: granted,
+      record: async (messageId, op, address) => {
+        const res = await agentMessageAudit(env, new Date().toISOString(), actor, QUOTE_AUDIT_ACTION, { op, address }, {
+          sql: "m.message_id = ?",
+          binds: [messageId],
+        }).run();
+        // Fail closed: no audit row, no send.
+        if ((res.meta?.changes ?? 0) !== 1) throw new Error("quote audit row was not written");
+      },
+    },
+  };
+}
+
 function writeReadScope(env: Env, resolution: AuthResolution): MessageReadScope {
   const bound = resolution.identity?.from;
   if (!bound) return authorize(resolution, "read") ? "estate" : "addressing";
