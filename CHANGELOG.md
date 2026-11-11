@@ -87,6 +87,17 @@ version or created the first admin. A manual run is still safe: it is idempotent
   when `delivered_to` includes the session viewer. An old row that omits
   `deliveredTo` still uses its `to` address. The global auth cooldown is off
   unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set.
+- **Python client requests.** Authorization is not sent on a cross-origin
+  redirect. Returned `bodyText` and `bodyHtml` are capped (default 64 KiB,
+  `POSTERN_MAX_BODY_CHARS`) and flagged with `bodyTruncated`. An id that is
+  empty, `.`, or `..` is refused before a path is built. A base URL must be
+  https except on localhost, must not carry userinfo, and its query is not
+  kept.
+
+- **MCP results mark every sender-written field as untrusted.** Search, list,
+  get, thread, and attachment results name those fields and say they were
+  written by the sender.
+
 - **Attachment download.** `postern attachment` without `-o` writes only the
   final path segment of the remote name, refuses an empty or hidden name, and
   does not replace a file that already exists. `-o` still writes the path you
