@@ -25,6 +25,7 @@
 // The error envelope, body parsing, paging and the audit writer are shared with the
 // delegation grants (#740 S1) through ./adminkit.
 
+import { mirrorAgent } from "./principalmirror";
 import type { BoundIdentity, IdentityCap } from "./sendidentity";
 import { sha256Hex } from "./sendidentity";
 import { displayNameProblem } from "./smtpcreds";
@@ -221,7 +222,7 @@ async function mint(request: Request, env: Env, actor: AuditActor): Promise<Resp
     outcome: "ok",
     detail: { from, scopes: caps },
   }, undefined, actor);
-  await env.DB.batch([insert, audit]);
+  await env.DB.batch([insert, audit, ...mirrorAgent(env, id)]); // #854 M2: dual-write
   return json(
     {
       ok: true,
@@ -284,7 +285,7 @@ async function revoke(env: Env, rawId: string, actor: AuditActor): Promise<Respo
     outcome: "ok",
     detail: { alreadyRevoked: row.revoked_at !== null },
   }, undefined, actor);
-  const results = await env.DB.batch([update, audit]);
+  const results = await env.DB.batch([update, audit, ...mirrorAgent(env, id)]); // #854 M2
   const revoked = results[0]?.meta?.changes ?? 0;
   return json({ ok: true, id, revoked, alreadyRevoked: row.revoked_at !== null });
 }

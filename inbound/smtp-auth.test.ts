@@ -56,7 +56,15 @@ function makeEnv(seed: CredRow[] = [], overrides: Record<string, unknown> = {}) 
     };
   }
   const env = {
-    DB: { prepare: (sql: string) => stmt(sql) },
+    DB: {
+      prepare: (sql: string) => stmt(sql),
+      // #854 M2: credential writes are a batch (the row plus its principal mirror).
+      batch: async (s: Array<{ run(): Promise<unknown> }>) => {
+        const out = [];
+        for (const x of s) out.push(await x.run());
+        return out;
+      },
+    },
     POSTERN_API_TOKEN: "api-token",
     POSTERN_TRANSPORT_TOKEN: "transport-token",
     ALLOWED_FROM_DOMAIN: "skyphusion.org",
