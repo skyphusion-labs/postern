@@ -1,3 +1,4 @@
+import { sqliteBatch } from "./test-support";
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -49,7 +50,7 @@ function realEnv(overrides: Record<string, unknown> = {}) {
   }
 
   const env = {
-    DB: { prepare },
+    DB: { prepare, batch: sqliteBatch(db) },
     ALLOWED_FROM_DOMAIN: "skyphusion.org",
     WEBMAIL_AUTH_BACKEND: "native",
     ...overrides,
@@ -299,6 +300,7 @@ describe("#409 POST /api/session lockout (durable, ported from relay/throttle.go
           if (/webmail_auth_failures/i.test(sql)) throw new Error("D1_ERROR: no such table");
           return (env as unknown as { DB: { prepare: (s: string) => unknown } }).DB.prepare(sql);
         },
+        batch: (s: unknown[]) => (env as unknown as { DB: { batch: (s: unknown[]) => unknown } }).DB.batch(s),
       },
     } as unknown as Env;
     const res = await mint(brokenEnv);

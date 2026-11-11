@@ -154,11 +154,19 @@ export interface AuditEntry {
  * `onlyIf`, when given, makes the insert conditional on a row existing, so an audit row
  * in the same batch as a conditional write records "ok" only when that write happened.
  */
+/** Who an audited admin-style action is recorded as. The default is the operator. */
+export interface AuditActor {
+  kind: "service" | "human";
+  id: string;
+}
+export const OPERATOR_ACTOR: AuditActor = { kind: "service", id: "svc_both" };
+
 export function auditStatement(
   env: Env,
   at: string,
   entry: AuditEntry,
   onlyIf?: { sql: string; binds: unknown[] },
+  actor: AuditActor = OPERATOR_ACTOR,
 ) {
   const values = [
     at,
@@ -170,10 +178,10 @@ export function auditStatement(
   ];
   const head = "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) ";
   if (onlyIf) {
-    return env.DB.prepare(head + `SELECT ?, 'service', 'svc_both', ?, ?, ?, ?, ? WHERE EXISTS (${onlyIf.sql})`)
-      .bind(...values, ...onlyIf.binds);
+    return env.DB.prepare(head + `SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${onlyIf.sql})`)
+      .bind(values[0], actor.kind, actor.id, ...values.slice(1), ...onlyIf.binds);
   }
-  return env.DB.prepare(head + "VALUES (?, 'service', 'svc_both', ?, ?, ?, ?, ?)").bind(...values);
+  return env.DB.prepare(head + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(values[0], actor.kind, actor.id, ...values.slice(1));
 }
 
 /**
@@ -222,13 +230,18 @@ export function agentAudit(
  * Record a refusal. Best effort BY DESIGN: the refusal already happened and its answer
  * is the same either way, so a failed write is logged and the refusal is still returned.
  */
-export async function auditRefusal(env: Env, entry: Omit<AuditEntry, "outcome">, err: AdminError): Promise<void> {
+export async function auditRefusal(
+  env: Env,
+  entry: Omit<AuditEntry, "outcome">,
+  err: AdminError,
+  actor: AuditActor = OPERATOR_ACTOR,
+): Promise<void> {
   try {
     await auditStatement(env, new Date().toISOString(), {
       ...entry,
       outcome: "refused",
       detail: { ...(entry.detail ?? {}), error: err.code },
-    }).run();
+    }, undefined, actor).run();
   } catch (e) {
     console.error("audit_log write failed for a refusal", e instanceof Error ? e.message : String(e));
   }
@@ -244,13 +257,14 @@ export async function runAudited(
   action: string,
   target: { kind: string; raw: string | null; idRe: RegExp },
   fn: () => Promise<Response>,
+  actor: AuditActor = OPERATOR_ACTOR,
 ): Promise<Response> {
   try {
     return await fn();
   } catch (err) {
     if (err instanceof AdminError) {
       const targetId = target.raw && target.idRe.test(target.raw) ? target.raw : null;
-      await auditRefusal(env, { action, targetKind: target.kind, targetId }, err);
+      await auditRefusal(env, { action, targetKind: target.kind, targetId }, err, actor);
       return fail(err);
     }
     throw err;
