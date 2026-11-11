@@ -105,10 +105,13 @@ export function mirrorAgent(env: Env, id: string): D1PreparedStatement[] {
   ];
 }
 
+/** Counts and opaque ids ONLY (the lead's rule): never a hash, a secret, a lookup value
+ *  (a username is one, and is often an address) or an address. A differing human with no
+ *  principal yet has no id to name, so it is counted, not sampled. */
 export interface ParityReport {
   agents: { checked: number; diffs: number; sample: string[] };
-  humans: { checked: number; diffs: number; sample: string[] };
-  /** Live password credentials whose smtp_credentials row is gone. */
+  humans: { checked: number; diffs: number; withoutPrincipal: number; sample: string[] };
+  /** Live password credentials whose smtp_credentials row is gone (credential ids). */
   orphans: { diffs: number; sample: string[] };
 }
 
@@ -125,7 +128,7 @@ export async function principalParity(env: Env): Promise<ParityReport> {
     "OR (c.revoked_at IS NULL) <> (a.revoked_at IS NULL) OR (p.disabled_at IS NULL) <> (a.revoked_at IS NULL) " +
     "ORDER BY a.id";
   const humanDiff =
-    "SELECT u.username FROM smtp_credentials u " +
+    "SELECT p.id FROM smtp_credentials u " +
     "LEFT JOIN credentials c ON c.type = 'password' AND c.lookup = u.username AND c.revoked_at IS NULL " +
     "LEFT JOIN principals p ON p.id = c.principal_id " +
     "WHERE c.id IS NULL OR p.id IS NULL OR c.secret IS NOT u.secret_hash OR p.kind IS NOT 'human' " +
@@ -136,11 +139,18 @@ export async function principalParity(env: Env): Promise<ParityReport> {
     "AND NOT EXISTS (SELECT 1 FROM smtp_credentials u WHERE u.username = c.lookup) ORDER BY c.id";
   const count = async (table: string) =>
     (await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>())?.n ?? 0;
-  const rows = async (sql: string) => ((await env.DB.prepare(sql).all<Record<string, string>>()).results ?? []).map((r) => Object.values(r)[0]);
+  const rows = async (sql: string) =>
+    ((await env.DB.prepare(sql).all<Record<string, string | null>>()).results ?? []).map((r) => Object.values(r)[0]);
   const [a, h, o] = await Promise.all([rows(agentDiff), rows(humanDiff), rows(orphanDiff)]);
+  const humanIds = h.filter((x): x is string => typeof x === "string");
   return {
-    agents: { checked: await count("agent_identities"), diffs: a.length, sample: a.slice(0, SAMPLE) },
-    humans: { checked: await count("smtp_credentials"), diffs: h.length, sample: h.slice(0, SAMPLE) },
-    orphans: { diffs: o.length, sample: o.slice(0, SAMPLE) },
+    agents: { checked: await count("agent_identities"), diffs: a.length, sample: (a as string[]).slice(0, SAMPLE) },
+    humans: {
+      checked: await count("smtp_credentials"),
+      diffs: h.length,
+      withoutPrincipal: h.length - humanIds.length,
+      sample: humanIds.slice(0, SAMPLE),
+    },
+    orphans: { diffs: o.length, sample: (o as string[]).slice(0, SAMPLE) },
   };
 }

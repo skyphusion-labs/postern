@@ -258,7 +258,9 @@ and also picks up rows a pre-M2 admin route wrote after M1 landed.
 - **`GET /api/admin/principals/parity`** (operator only, audited `principals.parity`)
   compares every `agent_identities` and `smtp_credentials` row with its principal and
   credential (token hash or secret, revoked or disabled, scopes, kind) and counts live
-  password credentials with no account row. It returns counts and up to 20 sample ids.
+  password credentials with no account row. It returns counts and up to 20 sample OPAQUE ids
+  (`idn_`, `prn_`, `crd_`), never a hash, secret, username or address; a differing human with
+  no principal yet is counted (`withoutPrincipal`), not sampled.
 - **Reads still use only the old tables.** The new tables authorize nothing yet.
 
 **The next M2 slice, and how its fallback is retired.** Resolution will read `credentials`

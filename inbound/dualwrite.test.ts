@@ -160,11 +160,35 @@ describe("#854 M2 parity sees every kind of disagreement (CONTROLS for the zeros
     s.raw.prepare("INSERT INTO credentials (id, principal_id, type, lookup, secret, caps, created_at) VALUES ('crd_orphan', 'prn_x', 'password', 'nobody@skyphusion.org', 's', '[]', '2026-11-11T00:00:00.000Z')").run();
     const res = await s.call("GET", "/api/admin/principals/parity", { token: ADMIN });
     expect(res.status).toBe(200);
+    const alicePrincipal = (s.raw.prepare("SELECT principal_id FROM credentials WHERE lookup = ?").get(ALICE) as Json).principal_id;
     expect(res.body).toMatchObject({
       agents: { checked: 1, diffs: 1, sample: [a.body.id] },
-      humans: { checked: 1, diffs: 1, sample: [ALICE] },
+      humans: { checked: 1, diffs: 1, withoutPrincipal: 0, sample: [alicePrincipal] },
       orphans: { diffs: 1, sample: ["crd_orphan"] },
     });
+  });
+
+  it("returns counts and opaque ids ONLY: no username, address, hash or secret, even of a differing row", async () => {
+    const s = setup();
+    const NAME = "planted-login-zq7@skyphusion.org";
+    await user(s, NAME);
+    const a = await s.call("POST", "/api/admin/identities", { token: ADMIN, body: { from: "planted-agent-zq7@skyphusion.org", scopes: ["read"] } });
+    const tokenHash = (s.raw.prepare("SELECT token_hash FROM agent_identities WHERE id = ?").get(a.body.id as string) as Json).token_hash as string;
+    // Plant a diff of every kind, each carrying a distinctive value.
+    s.raw.prepare("UPDATE credentials SET secret = 'PLANTED-SECRET-ZQ7' WHERE lookup = ?").run(NAME);
+    s.raw.prepare("UPDATE credentials SET caps = '[\"send\"]' WHERE principal_id = ?").run(a.body.id as string);
+    s.raw.prepare("INSERT INTO credentials (id, principal_id, type, lookup, secret, caps, created_at) VALUES ('crd_orphan', 'prn_x', 'password', 'planted-orphan-zq7@skyphusion.org', 'ORPHAN-SECRET-ZQ7', '[]', '2026-11-11T00:00:00.000Z')").run();
+    // A human row with NO principal at all (written before dual-write).
+    s.raw.prepare("INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled) VALUES ('planted-nop-zq7@skyphusion.org', 'planted-nop-zq7@skyphusion.org', 'NOP-HASH-ZQ7', 0)").run();
+    const res = await s.call("GET", "/api/admin/principals/parity", { token: ADMIN });
+    const text = JSON.stringify(res.body);
+    for (const leak of ["zq7", "ZQ7", tokenHash, "PLANTED", "ORPHAN-SECRET", "NOP-HASH", "@skyphusion.org"]) {
+      expect(text, `the report must not contain ${leak}`).not.toContain(leak);
+    }
+    expect(res.body).toMatchObject({ agents: { diffs: 1 }, humans: { diffs: 2, withoutPrincipal: 1 }, orphans: { diffs: 1 } });
+    const ids = [...(res.body.agents as Json).sample as string[], ...(res.body.humans as Json).sample as string[], ...(res.body.orphans as Json).sample as string[]];
+    expect(ids.length, "the report did sample (CONTROL: the leak check is not vacuous)").toBe(3);
+    for (const id of ids) expect(id).toMatch(/^(idn|prn|crd)_[0-9a-z]+$/);
   });
 
   it("the parity route is operator only, and audited", async () => {
