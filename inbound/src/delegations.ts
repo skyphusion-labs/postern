@@ -272,6 +272,9 @@ export async function handleAdminDelegations(request: Request, env: Env, url: UR
 
 export type AgentReadScope = "estate" | "granted";
 
+/** The audit_log action of an agent's organize write on a granted address. */
+export const ORGANIZE_AUDIT_ACTION = "delegation.organize";
+
 let readScopeConfigLogged: string | undefined;
 
 /**

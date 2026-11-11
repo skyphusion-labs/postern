@@ -13,6 +13,20 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Upgrade.** Unset `AGENT_READ_SCOPE` means `estate`: an upgraded deploy keeps the
+estate-wide agent read until the operator sets `AGENT_READ_SCOPE = "granted"`. The
+installer writes `granted` for a new install and does not add it on upgrade.
+
+### Added
+
+- **Delegation grants enforce `read` and `organize` (#740 S2).** The
+  `AGENT_READ_SCOPE` flag (`estate` or `granted`; an unknown value fails
+  closed to `granted`). Under `granted`, an agent reads its own address
+  plus the addresses it holds a grant on. An `organize` grant widens mark
+  read, flags and move to the granted address's mail, and every such
+  write is audited in the same batch. `GET /api/whoami` reports
+  `delegations`. See `docs/DELEGATION.md` section 4.
+
 ### Fixed
 
 - **Write scope binds to the bound identity.** An identity's write scope

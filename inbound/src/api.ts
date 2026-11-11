@@ -40,11 +40,13 @@ import {
 import {
   activeDelegations,
   agentReadScope,
+  ORGANIZE_AUDIT_ACTION,
   handleAdminDelegations,
   noDelegations,
   type AgentDelegations,
 } from "./delegations";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
+import { agentMessageAudit } from "./adminkit";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
 // be an if-chain further down this file, which is precisely the knowledge every client
@@ -307,14 +309,25 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // UNTOUCHED: they stay estate-scoped and may pass `for` (#350/#357), and they now
       // say so with the literal instead of by omitting an argument.
       let scope: store.AccessScope = "estate";
+      let audit: store.OrganizeAudit | undefined;
       const boundMember = boundWriteMember(resolution);
       if (boundMember) {
         const bound = boundMember.trim().toLowerCase();
         if (forRecipient && forRecipient !== bound) {
-          return json(
-            { ok: false, error: "E_FORBIDDEN", message: "for must match the session identity" },
-            403,
-          );
+          // #740 S2: the one exception. An address this identity holds an ACTIVE organize
+          // grant on may be named, and the mark is THAT address's read state, written on
+          // that address's mail only and audited in the same batch. Anything else is the
+          // same 403 as before.
+          if (!(await delegationsOf(env, resolution)).organize.includes(forRecipient)) {
+            return json(
+              { ok: false, error: "E_FORBIDDEN", message: "for must match the session identity" },
+              403,
+            );
+          }
+          scope = [forRecipient];
+          audit = organizeAudit(env, resolution, [forRecipient], { op: "seen", seen: body.seen, for: forRecipient });
+          const updated = await store.setSeen(env, body.ids as string[], body.seen, scope, forRecipient, audit);
+          return json({ ok: true, updated });
         }
         forRecipient = bound;
         // Reachability is the SET (identity plus its role queues, #425) so a member can
@@ -348,14 +361,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           (raw.flagged === undefined && raw.answered === undefined)) {
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "set requires boolean flagged and/or answered" }, 400);
       }
-      // Bound reader (session or registry with read cap, #544): only touch own mail.
+      // Bound identity: only touch own mail, plus (#740 S2) the mail of addresses it holds
+      // an organize grant on, each such message audited in the same batch as the write.
       // Static estate tokens name `"estate"` and keep IMAP/operator behavior.
-      const updated = await store.setFlags(
-        env,
-        body.ids as string[],
-        { flagged: raw.flagged as boolean | undefined, answered: raw.answered as boolean | undefined },
-        memberWriteScope(resolution),
-      );
+      const flagSet = { flagged: raw.flagged as boolean | undefined, answered: raw.answered as boolean | undefined };
+      const flagWrite = await organizeWriteScope(env, resolution, { op: "flags", set: flagSet });
+      const updated = await store.setFlags(env, body.ids as string[], flagSet, flagWrite.scope, flagWrite.audit);
       return json({ ok: true, updated });
     }
 
@@ -367,12 +378,9 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (body.mailbox !== null && body.mailbox !== "archive" && body.mailbox !== "trash" && body.mailbox !== "junk") {
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "mailbox must be archive, trash, junk, or null" }, 400);
       }
-      const updated = await store.moveMessages(
-        env,
-        body.ids as string[],
-        body.mailbox,
-        memberWriteScope(resolution),
-      );
+      // Same scope rule as flags (#740 S2): own mail plus organize-granted addresses, audited.
+      const moveWrite = await organizeWriteScope(env, resolution, { op: "move", mailbox: body.mailbox });
+      const updated = await store.moveMessages(env, body.ids as string[], body.mailbox, moveWrite.scope, moveWrite.audit);
       return json({ ok: true, updated });
     }
 
@@ -1281,6 +1289,43 @@ function readViewer(env: Env, resolution: AuthResolution): string | undefined {
 function memberWriteScope(resolution: AuthResolution): store.AccessScope {
   const member = boundWriteMember(resolution);
   return member ? [member] : "estate";
+}
+
+/** The scope of a flags or move write, widened by organize grants (#740 S2).
+ *
+ *  The bound identity's own address (memberWriteScope), plus every address it holds an
+ *  ACTIVE organize grant on. Under either AGENT_READ_SCOPE value: the flag decides how far
+ *  an agent READS, and a grant is the explicit, audited statement of what it may change.
+ *  When a grant widens the scope, the write carries an OrganizeAudit, so each touched
+ *  message on a granted address gets its audit row in the write's own batch. A write that
+ *  touches only the caller's own mail writes no audit row. */
+async function organizeWriteScope(
+  env: Env,
+  resolution: AuthResolution,
+  detail: Record<string, unknown>,
+): Promise<{ scope: store.AccessScope; audit?: store.OrganizeAudit }> {
+  const base = memberWriteScope(resolution);
+  if (base === "estate") return { scope: base };
+  const granted = (await delegationsOf(env, resolution)).organize.filter((a) => !base.includes(a));
+  if (granted.length === 0) return { scope: base };
+  return { scope: [...base, ...granted], audit: organizeAudit(env, resolution, granted, detail) };
+}
+
+/** The audit half of a granted organize write: one `delegation.organize` row per touched
+ *  message on a granted address, the grantee's identity id as actor (#740 S2). Called only
+ *  when delegationsOf returned grants, which it does only for a runtime identity. */
+function organizeAudit(
+  env: Env,
+  resolution: AuthResolution,
+  addresses: string[],
+  detail: Record<string, unknown>,
+): store.OrganizeAudit {
+  const at = new Date().toISOString();
+  const actor = resolution.identityId as string;
+  return {
+    addresses,
+    statement: (where) => agentMessageAudit(env, at, actor, ORGANIZE_AUDIT_ACTION, { ...detail, granted: addresses }, where),
+  };
 }
 
 /** The single address a resolution is bound to for a state-changing WRITE, or undefined.
