@@ -32,6 +32,12 @@ mismatched MCP tag fails before it publishes.
   shown as `[U+XXXX]`, the name is isolated left to right, and the
   download name replaces each such character with `_`.
 
+- **The webmail remote-content notice counts every remote reference.**
+  SVG image, use and feImage links, CSS url() written with escapes,
+  @import of a plain string and image-set() strings are counted and
+  removed from the reading frame; a URL inside a CSS comment is not
+  counted.
+
 ## v1.11.0
 
 MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's
