@@ -497,6 +497,37 @@ export function messageDate(raw: string | undefined, receivedAt: Date): string {
 // (ingest.ts), and at most 32,000 characters of the result are kept.
 export const HTML_TO_TEXT_MAX_INPUT = 512_000;
 
+// Work counter for the converter's scans (#923). It is null except inside
+// measureHtmlToTextWork, so in normal use scanIndexOf costs one null check per call.
+// The running-time tests bound this count, which is the same on every run, instead of
+// wall time, which machine load moves (#911, #923).
+let scanWork: { chars: number } | null = null;
+
+/** String.prototype.indexOf that, while measured, adds the characters it examined:
+ *  from `from` to the end of the match, or to the end of `s` when there is none. */
+export function scanIndexOf(s: string, needle: string, from: number): number {
+  const r = s.indexOf(needle, from);
+  if (scanWork) {
+    const f = Math.min(Math.max(from, 0), s.length);
+    scanWork.chars += r === -1 ? s.length - f : r + needle.length - f;
+  }
+  return r;
+}
+
+/** For tests: runs `fn` with the counter on and returns the characters that the
+ *  converter's scans examined. */
+export function measureHtmlToTextWork(fn: () => void): number {
+  const prev = scanWork;
+  const w = { chars: 0 };
+  scanWork = w;
+  try {
+    fn();
+  } finally {
+    scanWork = prev;
+  }
+  return w.chars;
+}
+
 // ASCII-only lower-casing. It keeps every index aligned with the input, which
 // String.prototype.toLowerCase does not promise for all of Unicode.
 function asciiLower(s: string): string {
@@ -521,10 +552,12 @@ function dropBlocks(src: string): string {
     if (c && from >= c.from && (c.at === -1 || from <= c.at)) return c.at;
     let p = from;
     for (;;) {
-      p = lower.indexOf("</" + name, p);
+      p = scanIndexOf(lower, "</" + name, p);
       if (p === -1) break;
-      let q = p + 2 + name.length;
+      const q0 = p + 2 + name.length;
+      let q = q0;
       while (q < lower.length && /\s/.test(lower[q])) q++;
+      if (scanWork) scanWork.chars += q - q0;
       if (lower[q] === ">") break;
       p += 1;
     }
@@ -536,20 +569,20 @@ function dropBlocks(src: string): string {
   let gtFrom = -1;
   let gtAt = -1;
   for (;;) {
-    const lt = lower.indexOf("<", i);
+    const lt = scanIndexOf(lower, "<", i);
     if (lt === -1) break;
     const name = names.find((n) => lower.startsWith(n, lt + 1) && !isWordChar(lower[lt + 1 + n.length]));
     if (name) {
       const from = lt + 1 + name.length;
       if (!(gtAt === -1 ? gtFrom !== -1 && from >= gtFrom : from >= gtFrom && from <= gtAt)) {
         gtFrom = from;
-        gtAt = lower.indexOf(">", from);
+        gtAt = scanIndexOf(lower, ">", from);
       }
       if (gtAt !== -1) {
         const close = findClose(name, gtAt + 1);
         if (close !== -1) {
           out += src.slice(i, lt);
-          i = lower.indexOf(">", close) + 1;
+          i = scanIndexOf(lower, ">", close) + 1;
           continue;
         }
       }
@@ -568,9 +601,9 @@ function dropTags(src: string): string {
   let out = "";
   let i = 0;
   for (;;) {
-    const lt = src.indexOf("<", i);
+    const lt = scanIndexOf(src, "<", i);
     if (lt === -1) return out + src.slice(i);
-    const gt = src.indexOf(">", lt + 1);
+    const gt = scanIndexOf(src, ">", lt + 1);
     if (gt === -1) return out + src.slice(i);
     if (gt === lt + 1) {
       out += src.slice(i, gt);
