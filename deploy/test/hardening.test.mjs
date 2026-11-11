@@ -1,0 +1,131 @@
+// hardening.test.mjs -- installer input validation, the per-install lock, and the cleanup of a
+// temporary secrets file an interrupted run left behind. Against the fake Cloudflare.
+// Run: node --test deploy/test/*.test.mjs
+
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { after, describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { cfClient } from "../lib/cf.mjs";
+import { Refused, install, takeLock } from "../lib/installer.mjs";
+import { parseArgs, plainHostname } from "../postern.mjs";
+import { TOKEN, fakeExec, fakeFetch, fakeHttp, makeFixtureRepo, newAccount } from "./fake-cloudflare.mjs";
+
+const REAL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const scratch = mkdtempSync(join(tmpdir(), "postern-hardening-test-"));
+after(() => rmSync(scratch, { recursive: true, force: true }));
+
+let n = 0;
+function setup() {
+  const dir = join(scratch, `case-${++n}`);
+  const repoRoot = makeFixtureRepo(REAL_ROOT, join(dir, "repo"));
+  const m = newAccount();
+  const out = [];
+  let seq = 0;
+  const deps = {
+    cf: cfClient({ token: TOKEN, fetch: fakeFetch(m) }), token: TOKEN, exec: fakeExec(m), http: fakeHttp(m),
+    sleep: async () => {}, log: (s) => out.push(s), repoRoot, appVersion: "1.8.0", healthTries: 2, healthDelayMs: 0,
+    randomSecret: () => `generated-secret-${++seq}-0123456789abcdef0123456789abcdef`,
+  };
+  const stateDir = join(dir, "state");
+  const opts = (...extra) => parseArgs(["install", "--domain", "acme-mail.test", "--state-dir", stateDir, ...extra]);
+  return { m, deps, opts, out, stateDir };
+}
+const writes = (m) => m.requests.filter((r) => r.method !== "GET" && !/\/d1\/database\/[^/]+\/query$/.test(r.path));
+const args = (...a) => ["install", "--domain", "acme-mail.test", ...a];
+
+describe("--hostname and --domain are plain hostnames", () => {
+  for (const bad of ["a/.acme-mail.test", "a#.acme-mail.test", "a?.acme-mail.test", "u@a.acme-mail.test",
+    "a.acme-mail.test:8443", "-a.acme-mail.test", "a-.acme-mail.test", "a..acme-mail.test", "a_b.acme-mail.test",
+    "a b.acme-mail.test", "a\\.acme-mail.test", ".acme-mail.test", `${"x".repeat(64)}.acme-mail.test`]) {
+    test(`refuses --hostname ${JSON.stringify(bad)}`, () => {
+      assert.throws(() => parseArgs(args("--hostname", bad)), /--hostname must be a plain hostname/);
+    });
+  }
+  for (const good of ["mail.acme-mail.test", "acme-mail.test", "a-b.c.acme-mail.test", "xn--bcher-kva.acme-mail.test"]) {
+    test(`accepts --hostname ${good}`, () => {
+      assert.equal(parseArgs(args("--hostname", good)).hostname, good);
+    });
+  }
+  test("refuses a --domain with an empty or dash-edged label", () => {
+    for (const d of ["acme..test", "-acme.test", "acme-.test"]) {
+      assert.throws(() => parseArgs(["install", "--domain", d]), /--domain must be a plain domain name|--domain is required/);
+    }
+  });
+  test("control: plainHostname is the gate, and a URL-shaped value never parses to another host", () => {
+    assert.equal(plainHostname("other.example/.acme-mail.test"), false);
+    assert.equal(new URL("https://other.example/.acme-mail.test").host, "other.example", "positive control: the shape the check exists for");
+    assert.equal(plainHostname("mail.acme-mail.test"), true);
+  });
+});
+
+describe("one run at a time per install", () => {
+  test("a held lock refuses the second run before any write", async () => {
+    const c = setup();
+    const release = takeLock(c.opts());
+    try {
+      await assert.rejects(install(c.deps, c.opts()), (e) => e instanceof Refused && /another postern run \(PID \d+\) is working on this install/.test(e.message));
+      assert.equal(writes(c.m).length, 0);
+    } finally { release(); }
+    await install(c.deps, c.opts());
+    assert.ok(!existsSync(join(c.stateDir, "postern.acme-mail.test.lock")), "a finished run left its lock");
+  });
+
+  test("a stale lock (its process is gone) is taken over, and said so", async () => {
+    const c = setup();
+    mkdirSync(c.stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(c.stateDir, "postern.acme-mail.test.lock"), "2147483646\n");
+    await install(c.deps, c.opts());
+    assert.match(c.out.join("\n"), /removed a stale lock from an earlier run that did not finish \(PID 2147483646\)/);
+    assert.ok(!existsSync(join(c.stateDir, "postern.acme-mail.test.lock")));
+  });
+
+  test("a failed run releases its lock", async () => {
+    const c = setup();
+    c.m.wranglerFaults.push({ re: /^deploy/, times: 1 });
+    await assert.rejects(install(c.deps, c.opts()));
+    assert.ok(!existsSync(join(c.stateDir, "postern.acme-mail.test.lock")));
+  });
+
+  test("a dry run takes no lock, so status works while an install runs", async () => {
+    const c = setup();
+    const release = takeLock(c.opts());
+    try { await install(c.deps, c.opts("--dry-run")); } finally { release(); }
+  });
+
+  test("locks are per install: another --name in the same state dir is not blocked", async () => {
+    const c = setup();
+    const release = takeLock(c.opts());
+    try { await install(c.deps, c.opts("--name", "other")); } finally { release(); }
+  });
+});
+
+describe("a temporary secrets file left by an interrupted run is removed", () => {
+  test("this install's leftover is removed before the next deploy writes its own", async () => {
+    const c = setup();
+    mkdirSync(c.stateDir, { recursive: true, mode: 0o700 });
+    const left = ".postern.acme-mail.test.secrets-0123456789abcdef01234567.json";
+    writeFileSync(join(c.stateDir, left), "{}", { mode: 0o600 });
+    await install(c.deps, c.opts());
+    assert.ok(!existsSync(join(c.stateDir, left)));
+    assert.match(c.out.join("\n"), new RegExp(`removed \\${left}, a temporary secrets file`));
+    assert.deepEqual(readdirSync(c.stateDir).filter((f) => /secrets-/.test(f)), [], "the run left a secrets file of its own");
+  });
+
+  test("another install's file is never touched; an old-format file only when over an hour old", async () => {
+    const c = setup();
+    mkdirSync(c.stateDir, { recursive: true, mode: 0o700 });
+    const other = ".other.acme-mail.test.secrets-0123456789abcdef01234567.json";
+    const young = ".secrets-aaaaaaaaaaaaaaaaaaaaaaaa.json";
+    const old = ".secrets-bbbbbbbbbbbbbbbbbbbbbbbb.json";
+    for (const f of [other, young, old]) writeFileSync(join(c.stateDir, f), "{}", { mode: 0o600 });
+    const t = (Date.now() - 2 * 3600e3) / 1000;
+    utimesSync(join(c.stateDir, old), t, t);
+    await install(c.deps, c.opts());
+    assert.ok(existsSync(join(c.stateDir, other)), "removed another install's file");
+    assert.ok(existsSync(join(c.stateDir, young)), "removed a recent old-format file");
+    assert.ok(!existsSync(join(c.stateDir, old)), "kept an hour-old old-format file");
+  });
+});
