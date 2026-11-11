@@ -279,6 +279,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md); overflow-wrap: anywhere;
   }
   .attachments .dl { min-height: 30px; flex-shrink: 0; }
+  .att-name { unicode-bidi: isolate; }
   .thread { margin-top: var(--sp-5); }
   .thread .t-item {
     padding: var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md);
@@ -704,6 +705,23 @@ export const WEBMAIL_HTML = `<!doctype html>
     return n;
   }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  // Attachment filenames are written by the sender. Control and invisible format
+  // characters (bidi overrides and isolates, zero-width characters, C0/C1 controls,
+  // line and paragraph separators) can make a name read differently from what it is,
+  // so the shown name marks each one as a visible [U+XXXX] and the name handed to the
+  // download replaces each one with "_". Shown names also sit in an LTR isolate.
+  var FILENAME_HIDDEN = /[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]/gu;
+  function codePointLabel(ch) {
+    var hex = ch.codePointAt(0).toString(16).toUpperCase();
+    while (hex.length < 4) hex = "0" + hex;
+    return "[U+" + hex + "]";
+  }
+  function shownFileName(name) { return String(name).replace(FILENAME_HIDDEN, codePointLabel); }
+  function savedFileName(name) { return String(name).replace(FILENAME_HIDDEN, "_"); }
+  function fileNameNode(name) {
+    return el("span", { class: "att-name", dir: "ltr", text: shownFileName(name) });
+  }
   function $(id) { return document.getElementById(id); }
 
   // --- session state ---------------------------------------------------------
@@ -1012,7 +1030,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     }).then(function (blob) {
       var obj = URL.createObjectURL(blob);
       var a = document.createElement("a");
-      a.href = obj; a.download = filename || ("attachment-" + index);
+      a.href = obj; a.download = savedFileName(filename || ("attachment-" + index));
       document.body.appendChild(a); a.click(); a.remove();
       // Revoke on the next tick so the download has started.
       setTimeout(function () { URL.revokeObjectURL(obj); }, 0);
@@ -1061,12 +1079,106 @@ export const WEBMAIL_HTML = `<!doctype html>
   // A neutral inline placeholder so a blocked image degrades to a tidy box (not a
   // broken-image icon) and fires NO network request (data: is allowed by the CSP).
   var BLOCKED_IMG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='90'%3E%3Crect width='100%25' height='100%25' fill='%23f3f3f3' stroke='%23cccccc'/%3E%3Ctext x='60' y='48' font-size='10' fill='%23999999' text-anchor='middle' font-family='sans-serif'%3Eimage blocked%3C/text%3E%3C/svg%3E";
-  function stripRemoteCssUrls(css) {
-    var n = 0;
-    var out = String(css).replace(/url\\(\\s*(['"]?)\\s*(?:https?:)?\\/\\/[^)'"]*\\1\\s*\\)/ig, function () {
-      n++; return "url('')";
+  // Remote references in CSS, read the way a CSS parser reads them, in one linear pass.
+  // Escapes (\\68 or \\h) are decoded in names and arguments, comments are skipped, and
+  // strings are read whole, so url(\\68ttps://x), u\\72l(https://x), @import "https://x"
+  // and image-set("https://x" 1x) are all seen. Each remote url() becomes url(''), each
+  // remote image-set() string becomes "", and each remote @import is dropped; every one
+  // is counted once. CSS the browser would not load from (comments, other strings) is
+  // left alone.
+  function cssUnescape(s) {
+    return s.replace(/\\\\(?:([0-9a-fA-F]{1,6})[ \\t\\n\\r\\f]?|([^\\n0-9a-fA-F]))/g, function (m, hex, ch) {
+      if (!hex) return ch;
+      var cp = parseInt(hex, 16);
+      return cp === 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) ? "�" : String.fromCodePoint(cp);
     });
-    return { css: out, count: n };
+  }
+  function stripRemoteCssUrls(css) {
+    css = String(css);
+    var len = css.length, out = "", last = 0, count = 0, i = 0, stack = [];
+    function isHex(c) { return /[0-9a-fA-F]/.test(c); }
+    function isSpace(c) { return c === " " || c === "\\t" || c === "\\n" || c === "\\r" || c === "\\f"; }
+    function isNameChar(c) { return /[A-Za-z0-9_\\-]/.test(c) || c.charCodeAt(0) >= 0x80; }
+    // css[j] is a backslash: the index just past the escape it starts.
+    function skipEscape(j) {
+      var k = j + 1, h = 0;
+      while (k < len && h < 6 && isHex(css[k])) { k++; h++; }
+      if (h > 0) return k < len && isSpace(css[k]) ? k + 1 : k;
+      return k < len && css[k] !== "\\n" ? k + 1 : k;
+    }
+    function skipName(j) {
+      var k = j;
+      while (k < len) {
+        if (css[k] === "\\\\" && css[k + 1] !== "\\n" && k + 1 < len) k = skipEscape(k);
+        else if (isNameChar(css[k])) k++;
+        else break;
+      }
+      return k;
+    }
+    // css[j] is a quote: the index just past the closing quote (or the end).
+    function skipString(j) {
+      var q = css[j], k = j + 1;
+      while (k < len && css[k] !== q && css[k] !== "\\n") k = css[k] === "\\\\" ? skipEscape(k) : k + 1;
+      return k < len && css[k] === q ? k + 1 : k;
+    }
+    function skipSpace(j) { while (j < len && isSpace(css[j])) j++; return j; }
+    function cut(from, to, replacement) { out += css.slice(last, from) + replacement; last = to; count++; }
+    while (i < len) {
+      var c = css[i];
+      if (c === "/" && css[i + 1] === "*") { var e = css.indexOf("*/", i + 2); i = e === -1 ? len : e + 2; continue; }
+      if (c === "\\"" || c === "'") {
+        var se = skipString(i);
+        var top = stack.length ? stack[stack.length - 1] : "";
+        if ((top === "image-set" || top === "-webkit-image-set") &&
+            isRemoteUrl(cssUnescape(css.slice(i + 1, css[se - 1] === c && se - 1 > i ? se - 1 : se)))) cut(i, se, "\\"\\"");
+        i = se; continue;
+      }
+      if (c === "(") { stack.push(""); i++; continue; }
+      if (c === ")") { stack.pop(); i++; continue; }
+      if (c === "@") {
+        var ae = skipName(i + 1);
+        if (cssUnescape(css.slice(i + 1, ae)).toLowerCase() === "import") {
+          var p = skipSpace(ae);
+          if (css[p] === "\\"" || css[p] === "'") {
+            var pe = skipString(p);
+            if (isRemoteUrl(cssUnescape(css.slice(p + 1, css[pe - 1] === css[p] && pe - 1 > p ? pe - 1 : pe)))) {
+              var semi = css.indexOf(";", pe);
+              cut(i, semi === -1 ? len : semi + 1, "");
+              i = semi === -1 ? len : semi + 1; continue;
+            }
+            i = pe; continue;
+          }
+        }
+        i = ae > i + 1 ? ae : i + 1; continue;
+      }
+      if (isNameChar(c) || (c === "\\\\" && css[i + 1] !== "\\n" && i + 1 < len)) {
+        var ne = skipName(i);
+        if (css[ne] === "(") {
+          var name = cssUnescape(css.slice(i, ne)).toLowerCase();
+          if (name === "url") {
+            var a = skipSpace(ne + 1), arg, close;
+            if (css[a] === "\\"" || css[a] === "'") {
+              var ae2 = skipString(a);
+              arg = css.slice(a + 1, css[ae2 - 1] === css[a] && ae2 - 1 > a ? ae2 - 1 : ae2);
+              close = css.indexOf(")", ae2);
+            } else {
+              var k = a;
+              while (k < len && css[k] !== ")") k = css[k] === "\\\\" ? skipEscape(k) : k + 1;
+              arg = css.slice(a, k);
+              close = k < len ? k : -1;
+            }
+            var end = close === -1 ? len : close + 1;
+            if (isRemoteUrl(cssUnescape(arg))) cut(i, end, "url('')");
+            i = end; continue;
+          }
+          stack.push(name);
+          i = ne + 1; continue;
+        }
+        i = ne > i ? ne : i + 1; continue;
+      }
+      i++;
+    }
+    return { css: out + css.slice(last), count: count };
   }
   function neutralizeRemoteHtml(html) {
     var blocked = 0, doc = null;
@@ -1110,6 +1222,14 @@ export const WEBMAIL_HTML = `<!doctype html>
       if (blockAttr(list[i], "data", "data-blocked-data")) hit = true;
       var ss2 = list[i].getAttribute("srcset");
       if (hasRemoteInSrcset(ss2)) { list[i].setAttribute("data-blocked-srcset", ss2); list[i].removeAttribute("srcset"); hit = true; }
+      if (hit) blocked++;
+    }
+    // SVG elements that fetch from href or xlink:href.
+    list = doc.querySelectorAll("image, use, feImage");
+    for (i = 0; i < list.length; i++) {
+      hit = false;
+      if (blockAttr(list[i], "href", "data-blocked-href")) hit = true;
+      if (blockAttr(list[i], "xlink:href", "data-blocked-xlink-href")) hit = true;
       if (hit) blocked++;
     }
     // Legacy background="" attribute (old HTML email tables).
@@ -2385,7 +2505,7 @@ export const WEBMAIL_HTML = `<!doctype html>
           }).catch(function (e) { err.textContent = e.message; remove.disabled = false; });
         });
         fileList.appendChild(el("li", {}, [
-          el("span", { text: (a.filename || "attachment") + " (" + fmtSize(a.size) + ")" }), remove
+          el("span", {}, [fileNameNode(a.filename || "attachment"), " (" + fmtSize(a.size) + ")"]), remove
         ]));
       });
     }
@@ -2656,7 +2776,7 @@ export const WEBMAIL_HTML = `<!doctype html>
         var btn = el("button", { class: "dl", text: "Download" });
         btn.addEventListener("click", function () { downloadAttachment(m.messageId, i, name, btn); });
         ul.appendChild(el("li", {}, [
-          el("span", {}, [icon("clip"), document.createTextNode(" " + name + " "),
+          el("span", {}, [icon("clip"), " ", fileNameNode(name), " ",
             el("span", { class: "sender-addr", text: (a.mime || "?") + ", " + fmtSize(a.size) })]),
           btn
         ]));
@@ -2866,18 +2986,21 @@ export const WEBMAIL_HTML = `<!doctype html>
 </html>
 `;
 
+// sha256 of the page's one inline <script>, computed by scripts/sync-webmail.mjs.
+export const WEBMAIL_SCRIPT_HASH = "sha256-yk8cDtwv93nOryahrqtF1L6CTsGxydBUSJf441IpeHs=";
+
+// The page CSP. It loads no third-party anything and only talks to the same origin
+// (its own API): connect-src 'self' means a hijacked page cannot send the pasted token
+// to another host. script-src allows exactly the page's own script, by its hash, so an
+// injected script does not run. frame-src 'self' permits the sandboxed srcdoc iframe
+// the reading pane uses to render message bodies (sandbox="" = no scripts, no
+// same-origin), so stored body content can never execute or reach the API.
+// style-src keeps 'unsafe-inline' for the inline <style> and style attributes.
+export const WEBMAIL_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-yk8cDtwv93nOryahrqtF1L6CTsGxydBUSJf441IpeHs='; connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 const SECURITY_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
-  // Lock the page down: it loads no third-party anything and only talks to the
-  // same origin (its own API). connect-src 'self' means a hijacked page cannot
-  // exfiltrate the pasted token to another host.
-  "content-security-policy":
-    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
-    // frame-src 'self' permits the sandboxed srcdoc iframe the reading pane uses
-    // to render message bodies in an isolated context (sandbox="" = no scripts,
-    // no same-origin), so stored body content can never execute or reach the API.
-    "connect-src 'self'; img-src 'self' data:; frame-src 'self'; " +
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "content-security-policy": WEBMAIL_CSP,
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
 };

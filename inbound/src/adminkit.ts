@@ -146,9 +146,10 @@ export interface AuditEntry {
 }
 
 /**
- * One audit_log INSERT with the operator as actor. Every writer today is the operator (a
- * static `both` token, which carries no id); actor_kind and actor_id exist so a later
- * slice of #740 can record an agent identity as the actor.
+ * One audit_log INSERT with the operator as actor. Every writer here is reached only by a
+ * static `both` token (the admin routes), so the actor is the `svc_both` SERVICE principal
+ * (#854 M1, D-ID-5), never the anonymous `operator` + NULL of rows written before it.
+ * Agent actors are written by agentAudit / agentMessageAudit.
  *
  * `onlyIf`, when given, makes the insert conditional on a row existing, so an audit row
  * in the same batch as a conditional write records "ok" only when that write happened.
@@ -169,10 +170,10 @@ export function auditStatement(
   ];
   const head = "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) ";
   if (onlyIf) {
-    return env.DB.prepare(head + `SELECT ?, 'operator', NULL, ?, ?, ?, ?, ? WHERE EXISTS (${onlyIf.sql})`)
+    return env.DB.prepare(head + `SELECT ?, 'service', 'svc_both', ?, ?, ?, ?, ? WHERE EXISTS (${onlyIf.sql})`)
       .bind(...values, ...onlyIf.binds);
   }
-  return env.DB.prepare(head + "VALUES (?, 'operator', NULL, ?, ?, ?, ?, ?)").bind(...values);
+  return env.DB.prepare(head + "VALUES (?, 'service', 'svc_both', ?, ?, ?, ?, ?)").bind(...values);
 }
 
 /**
@@ -196,6 +197,25 @@ export function agentMessageAudit(
     "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
       `SELECT ?, 'agent', ?, ?, 'message', m.message_id, 'ok', ? FROM messages m WHERE ${where.sql}`,
   ).bind(at, actorId, action, JSON.stringify(detail), ...where.binds);
+}
+
+/**
+ * One audit_log row with an AGENT identity as actor and a plain target (#740 S4: the
+ * address a send_as send went out as). The caller runs it before the act it records
+ * and treats a failed insert as a failed act.
+ */
+export function agentAudit(
+  env: Env,
+  at: string,
+  actorId: string,
+  action: string,
+  target: { kind: string; id: string },
+  detail: Record<string, unknown>,
+) {
+  return env.DB.prepare(
+    "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
+      "VALUES (?, 'agent', ?, ?, ?, ?, 'ok', ?)",
+  ).bind(at, actorId, action, target.kind, target.id, JSON.stringify(detail));
 }
 
 /**

@@ -29,6 +29,10 @@ export interface OutboundMessage {
   bcc?: string[];
   from: EmailAddress; // already domain-checked by resolveFrom()
   replyTo?: EmailAddress;
+  /** RFC 5322 Sender: who actually sent it, when that differs from From (#740 S4,
+   *  send_as). Present only on a send_as send, and only a transport whose
+   *  `canSetSender` is true is ever handed one. */
+  sender?: EmailAddress;
   subject: string;
   html?: string;
   text?: string;
@@ -42,6 +46,10 @@ export interface DispatchResult {
 }
 
 export interface Transport {
+  /** Whether this transport can put a distinct `Sender:` header on the wire. A
+   *  send_as send (#740 S4) is refused before dispatch on a transport that cannot,
+   *  never silently sent without one. */
+  readonly canSetSender: boolean;
   dispatch(msg: OutboundMessage): Promise<DispatchResult>;
 }
 

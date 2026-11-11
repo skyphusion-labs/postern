@@ -251,11 +251,12 @@ describe("#801 every mint, list and revoke writes an audit row", () => {
     await s.call("DELETE", `/api/admin/identities/idn_${"0".repeat(24)}`, ADMIN); // refused, 404
     const rows = s.auditRows().map((r) => [r.actor_kind, r.action, r.target_id, r.outcome]);
     expect(rows).toEqual([
-      ["operator", "identity.mint", a.id, "ok"],
-      ["operator", "identity.mint", null, "refused"],
-      ["operator", "identity.list", null, "ok"],
-      ["operator", "identity.revoke", a.id, "ok"],
-      ["operator", "identity.revoke", `idn_${"0".repeat(24)}`, "refused"],
+      // #854 M1: the operator is the svc_both SERVICE principal, no longer anonymous.
+      ["service", "identity.mint", a.id, "ok"],
+      ["service", "identity.mint", null, "refused"],
+      ["service", "identity.list", null, "ok"],
+      ["service", "identity.revoke", a.id, "ok"],
+      ["service", "identity.revoke", `idn_${"0".repeat(24)}`, "refused"],
     ]);
     expect(JSON.parse(s.auditRows()[1].detail!)).toMatchObject({ error: "E_VALIDATION_ERROR" });
     expect(JSON.parse(s.auditRows()[0].detail!)).toEqual({ from: ME, scopes: ["read"] });

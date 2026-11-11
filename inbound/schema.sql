@@ -304,3 +304,47 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_delegation_active
   ON delegation_grants(grantee_id, address) WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_delegation_address ON delegation_grants(address, grantee_id);
 CREATE INDEX IF NOT EXISTS idx_delegation_created ON delegation_grants(created_at, id);
+
+-- The principal layer (#854 M1, migration 0019). Store only in M1: nothing authorizes
+-- from these tables yet. See inbound/src/principals.ts and docs/IDENTITY.md.
+CREATE TABLE IF NOT EXISTS principals (
+  id           TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL,
+  display_name TEXT,
+  label        TEXT,
+  created_by   TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  disabled_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_principals_kind ON principals(kind, id);
+
+CREATE TABLE IF NOT EXISTS credentials (
+  id            TEXT PRIMARY KEY,
+  principal_id  TEXT NOT NULL,
+  type          TEXT NOT NULL,
+  lookup        TEXT,
+  secret        TEXT,
+  caps          TEXT NOT NULL,
+  protocols     TEXT,
+  label         TEXT,
+  created_at    TEXT NOT NULL,
+  last_used_at  TEXT,
+  expires_at    TEXT,
+  revoked_at    TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credentials_lookup ON credentials(type, lookup) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_credentials_principal ON credentials(principal_id, id);
+
+CREATE TABLE IF NOT EXISTS principal_addresses (
+  address      TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  is_primary   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_principal_addresses_principal ON principal_addresses(principal_id, address);
+
+INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_both', 'service', 'Operator (POSTERN_API_TOKEN)', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
+INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_read', 'service', 'POSTERN_API_TOKEN_READ', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
+INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_send', 'service', 'POSTERN_API_TOKEN_SEND', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
+INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_delete', 'service', 'POSTERN_API_TOKEN_DELETE', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
+INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_imap', 'service', 'POSTERN_API_TOKEN_IMAP', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
+INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_organize', 'service', 'POSTERN_API_TOKEN_ORGANIZE', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
