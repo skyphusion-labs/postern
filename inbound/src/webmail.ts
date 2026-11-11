@@ -2986,18 +2986,21 @@ export const WEBMAIL_HTML = `<!doctype html>
 </html>
 `;
 
+// sha256 of the page's one inline <script>, computed by scripts/sync-webmail.mjs.
+export const WEBMAIL_SCRIPT_HASH = "sha256-yk8cDtwv93nOryahrqtF1L6CTsGxydBUSJf441IpeHs=";
+
+// The page CSP. It loads no third-party anything and only talks to the same origin
+// (its own API): connect-src 'self' means a hijacked page cannot send the pasted token
+// to another host. script-src allows exactly the page's own script, by its hash, so an
+// injected script does not run. frame-src 'self' permits the sandboxed srcdoc iframe
+// the reading pane uses to render message bodies (sandbox="" = no scripts, no
+// same-origin), so stored body content can never execute or reach the API.
+// style-src keeps 'unsafe-inline' for the inline <style> and style attributes.
+export const WEBMAIL_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-yk8cDtwv93nOryahrqtF1L6CTsGxydBUSJf441IpeHs='; connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 const SECURITY_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
-  // Lock the page down: it loads no third-party anything and only talks to the
-  // same origin (its own API). connect-src 'self' means a hijacked page cannot
-  // exfiltrate the pasted token to another host.
-  "content-security-policy":
-    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; " +
-    // frame-src 'self' permits the sandboxed srcdoc iframe the reading pane uses
-    // to render message bodies in an isolated context (sandbox="" = no scripts,
-    // no same-origin), so stored body content can never execute or reach the API.
-    "connect-src 'self'; img-src 'self' data:; frame-src 'self'; " +
-    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "content-security-policy": WEBMAIL_CSP,
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
 };
