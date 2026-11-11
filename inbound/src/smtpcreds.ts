@@ -16,6 +16,8 @@
 // production. Do NOT raise this from a local result: the suite runs under the edge's limit
 // (test-setup/workers-pbkdf2-cap.ts) and goes red above it. A stronger KDF (scrypt or
 // Argon2 in WASM) is a separate design item.
+import { mirrorHuman } from "./principalmirror";
+
 export const RUNTIME_PBKDF2_MAX_ITERATIONS = 100_000;
 
 // THE TARGET (#828): PBKDF2-HMAC-SHA512 at the cap. At a FIXED iteration count, SHA-512
@@ -299,13 +301,15 @@ export async function createUser(
   secretHash: string,
   now: string,
 ): Promise<boolean> {
-  const res = await env.DB.prepare(
-    `INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, display_name, created_at, updated_at)
-     VALUES (?, ?, ?, 0, ?, ?, ?)
-     ON CONFLICT(username) DO NOTHING`,
-  )
-    .bind(normalizeUsername(user.username), user.fromAddr, secretHash, user.displayName, now, now)
-    .run();
+  const u = normalizeUsername(user.username);
+  const [res] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, display_name, created_at, updated_at)
+       VALUES (?, ?, ?, 0, ?, ?, ?)
+       ON CONFLICT(username) DO NOTHING`,
+    ).bind(u, user.fromAddr, secretHash, user.displayName, now, now),
+    ...mirrorHuman(env, u, now), // #854 M2: the principal tables change with it
+  ]);
   return (res.meta?.changes ?? 0) > 0;
 }
 
@@ -330,13 +334,15 @@ export async function createFirstUser(
   secretHash: string,
   now: string,
 ): Promise<boolean> {
-  const res = await env.DB.prepare(
-    `INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, display_name, created_at, updated_at)
-     SELECT ?, ?, ?, 0, ?, ?, ?
-      WHERE NOT EXISTS (SELECT 1 FROM smtp_credentials)`,
-  )
-    .bind(normalizeUsername(user.username), user.fromAddr, secretHash, user.displayName, now, now)
-    .run();
+  const u = normalizeUsername(user.username);
+  const [res] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, display_name, created_at, updated_at)
+       SELECT ?, ?, ?, 0, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM smtp_credentials)`,
+    ).bind(u, user.fromAddr, secretHash, user.displayName, now, now),
+    ...mirrorHuman(env, u, now), // #854 M2
+  ]);
   return (res.meta?.changes ?? 0) > 0;
 }
 
@@ -364,9 +370,10 @@ export async function updateUser(
   if (sets.length === 0) return await getUser(env, username);
   sets.push("updated_at = ?");
   args.push(now, normalizeUsername(username));
-  const res = await env.DB.prepare(`UPDATE smtp_credentials SET ${sets.join(", ")} WHERE username = ?`)
-    .bind(...args)
-    .run();
+  const [res] = await env.DB.batch([
+    env.DB.prepare(`UPDATE smtp_credentials SET ${sets.join(", ")} WHERE username = ?`).bind(...args),
+    ...mirrorHuman(env, normalizeUsername(username), now), // #854 M2
+  ]);
   if ((res.meta?.changes ?? 0) === 0) return null;
   return await getUser(env, username);
 }
@@ -384,15 +391,14 @@ export async function setPassword(
   expectedHash?: string,
 ): Promise<boolean> {
   const u = normalizeUsername(username);
-  const res = expectedHash === undefined
-    ? await env.DB.prepare("UPDATE smtp_credentials SET secret_hash = ?, updated_at = ? WHERE username = ?")
-        .bind(secretHash, now, u)
-        .run()
-    : await env.DB.prepare(
+  const update = expectedHash === undefined
+    ? env.DB.prepare("UPDATE smtp_credentials SET secret_hash = ?, updated_at = ? WHERE username = ?").bind(secretHash, now, u)
+    : env.DB.prepare(
         "UPDATE smtp_credentials SET secret_hash = ?, updated_at = ? WHERE username = ? AND secret_hash = ?",
-      )
-        .bind(secretHash, now, u, expectedHash)
-        .run();
+      ).bind(secretHash, now, u, expectedHash);
+  // #854 M2: every hash change, the upgrade-on-sign-in rehash included, moves the
+  // credential's secret in the same batch.
+  const [res] = await env.DB.batch([update, ...mirrorHuman(env, u, now)]);
   return (res.meta?.changes ?? 0) > 0;
 }
 
@@ -405,24 +411,28 @@ export async function upsert(
   now: string,
 ): Promise<void> {
   const u = normalizeUsername(username);
-  await env.DB.prepare(
-    `INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, created_at, updated_at)
-     VALUES (?, ?, ?, 0, ?, ?)
-     ON CONFLICT(username) DO UPDATE SET
-       from_addr = excluded.from_addr,
-       secret_hash = excluded.secret_hash,
-       disabled = 0,
-       updated_at = excluded.updated_at`,
-  )
-    .bind(u, fromAddr, secretHash, now, now)
-    .run();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled, created_at, updated_at)
+       VALUES (?, ?, ?, 0, ?, ?)
+       ON CONFLICT(username) DO UPDATE SET
+         from_addr = excluded.from_addr,
+         secret_hash = excluded.secret_hash,
+         disabled = 0,
+         updated_at = excluded.updated_at`,
+    ).bind(u, fromAddr, secretHash, now, now),
+    ...mirrorHuman(env, u, now), // #854 M2
+  ]);
 }
 
 /** Remove a credential. Returns true if a row was deleted. */
 export async function remove(env: Env, username: string): Promise<boolean> {
   const u = normalizeUsername(username);
   if (!u) return false;
-  const res = await env.DB.prepare("DELETE FROM smtp_credentials WHERE username = ?").bind(u).run();
+  const [res] = await env.DB.batch([
+    env.DB.prepare("DELETE FROM smtp_credentials WHERE username = ?").bind(u),
+    ...mirrorHuman(env, u, new Date().toISOString()), // #854 M2: revoke and disable, never delete
+  ]);
   return (res.meta?.changes ?? 0) > 0;
 }
 

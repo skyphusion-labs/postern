@@ -59,8 +59,12 @@ async function setup() {
   };
   const table = (name: string) => r.raw.prepare(`SELECT * FROM ${name} ORDER BY 1`).all() as Json[];
   const snapshot = () => ({ principals: table("principals"), credentials: table("credentials"), principal_addresses: table("principal_addresses") });
+  // #854 M2 dual-writes the principal tables on every write, so a backfill test models a
+  // deploy whose rows were written BEFORE dual-write existed: the old tables populated,
+  // the principal tables holding only the migration's service seeds.
+  const preM2 = () => r.raw.exec("DELETE FROM credentials; DELETE FROM principal_addresses; DELETE FROM principals WHERE kind <> 'service';");
   await putInbound(r.env, r.ctx, { id: "m1@x", from: "x@example.com", to: ALICE });
-  return { ...r, call, mint, user, table, snapshot };
+  return { ...r, call, mint, user, table, snapshot, preM2 };
 }
 type S = Awaited<ReturnType<typeof setup>>;
 
@@ -101,6 +105,7 @@ describe("#854 M1 the backfill maps today's people models", () => {
     const s = await setup();
     const a = await s.mint("agent@skyphusion.org", ["read", "organize"]);
     await s.user(ALICE, "Alice A");
+    s.preM2();
     const res = await s.call("POST", "/api/admin/principals/backfill", { token: ADMIN });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body).toMatchObject({ agents: { added: 1 }, humans: { added: 1 }, addressConflicts: [] });
@@ -147,6 +152,7 @@ describe("#854 M1 the backfill is idempotent and convergent", () => {
     await s.mint("agent2@skyphusion.org", ["send"]);
     await s.user(ALICE, "Alice A");
     await s.user(BOB);
+    s.preM2();
     const first = await backfillPrincipals(s.env);
     expect(first.agents.added + first.humans.added).toBe(4);
     const after1 = s.snapshot();
@@ -160,14 +166,17 @@ describe("#854 M1 the backfill is idempotent and convergent", () => {
     const a = await s.mint("agent@skyphusion.org");
     await s.user(ALICE);
     await s.user(BOB);
+    s.preM2();
     await backfillPrincipals(s.env);
     const aliceCred = s.raw.prepare("SELECT principal_id FROM credentials WHERE lookup = ?").get(ALICE) as Json;
     const bobCred = s.raw.prepare("SELECT id, principal_id FROM credentials WHERE lookup = ?").get(BOB) as Json;
 
-    expect((await s.call("DELETE", `/api/admin/identities/${a.id}`, { token: ADMIN })).status).toBe(200);
-    expect((await s.call("PATCH", `/api/admin/users/${encodeURIComponent(ALICE)}`, { token: ADMIN, body: { disabled: true } })).status).toBe(200);
-    expect((await s.call("POST", `/api/admin/users/${encodeURIComponent(ALICE)}/password`, { token: ADMIN, body: { password: "a-different-long-password" } })).status).toBe(200);
-    expect((await s.call("DELETE", `/api/admin/users/${encodeURIComponent(BOB)}`, { token: ADMIN })).status).toBe(200);
+    // The source changes the way a pre-M2 writer made them: on the old tables only, so the
+    // backfill is what has to converge them (dual-write would already have).
+    s.raw.prepare("UPDATE agent_identities SET revoked_at = ? WHERE id = ?").run("2026-11-11T01:00:00.000Z", a.id);
+    s.raw.prepare("UPDATE smtp_credentials SET disabled = 1, updated_at = ? WHERE username = ?").run("2026-11-11T01:00:00.000Z", ALICE);
+    s.raw.prepare("UPDATE smtp_credentials SET secret_hash = ? WHERE username = ?").run("pbkdf2-sha512$1$new$hash", ALICE);
+    s.raw.prepare("DELETE FROM smtp_credentials WHERE username = ?").run(BOB);
 
     const run = await backfillPrincipals(s.env);
     expect(run.agents.synced).toBe(1);
@@ -176,7 +185,7 @@ describe("#854 M1 the backfill is idempotent and convergent", () => {
     expect((s.raw.prepare("SELECT disabled_at FROM principals WHERE id = ?").get(a.id) as Json).disabled_at).not.toBeNull();
     expect((s.raw.prepare("SELECT revoked_at FROM credentials WHERE principal_id = ?").get(a.id) as Json).revoked_at).not.toBeNull();
     expect((s.raw.prepare("SELECT disabled_at FROM principals WHERE id = ?").get(aliceCred.principal_id as string) as Json).disabled_at).not.toBeNull();
-    const newSecret = (s.raw.prepare("SELECT secret_hash FROM smtp_credentials WHERE username = ?").get(ALICE) as Json).secret_hash;
+    const newSecret = "pbkdf2-sha512$1$new$hash";
     expect((s.raw.prepare("SELECT secret FROM credentials WHERE lookup = ? AND type = 'password'").get(ALICE) as Json).secret).toBe(newSecret);
     expect((s.raw.prepare("SELECT revoked_at FROM credentials WHERE id = ?").get(bobCred.id as string) as Json).revoked_at).not.toBeNull();
     // The principal rows are never deleted.
@@ -192,10 +201,11 @@ describe("#854 M1 the backfill is idempotent and convergent", () => {
     const s = await setup();
     await s.user(ALICE);
     await s.call("PATCH", `/api/admin/users/${encodeURIComponent(ALICE)}`, { token: ADMIN, body: { disabled: true } });
+    s.preM2();
     await backfillPrincipals(s.env);
     const pid = (s.raw.prepare("SELECT principal_id FROM credentials WHERE lookup = ?").get(ALICE) as Json).principal_id as string;
     expect((s.raw.prepare("SELECT disabled_at FROM principals WHERE id = ?").get(pid) as Json).disabled_at).not.toBeNull();
-    await s.call("PATCH", `/api/admin/users/${encodeURIComponent(ALICE)}`, { token: ADMIN, body: { disabled: false } });
+    s.raw.prepare("UPDATE smtp_credentials SET disabled = 0 WHERE username = ?").run(ALICE); // a pre-M2 writer
     expect((await backfillPrincipals(s.env)).humans.synced).toBe(1);
     expect((s.raw.prepare("SELECT disabled_at FROM principals WHERE id = ?").get(pid) as Json).disabled_at).toBeNull();
   });
@@ -262,6 +272,7 @@ describe("#854 M1 the backfill route is operator only (derived from the route ta
   it("refuses every non-operator credential and an anonymous caller; admits the operator", async () => {
     const s = await setup();
     const a = await s.mint("agent@skyphusion.org", ["read", "send", "organize"]);
+    s.preM2();
     for (const [who, token] of [["read", READ], ["send", SEND], ["registry", REGISTRY], ["runtime", a.token]] as const) {
       expect((await s.call("POST", ROW.path, { token })).status, who).toBe(403);
     }

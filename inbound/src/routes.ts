@@ -238,6 +238,9 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "admin-principals-backfill", method: "POST", path: "/api/admin/principals/backfill", match: "exact",
     scope: "admin", auth: "bearer",
     note: "#854 M1: copy agent identities, human users and the static slots into the principal tables. Idempotent and convergent; store only, nothing authorizes from it yet. Audited (principals.backfill)" },
+  { id: "admin-principals-parity", method: "GET", path: "/api/admin/principals/parity", match: "exact",
+    scope: "admin", auth: "bearer",
+    note: "#854 M2: compare every agent identity and human user with its principal and credential; counts plus sample ids. The evidence for retiring the old-table fallback. Audited (principals.parity)" },
   // #740 S5: the human's own delegation and audit trail. A webmail SESSION only (the
   // handler refuses every Bearer, E_SESSION_REQUIRED); `read` is held by every session, and
   // the gate's CSRF check covers the state-changing verbs. The address is always the
