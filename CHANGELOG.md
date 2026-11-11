@@ -23,6 +23,7 @@ turned main red at the v1.14.0 release commit, now waits for the answer and chec
 sign-out was sent.
 
 - `inbound/reindex.mjs` tries a failed page (a network error, including mid-body, or HTTP 5xx) up to 6 times (5 retries, waits 2 s to 32 s), prints each page's cursor, and resumes from `--cursor`. A long `--stale-only` run (#813) no longer restarts at page 0 after one connection reset.
+- `inbound/eval/replay813.mjs` reports FOUND as its primary known-item metric (the gold is a top-10 row, or folded into a top-10 hit's `similar`), with STRICT beside it, and splits known-item probes by whether their template family repeats (#940). With collapse on, a strict miss on a repeated family is usually a sibling standing for the group.
 
 ## v1.14.0
 
