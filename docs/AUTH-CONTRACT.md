@@ -332,7 +332,7 @@ equals. The worker secrets (set via `wrangler secret put`) define the scopes:
 |---|---|---|
 | `POSTERN_API_TOKEN` | `both` | read + send + delete + credential-admin (the egalitarian single-key default) |
 | `POSTERN_API_TOKEN_READ` | `read` | `GET /api/messages`/`search`/`threads`/`.../attachments/...`, plus `GET /api/whoami` (#650) |
-| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity) |
+| `POSTERN_API_TOKEN_SEND` | `send` | `POST /api/send`/`reply` only (un-bound From; drafts require a bound identity). It cannot read, so it reads nothing through a write route either: `forwardMessageId` is not found (`404 E_NOT_FOUND`). `/api/reply` reaches only the thread's existing parties: the target is looked up to address the reply and nothing else, recipients come from the stored message (`mode: "replyAll"` included), and a caller `cc`, `bcc` or `quoteOriginal` is refused `400 E_VALIDATION_ERROR` |
 | `POSTERN_API_TOKEN_DELETE` | `delete` | irreversible `DELETE /api/messages/{id}` only |
 | `POSTERN_API_TOKEN_IMAP` | `imap` | `/api/imap/drafts*` and `/api/imap/import`, plus the `organize` routes (#685); the authenticated door asserts the account identity |
 | `POSTERN_API_TOKEN_ORGANIZE` | `organize` | `POST /api/messages/seen`/`flags`/`move` only (#692). NOT `GET /api/folders`, which is a read. Cannot read, send, hard-delete, reach admin, or write through the `imap` seam |
