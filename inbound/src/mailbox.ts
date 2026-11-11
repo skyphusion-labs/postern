@@ -115,7 +115,7 @@ function asArray(v: string | string[] | undefined): string[] {
 function validateRecipients(label: string, list: string[]): void {
   for (const addr of list) {
     if (typeof addr !== "string" || !EMAIL_RE.test(addr.trim())) {
-      throw new MailboxError("E_VALIDATION_ERROR", `invalid ${label} address: ${addr}`);
+      throw new MailboxError("E_VALIDATION_ERROR", `invalid ${label} address`);
     }
   }
 }
@@ -227,7 +227,7 @@ function resolveFrom(env: Env, from: SendRequest["from"], bound?: BoundIdentity)
 
   email = (email ?? "").trim();
   if (!EMAIL_RE.test(email)) {
-    throw new MailboxError("E_VALIDATION_ERROR", `invalid from address: ${email}`);
+    throw new MailboxError("E_VALIDATION_ERROR", "invalid from address");
   }
   const domain = email.split("@")[1].toLowerCase();
   if (domain !== allowedDomain) {
@@ -523,7 +523,7 @@ export async function send(
     replyTo = toAddress(req.replyTo);
     const replyEmail = (replyTo?.email ?? "").trim();
     if (!EMAIL_RE.test(replyEmail)) {
-      throw new MailboxError("E_VALIDATION_ERROR", `invalid replyTo address: ${replyEmail}`);
+      throw new MailboxError("E_VALIDATION_ERROR", "invalid replyTo address");
     }
     if (replyTo?.name !== undefined) rejectCRLF("replyTo name", replyTo.name);
   }
@@ -621,10 +621,15 @@ export async function reply(
   // us and excluding the sender would leave no recipient (smoke-staging #25).
   const delegated = await delegatedFrom(env, req.from, identity, sendAs);
   const from = delegated ? delegated.from : resolveFrom(env, req.from, identity);
+  const storedField = original.direction === "outbound" ? "To" : original.replyTo ? "Reply-To" : "From";
   const primary =
     original.direction === "outbound"
       ? firstAddress(original.to)
       : firstAddress(original.replyTo ?? original.from);
+  // Name the stored header. Do not repeat its text.
+  if (!EMAIL_RE.test((primary ?? "").trim())) {
+    throw new MailboxError("E_VALIDATION_ERROR", `invalid to address derived from the stored ${storedField}`);
+  }
   const to = dedupeRecipients([primary], [from.email]);
   const derived = req.mode === "replyAll"
     ? [...addresses(original.to), ...addresses(original.cc)]

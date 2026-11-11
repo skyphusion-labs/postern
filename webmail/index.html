@@ -315,6 +315,19 @@
   .settings-panel form button[type="submit"] { width: 100%; margin-top: var(--sp-3); }
   .settings-panel .note-ok { color: var(--ok); font-size: var(--fs-xs); margin: var(--sp-2) 0 0; }
   .settings-panel .note-ok:empty, .settings-panel .err:empty { display: none; }
+  .grant-list, .audit-list { list-style: none; padding: 0; margin: var(--sp-2) 0 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+  .grant-list li { border: 1px solid var(--line); border-radius: 6px; padding: var(--sp-2); font-size: var(--fs-sm); }
+  .grant-list .grant-who { font-weight: 600; overflow-wrap: anywhere; }
+  .grant-list .revoke { margin-top: var(--sp-1); }
+  .audit-list li { font-size: var(--fs-xs); overflow-wrap: anywhere; }
+  .audit-list .when { color: var(--muted); display: block; }
+  .settings-panel .sub { margin: var(--sp-3) 0 0; font-size: var(--fs-sm); }
+  .settings-panel fieldset.powers { border: 0; padding: 0; margin: var(--sp-3) 0 0; }
+  .settings-panel fieldset.powers legend { font-size: var(--fs-sm); color: var(--muted); padding: 0; }
+  .settings-panel label.check { display: flex; gap: var(--sp-2); align-items: center; color: var(--fg); margin: var(--sp-1) 0; }
+  /* The global input rule gives every input a 38px min-height; a checkbox kept in that box
+     sits at its top while the label text drops below it. */
+  .settings-panel label.check input { width: auto; min-height: 0; height: auto; margin: 0; flex: none; }
   .ac-wrap { position: relative; }
   .ac-list {
     position: absolute; left: 0; right: 0; top: 100%; z-index: 5;
@@ -523,6 +536,40 @@
     </form>
     <div class="err" id="pwErr" role="alert" aria-live="assertive"></div>
     <p class="note-ok" id="pwNote" role="status"></p>
+  </div>
+  <!-- Agent access to my mail (#740 S5): session mode only -->
+  <div id="accessSection" style="display:none">
+    <h3 id="accessTitle">Agent access to your mail</h3>
+    <p class="hint">Agents you allow to act on your address. Read is always included.</p>
+    <ul id="grantList" class="grant-list" aria-labelledby="accessTitle"></ul>
+    <p class="hint" id="grantEmpty">No agent has access to your mail.</p>
+    <form id="grantForm" novalidate aria-labelledby="grantFormTitle">
+      <h4 id="grantFormTitle" class="sub">Give an agent access</h4>
+      <label for="grantAgent">Agent</label>
+      <select id="grantAgent"></select>
+      <fieldset class="powers">
+        <legend>It may</legend>
+        <label class="check"><input type="checkbox" id="grantPower_read" checked disabled> Read your mail (always included)</label>
+        <label class="check"><input type="checkbox" id="grantPower_organize"> Mark read, flag and move your mail</label>
+        <label class="check"><input type="checkbox" id="grantPower_quote"> Reply to, quote and forward your mail</label>
+        <label class="check"><input type="checkbox" id="grantPower_send_as" aria-describedby="sendAsHint"> Send as you</label>
+        <p class="hint" id="sendAsHint">You are the From and the agent is named as Sender. This works only where the server's mail transport can set Sender; otherwise the agent's send is refused.</p>
+      </fieldset>
+      <label for="grantLabel">Note (optional)</label>
+      <input id="grantLabel" maxlength="120" autocomplete="off">
+      <button type="submit" id="grantSubmit">Give access</button>
+    </form>
+    <div class="err" id="grantErr" role="alert" aria-live="assertive"></div>
+    <p class="note-ok" id="grantNote" role="status"></p>
+  </div>
+  <!-- Activity on my mail (#740 S5): session mode only -->
+  <div id="auditSection" style="display:none">
+    <h3 id="auditTitle">Activity on your mail</h3>
+    <p class="hint">Grants, revokes and what agents did with their access, newest first.</p>
+    <ul id="auditList" class="audit-list" aria-labelledby="auditTitle"></ul>
+    <p class="hint" id="auditEmpty">Nothing yet.</p>
+    <button type="button" id="auditMore" class="link" style="display:none">Show older</button>
+    <div class="err" id="auditErr" role="alert"></div>
   </div>
   <button type="button" id="settingsSignout" class="settings-signout">Sign out</button>
   <p class="note">Keyboard: <kbd>j</kbd> / <kbd>k</kbd> next and previous message, <kbd>/</kbd> search,
@@ -1451,12 +1498,16 @@
       $("settingsSession").textContent = "Session: " + state.identity.from +
         (state.identity.displayName ? " (" + state.identity.displayName + ")" : "");
       $("pwSection").style.display = "";
+      access.available = true; access.cursor = null;
+      setAccessVisible(true);
     } else {
       $("identity").textContent = "";
       $("who").textContent = state.origin;
       $("settingsSession").textContent = "Session: BYO token at " + (state.origin || "(same origin)");
       // A token is not a person and has no password to change (contract 1.10.5).
       $("pwSection").style.display = "none";
+      // Agent access is the human's own door: a token has no address of its own here.
+      setAccessVisible(false);
     }
     $("searchMode").value = state.searchMode;
     applyChromePrefs();
@@ -1686,6 +1737,207 @@
   // Change password (#819, contract 1.10.5): POST /api/session/password, cookie session
   // plus the CSRF header. On success the server ends every OTHER session of the account
   // and rotates this one (new cookies, new csrfToken; #827), so this tab stays signed in.
+  // --- Agent access and activity on my mail (#740 S5): session mode only ---------
+  // A signed-in human sees which agents may act on their own address, grants or revokes
+  // that access, and reads the audit rows about their address. Every server value goes
+  // in through text nodes (el / textContent), never markup.
+  var POWER_ORDER = ["read", "organize", "quote", "send_as"];
+  var POWER_SHORT = { read: "read", organize: "organize", quote: "quote", send_as: "send as you" };
+  var AUDIT_ACTIONS = {
+    "delegation.grant": "gave access",
+    "delegation.revoke": "removed access",
+    "delegation.organize": "organized your mail",
+    "delegation.quote": "used your mail in a reply or forward",
+    "delegation.send_as": "sent as you"
+  };
+  var access = { names: {}, cursor: null, available: true, seq: 0 };
+
+  // Session-only call for these routes: the cookie rides, writes add the CSRF header,
+  // there is no Bearer fallback, and the error keeps the server's code for the wording.
+  function sessionCall(method, path, body) {
+    var headers = { "accept": "application/json" };
+    if (body !== undefined) headers["content-type"] = "application/json";
+    if (method !== "GET") headers["x-postern-csrf"] = csrfFromCookie();
+    var opts = { method: method, headers: headers, credentials: "include", referrerPolicy: "no-referrer" };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    return fetch(baseUrl() + path, opts).then(function (r) {
+      return r.json().catch(function () { return { ok: false, error: "bad_json" }; }).then(function (j) {
+        if (!r.ok || j.ok === false) {
+          var err = new Error((j && (j.message || j.error)) || ("HTTP " + r.status));
+          err.status = r.status; err.code = (j && j.error) || "";
+          throw err;
+        }
+        return j;
+      });
+    });
+  }
+  function accessUnauthorized(e) {
+    if (e.code === "E_REAUTH_REQUIRED") { signInAgain("Sign in again to manage agent access to your mail."); return; }
+    logout();
+  }
+  function agentName(name, from, id) {
+    if (name && from) return name + " (" + from + ")";
+    return from || name || ("agent " + id);
+  }
+  function whenText(iso) {
+    var d = new Date(iso);
+    return isNaN(d.getTime()) ? "" : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  }
+  function powersText(powers) {
+    return POWER_ORDER.filter(function (p) { return (powers || []).indexOf(p) !== -1; })
+      .map(function (p) { return POWER_SHORT[p]; }).join(", ");
+  }
+  function setAccessVisible(on) {
+    $("accessSection").style.display = on ? "" : "none";
+    $("auditSection").style.display = on ? "" : "none";
+  }
+  function accessFailed(e, errNode) {
+    if (e.status === 401) { accessUnauthorized(e); return; }
+    // The load routes never answer 404 for real data, so a 404 here is an older server
+    // without them: hide the sections rather than show a broken form.
+    if (e.status === 404) { access.available = false; setAccessVisible(false); return; }
+    errNode.textContent = "Could not load: " + e.message;
+  }
+  function loadAccess() {
+    if (state.authMode !== "session" || !access.available) return Promise.resolve();
+    var seq = ++access.seq;
+    $("grantErr").textContent = "";
+    return Promise.all([
+      sessionCall("GET", "/api/delegations/mine/grantees"),
+      sessionCall("GET", "/api/delegations/mine")
+    ]).then(function (res) {
+      if (seq !== access.seq) return;
+      var grantees = res[0].items || [], grants = res[1].items || [];
+      grantees.forEach(function (g) { access.names[g.id] = agentName(g.displayName, g.from, g.id); });
+      grants.forEach(function (g) { access.names[g.granteeId] = agentName(g.granteeName, g.granteeFrom, g.granteeId); });
+      renderGrants(grants);
+      renderGrantees(grantees, grants);
+      return loadAudit(false);
+    }).catch(function (e) { accessFailed(e, $("grantErr")); });
+  }
+  function renderGrants(grants) {
+    var ul = $("grantList");
+    clear(ul);
+    $("grantEmpty").style.display = grants.length > 0 ? "none" : "";
+    grants.forEach(function (g) {
+      var btn = el("button", { type: "button", class: "link revoke", text: "Remove access" });
+      btn.addEventListener("click", function () { revokeGrant(g, btn); });
+      var by = g.createdBy === "operator" ? "the admin" : "you";
+      var when = whenText(g.createdAt);
+      ul.appendChild(el("li", {}, [
+        el("div", { class: "grant-who", text: access.names[g.granteeId] || agentName(null, null, g.granteeId) }),
+        el("div", { class: "hint", text: "May: " + powersText(g.powers) }),
+        g.label ? el("div", { class: "hint", text: "Note: " + g.label }) : null,
+        el("div", { class: "hint", text: "Given by " + by + (when ? ", " + when : "") }),
+        btn
+      ]));
+    });
+  }
+  function renderGrantees(grantees, grants) {
+    var sel = $("grantAgent");
+    var keep = sel.value;
+    clear(sel);
+    var has = {};
+    grants.forEach(function (g) { has[g.granteeId] = true; });
+    sel.appendChild(el("option", { value: "", text: grantees.length ? "Choose an agent" : "No agents on this server" }));
+    grantees.forEach(function (g) {
+      var o = el("option", { value: g.id, text: access.names[g.id] + (has[g.id] ? " (has access)" : "") });
+      if (has[g.id]) o.disabled = true;
+      sel.appendChild(o);
+    });
+    if (keep && !has[keep]) sel.value = keep;
+    $("grantSubmit").disabled = grantees.length === 0;
+  }
+  function grantErrorText(e) {
+    if (e.code === "E_CONFLICT") return "That agent already has access. Remove it first to change what it may do.";
+    if (e.code === "E_GRANTEE_INVALID") return "That agent is no longer available. Choose another.";
+    if (e.code === "E_CSRF") return "Your session needs a refresh. Reload the page and try again.";
+    return "Could not give access: " + e.message;
+  }
+  function submitGrant() {
+    var err = $("grantErr"), note = $("grantNote");
+    err.textContent = ""; note.textContent = "";
+    var id = $("grantAgent").value;
+    if (!id) { err.textContent = "Choose an agent."; $("grantAgent").focus(); return; }
+    var powers = ["read"];
+    POWER_ORDER.slice(1).forEach(function (p) { if ($("grantPower_" + p).checked) powers.push(p); });
+    var body = { granteeId: id, powers: powers };
+    var label = $("grantLabel").value.trim();
+    if (label) body.label = label;
+    $("grantSubmit").disabled = true;
+    sessionCall("POST", "/api/delegations/mine", body).then(function () {
+      $("grantForm").reset();
+      note.textContent = "Access given to " + (access.names[id] || id) + ".";
+      return loadAccess();
+    }).catch(function (e) {
+      if (e.status === 401) { accessUnauthorized(e); return; }
+      err.textContent = grantErrorText(e);
+    }).then(function () { $("grantSubmit").disabled = false; });
+  }
+  // Two steps, no browser dialog: the first click arms the button for 5 seconds.
+  function revokeGrant(g, btn) {
+    if (!btn.getAttribute("data-armed")) {
+      btn.setAttribute("data-armed", "1");
+      btn.textContent = "Confirm: remove access";
+      setTimeout(function () {
+        if (btn.isConnected && btn.getAttribute("data-armed")) { btn.removeAttribute("data-armed"); btn.textContent = "Remove access"; }
+      }, 5000);
+      return;
+    }
+    btn.disabled = true;
+    $("grantErr").textContent = ""; $("grantNote").textContent = "";
+    sessionCall("DELETE", "/api/delegations/mine/" + encodeURIComponent(g.id)).then(function () {
+      $("grantNote").textContent = "Access removed for " + (access.names[g.granteeId] || g.granteeId) + ".";
+      return loadAccess();
+    }).catch(function (e) {
+      if (e.status === 401) { accessUnauthorized(e); return; }
+      btn.disabled = false;
+      $("grantErr").textContent = e.status === 404
+        ? "That access was already removed."
+        : "Could not remove access: " + e.message;
+      if (e.status === 404) loadAccess();
+    });
+  }
+  function auditActor(a) {
+    if (!a) return "Someone";
+    if (a.kind === "human") return "You";
+    if (a.kind === "service") return "The admin";
+    if (a.kind === "agent") return access.names[a.id] || ("Agent " + a.id);
+    return String(a.kind || "Someone");
+  }
+  function auditText(row) {
+    var d = row.detail || {};
+    var text = auditActor(row.actor) + " " + (AUDIT_ACTIONS[row.action] || String(row.action || "acted"));
+    if (row.action === "delegation.grant" && d.granteeId) {
+      text += " to " + (access.names[d.granteeId] || d.granteeId) + (d.powers ? " (" + powersText(d.powers) + ")" : "");
+    } else if (row.action === "delegation.revoke" && d.granteeId) {
+      text += " from " + (access.names[d.granteeId] || d.granteeId);
+    } else if (d.op) {
+      text += " (" + String(d.op) + ")";
+    }
+    if (row.outcome && row.outcome !== "ok") text += ": " + String(row.outcome);
+    return text;
+  }
+  function loadAudit(more) {
+    var params = { limit: 25 };
+    if (more && access.cursor) params.cursor = access.cursor;
+    var qs = Object.keys(params).map(function (k) { return k + "=" + encodeURIComponent(params[k]); }).join("&");
+    $("auditErr").textContent = "";
+    return sessionCall("GET", "/api/audit/mine?" + qs).then(function (body) {
+      var ul = $("auditList");
+      if (!more) clear(ul);
+      (body.items || []).forEach(function (row) {
+        ul.appendChild(el("li", {}, [
+          el("span", { class: "when", text: whenText(row.at) }),
+          document.createTextNode(auditText(row))
+        ]));
+      });
+      access.cursor = body.cursor || null;
+      $("auditMore").style.display = access.cursor ? "" : "none";
+      $("auditEmpty").style.display = ul.childNodes.length > 0 ? "none" : "";
+    }).catch(function (e) { accessFailed(e, $("auditErr")); });
+  }
+
   function changePassword() {
     var cur = $("pwCur").value, nw = $("pwNew").value, nw2 = $("pwNew2").value;
     var err = $("pwErr"), note = $("pwNote");
@@ -1761,6 +2013,16 @@
 
   // Sign out. Session mode: DELETE /api/session revokes the row server-side and clears
   // the cookies; token mode: drop the tokens from sessionStorage.
+  function signInAgain(note) {
+    fetch("/api/session", {
+      method: "DELETE",
+      headers: { "accept": "application/json", "x-postern-csrf": csrfFromCookie() },
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).catch(function () {}).then(function () {
+      sessionReset();
+      showSignin("", note);
+    });
+  }
   function logout() {
     if (state.authMode === "session") {
       var csrf = csrfFromCookie();
@@ -2818,7 +3080,7 @@
   function setSettings(open) {
     $("settingsPanel").classList.toggle("on", open);
     $("settingsBtn").setAttribute("aria-expanded", open ? "true" : "false");
-    if (open) $("themeSelect").focus();
+    if (open) { $("themeSelect").focus(); loadAccess(); }
   }
   $("settingsBtn").addEventListener("click", function () {
     setSettings(!$("settingsPanel").classList.contains("on"));
@@ -2874,6 +3136,8 @@
   $("signinForm").addEventListener("submit", function (e) { e.preventDefault(); signIn(); });
   $("setupForm").addEventListener("submit", function (e) { e.preventDefault(); setupSubmit(); });
   $("pwForm").addEventListener("submit", function (e) { e.preventDefault(); changePassword(); });
+  $("grantForm").addEventListener("submit", function (e) { e.preventDefault(); submitGrant(); });
+  $("auditMore").addEventListener("click", function () { loadAudit(true); });
   Array.prototype.forEach.call(document.querySelectorAll(".pw-toggle"), function (btn) {
     btn.addEventListener("click", function () {
       var id = btn.getAttribute("data-toggle-for");

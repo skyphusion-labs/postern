@@ -26,11 +26,21 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Added
 
+- **A human manages delegation on their own address (#740 S5).** From a
+  webmail session: `GET /api/delegations/mine/grantees` (the live agents a
+  human may grant to), `GET`/`POST /api/delegations/mine`, `DELETE
+  /api/delegations/mine/{id}`, and `GET /api/audit/mine` (the audit rows
+  about the human own address). Session only: a token is refused. Grants
+  are audited with the human as actor. See `docs/DELEGATION.md` section 4.6.
 - **An admin-only token slot (#904).** `POSTERN_API_TOKEN_ADMIN` reaches the
   admin routes and nothing else: it cannot read, send, delete or organize
   mail. Its audit rows name the `svc_admin` service principal. Set and rotate
   it with `wrangler secret put POSTERN_API_TOKEN_ADMIN`; unset changes
   nothing.
+- **The principal tables are dual-written (#854 M2).** Every user and agent
+  identity write updates the principal, credential and address tables in
+  the same batch. `GET /api/admin/principals/parity` reports any row where
+  the two disagree. Reads are unchanged.
 - **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
   `principal_addresses` tables, the six static token slots as service
   principals, and `POST /api/admin/principals/backfill`, which copies agent
@@ -52,9 +62,18 @@ version or created the first admin. A manual run is still safe: it is idempotent
   the send is refused with `422 E_SEND_AS_UNSUPPORTED`, never sent
   without one (Cloudflare feature request: #896). The relay `/dispatch`
   body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
+- **Webmail: agent access to your mail, and activity on it (#740 S5).**
+  Signed in with a session, a person sees in Settings which agents may act
+  on their own address and what each may do, gives or removes that access,
+  and reads the audit rows about their address. Not offered in token
+  mode; hidden on a server without the routes.
 
 ### Changed
 
+- **An organize audit row names whose mail it touched (#740 S5).** Its
+  `detail` carries `address` (the granted human) instead of `granted` (every
+  granted address); a message two granted humans both receive gets a row
+  for each.
 - **Deploy runs the principals backfill (#901).** `.github/workflows/deploy.yml` calls it after
   the deployed artifact is verified, waits until `/health` reports the tag, and fails the release
   on a missing `POSTERN_DEPLOY_ADMIN_TOKEN`, a non-200 or a malformed report. Address conflicts
@@ -84,6 +103,14 @@ version or created the first admin. A manual run is still safe: it is idempotent
   be https, or http on localhost. An id that is empty, `.`, or `..` is
   refused. A long message body is cut and marked truncated, and the startup
   line shows only the API origin.
+- **A sign-in survives a failure on the principal side (#854).** If the
+  principal lookup at sign-in fails, the session is minted without one
+  (the self-service routes then ask for a fresh sign-in) instead of the
+  sign-in failing with a 500.
+- **A refused address names the field.** An invalid to, cc, bcc, from, or
+  reply-to value is reported by field name. A reply whose stored address
+  cannot be used names the header it came from.
+
 - **Door session edges.** The IMAP wire trace redacts every received line of a
   LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
   port 993; set a certificate, or use port 143. Submission backend errors log
@@ -131,6 +158,9 @@ version or created the first admin. A manual run is still safe: it is idempotent
   @import of a plain string and image-set() strings are counted and
   removed from the reading frame; a URL inside a CSS comment is not
   counted.
+- **Webmail: the agent-access checkboxes sit beside their text.** In
+  Settings, each "It may" checkbox showed above and to the left of its
+  label, because the general input height applied to it.
 
 ## v1.11.0
 

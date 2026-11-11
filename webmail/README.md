@@ -49,7 +49,11 @@ inbound worker (`inbound/wrangler.dev.jsonc`, a local D1, no remote bindings),
 seeded from `inbound/seed.dev.sql`. To regenerate: apply the migrations, then
 `seed.dev.sql`, to a local D1, run `wrangler dev` with a dev `POSTERN_API_TOKEN`
 in `.dev.vars`, and open `/webmail`. Use `WEBMAIL_AUTH_BACKEND=native` for the
-sign-in shot.
+sign-in shot. The two agent-access shots use the same worker with
+`WEBMAIL_AUTH_BACKEND=native` and `AGENT_READ_SCOPE=granted`: a first account made through
+`POST /api/setup`, two agents minted with `POST /api/admin/identities`, one access given in
+Settings and one with `POST /api/admin/delegations`, and the agents' own flag, move and
+reply calls. All addresses are `example` domains.
 
 ## What it does
 
@@ -85,6 +89,7 @@ sign-in shot.
   previous message, `/` search, `c` compose, `Esc` closes a panel or goes back.
   Loads and errors are announced through a live region.
 - **Change password** in Settings when signed in with a session (below).
+- **Agent access and activity** in Settings when signed in with a session (below).
 
 ## Auth (#32): bring your own token
 
@@ -154,6 +159,8 @@ offered in token mode, where there is no person and no password. Directory
 (`ldap`/`system`) sign-in is designed but deferred and out of this phase; those
 deployments keep using BYO-token webmail.
 
+**Agent access to your mail.** See [Agent access to your mail](#agent-access-to-your-mail) below.
+
 **First run (no accounts yet).** A fresh manual deploy can create its first account
 from the browser. The page shows **Create the first account** only when ALL three hold
 (`docs/design/webmail-v2-contracts.md` section 1.10.7):
@@ -174,6 +181,81 @@ delete the secret. The one-command installer (`deploy/`) does not need this: it
 creates the first admin itself through `POST /api/admin/users`.
 
 ![First run](screenshots/webmail-first-run.png)
+
+## Agent access to your mail
+
+An agent is a program with its own Postern address and credential, such as an assistant
+that sorts your mail. In **Settings**, you can let an agent act on your mail, see which
+agents can, and take that access away. You can also see what agents did with it.
+
+This is for your own address only. It is in Settings when you sign in with your username
+and password. It is not there when you connect with an API token.
+
+![Agent access in Settings](screenshots/webmail-agent-access.png)
+
+**What an agent may do.** You choose this when you give access.
+
+| You tick | The agent may |
+|---|---|
+| Read your mail | read your mail. This is always included. |
+| Mark read, flag and move your mail | change your read state, flags and folders. |
+| Reply to, quote and forward your mail | reply to your mail, quote it, and forward it. |
+| Send as you | send mail with you as the sender. You are the From, and the agent is named as the Sender. |
+
+Every access includes reading your mail. You cannot let an agent organize, quote or send
+as you without it.
+
+**About reading.** Reading has an effect only on a server where agents read granted mail
+only. Your admin sets this (`AGENT_READ_SCOPE=granted`; a new install has it). On a
+server where agents can read all mail, giving read access adds nothing: the agent can
+already read your mail. If you are not sure which kind of server you are on, ask your
+admin. The other three choices work on both kinds of server.
+
+**About sending as you.** The server's mail transport must be able to set a `Sender`
+header. Postern's default transport, Cloudflare Email Sending, cannot. On that transport,
+an agent that tries to send as you is refused, and nothing is sent. Your choice is still
+saved. The SMTP relay transport can set the header, so there it works.
+
+**Access covers all of your mail.** You cannot leave single messages out.
+
+**To give access:** open Settings, go to **Give an agent access**, choose the agent,
+tick what it may do, add a note if you want one, and select **Give access**. An agent that
+already has access shows "(has access)" and you cannot choose it again. To change what it
+may do, remove its access and give it again.
+
+**To remove access:** select **Remove access** next to the agent, then **Confirm: remove
+access**. It takes effect on the agent's next request. You can remove any access on your
+address, also access that your admin gave. If your admin removes the agent itself, its
+access stops, and it leaves your list.
+
+**Activity on your mail.** This list shows, newest first:
+
+- each time you or your admin gave or removed access on your address;
+- each time an agent marked, flagged or moved one of your messages (one row for each
+  message);
+- each time an agent replied to, quoted or forwarded your mail;
+- each time an agent sent as you.
+
+![Activity on your mail](screenshots/webmail-agent-activity.png)
+
+A reply, a forward or a send as you is written to the list when the agent tries it,
+before the mail goes out. So a row can stay there for a send that then failed.
+
+The list does not show:
+
+- when an agent reads your mail. Reads are not logged.
+- requests that were refused before they reached your mail.
+- anything about other people's mail. When an agent acts on a message that you and
+  someone else both received, each of you gets your own row, and you see only yours.
+  Other people never see your rows. Your admin can see all rows.
+- organize rows from before this release, which named several people in one row.
+
+**If you are asked to sign in again.** After an update, a session that started before it
+cannot use these sections. Postern signs you out and asks you to sign in again. Sign in
+once more and they work.
+
+For operators: the routes, the stored grant and the audit rows are in
+[docs/DELEGATION.md](../docs/DELEGATION.md) section 4.6.
 
 ## Run it
 

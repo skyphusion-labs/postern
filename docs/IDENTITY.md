@@ -246,6 +246,32 @@ and also picks up rows a pre-M2 admin route wrote after M1 landed.
 - **Deferred until after S5:** resolution reading `credentials` first, the full dual-write
   on every admin route, and the new credential types (M3).
 
+**M2, dual-write and parity (shipped).**
+
+- **Every write to the old tables carries its principal-table statements in the SAME D1
+  batch** (`inbound/src/principalmirror.ts`): the eight write sites are user create, first
+  user, update (disable, display name, From), set password (admin reset, self change and the
+  upgrade-on-sign-in rehash), the legacy smtp-credentials upsert, user delete, agent mint and
+  agent revoke. The statements are pure SQL over the old row as it stands after the write
+  and encode the backfill's converge rules, so a write and its mirror land together or not
+  at all. A delete revokes the credential and disables the principal; nothing is deleted.
+- **`GET /api/admin/principals/parity`** (operator only, audited `principals.parity`)
+  compares every `agent_identities` and `smtp_credentials` row with its principal and
+  credential (token hash or secret, revoked or disabled, scopes, kind) and counts live
+  password credentials with no account row. It returns counts and up to 20 sample OPAQUE ids
+  (`idn_`, `prn_`, `crd_`), never a hash, secret, username or address; a differing human with
+  no principal yet is counted (`withoutPrincipal`), not sampled.
+- **Reads still use only the old tables.** The new tables authorize nothing yet.
+
+**The next M2 slice, and how its fallback is retired.** Resolution will read `credentials`
+first but act on a credential only when its old-table row AGREES (same hash or secret, same
+revoked or disabled state); on any disagreement it resolves from the old table, as today, and
+counts a parity miss. So a stale credential can never allow what the old table denies. The
+fallback is retired (M3: credentials become the authority, the old tables stop being written)
+only when all of these hold: the deploy backfill runs on every release (#901, #906); one full
+release ran with dual-write; and parity returns zero diffs after that release's backfill, with
+zero read-path misses across the release.
+
 **Usernames.** `smtp_credentials.username` becomes the `lookup` of the principal's
 `password` credential. Renaming a login changes that credential, never the principal id,
 so sessions, grants and audit rows survive a rename.
@@ -263,6 +289,12 @@ An upstream sign-in (Cloudflare Access, Google, any OIDC issuer) links to a prin
 password does. Linking needs an already-signed-in principal or the operator, never a
 first sign-in, so an outside issuer can never create an account by itself. Self-host
 needs none of this.
+
+**S5 shows the agent roster to humans.** `GET /api/delegations/mine/grantees` lists every
+LIVE agent identity (id, display name, From) to every signed-in human on that deploy, so a
+human can pick whom to grant. It shows nothing else about an agent (no powers, no grants it
+holds, no creation data). An operator who does not want humans to see the roster leaves
+agents unminted or revokes them; there is no per-agent visibility flag in v1.
 
 ## 8. What each #740 slice keys on
 

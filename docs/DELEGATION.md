@@ -140,7 +140,9 @@ Under EITHER flag value, an active `organize` grant widens the three organize ro
 **Every such write is audited in the same D1 batch as the write.** One `audit_log` row
 per touched message on a granted address: action `delegation.organize`, `actor_kind`
 `agent`, `actor_id` the grantee's identity id, `target_kind` `message`, `target_id` the
-message id, and `detail` `{op, ..., granted: [addresses]}`. If the audit insert fails,
+message id, and `detail` `{op, ..., address}`, where `address` is the granted human whose
+mail it is (a message two granted humans both receive gets a row for each; #740 S5 made
+this per address, so each human's own trail shows only their mail). If the audit insert fails,
 the batch rolls back and the write does not happen. A write that touches only the
 caller's own mail writes no audit row. Every field names a stable id, so a later
 identity layer (#854) can adopt these rows without rewriting them.
@@ -198,7 +200,26 @@ Sender and never silently sent as the agent instead (Conrad's ruling, fail close
 SMTP relay transport (`OUTBOUND_TRANSPORT=relay`) writes `Sender:` and supports it.
 Cloudflare support for `Sender` on the allowlist is a feature request (#896).
 
-### 4.6 Known limits of S2 to S4
+### 4.6 S5: the human manages their own address (shipped)
+
+A signed-in human, from a webmail SESSION, manages delegation on their own address and
+reads their own trail. Every route refuses a Bearer of any kind (`403 E_SESSION_REQUIRED`):
+this is the human's door, not the operator's. The general gate demands CSRF on the
+state-changing verbs. The address is always the session's own; no route takes one.
+
+| route | does |
+|---|---|
+| `GET /api/delegations/mine/grantees` | the LIVE agent identities, exactly `{id, displayName, from}`. Every signed-in human on the deploy sees this roster (the lead's S5 ruling, Q1). |
+| `GET /api/delegations/mine` | the active grants on my address whose grantee is live, newest first: `{id, granteeId, granteeName, granteeFrom, powers, label, createdBy, createdAt}`. `createdBy` is `operator` or my principal id. |
+| `POST /api/delegations/mine` `{granteeId, powers, label?}` | grant on my address. All four powers are allowed (Q2). The same validation as the operator route; an `address` field is a `400`. Audited `delegation.grant` with actor `human` / my `prn_` id, and `created_by` my `prn_` id. |
+| `DELETE /api/delegations/mine/{id}` | revoke a grant on my address, idempotent. Any other id, including a grant on someone else's address, is the same `404` as a missing one. Audited `delegation.revoke`, actor human. |
+| `GET /api/audit/mine` | the audit rows about my address, newest first, keyset `limit`/`cursor`, the `/api/admin/audit` row shape: grants and revokes on it, quotes and organize writes of my mail (`detail.address`), and send_as sends as me (`target_id`). Nothing about any other address. |
+
+A session minted before migration `0020` names no principal; these routes answer `401
+E_REAUTH_REQUIRED` and one more sign-in fixes it. A human-made grant is enforced exactly as
+an operator's (sections 4.2 to 4.5).
+
+### 4.7 Known limits of S2 to S5
 
 - **A refusal at the scope gate is not audited** (section 3 says the same for the
   operator routes). A `403` from the gate (a token without `organize`) never reaches a
@@ -212,9 +233,8 @@ Cloudflare support for `Sender` on the allowlist is a feature request (#896).
 
 ## 5. What is not built yet (the plan)
 
-- **S5:** a human reads their own audit log and makes and revokes grants on their own
-  address from webmail. That is what makes the trail a product feature rather than an
-  operator log.
+- **The S5 webmail UI** (the Settings screen over section 4.6) is the frontend lane's,
+  on the same contract.
 
 **Conrad's rulings (2026-11-10), recorded on #740:**
 
