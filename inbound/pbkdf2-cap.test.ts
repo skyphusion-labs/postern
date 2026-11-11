@@ -1,3 +1,4 @@
+import { sqliteBatch } from "./test-support";
 import { describe, it, expect, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -39,7 +40,7 @@ function realEnv() {
     };
   }
   const env = {
-    DB: { prepare }, ALLOWED_FROM_DOMAIN: "skyphusion.org", WEBMAIL_AUTH_BACKEND: "native",
+    DB: { prepare, batch: sqliteBatch(db) }, ALLOWED_FROM_DOMAIN: "skyphusion.org", WEBMAIL_AUTH_BACKEND: "native",
     POSTERN_API_TOKEN: ADMIN, POSTERN_TRANSPORT_TOKEN: TRANSPORT,
   } as unknown as Env;
   return { env, raw: db };
