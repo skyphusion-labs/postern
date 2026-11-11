@@ -13,14 +13,289 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds),
+`0020` (`webmail_sessions.principal_id`) and `0021` (the `svc_admin` seed) are additive and
+are applied by the deploy. Run `POST /api/admin/principals/backfill` once after
+upgrading to copy existing identities and users in; it is safe to run again.
+**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
+`0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. The
+backfill that copies existing identities and users in now runs automatically after each
+deploy: the release workflow calls `POST /api/admin/principals/backfill` once the new version
+answers (#901), and the self-host installer calls it after any run that deployed a Worker
+version or created the first admin. A manual run is still safe: it is idempotent.
+
+### Added
+
+- **An admin-only token slot (#904).** `POSTERN_API_TOKEN_ADMIN` reaches the
+  admin routes and nothing else: it cannot read, send, delete or organize
+  mail. Its audit rows name the `svc_admin` service principal. Set and rotate
+  it with `wrangler secret put POSTERN_API_TOKEN_ADMIN`; unset changes
+  nothing.
+- **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
+  `principal_addresses` tables, the six static token slots as service
+  principals, and `POST /api/admin/principals/backfill`, which copies agent
+  identities (keeping their `idn_` ids) and human users in. Idempotent and
+  convergent. Store only: every credential resolves exactly as before. See
+  `docs/IDENTITY.md` section 6.
+- **Webmail sessions name their human principal (#854 M2).** Each sign-in
+  records the principal behind it (created at sign-in if the backfill has
+  not reached that login), and a grant or audit row can name a human
+  principal as grantor and actor. Nothing new authorizes from it yet; it is
+  what #740 S5 builds on.
+
+- **The `send_as` power (#740 S4).** An agent holding a `send_as` grant
+  sends as the human by naming the address as `from`: From is the human
+  with the human display name, `Sender:` is the agent, Reply-To is the
+  human, and the response reports `from` and `sender`. Each send writes a
+  `delegation.send_as` audit row before dispatch, fail closed. It needs a
+  transport that can set `Sender:`: on the default Cloudflare transport
+  the send is refused with `422 E_SEND_AS_UNSUPPORTED`, never sent
+  without one (Cloudflare feature request: #896). The relay `/dispatch`
+  body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
+
+### Changed
+
+- **Deploy runs the principals backfill (#901).** `.github/workflows/deploy.yml` calls it after
+  the deployed artifact is verified, waits until `/health` reports the tag, and fails the release
+  on a missing `POSTERN_DEPLOY_ADMIN_TOKEN`, a non-200 or a malformed report. Address conflicts
+  are warnings that name principal ids, never addresses (Actions logs are public).
+  `deploy/postern.mjs install` and `upgrade` make the same call with the install's own token.
+
+- **The operator is named in the audit log (#854 M1).** Rows the admin
+  routes write now carry actor `service` / `svc_both` instead of
+  `operator` with no id. Older rows are unchanged.
+- **CI refuses CHANGELOG lines added to a released section.** A new
+  `release-gate` step fails when a change adds a line inside an
+  already-released `## vX.Y.Z` section of `CHANGELOG.md`; entries belong
+  under `## Unreleased`. A clean merge after a release can put an entry
+  there with no conflict, which is what this catches. A deliberate edit to
+  released notes passes with the commit trailer
+  `Changelog-History-Edit: <reason>`.
+
+
+- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
+  The served CSP lists the sha256 of the page's one inline script, which
+  `npm run sync-webmail` computes, so a script that is not the page's
+  own does not run. `style-src 'unsafe-inline'` is unchanged.
+
 ### Fixed
 
-- **Write scope binds to the bound identity.** An identity's write scope
-  (flags, move, seen) now binds to its bound address whatever its other
-  caps; previously a token without `read` could organize outside its own
-  address. Applies to runtime agent identities and
-  `POSTERN_SEND_IDENTITIES` entries alike. Static tokens and webmail
-  sessions are unchanged.
+- **A refused address names the field.** An invalid to, cc, bcc, from, or
+  reply-to value is reported by field name. A reply whose stored address
+  cannot be used names the header it came from.
+
+- **Door session edges.** The IMAP wire trace redacts every received line of a
+  LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
+  port 993; set a certificate, or use port 143. Submission backend errors log
+  the username length, not the username. An APPEND places a stored row only
+  when `delivered_to` includes the session viewer. An old row that omits
+  `deliveredTo` still uses its `to` address. The global auth cooldown is off
+  unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set.
+- **Python client requests.** Authorization is not sent on a cross-origin
+  redirect. Returned `bodyText` and `bodyHtml` are capped (default 64 KiB,
+  `POSTERN_MAX_BODY_CHARS`) and flagged with `bodyTruncated`. An id that is
+  empty, `.`, or `..` is refused before a path is built. A base URL must be
+  https except on localhost, must not carry userinfo, and its query is not
+  kept.
+
+- **MCP results mark every sender-written field as untrusted.** Search, list,
+  get, thread, and attachment results name those fields and say they were
+  written by the sender.
+
+- **Attachment download.** `postern attachment` without `-o` writes only the
+  final path segment of the remote name, refuses an empty or hidden name, and
+  does not replace a file that already exists. `-o` still writes the path you
+  name.
+- **Submission deadlines.** The submission listener has a read timeout and a
+  write timeout (default 5 minutes each). The read timeout is an idle limit,
+  refreshed on each read. Open connections are capped globally
+  (`SUBMISSION_MAX_CONNECTIONS`, default 200) and per source address
+  (`SUBMISSION_MAX_CONNECTIONS_PER_IP`, default 20). Zero means no cap. The
+  per-source cap uses the address from a trusted PROXY header when one is
+  present. After that header is read, the door puts back the read deadline
+  the protocol had set.
+- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
+  (default 22 MiB, the same ceiling as the worker import) is refused before
+  the bytes are read. The tagged reply starts `NO [TOOBIG]`. `CAPABILITY`
+  advertises `APPENDLIMIT`.
+- **Door throttle key.** The throttle key is canonicalized like the Worker's:
+  the ECMAScript trim set, then lower-case. In system (PAM) mode the key is
+  the local part before `@`. native and ldap keep the whole trimmed name.
+- **Webmail shows attachment names with hidden characters made visible.**
+  Control and invisible format characters in an attachment filename are
+  shown as `[U+XXXX]`, the name is isolated left to right, and the
+  download name replaces each such character with `_`.
+
+- **The webmail remote-content notice counts every remote reference.**
+  SVG image, use and feImage links, CSS url() written with escapes,
+  @import of a plain string and image-set() strings are counted and
+  removed from the reading frame; a URL inside a CSS comment is not
+  counted.
+
+## v1.11.0
+
+MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's
+mail under an explicit, audited grant (#740 S2 and S3).
+
+**Upgrade.** Unset `AGENT_READ_SCOPE` means `estate`: an upgraded deploy keeps the
+estate-wide agent read until the operator sets `AGENT_READ_SCOPE = "granted"`. The
+installer writes `granted` for a new install and does not add it on upgrade.
+
+### Added
+
+- **Delegation grants enforce `read` and `organize` (#740 S2, #860).** The
+  `AGENT_READ_SCOPE` flag (`estate` or `granted`; an unknown value fails
+  closed to `granted`). Under `granted`, an agent reads its own address
+  plus the addresses it holds a grant on. An `organize` grant widens mark
+  read, flags and move to the granted address's mail, and every such
+  write is audited in the same batch. `GET /api/whoami` reports
+  `delegations`. See `docs/DELEGATION.md` section 4.
+- **The `quote` power (#740 S3, #892).** A `quote` grant lets an agent reply
+  to, quote and forward the granted address's mail, under either
+  `AGENT_READ_SCOPE` value. Each such quote writes a `delegation.quote`
+  audit row before it is sent, and nothing is sent if that row cannot be
+  written. See `docs/DELEGATION.md` section 4.4.
+
+## v1.10.1
+
+PATCH. Fixes across inbound, the installer and CI. Upgrade to pick them up; no config change
+is needed.
+
+**Upgrade.** Migration `0018` (adds `messages.claimed_id`) is additive and is applied by the
+deploy. A self-hosted install picks up the installer changes the next time it runs
+`node deploy/postern.mjs`.
+
+### Fixed
+
+- **The reply and forward quote follows the caller's read scope.** A
+  static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
+  quotes or forwards a stored message: the source is not found, as on the
+  read routes. `both` and `read` tokens and bound identities are
+  unchanged.
+
+- **The send-only token can reply again, to the thread's existing
+  parties.** `POSTERN_API_TOKEN_SEND` replies to a stored message as
+  documented: recipients come from the stored message, and a caller `cc`,
+  `bcc` or `quoteOriginal` is refused with `400`. Forwarding a stored
+  message with that token stays not found.
+
+- **The legacy `EmailService` RPC entrypoint is send-only, as documented.**
+  It exposes `send` and `reply` only (no `get`, `thread`, `list` or
+  `search`) and follows the same rule as the send-only token: a reply
+  goes to the thread's existing parties, and nothing is quoted or
+  forwarded. `MailboxService` is unchanged.
+
+- **HTML-to-text conversion runs in one pass.** Mail with only an HTML
+  body is converted to its stored text body by a single linear scan, and
+  the converter reads at most the first 512,000 characters, the same bound
+  as the stored HTML. Output on ordinary HTML is unchanged.
+- **Sign-in attempts are counted atomically.** Webmail sign-in, change
+  password and first-run setup now reserve each attempt before the
+  password check, so attempts made at the same time are each counted
+  toward the lockout.
+- **`/api/smtp-auth` is throttled at the Worker** on the canonical
+  username (AUTH-CONTRACT.md section 5d), sharing the account budget with
+  webmail sign-in. A locked account answers `200 {ok: false, error:
+  "E_AUTH_THROTTLED"}`.
+
+- **A Date header that does not parse falls back to the receive time.**
+  Mail whose Date header is not a valid date is stored with the time it
+  was received as its date. The IMAP APPEND import uses the same rule.
+
+- **Thread resolution looks up its candidates in one query.** A message's
+  thread is resolved from its In-Reply-To and its 20 most recent
+  References (`MAX_THREAD_REFERENCES`), deduplicated, in a single D1
+  query. The parent is chosen in the same order as before.
+
+- **"Authored by" means sent by postern.** Read access, the account
+  view, the Sent lens and the Sent folder count treat a message as
+  authored by V only when postern sent it as V (direction `outbound`).
+  An inbound message whose From header names V is reachable by V only
+  when it was delivered to V. Semantic and hybrid search apply the same
+  rule as the SQL paths.
+
+- **Thread resolution prefers a trusted message for a shared
+  Message-ID.** A different message that arrives with a Message-ID already
+  held by another is still stored under its derived id, and now records
+  the id it arrived with (`claimed_id`, migration `0018`, additive,
+  applied by the deploy). For that id, threading picks the holder when it
+  is trusted, else a trusted claimant, else the holder. A read by id still
+  returns the first message stored under it: `docs/CONTRACT.md` states
+  this, and the MCP `mailbox_get` description tells agents to check
+  `trusted`.
+
+- **A member's send threads only through mail that member can read.**
+  When a bound identity or session sends with In-Reply-To or
+  References, the parent is looked up among messages it can read; any
+  other id starts a new thread, as an unknown id does.
+
+### Changed
+
+- **Installer inputs are checked strictly (#873).** `--hostname` must be a plain hostname
+  under the domain, a second run waits on a per-install lock, an interrupted run leaves no
+  secrets file behind, and the documented token no longer asks for Email Routing Addresses.
+- **Uninstall removes the `_dmarc` record that install created (#863)**, and only if it is
+  unchanged since; an existing DMARC record is never touched.
+- **CI:** every GitHub Action is pinned to a full commit sha (#868); the production deploy
+  job runs in the `production` environment (#885); the one-off unscoped-package deprecation
+  workflow is removed (#883).
+
+## v1.10.0
+
+MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
+uninstall command and an Email Routing report for the installer, PBKDF2-SHA512 for native
+credentials, and write-scope and redirect fixes.
+
+**Upgrade.** Migrations `0016` (agent identities, audit log) and `0017` (delegation grants) are
+additive and are applied by the deploy. Apart from the write-scope fix below (an existing
+`POSTERN_SEND_IDENTITIES` entry that holds `organize` without `read` is now held to its own
+address), nothing changes for an existing deploy until an operator mints an identity or a grant.
+Existing SHA-256 password hashes keep verifying and are upgraded to
+SHA-512 on the next successful sign-in. The MCP changes below ship on the separate
+`postern-mcp-v*` track, not with this tag.
+
+### Added
+
+- **Runtime agent identities (#846, #801).** `POST`, `GET` and `DELETE /api/admin/identities`
+  mint, list and revoke agent credentials without a redeploy. The token is returned once and
+  only its hash is stored. A revoke takes effect on the next request, and every mint, list and
+  revoke is written to the new `audit_log` (`GET /api/admin/audit`). The Python client gains
+  `mint_identity`, `list_identities`, `revoke_identity` and `list_audit`.
+- **Delegation grants (#852, #740 S1).** `POST`, `GET` and `DELETE /api/admin/delegations` record
+  which agent may act on which address, with the powers `read`, `organize`, `quote` and
+  `send_as` (every grant includes `read`). The grantee must be a live identity. Grants are
+  stored and audited; enforcement arrives in a later release. Python client:
+  `grant_delegation`, `list_delegations`, `revoke_delegation`.
+- **Send results report the From used (#847, #804).** Send, reply, forward, draft send and the
+  `/send` alias return `from`, the address actually used (a bound identity overrides the
+  caller's).
+- **`postern uninstall` (#849, #831).** Removes a self-hosted install. It never disables Email
+  Routing (that would delete the zone's MX, SPF and DKIM); it disables only a catch-all that
+  points at its own Worker. Mail is kept by default; `--delete-data --confirm-delete <domain>`
+  exports D1 to a mode-600 file first. Every printed line and error is redacted.
+- **`postern routing` (#848, #802).** A read-only report naming every Email Routing address
+  that does not reach the Worker, with a weekly workflow when `ROUTING_REPORT_DOMAIN` is set.
+- **MCP `mailbox_recipients_recent` (#845, #805)**, on the `postern-mcp-v*` track.
+- **Identity design (#861, #854).** `docs/IDENTITY.md`: one principal layer for humans and
+  agents. Design only; the rulings are recorded on #854.
+
+### Changed
+
+- **Native credentials hash with PBKDF2-SHA512 (#851, #828)** at the 100,000-iteration Workers
+  cap; legacy SHA-256 rows verify and are re-hashed on the next successful sign-in.
+- **Installer re-run keeps the recorded hostname and admin (#862, #855)** unless they are
+  passed explicitly.
+- **Live docs no longer describe retired infrastructure (#850, #806).**
+
+### Fixed
+
+- **Write scope binds to the bound identity (#857).** An identity's write scope (flags, move,
+  seen) now binds to its bound address whatever its other caps; previously a token without
+  `read` could organize outside its own address. Applies to runtime agent identities and
+  `POSTERN_SEND_IDENTITIES` entries alike. Static tokens and webmail sessions are unchanged.
+- **The posternonline.com apex redirect keeps the demo host for every request path (#859).**
+- **The installer's routing checks name the permission they need (#848):** Zone Settings, not
+  Email Routing Rules.
 
 ## v1.9.0
 

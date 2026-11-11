@@ -184,6 +184,15 @@ interface Env {
    */
   POSTERN_API_TOKEN_ORGANIZE?: string;
   /**
+   * The ADMIN-ONLY slot (#904). A comma SET like the others (#154). A match resolves to
+   * the `admin` scope, which satisfies the admin routes and nothing else: it cannot read,
+   * send, delete or organize mail. Its audit rows name the `svc_admin` service principal,
+   * so automation (the post-deploy principal backfill, #901) is told apart from the
+   * operator. Rotate it on its own with `wrangler secret put POSTERN_API_TOKEN_ADMIN`; no
+   * deploy is needed. Leave unset to keep admin on `both` only.
+   */
+  POSTERN_API_TOKEN_ADMIN?: string;
+  /**
    * Optional per-identity SEND registry (#28). A JSON object mapping the sha256 HEX
    * of a send token -> its bound sender identity { from, displayName? }. MANY tokens,
    * each the SAME send scope but a DISTINCT, authoritative From, so crew + released
@@ -248,6 +257,16 @@ interface Env {
    * secret (holds no credential).
    */
   WEBMAIL_AUTH_BACKEND?: string;
+  /**
+   * How far an AGENT credential reads (#740 S2, Conrad's Q1 ruling). "estate" keeps the
+   * #718 estate-wide agent read; "granted" narrows an agent to its own address (plus its
+   * role queues) and the addresses it holds an active delegation grant on. UNSET means
+   * "estate", so an upgraded deploy keeps today's behaviour; the installer writes
+   * "granted" for a new install. Any other value (a typo, another case, an empty string)
+   * fails CLOSED to "granted" and logs a config error. Webmail sessions and static tokens
+   * are unaffected. Config VAR, not a secret.
+   */
+  AGENT_READ_SCOPE?: string;
   /**
    * First-run setup secret (contract 1.10.7, #791). With WEBMAIL_AUTH_BACKEND explicitly
    * "native" and NO smtp_credentials row, POST /api/setup with this value creates the

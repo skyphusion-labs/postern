@@ -1,3 +1,4 @@
+import { sqliteBatch } from "./test-support";
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -49,7 +50,7 @@ function realEnv(overrides: Record<string, unknown> = {}) {
   }
 
   const env = {
-    DB: { prepare },
+    DB: { prepare, batch: sqliteBatch(db) },
     ALLOWED_FROM_DOMAIN: "skyphusion.org",
     WEBMAIL_AUTH_BACKEND: "native",
     ...overrides,
@@ -194,22 +195,24 @@ describe("#409 POST /api/session lockout (durable, ported from relay/throttle.go
     expect(failureRows(raw)[0].failures).toBe(1);
   });
 
-  it("adds NO throttle write to a clean successful login (recording proxy over every run())", async () => {
-    // The dispatch constraint: counting failures must not cost a D1 write on every
-    // success. Assert on what was PASSED to the store, not on final state -- a
-    // point-in-time row read cannot see a write-then-delete.
+  it("reserves the attempt BEFORE the verify, and a clean success leaves nothing counted (recording proxy)", async () => {
+    // The counter is written first (an atomic reservation), so concurrent attempts are
+    // each counted; see throttle-atomic.test.ts. Asserted on what was PASSED to the
+    // store, because the order is the claim.
     const { env, raw, seenSql } = realEnv();
     await seedCredential(raw);
     const before = seenSql.length;
     const res = await mint(env);
     expect(res.status).toBe(200);
     const statements = seenSql.slice(before);
+    const firstCounter = statements.findIndex((sql) => /webmail_auth_failures/i.test(sql));
+    const sessionWrite = statements.findIndex((sql) => /INSERT INTO webmail_sessions/i.test(sql));
     // CONTROL: the proxy really is recording (the mint wrote its session row).
-    expect(statements.some((sql) => /INSERT INTO webmail_sessions/i.test(sql))).toBe(true);
-    // The claim: not one statement touched the counter table except the gate READ.
-    const touched = statements.filter((sql) => /webmail_auth_failures/i.test(sql));
-    expect(touched.length).toBe(1);
-    expect(touched[0]).toMatch(/^SELECT/i);
+    expect(sessionWrite).toBeGreaterThanOrEqual(0);
+    expect(statements[firstCounter]).toMatch(/^INSERT INTO webmail_auth_failures/i);
+    expect(firstCounter).toBeLessThan(sessionWrite);
+    // The success cleared the account row, so nothing stays counted.
+    expect(failureRows(raw).filter((r) => r.scope_key === "a:" + USER)).toEqual([]);
   });
 
   it("expires the lockout: once locked_until has passed, the door reopens", async () => {
@@ -297,6 +300,7 @@ describe("#409 POST /api/session lockout (durable, ported from relay/throttle.go
           if (/webmail_auth_failures/i.test(sql)) throw new Error("D1_ERROR: no such table");
           return (env as unknown as { DB: { prepare: (s: string) => unknown } }).DB.prepare(sql);
         },
+        batch: (s: unknown[]) => (env as unknown as { DB: { batch: (s: unknown[]) => unknown } }).DB.batch(s),
       },
     } as unknown as Env;
     const res = await mint(brokenEnv);

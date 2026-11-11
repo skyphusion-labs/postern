@@ -473,7 +473,9 @@ describe("lead rulings: placeholder defaults, prefix, status, AUTH seam", () => 
     const c = setup();
     await install(c.deps, c.opts);
     const calls = c.m.requests.filter((r) => r.path.startsWith("https://") && r.path.includes("/api/admin/"));
-    assert.deepEqual(calls.map((r) => r.path), ["https://mail.acme-mail.test/api/admin/users"]);
+    // #901 adds the principals backfill AFTER the admin; still no smtp-credentials call.
+    assert.deepEqual(calls.map((r) => r.path), ["https://mail.acme-mail.test/api/admin/users", "https://mail.acme-mail.test/api/admin/principals/backfill"]);
+    assert.ok(!calls.some((r) => /smtp-credentials/.test(r.path)));
     const body = JSON.parse(calls[0].body);
     assert.deepEqual(Object.keys(body).sort(), ["from", "password", "username"]);
   });
@@ -562,6 +564,35 @@ describe("D-AUTH-3: unset WEBMAIL_AUTH_BACKEND means OFF", () => {
   });
 });
 
+describe("#740 S2: unset AGENT_READ_SCOPE means estate; a new install writes granted", () => {
+  test("a new install writes AGENT_READ_SCOPE=granted explicitly", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    assert.equal(c.m.scripts.postern.vars.AGENT_READ_SCOPE, "granted");
+  });
+
+  test("adopt and upgrade over a Worker with no AGENT_READ_SCOPE leave it absent (estate)", async () => {
+    const c = setup();
+    c.m.scripts.postern = { versions: ["v0"], secrets: new Map([["POSTERN_API_TOKEN", "old"]]), live: "v0", vars: { ALLOWED_FROM_DOMAIN: "acme-mail.test" } };
+    c.m.d1.push({ uuid: "d1-old", name: "postern" });
+    c.m.migrations["d1-old"] = [];
+    c.opts.adopt = true;
+    await install(c.deps, c.opts).catch(() => {}); // the admin step may stop; vars are what this asserts
+    assert.ok(!("AGENT_READ_SCOPE" in c.m.scripts.postern.vars), "an adopted install narrowed agent reads");
+    writeFileSync(join(c.repoRoot, "inbound", "src", "index.ts"), "export default { v: 9 };\n");
+    await install(c.deps, c.opts, "upgrade").catch(() => {});
+    assert.ok(!("AGENT_READ_SCOPE" in c.m.scripts.postern.vars), "upgrade added AGENT_READ_SCOPE");
+  });
+
+  test("an operator's explicit estate is kept across adopt", async () => {
+    const c = setup();
+    c.m.scripts.postern = { versions: ["v0"], secrets: new Map([["POSTERN_API_TOKEN", "old"]]), live: "v0", vars: { AGENT_READ_SCOPE: "estate" } };
+    c.opts.adopt = true;
+    await install(c.deps, c.opts).catch(() => {});
+    assert.equal(c.m.scripts.postern.vars.AGENT_READ_SCOPE, "estate");
+  });
+});
+
 describe("rollback --restore-db and the first admin", () => {
   test("an admin created after the bookmark is re-created by the next run after a restore", async () => {
     const c = setup();
@@ -595,5 +626,106 @@ describe("upgrade record survives a failed upgrade", () => {
     const st = JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.json"), "utf8"));
     assert.ok(st.history.at(-1)?.d1Bookmark, "a failed upgrade lost its D1 bookmark");
     assert.equal(st.history.at(-1).complete, false);
+  });
+});
+
+describe("re-run keeps the recorded hostname and admin (#855)", () => {
+  const custom = ["--hostname", "post.acme-mail.test", "--admin", "boss@acme-mail.test"];
+  const rerun = (c, args = []) => parseArgs(["install", "--domain", "acme-mail.test", "--state-dir", c.opts.stateDir, ...args]);
+  const routes = (c) => JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.wrangler.json"), "utf8")).routes.map((r) => r.pattern);
+  const state = (c) => JSON.parse(readFileSync(join(c.opts.stateDir, "postern.acme-mail.test.json"), "utf8"));
+
+  test("a re-run with no --hostname / --admin keeps the recorded ones, and never touches mail.<domain>", async () => {
+    const c = setup({ args: custom });
+    await install(c.deps, c.opts);
+    c.out.length = 0;
+    const o = rerun(c);
+    await install(c.deps, o);
+    assert.equal(o.hostname, "post.acme-mail.test");
+    assert.equal(o.admin, "boss@acme-mail.test");
+    assert.deepEqual(routes(c), ["post.acme-mail.test"]);
+    assert.equal(state(c).hostname, "post.acme-mail.test");
+    assert.ok(!c.m.domains.some((d) => d.hostname === "mail.acme-mail.test"), "the re-run attached mail.<domain>");
+    assert.ok(!c.m.dns.some((r) => r.name === "mail.acme-mail.test"), "the re-run created DNS for mail.<domain>");
+    assert.match(c.out.join("\n"), /-> Worker postern on https:\/\/post\.acme-mail\.test/);
+  });
+
+  test("a resume before the admin exists keeps the admin login the first run chose", async () => {
+    const c = setup({ args: custom });
+    // The live failure: this machine could not resolve the new hostname yet, so the
+    // first run stopped before it created the admin.
+    const realHttp = c.deps.http;
+    c.deps.http = async () => { const e = new Error("getaddrinfo ENOTFOUND"); e.code = "ENOTFOUND"; throw e; };
+    await assert.rejects(install(c.deps, c.opts), /cannot resolve post\.acme-mail\.test/);
+    assert.equal(state(c).admin, undefined);
+    c.deps.http = realHttp;
+    const o = rerun(c);
+    await install(c.deps, o);
+    assert.equal(o.admin, "boss@acme-mail.test");
+    assert.deepEqual(Object.keys(c.m.admins), ["boss@acme-mail.test"]);
+  });
+
+  test("an explicit, different --hostname is honoured and said out loud", async () => {
+    const c = setup({ args: custom });
+    await install(c.deps, c.opts);
+    c.out.length = 0;
+    const o = rerun(c, ["--hostname", "mx.acme-mail.test"]);
+    await install(c.deps, o);
+    assert.equal(o.hostname, "mx.acme-mail.test");
+    assert.deepEqual(routes(c), ["mx.acme-mail.test"]);
+    assert.match(c.out.join("\n"), /note: --hostname mx\.acme-mail\.test replaces the recorded post\.acme-mail\.test, because it was passed\./);
+  });
+
+  test("a first install still defaults to mail.<domain> and admin@<domain>", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    assert.equal(c.opts.hostname, "mail.acme-mail.test");
+    assert.equal(state(c).hostname, "mail.acme-mail.test");
+    assert.equal(state(c).admin, "admin@acme-mail.test");
+  });
+});
+
+describe("principals backfill after a deploy (#901)", () => {
+  test("install converges the principal tables once, after the first admin", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    assert.equal(c.m.backfills, 1);
+    const posts = c.m.requests.filter((r) => r.method === "POST" && /\/api\/admin\//.test(r.path)).map((r) => r.path.replace(/^https:\/\/[^/]+/, ""));
+    assert.deepEqual(posts, ["/api/admin/users", "/api/admin/principals/backfill"], "the backfill must follow the admin it copies");
+    assert.match(c.out.join("\n"), /~ updated   principal tables \(services \+3, agents \+0 ~0, humans \+1 ~0, orphans revoked 0\)/);
+  });
+
+  test("a re-run with nothing to deploy does not call it (no write of any kind)", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    c.m.requests.length = 0;
+    await install(c.deps, c.opts);
+    assert.equal(c.m.backfills, 1);
+    assert.ok(!c.m.requests.some((r) => /principals\/backfill/.test(r.path)));
+  });
+
+  test("a 404 (an edge still on the old version) is retried; a 500 fails the run by status", async () => {
+    const c = setup();
+    let n404 = 1;
+    const realHttp = c.deps.http;
+    c.deps.http = async (url, init) => {
+      if (/principals\/backfill/.test(url) && n404-- > 0) return new Response(JSON.stringify({ ok: false }), { status: 404 });
+      return realHttp(url, init);
+    };
+    await install(c.deps, c.opts);
+    assert.equal(c.m.backfills, 1);
+    const d = setup();
+    d.m.backfillStatus = 500;
+    await assert.rejects(install(d.deps, d.opts), /principals\/backfill answered HTTP 500 E_INTERNAL/);
+  });
+
+  test("an address conflict is reported and does not fail the run; dry run never calls it", async () => {
+    const c = setup();
+    c.m.backfillConflicts = [{ address: "dup@acme-mail.test", principalId: "prn_a", ownerId: "idn_b" }];
+    await install(c.deps, c.opts);
+    assert.match(c.out.join("\n"), /note: address dup@acme-mail\.test is claimed by principal prn_a but already owned by idn_b/);
+    const d = setup({ args: ["--dry-run"] });
+    await install(d.deps, d.opts);
+    assert.equal(d.m.backfills, undefined);
   });
 });

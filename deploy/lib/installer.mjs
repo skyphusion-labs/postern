@@ -15,7 +15,7 @@
 // replaces the token and every secret this installer generated or stored.
 
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CfError } from "./cf.mjs";
 import { renderConfig } from "./config.mjs";
@@ -49,7 +49,92 @@ export class Refused extends Error {
 
 function statePaths(opts) {
   const base = join(opts.stateDir, `${opts.name}.${opts.domain}`);
-  return { state: `${base}.json`, creds: `${base}.credentials.env`, config: `${base}.wrangler.json`, build: `${base}.build` };
+  return {
+    state: `${base}.json`, creds: `${base}.credentials.env`, config: `${base}.wrangler.json`, build: `${base}.build`,
+    lock: `${base}.lock`, secretsPrefix: `.${opts.name}.${opts.domain}.secrets-`,
+  };
+}
+
+// ONE RUN AT A TIME per install. Two runs on one state directory could each generate a
+// mailbox token and leave the credentials file holding one the Worker does not. The lock
+// holds the PID. A lock whose process is gone (a crash, Ctrl-C, a kill) is taken over, so
+// an interrupted run never blocks the next one.
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+}
+// The PID in a lock file, read through one descriptor; NaN when it is unreadable or empty.
+function lockPid(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    return parseInt(readFileSync(fd, "utf8"), 10);
+  } catch {
+    return NaN;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+export function takeLock(opts, log = () => {}) {
+  ensureStateDir(opts);
+  const p = statePaths(opts).lock;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(p, "wx", 0o600);
+      writeFileSync(fd, `${process.pid}\n`);
+      closeSync(fd);
+      return () => rmSync(p, { force: true });
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+    const pid = lockPid(p);
+    if (pidAlive(pid)) {
+      throw new Refused([`another postern run (PID ${pid}) is working on this install (lock ${p}). Wait for it to finish. If no other run is going, delete that file and re-run.`]);
+    }
+    // Take over a stale lock without racing another run doing the same: move it to a name
+    // only this run knows, then check the moved file is the stale lock that was judged. If a
+    // live run replaced it in between, put that lock back (link never overwrites) and stop.
+    const moved = `${p}.stale-${process.pid}-${randomBytes(6).toString("hex")}`;
+    try {
+      renameSync(p, moved);
+    } catch (e) {
+      if (e.code === "ENOENT") continue; // another run already moved it; try to create again
+      throw e;
+    }
+    const movedPid = lockPid(moved);
+    if (movedPid !== pid && !(Number.isNaN(movedPid) && Number.isNaN(pid)) && pidAlive(movedPid)) {
+      try { linkSync(moved, p); } catch { /* a third run holds p now; it keeps it */ }
+      rmSync(moved, { force: true });
+      throw new Refused([`another postern run (PID ${movedPid}) took the lock ${p} a moment ago. Wait for it to finish, then re-run.`]);
+    }
+    rmSync(moved, { force: true });
+    log(`  note: removed a stale lock from an earlier run that did not finish (PID ${Number.isNaN(pid) ? "unknown" : pid})`);
+  }
+  throw new Refused([`could not take the lock ${p}. Delete it if no other run is going, and re-run.`]);
+}
+
+// An interrupted deploy (Ctrl-C, a kill) skips the cleanup of its temporary secrets file.
+// Remove this install's leftovers before writing a new one; the lock means no other run of
+// this install is using them. Files from an older installer (unscoped .secrets-*.json) are
+// removed only when over an hour old, since a deploy never takes that long.
+function sweepSecretsFiles(ctx) {
+  const { opts, paths } = ctx;
+  let names = [];
+  try { names = readdirSync(opts.stateDir); } catch { return; }
+  const now = Date.now();
+  for (const n of names) {
+    const mine = n.startsWith(paths.secretsPrefix) && n.endsWith(".json");
+    const legacy = /^\.secrets-[0-9a-f]{24}\.json$/.test(n);
+    if (!mine && !legacy) continue;
+    const f = join(opts.stateDir, n);
+    if (legacy) {
+      let age = 0;
+      try { age = now - statSync(f).mtimeMs; } catch { continue; }
+      if (age < 3600e3) continue;
+    }
+    rmSync(f, { force: true });
+    ctx.log(`  note: removed ${n}, a temporary secrets file an interrupted run left behind`);
+  }
 }
 
 function loadState(opts) {
@@ -314,14 +399,22 @@ async function preflight(ctx) {
 // sign-in on explicitly (that is what the first admin is for). An existing Worker
 // keeps exactly what it has: upgrade never adds the var, and --adopt carries the
 // live value over (or its absence). The decision is stored once, in state.vars.
+//
+// #740 S2: AGENT_READ_SCOPE follows the same pattern in the opposite direction. UNSET
+// means "estate" (the #718 agent read), so an upgrade keeps it; a NEW install writes
+// "granted" explicitly (Conrad's Q1 ruling: estate-wide agent read is off on a new install).
+const NEW_INSTALL_VARS = { WEBMAIL_AUTH_BACKEND: "native", AGENT_READ_SCOPE: "granted" };
+
 async function decideAuthBackend(ctx, pf) {
   const { state, opts } = ctx;
   if (state.authBackendDecided) return;
-  if (!pf.script) {
-    if (state.vars.WEBMAIL_AUTH_BACKEND === undefined) state.vars.WEBMAIL_AUTH_BACKEND = "native";
-  } else if (state.vars.WEBMAIL_AUTH_BACKEND === undefined && !(opts.vars || {}).WEBMAIL_AUTH_BACKEND) {
-    const live = (pf.script.result?.bindings || []).find((b) => b.name === "WEBMAIL_AUTH_BACKEND" && b.type === "plain_text");
-    if (live) state.vars.WEBMAIL_AUTH_BACKEND = live.text;
+  for (const [name, fresh] of Object.entries(NEW_INSTALL_VARS)) {
+    if (!pf.script) {
+      if (state.vars[name] === undefined) state.vars[name] = fresh;
+    } else if (state.vars[name] === undefined && !(opts.vars || {})[name]) {
+      const live = (pf.script.result?.bindings || []).find((b) => b.name === name && b.type === "plain_text");
+      if (live) state.vars[name] = live.text;
+    }
   }
   state.authBackendDecided = true;
   saveState(opts, state);
@@ -485,7 +578,8 @@ async function ensureWorker(ctx, pf) {
     }
     // Unpredictable name, exclusive create: never write the token through a
     // file or symlink that was already sitting at that path.
-    secretsFile = join(opts.stateDir, `.secrets-${randomBytes(12).toString("hex")}.json`);
+    sweepSecretsFiles(ctx);
+    secretsFile = join(opts.stateDir, `${ctx.paths.secretsPrefix}${randomBytes(12).toString("hex")}.json`);
     writeFileSync(secretsFile, JSON.stringify({ POSTERN_API_TOKEN: creds.POSTERN_API_TOKEN }), { mode: 0o600, flag: "wx" });
     args.push("--secrets-file", secretsFile);
   }
@@ -504,14 +598,17 @@ async function ensureWorker(ctx, pf) {
   const wasOwned = state.owned.worker;
   state.owned.worker = wasOwned || (pf.script ? "adopted" : "created");
   state.deploy = { hash, versionId: id };
+  ctx.deployedThisRun = true;
   saveState(opts, state);
   if (needToken) rep.created(`Worker secret POSTERN_API_TOKEN (value in ${paths.creds})`);
   (live.length ? rep.updated : rep.created)(`Worker ${opts.name} version ${id} on https://${opts.hostname}`);
 }
 
+// Returns the records this call created, each with the id Cloudflare gave it.
 async function ensureDnsRecords(ctx, pf, wants, label) {
   const { cf, opts, rep } = ctx;
   const records = await cf.list("read DNS records", P.dns, `/zones/${pf.zone.id}/dns_records`);
+  const created = [];
   for (const w of wants) {
     const s = dnsSatisfied(records, w);
     const what = `DNS ${w.type} ${w.name} (${label})`;
@@ -520,10 +617,12 @@ async function ensureDnsRecords(ctx, pf, wants, label) {
     if (opts.dryRun) { rep.would(`create ${what}`); continue; }
     const body = { type: w.type, name: w.name, content: w.content, ttl: w.ttl || 1, comment: "postern installer" };
     if (w.priority !== undefined) body.priority = w.priority;
-    await cf.call(`create ${what}`, P.dns, "POST", `/zones/${pf.zone.id}/dns_records`, body);
+    const res = await cf.call(`create ${what}`, P.dns, "POST", `/zones/${pf.zone.id}/dns_records`, body);
     records.push(body);
+    created.push({ ...body, id: res?.result?.id });
     rep.created(what);
   }
+  return created;
 }
 
 async function ensureSending(ctx, pf) {
@@ -584,8 +683,15 @@ async function ensureDmarc(ctx, pf) {
   const records = await cf.list("read DNS records", P.dns, `/zones/${pf.zone.id}/dns_records?type=TXT`);
   const have = records.find((r) => r.type === "TXT" && norm(r.name) === norm(name) && /^v=DMARC1/i.test(unquote(r.content)));
   if (have) return rep.kept(`DNS TXT ${name} (your existing DMARC policy is left as it is)`);
-  await ensureDnsRecords(ctx, pf, [{ type: "TXT", name, content: `v=DMARC1; p=${opts.dmarcPolicy}` }], "DMARC");
+  const content = `v=DMARC1; p=${opts.dmarcPolicy}`;
+  const made = await ensureDnsRecords(ctx, pf, [{ type: "TXT", name, content }], "DMARC");
   ctx.dmarcWritten = !opts.dryRun;
+  // Recorded so that uninstall removes it (#856). Only a record this run CREATED is recorded;
+  // a DMARC the domain already had is never ours.
+  if (made[0]?.id) {
+    ctx.state.owned.dmarc = { id: made[0].id, content };
+    saveState(opts, ctx.state);
+  }
   if (opts.dmarcPolicy !== "reject") {
     ctx.log(`  note: Cloudflare Email Sending recommends p=reject. If only Postern sends as ${opts.domain}, use --dmarc reject (a new install only; an existing DMARC is never changed).`);
   }
@@ -660,14 +766,71 @@ async function ensureFirstAdmin(ctx, pf) {
   if (ctx.upgradeEntry?.d1Bookmark) ctx.upgradeEntry.adminCreatedAfterBookmark = true;
   saveState(opts, state);
   rep.created(`first admin ${opts.admin} (password in ${ctx.paths.creds})`);
+  ctx.adminCreatedThisRun = true;
+}
+
+// PRINCIPALS (#901, #854 M1): converge the principal tables after a deploy. The backfill
+// copies agent identities, human users and the static slots into them; it is idempotent,
+// and it cannot be migration SQL (the #112 gate refuses INSERT ... SELECT). It runs only
+// when this run deployed a Worker version or created the first admin, so a re-run with
+// nothing to do still makes no write. Right after an upgrade an edge can still answer with
+// the previous version, which has no such route, so a 404 is retried like /health.
+async function ensurePrincipals(ctx) {
+  const { opts, rep } = ctx;
+  if (opts.dryRun || !(ctx.deployedThisRun || ctx.adminCreatedThisRun)) return;
+  const creds = loadCreds(opts);
+  if (!creds.POSTERN_API_TOKEN) throw new Error(`no mailbox token in ${ctx.paths.creds}; cannot converge the principal tables`);
+  const url = `https://${opts.hostname}/api/admin/principals/backfill`;
+  let res;
+  let body = {};
+  for (let i = 0; i < ctx.healthTries; i++) {
+    res = await ctx.http(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${creds.POSTERN_API_TOKEN}`, "content-type": "application/json" },
+      body: "{}",
+    });
+    try { body = await res.json(); } catch { body = {}; }
+    if (res.status !== 404) break;
+    await ctx.sleep(ctx.healthDelayMs);
+  }
+  if (res.status !== 200) {
+    throw new Error(`converging the principal tables failed: POST /api/admin/principals/backfill answered HTTP ${res.status}${body.error ? ` ${body.error}` : ""}. The Worker is deployed; re-run the same command to finish.`);
+  }
+  const a = body.agents || {};
+  const h = body.humans || {};
+  const changed = (body.services?.added || 0) + (a.added || 0) + (a.synced || 0) + (h.added || 0) + (h.synced || 0) + (h.orphansRevoked || 0);
+  const conflicts = Array.isArray(body.addressConflicts) ? body.addressConflicts : [];
+  const what = `principal tables (services +${body.services?.added || 0}, agents +${a.added || 0} ~${a.synced || 0}, humans +${h.added || 0} ~${h.synced || 0}, orphans revoked ${h.orphansRevoked || 0})`;
+  (changed ? rep.updated : rep.unchanged)(what);
+  for (const c of conflicts) {
+    ctx.log(`  note: address ${c.address} is claimed by principal ${c.principalId} but already owned by ${c.ownerId}; it was left with its owner`);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // entry points
 
+// #855. A re-run keeps the hostname and admin this install recorded, unless the operator
+// passes --hostname / --admin. Measured 2026-11-10: a re-run without --hostname took the
+// default mail.<domain>, and the deploy moved the live custom domain there. The admin is
+// recorded once it exists (state.admin); before that, the credentials file holds the login
+// the run is creating. Returns the note lines to print.
+export function settleRecorded(opts, state, creds) {
+  const recorded = { hostname: state.hostname, admin: state.admin || creds.POSTERN_ADMIN_USERNAME };
+  const notes = [];
+  for (const [k, flag] of [["hostname", "--hostname"], ["admin", "--admin"]]) {
+    const was = recorded[k];
+    if (!was) continue;
+    if (!opts.given?.[k]) opts[k] = was;
+    else if (opts[k] !== was) notes.push(`  note: ${flag} ${opts[k]} replaces the recorded ${was}, because it was passed.`);
+  }
+  return notes;
+}
+
 function makeCtx(deps, opts, mode) {
   const paths = statePaths(opts);
   const state = loadState(opts);
+  const settled = settleRecorded(opts, state, loadCreds(opts));
   // Every secret this run knows: the Cloudflare token, each one it generates, and each
   // SECRET value in the credentials file (read at print time, since a run writes it
   // midway). The file also holds the API URL and the admin login, which are not secret.
@@ -677,6 +840,7 @@ function makeCtx(deps, opts, mode) {
   const redact = (text) => redactText(text, [deps.token, ...generated, ...storedSecrets()]);
   const log = (s) => deps.log(redact(s));
   const rep = reporter(log);
+  for (const s of settled) log(s);
   const ctx = {
     ...deps,
     log,
@@ -709,12 +873,17 @@ function writeConfig(ctx) {
 // Every error leaves through here, redacted: a wrangler failure's tail() can carry
 // whatever wrangler printed, and a refusal can quote API text.
 async function guarded(ctx, fn) {
+  // A dry run (and status) writes nothing, so it takes no lock.
+  let release = null;
   try {
+    if (!ctx.opts.dryRun) release = takeLock(ctx.opts, ctx.log);
     return await fn();
   } catch (e) {
     if (e && typeof e.message === "string") e.message = ctx.redact(e.message);
     if (e && Array.isArray(e.reasons)) e.reasons = e.reasons.map(ctx.redact);
     throw e;
+  } finally {
+    if (release) release();
   }
 }
 
@@ -758,6 +927,7 @@ async function installRun(ctx, opts, mode) {
   await ensureRouting(ctx, pf);
   if (!opts.dryRun && ctx.state.deploy) await ensureFirstAdmin(ctx, pf);
   else if (opts.dryRun) ctx.rep.would(`create the first admin ${opts.admin}`);
+  await ensurePrincipals(ctx);
 
   if (ctx.upgradeEntry) {
     Object.assign(ctx.upgradeEntry, { toVersionId: ctx.state.deploy.versionId, complete: true });
@@ -917,6 +1087,27 @@ async function uninstallRun(ctx, opts) {
       rep.removed(`Email Sending for ${opts.domain}`);
     }
   } else rep.kept(`Email Sending for ${opts.domain}: this installer did not record enabling it, so it is left as it is`);
+
+  // 3b. The DMARC record, only if this installer created it (#856), and only while it still
+  //     holds the value the installer wrote. A record the operator has edited is theirs.
+  if (owned.dmarc) {
+    const name = `_dmarc.${opts.domain}`;
+    const rec = (await cf.call("read the DMARC record", P.dns, "GET", `/zones/${z}/dns_records/${owned.dmarc.id}`, undefined, { allow404: true }))?.result;
+    const forget = () => { if (!dry) { delete owned.dmarc; saveState(opts, state); } };
+    if (!rec) {
+      rep.unchanged(`DNS TXT ${name} (already gone)`);
+      forget();
+    } else if (unquote(rec.content) !== owned.dmarc.content) {
+      rep.kept(`DNS TXT ${name}: it was changed after install, so it is yours now and is left as it is`);
+      forget();
+    } else if (dry) {
+      rep.would(`delete DNS TXT ${name} (the DMARC record this installer created)`);
+    } else {
+      await cf.call("delete the DMARC record", P.dns, "DELETE", `/zones/${z}/dns_records/${owned.dmarc.id}`, undefined, { allow404: true });
+      forget();
+      rep.removed(`DNS TXT ${name} (the DMARC record this installer created)`);
+    }
+  }
 
   // 4. Data: kept unless asked, exported before it is deleted.
   if (!opts.deleteData) {

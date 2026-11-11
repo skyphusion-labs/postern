@@ -31,10 +31,15 @@ name: deploy
 # to push-to-main (never a fork PR) and runs on the fork-safe hosted runner
 # (matches ci.yml and the GitHub-hosted policy for public repos).
 #
-# Required repo secrets (Settings -> Secrets and variables -> Actions):
+# Required ENVIRONMENT secrets (Settings -> Environments -> production):
 #   CLOUDFLARE_API_TOKEN   -- CF API token, Workers Scripts:Edit on the account
 #                             (plus D1 + Vectorize + R2 edit for the inbound store).
 #   CLOUDFLARE_ACCOUNT_ID  -- the Cloudflare account ID.
+#   POSTERN_DEPLOY_ADMIN_TOKEN -- the bearer for the post-deploy principals backfill
+#                             (#901): the admin-only credential slot from #904, never the
+#                             operator POSTERN_API_TOKEN. A tag deploy needs #904 deployed
+#                             and this secret set first; without it the release fails at
+#                             that step, by name.
 #
 # Optional operator override:
 #   POSTERN_INBOUND_WRANGLER -- the full real inbound wrangler config (JSON) for
@@ -124,12 +129,17 @@ jobs:
     name: Deploy workers to Cloudflare
     needs: preflight
     runs-on: ubuntu-latest
+    # The Cloudflare deploy credentials (CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID,
+    # POSTERN_INBOUND_WRANGLER) live in the GitHub Environment `production`, whose
+    # deployment policy admits only v* tags and main. A job outside that environment
+    # cannot read them. The POSTERN_SMOKE_* secrets stay repository secrets.
+    environment: production
     timeout-minutes: 20
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -154,7 +164,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -269,6 +279,22 @@ jobs:
           fi
           npx wrangler deployments status --json -c "$CFG" > deployment.json
           node ../.github/scripts/verify-worker-deployment.mjs deployment.json "$EXPECTED_VERSION_ID"
+
+      # Converge the principal tables (#901, #854 M1). The backfill copies agent identities,
+      # human users and the static slots into the principal tables; it cannot be migration
+      # SQL because the #112 gate refuses INSERT ... SELECT, and docs/IDENTITY.md section 6
+      # says it runs on every deploy. Idempotent: a run with nothing to do changes nothing.
+      # It waits until /health reports THIS tag, because the route exists only in the new
+      # code. A missing secret, a non-200 or a malformed report fails the release by name.
+      # POSTERN_DEPLOY_ADMIN_TOKEN is a `production` ENVIRONMENT secret holding the #904
+      # admin-only slot, not the operator token. Nothing prints the token or an address.
+      - name: Converge the principal tables (principals backfill)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          POSTERN_BASE_URL: ${{ secrets.POSTERN_SMOKE_BASE_URL }}
+          POSTERN_DEPLOY_ADMIN_TOKEN: ${{ secrets.POSTERN_DEPLOY_ADMIN_TOKEN }}
+          POSTERN_EXPECT_VERSION: ${{ github.ref_name }}
+        run: node .github/scripts/principals-backfill.mjs
 
       # Second, INDEPENDENT probe: behavior, not metadata. Runs only when the
       # operator has the smoke secrets configured (the same ones smoke-staging.yml

@@ -32,22 +32,10 @@ interface SessionRow {
   revoked: number;
   username: string | null;
 }
-// The #409 mint throttle counters. Behavioural coverage of the throttle itself lives
-// in session-hardening.test.ts against a REAL sqlite schema; this fake only has to
-// keep the endpoint tests here honest (an unbacked table would make every mint
-// fail-closed with a 503, which is exactly what happened before it was added).
-interface FailureRow {
-  scope_key: string;
-  failures: number;
-  window_start_at: string;
-  last_failure_at: string;
-  locked_until: string | null;
-}
 
 function makeEnv(creds: CredRow[] = [], overrides: Record<string, unknown> = {}) {
   const credRows: CredRow[] = creds.map((c) => ({ ...c }));
   const sessions: SessionRow[] = [];
-  const failures: FailureRow[] = [];
   function stmt(sql: string) {
     let bound: unknown[] = [];
     return {
@@ -71,36 +59,9 @@ function makeEnv(creds: CredRow[] = [], overrides: Record<string, unknown> = {})
         return null as T | null;
       },
       async all<T>() {
-        if (/FROM webmail_auth_failures WHERE scope_key IN/i.test(sql)) {
-          const keys = bound.map(String);
-          return { results: failures.filter((r) => keys.includes(r.scope_key)) as unknown as T[] };
-        }
         return { results: [] as T[] };
       },
       async run() {
-        if (/INSERT INTO webmail_auth_failures/i.test(sql)) {
-          const [scope_key, count, window_start_at, last_failure_at, locked_until] =
-            bound as [string, number, string, string, string | null];
-          const existing = failures.find((r) => r.scope_key === scope_key);
-          if (existing) {
-            existing.failures = count;
-            existing.window_start_at = window_start_at;
-            existing.last_failure_at = last_failure_at;
-            existing.locked_until = locked_until;
-          } else {
-            failures.push({ scope_key, failures: count, window_start_at, last_failure_at, locked_until });
-          }
-          return { meta: { changes: 1 } };
-        }
-        if (/DELETE FROM webmail_auth_failures WHERE scope_key = \?/i.test(sql)) {
-          const key = String(bound[0]);
-          const i = failures.findIndex((r) => r.scope_key === key);
-          if (i >= 0) {
-            failures.splice(i, 1);
-            return { meta: { changes: 1 } };
-          }
-          return { meta: { changes: 0 } };
-        }
         if (/INSERT INTO webmail_sessions/i.test(sql)) {
           const [id_hash, identity, display_name, caps, csrf_hash, issued_at, last_seen_at, expires_at, username] =
             bound as [string, string, string | null, string, string, string, string, string, string | null];
@@ -142,13 +103,20 @@ function makeEnv(creds: CredRow[] = [], overrides: Record<string, unknown> = {})
     };
   }
   const env = {
-    DB: { prepare: (sql: string) => stmt(sql) },
+    DB: {
+      prepare: (sql: string) => stmt(sql),
+      // #854 M2: the per-user principal insert is a batch; this fake only needs it to run.
+      batch: async (s: Array<{ run(): Promise<unknown> }>) => Promise.all(s.map((x) => x.run())),
+    },
     ALLOWED_FROM_DOMAIN: "skyphusion.org",
     WEBMAIL_AUTH_BACKEND: "native",
+    // The throttle is OFF in this endpoint suite: its SQL needs a real engine, and its
+    // behaviour is covered against real sqlite (session-hardening, throttle-atomic).
+    WEBMAIL_AUTH_THROTTLE: "off",
     ...overrides,
   } as unknown as Env;
   const ctx = { waitUntil() {} } as unknown as ExecutionContext;
-  return { env, ctx, sessions, credRows, failures };
+  return { env, ctx, sessions, credRows };
 }
 
 async function seededCred(): Promise<CredRow> {

@@ -27,8 +27,8 @@ jobs:
       run:
         working-directory: inbound
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -49,7 +49,7 @@ jobs:
       run:
         working-directory: relay
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The relay govulncheck gate below measures the toolchain it runs under, and
       # setup-go resolves that from relay/go.mod. relay/Dockerfile names a Go
       # version too, and for months it named a DIFFERENT one, so a green relay job
@@ -58,7 +58,7 @@ jobs:
       - name: scanned Go == shipped Go (#704)
         working-directory: ${{ github.workspace }}
         run: bash .github/scripts/assert-relay-go-pin.sh
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Track the relay go.mod toolchain so CI never drifts from the code.
           go-version-file: relay/go.mod
@@ -85,7 +85,7 @@ jobs:
       run:
         working-directory: imap
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # INCIDENT postern#539: this was pinned to 3.12 while imap/Dockerfile builds
       # FROM python:3.14-slim. A lone-surrogate string constant compiled fine on
       # 3.12 (686 trial tests + mypy green) and could not be IMPORTED AT ALL on
@@ -94,7 +94,7 @@ jobs:
       # every door. Pin to the SAME version family the image is built FROM, not a
       # separately-chosen one -- a green suite on a different interpreter than
       # production is not evidence of anything about production.
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
       # #529: test_projection_cross_engine.py shells out to `node` to render
@@ -103,7 +103,7 @@ jobs:
       # equality against this door's own render_rfc822 for the SAME input. Pinned
       # to the same version as the inbound job so both engines are exercised under
       # a known Node, not whatever happens to be preinstalled on the runner image.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: node available for the cross-engine projection test (#529)
@@ -144,8 +144,8 @@ jobs:
       run:
         working-directory: clients/python
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       # Zero runtime deps (pure stdlib urllib); install the package + dev extras so
@@ -171,8 +171,8 @@ jobs:
       run:
         working-directory: mcp
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - run: npm ci
@@ -191,8 +191,8 @@ jobs:
       run:
         working-directory: webmail/e2e
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -217,8 +217,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # HEAD^1 is needed by the CHANGELOG placement check below.
+          fetch-depth: 2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: tag-preflight + CHANGELOG matcher
@@ -246,8 +249,21 @@ jobs:
         run: bash .github/scripts/tests/check-dead-topology-prose.test.sh
       - name: forwarding preflight verdict logic (#611)
         run: bash .github/scripts/tests/forwarding-preflight.test.sh
+      - name: post-deploy principals backfill verdict logic (#901)
+        run: bash .github/scripts/tests/principals-backfill.test.sh
       - name: relay Go pin skew detection (#704)
         run: bash .github/scripts/tests/assert-relay-go-pin.test.sh
+      - name: CHANGELOG placement suite
+        run: bash .github/scripts/tests/changelog-placement.test.sh
+      # A change must not add lines inside an already-released "## vX.Y.Z" section.
+      # On a pull_request, HEAD is the merge commit and HEAD^1 the base tip, so this
+      # checks what the merge would add to main, including a clean merge that lands an
+      # entry in a section a release has just renamed. On a push it checks the commit.
+      - name: CHANGELOG entries are not added to released sections
+        run: |
+          set -euo pipefail
+          git rev-parse --verify --quiet HEAD^1 >/dev/null || { echo "::error::HEAD^1 is not available; CHANGELOG placement NOT measured"; exit 1; }
+          node .github/scripts/changelog-placement.mjs HEAD^1 HEAD
 
   # The self-host installer (deploy/postern.mjs) against a stubbed Cloudflare
   # account: idempotency, resume after a partial failure, and every refusal.
@@ -257,8 +273,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: installer suite

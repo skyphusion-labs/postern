@@ -4,19 +4,20 @@ name: Publish PyPI package
 # release.yml). Do not trigger on release: published: releases created by
 # softprops/action-gh-release with GITHUB_TOKEN do not fire that webhook.
 #
-# AUTH MODEL (#418 item 7): API-token publishing, one model, no dead
-# alternative. The job previously requested `id-token: write` for PyPI trusted
-# publishing but always took the token path (a `password:` wins), so the OIDC
-# permission was pure surface with no effect. Trusted publishing is the better
-# end state, but flipping to it needs a publisher configured on the PyPI project
-# first, at pypi.org, by the account owner; removing the token before that would
-# simply break the next release. Filed as a follow-up, not silently half-done.
+# AUTH MODEL: PyPI Trusted Publishing (OIDC), one model, no token. The publish
+# job runs in the GitHub Environment `production` and presents the Actions OIDC
+# token; PyPI accepts it only for the publisher configured on the postern-client
+# project: owner skyphusion-labs, repository postern, workflow publish-pypi.yml,
+# environment production. There is no `password:`, so no long-lived token is
+# read. The action also uploads PEP 740 attestations. Renaming this file, or
+# changing the environment name, breaks that trust until PyPI is updated.
 #
 # `skip-existing: true` makes a re-run safe: after a partial publish (or a
 # workflow_dispatch recovery run on an already-published version) the upload of
 # an existing file is a no-op instead of a hard 400.
 #
-# Required repo secret: PYPI_API_TOKEN.
+# Required: the PyPI trusted publisher above, and the `production` Environment.
+# No secret.
 on:
   push:
     tags:
@@ -45,12 +46,18 @@ jobs:
   publish:
     needs: preflight
     runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://pypi.org/p/postern-client
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -62,8 +69,7 @@ jobs:
         run: python -m build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: clients/python/dist
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true

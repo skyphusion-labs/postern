@@ -40,6 +40,10 @@ from . import proxyproto
 SERVICE_TOKEN_MODES = ("native", "ldap", "system")
 ALL_AUTH_MODES = ("token", "fixed") + SERVICE_TOKEN_MODES
 
+# Same byte ceiling as inbound/src/api.ts MAX_IMPORT_MIME_BYTES. An APPEND larger
+# than this is refused before the literal is read.
+DEFAULT_MAX_APPEND_BYTES = 22 * 1024 * 1024
+
 
 class ConfigError(ValueError):
     """A required setting is missing or malformed."""
@@ -56,6 +60,8 @@ class Config:
     # termination and exposure are the operator's call). 1143 avoids needing root.
     listen_host: str = "127.0.0.1"
     listen_port: int = 1143
+    # Largest APPEND literal, in octets. Over this the door refuses before reading.
+    max_append_bytes: int = DEFAULT_MAX_APPEND_BYTES
 
     # Optional TLS (recommended whenever the listener is not loopback): paths to
     # a PEM cert + key. If both are set the proxy serves IMAPS over the listener.
@@ -271,7 +277,7 @@ class Config:
     throttle_max_failures: int = 5  # per-account consecutive failures before lockout
     throttle_lockout_seconds: int = 60  # base lockout; doubles per failure past threshold
     throttle_max_lockout_seconds: int = 900  # backoff cap
-    throttle_global_max_failures: int = 100  # aggregate failures/window before global cooldown (0 = off)
+    throttle_global_max_failures: int = 0  # aggregate failures/window before global cooldown (0 = off)
     throttle_global_window_seconds: int = 60  # aggregate window + cooldown
 
     # --- PROXY protocol on the listener edge (#155) ---
@@ -475,7 +481,7 @@ class Config:
         throttle_max_failures = _int(e, "AUTH_THROTTLE_MAX_FAILURES", 5)
         throttle_lockout_seconds = _int(e, "AUTH_THROTTLE_LOCKOUT_SECONDS", 60)
         throttle_max_lockout_seconds = _int(e, "AUTH_THROTTLE_MAX_LOCKOUT_SECONDS", 900)
-        throttle_global_max_failures = _int(e, "AUTH_THROTTLE_GLOBAL_MAX_FAILURES", 100)
+        throttle_global_max_failures = _int(e, "AUTH_THROTTLE_GLOBAL_MAX_FAILURES", 0)
         throttle_global_window_seconds = _int(e, "AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS", 60)
         for _name, _val in (
             ("AUTH_THROTTLE_MAX_FAILURES", throttle_max_failures),
@@ -513,10 +519,21 @@ class Config:
             mode=proxy_mode, trusted=proxy_trusted, timeout=float(proxy_timeout_secs)
         )
 
+        listen_port = _int(e, "POSTERN_IMAP_PORT", 1143)
+        if listen_port == 993 and not (cert and key):
+            raise ConfigError(
+                "refusing plaintext on port 993. Set POSTERN_IMAP_TLS_CERT and "
+                "POSTERN_IMAP_TLS_KEY, or set POSTERN_IMAP_PORT=143 for plaintext."
+            )
+        max_append_bytes = _int(e, "POSTERN_IMAP_MAX_APPEND_BYTES", DEFAULT_MAX_APPEND_BYTES)
+        if max_append_bytes < 1:
+            raise ConfigError("POSTERN_IMAP_MAX_APPEND_BYTES must be >= 1")
+
         return cls(
             api_url=api_url,
             listen_host=(e.get("POSTERN_IMAP_HOST") or "127.0.0.1").strip(),
-            listen_port=_int(e, "POSTERN_IMAP_PORT", 1143),
+            listen_port=listen_port,
+            max_append_bytes=max_append_bytes,
             tls_cert=cert,
             tls_key=key,
             auth_mode=auth_mode,

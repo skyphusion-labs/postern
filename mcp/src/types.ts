@@ -141,6 +141,21 @@ export interface WhoAmI {
   /** The route scopes the worker's gate will honour for this credential. */
   capabilities: string[];
   via: "session" | "bearer";
+  /** The human addresses this identity holds an ACTIVE delegation grant on, and what
+   *  each grant allows (worker #740 S2). Under the operator's AGENT_READ_SCOPE=granted
+   *  you read one by naming it as `to` on a list, search or folders call; `organize`
+   *  lets you mark read (`for: <address>`), flag and move its mail, each write audited.
+   *  `[]` means none. ABSENT means the worker predates grants and cannot say: it is not
+   *  reported as an empty list, because that would be a confident answer it never gave. */
+  delegations?: Delegation[];
+}
+
+/** One active delegation grant, as GET /api/whoami reports it. */
+export interface Delegation {
+  id: string;
+  address: string;
+  /** Always includes "read": every power implies it. */
+  powers: string[];
 }
 
 export type ReadScopeReport =

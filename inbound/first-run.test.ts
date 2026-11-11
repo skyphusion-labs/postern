@@ -1,3 +1,4 @@
+import { sqliteBatch } from "./test-support";
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -42,7 +43,7 @@ function realEnv(overrides: Record<string, unknown> = {}) {
       },
     };
   }
-  const env = { DB: { prepare }, ALLOWED_FROM_DOMAIN: "skyphusion.org", ...overrides } as unknown as Env;
+  const env = { DB: { prepare, batch: sqliteBatch(db) }, ALLOWED_FROM_DOMAIN: "skyphusion.org", ...overrides } as unknown as Env;
   return { env, raw: db };
 }
 

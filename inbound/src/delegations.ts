@@ -2,9 +2,9 @@
 //
 // A grant says that one agent identity (#801, agent_identities.id) may act on one human
 // address with a named set of powers. #740 is "delegated agent read AND send with an
-// audit trail", and the audit trail is a precondition for the write side, so this slice
-// lays the rails and changes NO behaviour: nothing reads a grant for authorization yet.
-// The powers are named now so a grant made today means what the later slices enforce:
+// audit trail", and the audit trail is a precondition for the write side. S1 laid the
+// store and the routes; S2 (the end of this file) enforces read and organize. The powers
+// are named so a grant made today means what the later slices enforce:
 //
 //   read      read the address's mail (under AGENT_READ_SCOPE=granted) (S2)
 //   organize  mark read / flags / move on the address's mail          (S2)
@@ -31,7 +31,9 @@ import { IDENTITY_ID_RE } from "./agentidentities";
 import {
   AdminError,
   EMAIL_RE,
+  OPERATOR_ACTOR,
   auditStatement,
+  type AuditActor,
   decodeCursor,
   encodeCursor,
   generateId,
@@ -123,13 +125,32 @@ function bodyAddress(body: Record<string, unknown>, domain: string): string {
 
 const LIVE_GRANTEE = "SELECT 1 FROM agent_identities WHERE id = ? AND revoked_at IS NULL";
 
-async function grant(request: Request, env: Env): Promise<Response> {
+/**
+ * Who makes or revokes a grant (#854 M2). The operator by default; a human principal for
+ * #740 S5 self-service, which also pins the grant to that human's OWN address. `actor` is
+ * what the audit row names; `createdBy` is what the grant row stores (the string
+ * `operator` for the operator, unchanged; the human's prn_ id for a human).
+ */
+export interface Grantor {
+  actor: AuditActor;
+  createdBy: string;
+  /** When set, the only address this grantor may grant or revoke on. */
+  ownAddress?: string;
+}
+export const OPERATOR_GRANTOR: Grantor = { actor: OPERATOR_ACTOR, createdBy: "operator" };
+
+export async function grant(request: Request, env: Env, grantor: Grantor = OPERATOR_GRANTOR): Promise<Response> {
   const body = await readBody(request);
   const domain = requireDomain(env);
   const rawGrantee = body.granteeId;
   if (typeof rawGrantee !== "string") throw new AdminError(400, "E_FIELD_MISSING", "granteeId is required", "granteeId");
   const granteeId = rawGrantee.trim();
-  const address = bodyAddress(body, domain);
+  // A self-service grantor grants on its own address and nowhere else: the address is not
+  // a field it may send at all, so a wrong one is refused rather than silently replaced.
+  if (grantor.ownAddress !== undefined && body.address !== undefined) {
+    throw new AdminError(400, "E_VALIDATION_ERROR", "address is your own and is not a field here", "address");
+  }
+  const address = grantor.ownAddress !== undefined ? grantor.ownAddress.trim().toLowerCase() : bodyAddress(body, domain);
   const powers = requestedPowers(body);
   const label = optLine(body, "label", LABEL_MAX);
 
@@ -160,13 +181,14 @@ async function grant(request: Request, env: Env): Promise<Response> {
   // Conditional on the grantee STILL being live, in the same statement as the write.
   const insert = env.DB.prepare(
     `INSERT INTO delegation_grants (id, grantee_id, address, powers, label, created_by, created_at) ` +
-      `SELECT ?, ?, ?, ?, ?, 'operator', ? WHERE EXISTS (${LIVE_GRANTEE})`,
-  ).bind(id, granteeId, address, JSON.stringify(powers), label, now, granteeId);
+      `SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${LIVE_GRANTEE})`,
+  ).bind(id, granteeId, address, JSON.stringify(powers), label, grantor.createdBy, now, granteeId);
   const audit = auditStatement(
     env,
     now,
     { action: "delegation.grant", targetKind: "delegation", targetId: id, outcome: "ok", detail: { granteeId, address, powers } },
     { sql: "SELECT 1 FROM delegation_grants WHERE id = ?", binds: [id] },
+    grantor.actor,
   );
   let results: Array<{ meta?: { changes?: number } }>;
   try {
@@ -182,12 +204,12 @@ async function grant(request: Request, env: Env): Promise<Response> {
     throw new AdminError(409, "E_GRANTEE_INVALID", "the grantee was revoked before the grant was written");
   }
   return json(
-    { ok: true, id, granteeId, address, powers, label, createdBy: "operator", createdAt: now, revokedAt: null },
+    { ok: true, id, granteeId, address, powers, label, createdBy: grantor.createdBy, createdAt: now, revokedAt: null },
     201,
   );
 }
 
-async function list(url: URL, env: Env): Promise<Response> {
+async function list(url: URL, env: Env, actor: AuditActor = OPERATOR_ACTOR): Promise<Response> {
   const limit = parseLimit(url);
   const includeRevoked = parseIncludeRevoked(url);
   const cursor = decodeCursor(url, DELEGATION_ID_RE);
@@ -225,14 +247,17 @@ async function list(url: URL, env: Env): Promise<Response> {
     action: "delegation.list",
     outcome: "ok",
     detail: { returned: page.length, includeRevoked, grantee, address },
-  }).run();
+  }, undefined, actor).run();
   return json({ ok: true, items: page.map(project), cursor: next });
 }
 
-async function revoke(env: Env, rawId: string): Promise<Response> {
+export async function revoke(env: Env, rawId: string, grantor: Grantor = OPERATOR_GRANTOR): Promise<Response> {
   const id = pathId(rawId, DELEGATION_ID_RE, "delegation");
   const row = await env.DB.prepare(`SELECT ${COLUMNS} FROM delegation_grants WHERE id = ?`).bind(id).first<GrantRow>();
-  if (!row) throw new AdminError(404, "E_NOT_FOUND", "no such delegation");
+  // A self-service grantor sees only grants on its own address: any other id is the same
+  // 404 as a missing one, so nothing says another address's grant exists.
+  const mine = grantor.ownAddress === undefined || (row && row.address === grantor.ownAddress.trim().toLowerCase());
+  if (!row || !mine) throw new AdminError(404, "E_NOT_FOUND", "no such delegation");
   const now = new Date().toISOString();
   const update = env.DB.prepare(
     "UPDATE delegation_grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
@@ -243,7 +268,7 @@ async function revoke(env: Env, rawId: string): Promise<Response> {
     targetId: id,
     outcome: "ok",
     detail: { alreadyRevoked: row.revoked_at !== null, granteeId: row.grantee_id, address: row.address },
-  });
+  }, undefined, grantor.actor);
   const results = await env.DB.batch([update, audit]);
   return json({ ok: true, id, revoked: results[0]?.meta?.changes ?? 0, alreadyRevoked: row.revoked_at !== null });
 }
@@ -255,15 +280,114 @@ const ADMIN_ITEM = /^\/api\/admin\/delegations\/([^/]+)$/;
  * for a method or path this does not serve (falls through to 404): a method with no
  * route row has no scope gate in front of it.
  */
-export async function handleAdminDelegations(request: Request, env: Env, url: URL): Promise<Response | null> {
+export async function handleAdminDelegations(
+  request: Request,
+  env: Env,
+  url: URL,
+  actor: AuditActor = OPERATOR_ACTOR,
+): Promise<Response | null> {
   const path = url.pathname;
   const target = (raw: string | null) => ({ kind: "delegation", raw, idRe: DELEGATION_ID_RE });
+  // Any operator-level credential makes an `operator` grant; the audit row names which.
+  const grantor: Grantor = { ...OPERATOR_GRANTOR, actor };
   if (path === "/api/admin/delegations") {
-    if (request.method === "POST") return runAudited(env, "delegation.grant", target(null), () => grant(request, env));
-    if (request.method === "GET") return runAudited(env, "delegation.list", target(null), () => list(url, env));
+    if (request.method === "POST") return runAudited(env, "delegation.grant", target(null), () => grant(request, env, grantor), actor);
+    if (request.method === "GET") return runAudited(env, "delegation.list", target(null), () => list(url, env, actor), actor);
     return null;
   }
   const m = ADMIN_ITEM.exec(path);
-  if (m && request.method === "DELETE") return runAudited(env, "delegation.revoke", target(m[1]), () => revoke(env, m[1]));
+  if (m && request.method === "DELETE") return runAudited(env, "delegation.revoke", target(m[1]), () => revoke(env, m[1], grantor), actor);
   return null;
+}
+
+// --- #740 S2: what a grant lets its grantee do ---------------------------------------
+
+export type AgentReadScope = "estate" | "granted";
+
+/** The audit_log action of an agent's organize write on a granted address. */
+export const ORGANIZE_AUDIT_ACTION = "delegation.organize";
+/** The audit_log action of an agent quoting a granted address's mail (#740 S3). */
+export const QUOTE_AUDIT_ACTION = "delegation.quote";
+/** The audit_log action of an agent sending as a granted address (#740 S4). */
+export const SEND_AS_AUDIT_ACTION = "delegation.send_as";
+
+let readScopeConfigLogged: string | undefined;
+
+/**
+ * The operator flag AGENT_READ_SCOPE (Conrad's Q1 ruling on #740, "opt-in fallback").
+ *
+ *   unset      "estate": an upgraded deploy keeps the #718 estate-wide agent read.
+ *   "estate"   "estate".
+ *   "granted"  an agent reads its own address (and its role queues) plus every address it
+ *              holds an active grant on. The installer writes this on a new install.
+ *   other      "granted", and a config error is logged once per value per isolate. A typo
+ *              must not widen reads on the very deploy whose operator tried to narrow them.
+ *
+ * Exact values only: "Granted" and "" are typos, so they fail closed with the rest.
+ */
+export function agentReadScope(env: Env): AgentReadScope {
+  const raw = env.AGENT_READ_SCOPE;
+  if (raw === undefined || raw === "estate") return "estate";
+  if (raw === "granted") return "granted";
+  if (readScopeConfigLogged !== raw) {
+    readScopeConfigLogged = raw;
+    console.error(
+      `config error: AGENT_READ_SCOPE=${JSON.stringify(raw)} is not "estate" or "granted"; agent reads fail closed to granted`,
+    );
+  }
+  return "granted";
+}
+
+export interface AgentDelegations {
+  /** Every address the grantee holds an ACTIVE grant on. Every power implies read. */
+  read: string[];
+  /** The subset whose grant carries organize. */
+  organize: string[];
+  /** The subset whose grant carries quote (#740 S3). */
+  quote: string[];
+  /** The subset whose grant carries send_as (#740 S4). */
+  sendAs: string[];
+  /** The active grants themselves, as GET /api/whoami reports them. */
+  grants: Array<{ id: string; address: string; powers: DelegationPower[] }>;
+}
+
+export function noDelegations(): AgentDelegations {
+  return { read: [], organize: [], quote: [], sendAs: [], grants: [] };
+}
+
+/**
+ * The active grants one runtime agent identity holds. Read on every request that needs
+ * them, never cached across requests, so a revoke takes effect on the next request, the
+ * same rule the identity resolver follows for a revoked identity.
+ *
+ * A grant counts ONLY while its grantee identity is live: the lookup joins
+ * agent_identities on `revoked_at IS NULL`. Revoking an identity therefore cuts every
+ * grant it holds at once, from one source of truth, with no cascade write that could
+ * fail half way. The grant rows stay as they are (still listed by the operator routes),
+ * so the record of what was granted is not rewritten by the revoke.
+ *
+ * A row whose stored powers parse to nothing grants nothing (fail closed). Any power puts
+ * the address in `read`, because every power implies read; S1 stores read explicitly, and
+ * this does not depend on that.
+ */
+export async function activeDelegations(env: Env, granteeId: string): Promise<AgentDelegations> {
+  const rows = await env.DB.prepare(
+    "SELECT g.id AS id, g.address AS address, g.powers AS powers FROM delegation_grants g " +
+      "JOIN agent_identities i ON i.id = g.grantee_id AND i.revoked_at IS NULL " +
+      "WHERE g.grantee_id = ? AND g.revoked_at IS NULL ORDER BY g.address, g.id",
+  )
+    .bind(granteeId)
+    .all<{ id: string; address: string; powers: string }>();
+  const out = noDelegations();
+  for (const row of rows.results ?? []) {
+    const powers = parsePowers(row.powers);
+    if (powers.length === 0) continue;
+    const address = row.address.trim().toLowerCase();
+    out.grants.push({ id: row.id, address, powers });
+    if (!out.read.includes(address)) out.read.push(address);
+    if (powers.includes("organize") && !out.organize.includes(address)) out.organize.push(address);
+    if (powers.includes("quote") && !out.quote.includes(address)) out.quote.push(address);
+    if (powers.includes("send_as") && !out.sendAs.includes(address)) out.sendAs.push(address);
+  }
+  return out;
 }

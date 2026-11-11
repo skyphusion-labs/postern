@@ -146,18 +146,27 @@ export interface AuditEntry {
 }
 
 /**
- * One audit_log INSERT with the operator as actor. Every writer today is the operator (a
- * static `both` token, which carries no id); actor_kind and actor_id exist so a later
- * slice of #740 can record an agent identity as the actor.
+ * One audit_log INSERT with the operator as actor. Every writer here is reached only by a
+ * static `both` token (the admin routes), so the actor is the `svc_both` SERVICE principal
+ * (#854 M1, D-ID-5), never the anonymous `operator` + NULL of rows written before it.
+ * Agent actors are written by agentAudit / agentMessageAudit.
  *
  * `onlyIf`, when given, makes the insert conditional on a row existing, so an audit row
  * in the same batch as a conditional write records "ok" only when that write happened.
  */
+/** Who an audited admin-style action is recorded as. The default is the operator. */
+export interface AuditActor {
+  kind: "service" | "human";
+  id: string;
+}
+export const OPERATOR_ACTOR: AuditActor = { kind: "service", id: "svc_both" };
+
 export function auditStatement(
   env: Env,
   at: string,
   entry: AuditEntry,
   onlyIf?: { sql: string; binds: unknown[] },
+  actor: AuditActor = OPERATOR_ACTOR,
 ) {
   const values = [
     at,
@@ -169,23 +178,70 @@ export function auditStatement(
   ];
   const head = "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) ";
   if (onlyIf) {
-    return env.DB.prepare(head + `SELECT ?, 'operator', NULL, ?, ?, ?, ?, ? WHERE EXISTS (${onlyIf.sql})`)
-      .bind(...values, ...onlyIf.binds);
+    return env.DB.prepare(head + `SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${onlyIf.sql})`)
+      .bind(values[0], actor.kind, actor.id, ...values.slice(1), ...onlyIf.binds);
   }
-  return env.DB.prepare(head + "VALUES (?, 'operator', NULL, ?, ?, ?, ?, ?)").bind(...values);
+  return env.DB.prepare(head + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(values[0], actor.kind, actor.id, ...values.slice(1));
+}
+
+/**
+ * One audit_log row PER MESSAGE an agent's organize write touches on a granted address
+ * (#740 S2). An INSERT ... SELECT over `messages m`, so it names exactly the rows the
+ * caller's predicate matches, and it runs in the SAME D1 batch as the write it records:
+ * if this insert fails the batch rolls back and the write does not happen.
+ *
+ * The actor is the grantee's stable agent_identities id and the target is the message
+ * id: both stable ids, so a later identity layer can adopt these rows unchanged.
+ */
+export function agentMessageAudit(
+  env: Env,
+  at: string,
+  actorId: string,
+  action: string,
+  detail: Record<string, unknown>,
+  where: { sql: string; binds: unknown[] },
+) {
+  return env.DB.prepare(
+    "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
+      `SELECT ?, 'agent', ?, ?, 'message', m.message_id, 'ok', ? FROM messages m WHERE ${where.sql}`,
+  ).bind(at, actorId, action, JSON.stringify(detail), ...where.binds);
+}
+
+/**
+ * One audit_log row with an AGENT identity as actor and a plain target (#740 S4: the
+ * address a send_as send went out as). The caller runs it before the act it records
+ * and treats a failed insert as a failed act.
+ */
+export function agentAudit(
+  env: Env,
+  at: string,
+  actorId: string,
+  action: string,
+  target: { kind: string; id: string },
+  detail: Record<string, unknown>,
+) {
+  return env.DB.prepare(
+    "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
+      "VALUES (?, 'agent', ?, ?, ?, ?, 'ok', ?)",
+  ).bind(at, actorId, action, target.kind, target.id, JSON.stringify(detail));
 }
 
 /**
  * Record a refusal. Best effort BY DESIGN: the refusal already happened and its answer
  * is the same either way, so a failed write is logged and the refusal is still returned.
  */
-export async function auditRefusal(env: Env, entry: Omit<AuditEntry, "outcome">, err: AdminError): Promise<void> {
+export async function auditRefusal(
+  env: Env,
+  entry: Omit<AuditEntry, "outcome">,
+  err: AdminError,
+  actor: AuditActor = OPERATOR_ACTOR,
+): Promise<void> {
   try {
     await auditStatement(env, new Date().toISOString(), {
       ...entry,
       outcome: "refused",
       detail: { ...(entry.detail ?? {}), error: err.code },
-    }).run();
+    }, undefined, actor).run();
   } catch (e) {
     console.error("audit_log write failed for a refusal", e instanceof Error ? e.message : String(e));
   }
@@ -201,13 +257,14 @@ export async function runAudited(
   action: string,
   target: { kind: string; raw: string | null; idRe: RegExp },
   fn: () => Promise<Response>,
+  actor: AuditActor = OPERATOR_ACTOR,
 ): Promise<Response> {
   try {
     return await fn();
   } catch (err) {
     if (err instanceof AdminError) {
       const targetId = target.raw && target.idRe.test(target.raw) ? target.raw : null;
-      await auditRefusal(env, { action, targetKind: target.kind, targetId }, err);
+      await auditRefusal(env, { action, targetKind: target.kind, targetId }, err, actor);
       return fail(err);
     }
     throw err;

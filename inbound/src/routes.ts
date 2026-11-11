@@ -235,6 +235,9 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "admin-delegation-revoke", method: "DELETE", path: "/api/admin/delegations/", match: "prefix", scope: "admin",
     auth: "bearer", requireChild: true, template: "/api/admin/delegations/{id}",
     note: "#740 S1: idempotent; the row is kept with revokedAt and its id is never reused. Audited (delegation.revoke)" },
+  { id: "admin-principals-backfill", method: "POST", path: "/api/admin/principals/backfill", match: "exact",
+    scope: "admin", auth: "bearer",
+    note: "#854 M1: copy agent identities, human users and the static slots into the principal tables. Idempotent and convergent; store only, nothing authorizes from it yet. Audited (principals.backfill)" },
   { id: "admin-audit", method: "GET", path: "/api/admin/audit", match: "exact", scope: "admin", auth: "bearer",
     query: ["limit", "cursor"],
     note: "the audit log (#801), newest first: actor, action, target, outcome, detail. Refusals are recorded too" },
@@ -363,5 +366,8 @@ export function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (need === "delete") return have === "delete";
   if (need === "imap") return have === "imap";
   if (need === "organize") return have === "organize" || have === "imap";
+  // #904: the admin slot holds admin and NOTHING else, so automation that runs an admin
+  // route (the post-deploy principal backfill) never holds a key that reads or sends mail.
+  if (need === "admin") return have === "admin";
   return false; // admin: only `both`
 }
