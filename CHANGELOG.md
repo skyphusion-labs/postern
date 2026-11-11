@@ -46,6 +46,19 @@ upgrading to copy existing identities and users in; it is safe to run again.
 - **The operator is named in the audit log (#854 M1).** Rows the admin
   routes write now carry actor `service` / `svc_both` instead of
   `operator` with no id. Older rows are unchanged.
+- **CI refuses CHANGELOG lines added to a released section.** A new
+  `release-gate` step fails when a change adds a line inside an
+  already-released `## vX.Y.Z` section of `CHANGELOG.md`; entries belong
+  under `## Unreleased`. A clean merge after a release can put an entry
+  there with no conflict, which is what this catches. A deliberate edit to
+  released notes passes with the commit trailer
+  `Changelog-History-Edit: <reason>`.
+
+
+- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
+  The served CSP lists the sha256 of the page's one inline script, which
+  `npm run sync-webmail` computes, so a script that is not the page's
+  own does not run. `style-src 'unsafe-inline'` is unchanged.
 
 ### Fixed
 
@@ -59,13 +72,6 @@ upgrading to copy existing identities and users in; it is safe to run again.
   @import of a plain string and image-set() strings are counted and
   removed from the reading frame; a URL inside a CSS comment is not
   counted.
-
-### Changed
-
-- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
-  The served CSP lists the sha256 of the page's one inline script, which
-  `npm run sync-webmail` computes, so a script that is not the page's
-  own does not run. `style-src 'unsafe-inline'` is unchanged.
 
 ## v1.11.0
 
