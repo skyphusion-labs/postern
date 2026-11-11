@@ -935,6 +935,18 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
+      // #930: hybrid's per-family cap. An integer 0..10; 0 lists every member. Hybrid only.
+      const capParam = url.searchParams.get("familyCap");
+      if (capParam !== null && !/^(10|[0-9])$/.test(capParam)) {
+        return json({ ok: false, error: "E_VALIDATION_ERROR", message: "familyCap must be an integer 0..10" }, 400);
+      }
+      // An omitted mode is fts, which has no families to cap.
+      if (capParam !== null && capParam !== "0" && modeParam !== "hybrid") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "familyCap limits template families in mode hybrid only; remove it or pass mode=hybrid" },
+          400,
+        );
+      }
       // Asking a mode that never collapses to collapse is refused, not ignored (the #651
       // rule): the caller would read the answer as collapsed. "Do not collapse" is true
       // of every mode, so 0/false is accepted anywhere.
@@ -999,6 +1011,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         seen: seenParam === null ? undefined : seenParam === "1" || seenParam === "true",
         collapse: modeParam !== "semantic" ? false : collapseParam === null ? SEMANTIC_COLLAPSE_DEFAULT : collapseParam === "1" || collapseParam === "true",
         collapseThreads: modeParam !== "semantic" ? false : threadsParam === null ? SEMANTIC_THREAD_COLLAPSE_DEFAULT : threadsParam === "1" || threadsParam === "true",
+        familyCap: modeParam !== "hybrid" ? 0 : capParam === null ? HYBRID_FAMILY_CAP_DEFAULT : Number(capParam),
         // A role read drops the account viewer: the queue IS the scope, and the account
         // boundary would otherwise intersect it down to the member own mail (#425).
         viewer: role ? undefined : sessionIdentity,
@@ -1344,8 +1357,15 @@ async function quoteScope(
 const SEMANTIC_COLLAPSE_DEFAULT = true;
 
 /** #926: whether semantic search folds a thread's hits when `collapseThreads` is absent.
- *  Decided by the recall eval under the same rule as collapse. */
-const SEMANTIC_THREAD_COLLAPSE_DEFAULT = false;
+ *  Decided by the recall eval under the same rule as collapse: on the #930 corpus (35
+ *  threads, 15 diversity queries) it raised diversity coverage 67% to 71% and MRR, with no
+ *  recall family worse, so it is on (it was off on the smaller #813 corpus). */
+const SEMANTIC_THREAD_COLLAPSE_DEFAULT = true;
+
+/** #930: hybrid shows at most this many hits per template family when `familyCap` is
+ *  absent. Chosen by the recall eval under the same rule: cap 2 raised diversity coverage
+ *  (53% to 64%) and MRR with no recall family worse; folding, and cap 1, regressed `latest`. */
+const HYBRID_FAMILY_CAP_DEFAULT = 2;
 
 /** The #853 guard: set for an AGENT reader only, i.e. a Bearer bound to an identity (a
  *  runtime agent identity or a registry entry). A webmail session is the human and a

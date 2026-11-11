@@ -171,7 +171,7 @@ describe("#813 semantic search: template families", () => {
     const noMode = await s.call("GET", "/api/search?q=corpus&collapse=true", { token: OPERATOR });
     expect(noMode.status, "an omitted mode is fts").toBe(400);
     expect((await s.call("GET", "/api/search?q=corpus&mode=hybrid&collapse=0", { token: OPERATOR })).status).toBe(200);
-    const res = await s.call("GET", `/api/search?q=${encodeURIComponent("corpus-sync")}&mode=hybrid`, { token: OPERATOR });
+    const res = await s.call("GET", `/api/search?q=${encodeURIComponent("corpus-sync")}&mode=hybrid&familyCap=0`, { token: OPERATOR });
     expect(res.status).toBe(200);
     const h = hits(res);
     expect(h.filter((x) => x.id.startsWith("run-")).length).toBe(5);
@@ -180,7 +180,7 @@ describe("#813 semantic search: template families", () => {
     // semantic half: if that half collapsed, hybrid would show one run.
     const fts = await s.call("GET", `/api/search?q=${encodeURIComponent("the job broke overnight")}&mode=fts`, { token: OPERATOR });
     expect((fts.body.items as Json[]).length, "CONTROL: fts finds nothing").toBe(0);
-    const semOnly = hits(await s.call("GET", `/api/search?q=${encodeURIComponent("the job broke overnight")}&mode=hybrid&limit=20`, { token: OPERATOR }));
+    const semOnly = hits(await s.call("GET", `/api/search?q=${encodeURIComponent("the job broke overnight")}&mode=hybrid&limit=20&familyCap=0`, { token: OPERATOR }));
     expect(semOnly.filter((x) => x.id.startsWith("run-")).length).toBe(5);
   });
 });
@@ -239,11 +239,12 @@ describe("#926 thread collapse in semantic search", () => {
     .map((h) => ({ id: (h.message as Json).messageId as string, threadHits: h.threadHits as Json | undefined }))
     .filter((h) => h.id.startsWith("zep-"));
 
-  it("off by default: every message of the thread is a row", async () => {
+  it("on by default (#930 re-judged it); collapseThreads=0 lists every message of the thread", async () => {
     const s = await withThread();
-    const rows = zep(await sem(s, "zeppelin hangar maintenance"));
+    const rows = zep(await sem(s, "zeppelin hangar maintenance", "&collapseThreads=0"));
     expect(rows).toHaveLength(3);
     expect(rows.every((r) => r.threadHits === undefined)).toBe(true);
+    expect(zep(await sem(s, "zeppelin hangar maintenance"))).toEqual(zep(await sem(s, "zeppelin hangar maintenance", "&collapseThreads=1")));
   });
 
   it("collapseThreads=1 folds the thread into its best hit with the others in threadHits", async () => {
@@ -291,5 +292,59 @@ describe("#926 thread collapse in semantic search", () => {
     const seen = after.flatMap((r) => [r.id, ...(((r.threadHits?.ids as string[]) ?? []))]);
     expect(seen).not.toContain("zep-2@x");
     expect(seen.sort()).toEqual(["zep-0@x", "zep-1@x"]);
+  });
+});
+
+describe("#930 hybrid caps each template family (default 2)", () => {
+  const runs = (res: { body: Json }) => hits(res).filter((h) => h.id.startsWith("run-"));
+  const hyb = (s: S, extra = "", token = OPERATOR) =>
+    s.call("GET", `/api/search?q=${encodeURIComponent("corpus-sync failed")}&mode=hybrid${extra}`, { token });
+
+  it("at most 2 runs by default, the page says it is not complete; familyCap=0 lists all 5", async () => {
+    const s = await setup();
+    const capped = await hyb(s);
+    expect(runs(capped)).toHaveLength(2);
+    expect(capped.body.complete).toBe(false);
+    expect(String(capped.body.degraded)).toMatch(/3 more match\(es\) from repeated notification families were left off \(familyCap=2\)/);
+    const all = await hyb(s, "&familyCap=0");
+    expect(runs(all)).toHaveLength(5);
+    // The capped page is the uncapped one with the later family members removed, in order.
+    expect(runs(capped).map((h) => h.id)).toEqual(runs(all).slice(0, 2).map((h) => h.id));
+    expect(runs(await hyb(s, "&familyCap=1"))).toHaveLength(1);
+    // The halves fetch past `limit`, so a capped page refills with other mail: at limit 3 it
+    // is 2 runs plus one other hit, not just the 2 runs a 3-row fetch would leave.
+    const small = hits(await hyb(s, "&limit=3"));
+    expect(small).toHaveLength(3);
+    expect(small.filter((h) => h.id.startsWith("run-"))).toHaveLength(2);
+    expect(runs(await hyb(s, "&familyCap=10"))).toHaveLength(5);
+  });
+
+  it("familyCap is validated, and refused outside hybrid; 0 is accepted anywhere", async () => {
+    const s = await setup();
+    for (const bad of ["11", "-1", "2.5", "x", ""]) {
+      const r = await s.call("GET", `/api/search?q=x&mode=hybrid&familyCap=${bad}`, { token: OPERATOR });
+      expect([r.status, r.body.error], bad).toEqual([400, "E_VALIDATION_ERROR"]);
+    }
+    for (const mode of ["semantic", "fts", "substr"]) {
+      const r = await s.call("GET", `/api/search?q=x&mode=${mode}&familyCap=2`, { token: OPERATOR });
+      expect([r.status, r.body.error], mode).toEqual([400, "E_VALIDATION_ERROR"]);
+    }
+    expect((await s.call("GET", "/api/search?q=x&familyCap=2", { token: OPERATOR })).status, "omitted mode is fts").toBe(400);
+    expect((await s.call("GET", "/api/search?q=x&mode=semantic&familyCap=0", { token: OPERATOR })).status).toBe(200);
+  });
+
+  it("the cap counts visible mail only: a hidden run frees its slot for the next visible one", async () => {
+    const s = await setup("estate");
+    expect((await s.call("POST", "/api/admin/users", { token: OPERATOR, body: { username: HUMAN, password: PASSWORD } })).status).toBe(201);
+    const minted = await s.call("POST", "/api/admin/identities", { token: OPERATOR, body: { from: AGENT, scopes: ["read"] } });
+    const agent = minted.body as { id: string; token: string };
+    const all = runs(await hyb(s, "&familyCap=0")).map((h) => h.id);
+    const before = runs(await hyb(s, "", agent.token)).map((h) => h.id);
+    expect(before, "CONTROL: the agent's capped page is the first two").toEqual(all.slice(0, 2));
+    const owner = await signIn(s, HUMAN);
+    const thread = (s.raw.prepare("SELECT COALESCE(thread_id, message_id) AS t FROM messages WHERE message_id = ?").get(all[0]) as Json).t;
+    expect((await s.call("POST", "/api/delegations/mine/exclusions", { session: owner, body: { threadId: thread } })).status).toBe(201);
+    const after = runs(await hyb(s, "", agent.token)).map((h) => h.id);
+    expect(after).toEqual(all.slice(1, 3));
   });
 });

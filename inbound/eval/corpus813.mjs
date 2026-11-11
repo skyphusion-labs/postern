@@ -79,6 +79,81 @@ const THREADS = [
   ["Data retention policy update", ["Logs will be kept for 90 days instead of a year.", "Does that include audit logs?", "No, audit logs stay for seven years."], "how long do we store records now"],
 ];
 
+// #930: a second block, APPENDED with its own seed so the first 300 messages and 98
+// queries stay byte-identical. It adds five more notification families (for hybrid
+// diversity), twenty more threads (so thread collapse, #926, is judged on more than 15),
+// and broad queries that several families answer.
+const THREADS2 = [
+  ["Quarterly planning for the mobile app", ["Mobile planning: offline mode and push settings are the two big items.", "Offline mode first, push settings can slip to Q3.", "Agreed, offline mode is the Q2 headline."], "what is the phone app roadmap for next quarter"],
+  ["Expense policy for client dinners", ["Client dinners are capped at 80 dollars a head from next month.", "Does the cap include wine?", "Yes, everything on the bill counts."], "limit on spending when taking customers out to eat"],
+  ["Accessibility audit results", ["The audit found 14 issues, mostly missing labels on form fields.", "Can we fix the labels this sprint?", "Labels this sprint, contrast fixes next sprint."], "findings from the screen reader review"],
+  ["Moving the standup to 9:30", ["Several people asked to move standup from 9:00 to 9:30.", "9:30 clashes with the support handover.", "Then 9:45, after the handover."], "changing the time of the morning team meeting"],
+  ["Choosing a new password manager", ["We need to replace the password manager before the license lapses.", "The two finalists both support shared vaults.", "Pick the one with hardware key support."], "selecting a tool to store team credentials"],
+  ["Warehouse temperature alarms", ["The cold room alarm fired three nights in a row.", "The sensor battery was low, it reads wrong when weak.", "Swapped the battery, no alarm last night."], "why did the fridge alert keep going off"],
+  ["Interns for the summer", ["We have budget for three summer interns in research.", "Can one sit with the design team?", "Yes, two in research and one in design."], "how many students are joining for the holidays"],
+  ["Rewriting the export feature", ["The CSV export times out on accounts with over a million rows.", "Should we stream it instead of building the file in memory?", "Streaming it, and email a link when it is ready."], "the spreadsheet download is too slow for big customers"],
+  ["Office plants and cleaning rota", ["Who waters the plants now that Dana has left?", "We can add it to the cleaning rota.", "Added, it rotates weekly with the kitchen duty."], "who takes care of the greenery at work"],
+  ["Customer advisory board meeting", ["The advisory board meets on the 18th, six customers confirmed.", "Do we share the roadmap slides with them?", "Only the next two quarters, under NDA."], "the session with our key clients to get product feedback"],
+  ["Renewing the domain names", ["Three of our domains expire next month.", "Is auto renew on for all of them?", "It was off for one, I turned it on."], "website addresses about to lapse"],
+  ["Load testing before the launch", ["Load tests show the API holds 2000 requests a second.", "What about the search endpoint?", "Search tops out at 400, we are adding a cache."], "can the system handle the traffic at launch"],
+  ["Rebranding the newsletter", ["Marketing wants to rename the newsletter to The Ledger.", "Does that need a new sending domain?", "No, same domain, new display name."], "new name for our email bulletin"],
+  ["Parental leave coverage", ["Jo starts parental leave in June for four months.", "Who covers the billing integrations?", "Sam covers billing, Lee takes the on call slot."], "who handles the work while a colleague is away with a new baby"],
+  ["Translating the help center", ["We will translate the help center into Spanish and German first.", "Machine translation or agency?", "Agency for the top 50 articles, machine for the rest."], "localizing support articles into other languages"],
+  ["Desk booking system", ["Hot desks can now be booked a week ahead in the app.", "Can we book a whole team table?", "Yes, up to eight seats in one booking."], "reserving a workspace in the office"],
+  ["Incident drill next Tuesday", ["We run a failover drill next Tuesday at 2pm.", "Will customers notice anything?", "No, it runs against the staging region only."], "practice run for a disaster recovery scenario"],
+  ["Fixing the flaky email delivery", ["About 2 percent of password reset emails never arrive.", "They all go to one mail provider, it greylists us.", "Retrying after the greylist delay fixed it."], "why are some account recovery messages missing"],
+  ["Coffee machine budget", ["The office coffee machine broke again.", "Is it worth repairing or buying a new one?", "A new one is cheaper than two more repairs."], "replacing the broken espresso maker at work"],
+  ["Board deck for March", ["The March board deck needs revenue, churn and hiring slides.", "I can do the hiring slide by Friday.", "Revenue and churn are done, deck goes out Monday."], "preparing the slides for the investors meeting"],
+];
+
+function extendCorpus(messages, queries) {
+  const rnd = mulberry32(930);
+  const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
+  const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const base = Date.UTC(2026, 9, 1);
+  let tick = 0;
+  const nextDate = () => new Date(base + (tick++) * 3_600_000 * 5).toISOString();
+  const add = (m) => (messages.push({ to: ME, inReplyTo: null, ...m }), m.id);
+  const FAMS = [
+    ["invoice", "billing@vendor.example", () => `Invoice ${String(Math.floor(1000 + rnd() * 8999))} is available`, () => `Your invoice for ${pick(["October", "November", "September"])} is ready. Amount due ${Math.floor(20 + rnd() * 400)}.00 USD. Pay by the ${Math.floor(1 + rnd() * 28)}th. Ref ${hex(8)}.`],
+    ["calendar", "calendar@meet.example", () => `Reminder: ${pick(["Design sync", "1:1 with Priya", "Budget review", "Sprint planning"])} tomorrow`, () => `This is a reminder for your meeting tomorrow at ${Math.floor(8 + rnd() * 9)}:00 in room ${pick(["Atlas", "Borealis", "Cedar"])}. Join link meet.example/${hex(10)}.`],
+    ["digest", "digest@news.example", () => `Your weekly digest #${Math.floor(100 + rnd() * 899)}`, () => `This week: ${pick(["edge computing", "vector databases", "email security"])}, ${pick(["remote work", "open source funding", "rust in production"])}, and ${Math.floor(3 + rnd() * 9)} more stories.`],
+    ["deploy-ok", "ci@builds.example", () => `Deploy succeeded: ${pick(["web", "api", "worker"])}`, () => `Deployment of ${pick(["web", "api", "worker"])} succeeded at commit ${hex(7)} in ${Math.floor(30 + rnd() * 300)} seconds.`],
+    ["reset", "security@accounts.example", () => "Reset your password", () => `Someone asked to reset the password for your account. Use code ${String(Math.floor(100000 + rnd() * 899999))} within 15 minutes. If it was not you, ignore this.`],
+  ];
+  for (const [fam, from, subj, body] of FAMS) {
+    for (let i = 0; i < 25; i++) {
+      add({ id: `${fam}-${i}@x2.example`, from, subject: subj(), body: body(), date: nextDate(), family: fam });
+    }
+  }
+  const thread2Ids = THREADS2.map(([subject, bodies], t) => {
+    const ids = [];
+    bodies.forEach((body, k) => {
+      ids.push(add({
+        id: `t2-${t}-${k}@team.example`, from: k % 2 ? ME : `peer${t % 6}@team.example`, to: k % 2 ? `peer${t % 6}@team.example` : ME,
+        subject: k ? `Re: ${subject}` : subject, body, date: nextDate(), inReplyTo: k ? `t2-${t}-${k - 1}@team.example` : null, family: "thread",
+      }));
+    });
+    return ids;
+  });
+  THREADS2.forEach(([, , para], t) => queries.push({ family: "paraphrase", q: para, gold: thread2Ids[t] }));
+  const newest = (fam) => messages.filter((m) => m.family === fam).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+  for (const fam of ["deploy-ok", "reset"]) queries.push({ family: "latest", q: newest(fam).subject, gold: [newest(fam).id] });
+  const D = (q, goldFamilies) => queries.push({ family: "diversity", q, goldFamilies });
+  D("bills and payment reminders", ["invoice", "order"]);
+  D("meetings on my calendar and newsletters", ["calendar", "digest"]);
+  D("deployments and build results", ["deploy-ok", "ci:corpus-sync", "ci:nightly-index", "ci:deploy-staging", "pr"]);
+  D("account security emails", ["login", "reset"]);
+  D("emails sent by machines, not people", ["invoice", "calendar", "digest", "deploy-ok", "reset", "order", "login"]);
+  D("what did the build system tell me", ["deploy-ok", "ci:corpus-sync", "ci:nightly-index", "ci:deploy-staging"]);
+  D("shopping, billing and subscriptions", ["order", "invoice", "digest"]);
+  D("anything about passwords or sign in", ["reset", "login"]);
+  D("scheduling and reminders", ["calendar", "login"]);
+  D("money owed and things shipped", ["invoice", "order"]);
+  D("reading material and news", ["digest"]);
+  D("pull requests and deploys", ["pr", "deploy-ok"]);
+}
+
 export function buildCorpus() {
   const rnd = mulberry32(813);
   const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
@@ -168,5 +243,6 @@ export function buildCorpus() {
   queries.push({ family: "diversity", q: "build and test failures", goldFamilies: ["ci:corpus-sync", "ci:nightly-index", "ci:deploy-staging", "pr"] });
   queries.push({ family: "diversity", q: "automated notifications I received", goldFamilies: ["ci:corpus-sync", "ci:nightly-index", "ci:deploy-staging", "pr", "order", "login"] });
   queries.push({ family: "diversity", q: "deliveries and account security", goldFamilies: ["order", "login"] });
+  extendCorpus(messages, queries);
   return { messages, queries };
 }

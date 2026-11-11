@@ -124,7 +124,9 @@ async function setup(flag: "granted" | "estate", roles = `${QUEUE}=${HUMAN}+${BO
 }
 type S = Awaited<ReturnType<typeof setup>>;
 const surfaces = (items: unknown, id: string) =>
-  ((items ?? []) as Json[]).some((h) => (h.message as Json)?.messageId === id || (((h.similar as Json | undefined)?.ids as string[] | undefined) ?? []).includes(id));
+  ((items ?? []) as Json[]).some((h) => (h.message as Json)?.messageId === id ||
+    (((h.similar as Json | undefined)?.ids as string[] | undefined) ?? []).includes(id) ||
+    (((h.threadHits as Json | undefined)?.ids as string[] | undefined) ?? []).includes(id));
 const idsOf = (items: unknown) => ((items ?? []) as Json[]).map((m) => (m.message ? (m.message as Json).messageId : m.messageId));
 
 // Every path an agent reaches the owner's mail by, as "does this credential reach `id`".
