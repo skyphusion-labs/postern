@@ -80,6 +80,10 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Fixed
 
+- **MCP results mark every sender-written field as untrusted.** Search, list,
+  get, thread, and attachment results name those fields and say they were
+  written by the sender.
+
 - **Attachment download.** `postern attachment` without `-o` writes only the
   final path segment of the remote name, refuses an empty or hidden name, and
   does not replace a file that already exists. `-o` still writes the path you
