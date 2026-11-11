@@ -283,6 +283,16 @@ without principal ids. `outOfScope` reports those sources (the registry entry co
 auth backend), so a zero has a visible reason. M3b retires the fallback for a kind only on a
 `pass` with that kind measured.
 
+**M3a, the read-only view (shipped).** M3 is split (#854, 2026-11-11). M3a is additive and not
+gated: `GET /api/admin/principals` (keyset list; `kind`, `includeDisabled`) and
+`GET /api/admin/principals/{id}` (the principal, its credentials and its addresses), operator
+only, audited `principal.list` and `principal.show`. They read the principal tables and
+authorize nothing. No response carries a credential's `lookup` or `secret`: the column list
+leaves both out (`inbound/src/principaladmin.ts`). Next in M3a: the credential types with no
+old-table twin (app passwords, D-ID-4; human API tokens, D-ID-3), for which `credentials` is
+the only store. M3b (`credentials` becomes the authority for the existing types, the old
+tables freeze) stays behind the gate below.
+
 **How the fallback is retired.** It is the lead's call, made from the parity route (it needs
 no spend and is not a ruling). M3 (credentials become the authority, the old tables stop being
 written) happens only when all of these hold: the deploy backfill runs on every release (#901, #906); one full

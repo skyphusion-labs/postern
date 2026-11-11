@@ -369,6 +369,26 @@
       "note": "#854 M2: compare every agent identity and human user with its principal and credential; counts plus sample ids. The evidence for retiring the old-table fallback. Audited (principals.parity)"
     },
     {
+      "id": "admin-principals-list",
+      "method": "GET",
+      "path": "/api/admin/principals",
+      "match": "exact",
+      "scope": "admin",
+      "auth": "bearer",
+      "note": "#854 M3a: one keyset page of principals ordered by createdAt; enabled only unless includeDisabled=1; kind= human|agent|service. Read only. Audited (principal.list)"
+    },
+    {
+      "id": "admin-principal-show",
+      "method": "GET",
+      "path": "/api/admin/principals/",
+      "match": "prefix",
+      "scope": "admin",
+      "auth": "bearer",
+      "requireChild": true,
+      "template": "/api/admin/principals/{id}",
+      "note": "#854 M3a: one principal (idn_, prn_ or svc_ id) with its credentials (type, caps, protocols, dates; never the lookup or the secret) and addresses. Read only. Audited (principal.show)"
+    },
+    {
       "id": "self-delegation-grantees",
       "method": "GET",
       "path": "/api/delegations/mine/grantees",

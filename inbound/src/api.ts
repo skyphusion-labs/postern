@@ -53,6 +53,7 @@ import {
 import { parseRegistry, resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 import { agentAudit, agentMessageAudit, auditStatement, OPERATOR_ACTOR, type AuditActor } from "./adminkit";
 import { backfillPrincipals } from "./principals";
+import { handleAdminPrincipals } from "./principaladmin";
 import { parityGate, principalParity, readMisses } from "./principalmirror";
 import { handleSelfService } from "./selfservice";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
@@ -516,6 +517,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         },
       }, undefined, actor).run();
       return json({ ok: true, ...report });
+    }
+    // #854 M3a: the read-only principal view (list, show). After parity and backfill,
+    // which share the prefix and are matched above.
+    if (path === "/api/admin/principals" || path.startsWith("/api/admin/principals/")) {
+      const pres = await handleAdminPrincipals(request, env, url, adminActorOf(resolution));
+      if (pres) return pres;
     }
 
     // --- admin: human user management (#790, contract 1.10.4) ---

@@ -1151,6 +1151,39 @@ class PosternClient:
         """DELETE /api/admin/delegations/{id}. Idempotent."""
         return self._json("DELETE", f"/api/admin/delegations/{_quote_id(delegation_id)}")
 
+    # --- the principal layer, read only (#854 M3a) ------------------------------
+    #
+    # docs/IDENTITY.md. Operator routes: they need the `both` token. Nothing here
+    # carries a credential lookup or secret.
+
+    def list_principals(
+        self,
+        *,
+        kind: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        include_disabled: bool = False,
+    ) -> dict[str, Any]:
+        """GET /api/admin/principals. Returns {items, cursor}.
+
+        `kind` is human, agent or service. Enabled principals only unless
+        `include_disabled`.
+        """
+        params: dict[str, str] = {}
+        if kind is not None:
+            params["kind"] = kind
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        if include_disabled:
+            params["includeDisabled"] = "1"
+        return self._json("GET", "/api/admin/principals", params=params or None)
+
+    def get_principal(self, principal_id: str) -> dict[str, Any]:
+        """GET /api/admin/principals/{id}. {principal, credentials, addresses}."""
+        return self._json("GET", f"/api/admin/principals/{_quote_id(principal_id)}")
+
     def list_audit(self, *, limit: Optional[int] = None, cursor: Optional[str] = None) -> dict[str, Any]:
         """GET /api/admin/audit. The audit log, newest first: {items, cursor}."""
         params: dict[str, str] = {}
