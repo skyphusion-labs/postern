@@ -163,6 +163,9 @@ first admin. A manual run is still safe: it is idempotent.
 - **Webmail: the agent-access checkboxes sit beside their text.** In
   Settings, each "It may" checkbox showed above and to the left of its
   label, because the general input height applied to it.
+- **The relay builds with Go 1.27.4.** `relay/go.mod` (`toolchain`) and
+  `relay/Dockerfile` (`FROM golang:1.27.4-bookworm`) move together; the
+  standard library in 1.27.4 clears GO-2026-6859 in `net/http`.
 
 ## v1.11.0
 
