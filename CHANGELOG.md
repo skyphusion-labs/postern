@@ -14,15 +14,12 @@ mismatched MCP tag fails before it publishes.
 ## Unreleased
 
 **Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds),
-`0020` (`webmail_sessions.principal_id`) and `0021` (the `svc_admin` seed) are additive and
-are applied by the deploy. Run `POST /api/admin/principals/backfill` once after
-upgrading to copy existing identities and users in; it is safe to run again.
-**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
-`0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. The
-backfill that copies existing identities and users in now runs automatically after each
-deploy: the release workflow calls `POST /api/admin/principals/backfill` once the new version
-answers (#901), and the self-host installer calls it after any run that deployed a Worker
-version or created the first admin. A manual run is still safe: it is idempotent.
+`0020` (`webmail_sessions.principal_id`), `0021` (the `svc_admin` seed) and `0022` (the
+principal read-miss counter) are additive and are applied by the deploy. The backfill that
+copies existing identities and users in runs automatically after each deploy: the release
+workflow calls `POST /api/admin/principals/backfill` once the new version answers (#901), and
+the self-host installer calls it after any run that deployed a Worker version or created the
+first admin. A manual run is still safe: it is idempotent.
 
 ### Added
 
@@ -32,6 +29,11 @@ version or created the first admin. A manual run is still safe: it is idempotent
   /api/delegations/mine/{id}`, and `GET /api/audit/mine` (the audit rows
   about the human own address). Session only: a token is refused. Grants
   are audited with the human as actor. See `docs/DELEGATION.md` section 4.6.
+- **Sign-ins compare the principal tables with the old ones (#854 M2).**
+  Agent tokens and password checks also read the new `credentials` table,
+  always act on the old table's answer, and count any disagreement (one
+  write, only on a miss). `GET /api/admin/principals/parity` reports the
+  counts. A failure on the new side never blocks a sign-in.
 - **An admin-only token slot (#904).** `POSTERN_API_TOKEN_ADMIN` reaches the
   admin routes and nothing else: it cannot read, send, delete or organize
   mail. Its audit rows name the `svc_admin` service principal. Set and rotate

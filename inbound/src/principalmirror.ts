@@ -154,3 +154,89 @@ export async function principalParity(env: Env): Promise<ParityReport> {
     orphans: { diffs: o.length, sample: (o as string[]).slice(0, SAMPLE) },
   };
 }
+
+// --- #854 M2 part ii: the read side (agree-or-fallback) ------------------------------
+
+/**
+ * Count one read-path disagreement. A single upsert, made ONLY when a disagreement was
+ * seen, so an agreeing sign-in writes nothing. Best effort by design: a counter failure is
+ * logged and swallowed, and the caller's answer (the old table's) stands either way.
+ */
+export async function recordReadMiss(env: Env, kind: "agent" | "human"): Promise<void> {
+  try {
+    await env.DB.prepare(
+      "INSERT INTO principal_read_misses (day, kind, misses) VALUES (?, ?, 1) " +
+        "ON CONFLICT(day, kind) DO UPDATE SET misses = misses + 1",
+    )
+      .bind(new Date().toISOString().slice(0, 10), kind)
+      .run();
+  } catch (err) {
+    console.error("principal read-miss counter failed", err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
+ * Does the `credentials` table agree with the old table about one agent token? `old` is
+ * the LIVE agent_identities row the token hash found, or null when the old table denies it.
+ * Agreement: a live old row has a live credential with the same principal and caps, under a
+ * live agent principal; a denied token has NO live credential. A credentials read that
+ * fails counts as agreement (no evidence), so it can never change an answer or a count.
+ */
+export async function agentCredentialAgrees(
+  env: Env,
+  tokenHash: string,
+  old: { id: string; scopes: string } | null,
+): Promise<boolean> {
+  let row: { principal_id: string; caps: string; disabled_at: string | null; kind: string } | null;
+  try {
+    row = await env.DB.prepare(
+      "SELECT c.principal_id, c.caps, p.disabled_at, p.kind FROM credentials c LEFT JOIN principals p ON p.id = c.principal_id " +
+        "WHERE c.type = 'api_token' AND c.lookup = ? AND c.revoked_at IS NULL",
+    )
+      .bind(tokenHash)
+      .first();
+  } catch {
+    return true;
+  }
+  if (!old) return row === null;
+  return row !== null && row.principal_id === old.id && row.caps === old.scopes && row.kind === "agent" && row.disabled_at === null;
+}
+
+/**
+ * Does the `credentials` table agree with the old table about one login? `old` is the
+ * smtp_credentials row (or null when there is none). Agreement: an existing row has a live
+ * password credential with the same secret under a human principal whose disabled state
+ * matches; a missing row has NO live credential. A failed read counts as agreement.
+ */
+export async function humanCredentialAgrees(
+  env: Env,
+  username: string,
+  old: { secretHash: string; disabled: boolean } | null,
+): Promise<boolean> {
+  let row: { secret: string | null; disabled_at: string | null; kind: string | null } | null;
+  try {
+    row = await env.DB.prepare(
+      "SELECT c.secret, p.disabled_at, p.kind FROM credentials c LEFT JOIN principals p ON p.id = c.principal_id " +
+        "WHERE c.type = 'password' AND c.lookup = ? AND c.revoked_at IS NULL",
+    )
+      .bind(username)
+      .first();
+  } catch {
+    return true;
+  }
+  if (!old) return row === null;
+  return row !== null && row.secret === old.secretHash && row.kind === "human" && (row.disabled_at !== null) === old.disabled;
+}
+
+/** The read-path miss counts for the last `days` UTC days (counts only). */
+export async function readMisses(env: Env, days = 30): Promise<{ agent: number; human: number; byDay: Array<{ day: string; kind: string; misses: number }> }> {
+  const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+  let rows: Array<{ day: string; kind: string; misses: number }> = [];
+  try {
+    rows = (await env.DB.prepare("SELECT day, kind, misses FROM principal_read_misses WHERE day >= ? ORDER BY day, kind").bind(since).all<{ day: string; kind: string; misses: number }>()).results ?? [];
+  } catch {
+    rows = [];
+  }
+  const sum = (k: string) => rows.filter((r) => r.kind === k).reduce((n, r) => n + Number(r.misses), 0);
+  return { agent: sum("agent"), human: sum("human"), byDay: rows.map((r) => ({ day: r.day, kind: r.kind, misses: Number(r.misses) })) };
+}
