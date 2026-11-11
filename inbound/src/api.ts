@@ -14,7 +14,7 @@
 
 import PostalMime from "postal-mime";
 import * as store from "./store";
-import { cleanBody, htmlToText, ingest, normalizeMessageId, type ParsedInbound } from "./ingest";
+import { cleanBody, htmlToText, ingest, messageDate, normalizeMessageId, type ParsedInbound } from "./ingest";
 import { toArrayBuffer } from "./headers";
 import {
   send,
@@ -1761,8 +1761,7 @@ async function handleImapImport(
   // own Message-ID verbatim, so a Sent copy imported here and the delivered copy that
   // arrives over SMTP resolve to one identity.
   const messageId = await normalizeMessageId(env, parsed.messageId);
-  const parsedDate = parsed.date ? new Date(parsed.date) : new Date();
-  const date = Number.isNaN(parsedDate.getTime()) ? new Date().toISOString() : parsedDate.toISOString();
+  const date = messageDate(parsed.date, new Date());
   const attachments: NonNullable<store.StoreInput["attachments"]> = [];
   for (const attachment of parsed.attachments ?? []) {
     const content = toArrayBuffer(attachment.content);
