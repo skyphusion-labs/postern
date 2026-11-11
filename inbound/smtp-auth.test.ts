@@ -60,6 +60,9 @@ function makeEnv(seed: CredRow[] = [], overrides: Record<string, unknown> = {}) 
     POSTERN_API_TOKEN: "api-token",
     POSTERN_TRANSPORT_TOKEN: "transport-token",
     ALLOWED_FROM_DOMAIN: "skyphusion.org",
+    // The Worker-side throttle is OFF in this endpoint suite: its SQL needs a real engine,
+    // and its behaviour is covered against real sqlite in throttle-atomic.test.ts.
+    WEBMAIL_AUTH_THROTTLE: "off",
     ...overrides,
   } as unknown as Env;
   const ctx = { waitUntil() {} } as unknown as ExecutionContext;
