@@ -960,15 +960,14 @@ class PosternMailbox:
         """True when this session may place the stored row.
 
         No viewer means an estate-wide session. A viewer may place a row only
-        when the stored recipients include that viewer. Content equality is not
-        enough.
+        when ``delivered_to`` includes that viewer. An old row that omits
+        ``deliveredTo`` already falls back to its ``to`` address in
+        ``_delivered_to``, so this check does not read ``to_addr`` again.
         """
         viewer = _bare_addr(self._viewer or "")
         if not viewer:
             return True
         owned = {_bare_addr(addr) for addr in (existing.delivered_to or []) if addr}
-        if existing.to_addr:
-            owned.add(_bare_addr(existing.to_addr))
         return viewer in owned
 
     def _placement_direction_matches(self, existing: Message, parsed: PyMessage) -> bool:

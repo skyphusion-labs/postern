@@ -27,6 +27,13 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **Door session edges.** The IMAP wire trace redacts every received line of a
+  LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
+  port 993; set a certificate, or use port 143. Submission backend errors log
+  the username length, not the username. An APPEND places a stored row only
+  when `delivered_to` includes the session viewer. An old row that omits
+  `deliveredTo` still uses its `to` address. The global auth cooldown is off
+  unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
@@ -67,12 +74,6 @@ deploy. A self-hosted install picks up the installer changes the next time it ru
 
 ### Fixed
 
-- **Door session edges.** The IMAP wire trace redacts every received line of a
-  LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
-  port 993; set a certificate, or use port 143. Submission backend errors log
-  the username length, not the username. An APPEND moves a stored row only
-  when that row's recipients include the session's viewer. The global auth
-  cooldown is off unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set.
 - **The reply and forward quote follows the caller's read scope.** A
   static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
   quotes or forwards a stored message: the source is not found, as on the
