@@ -28,9 +28,23 @@ describe("message-derived fields", () => {
     expect(out.message.trusted).toBe(false);
     expect(typeof out.contentNotice).toBe("string");
     expect(out.contentNotice.length).toBeGreaterThan(20);
-    expect(out.untrustedFields).toEqual(expect.arrayContaining([
-      "subject", "from", "bodyText", "bodyHtml", "attachments.filename",
-    ]));
+    expect(out.untrustedFields).toEqual([
+      "messageId",
+      "date",
+      "subject",
+      "from",
+      "sender",
+      "to",
+      "cc",
+      "bcc",
+      "replyTo",
+      "inReplyTo",
+      "deliveredTo",
+      "bodyText",
+      "bodyHtml",
+      "attachments.filename",
+      "attachments.mime",
+    ]);
   });
 
   it("marks a list, a search page, and a thread the same way", async () => {
@@ -65,5 +79,27 @@ describe("message-derived fields", () => {
     expect(readme).toMatch(/untrustedFields/);
     expect(readme).toMatch(/trusted/);
     expect(readme).toMatch(/\bauth\b/);
+    for (const text of [tool("mailbox_get").description, readme]) {
+      expect(text).toMatch(/allowlist/);
+      expect(text).toMatch(/aligned DMARC or aligned DKIM/);
+      expect(text).toMatch(/Even when trusted is true/);
+      expect(text).toMatch(/still sender-written/);
+    }
+  });
+
+  it("marks filename, mimeType, and content on mailbox_get_attachment", async () => {
+    const client: any = {
+      get: async () => ({
+        message: { attachments: [{ filename: "note.txt", mime: "text/plain", size: 4 }] },
+      }),
+      getAttachmentBytes: async () => ({ base64: "YQ==", contentType: "text/plain", size: 1 }),
+    };
+    const out: any = await tool("mailbox_get_attachment").handler(client, { message_id: "m1", index: 0 });
+    expect(out.filename).toBe("note.txt");
+    expect(out.content).toBe("YQ==");
+    expect(out.untrustedFields).toEqual(["filename", "mimeType", "content"]);
+    expect(out.contentNotice).toMatch(/untrustedFields/);
+    expect(tool("mailbox_get_attachment").description).toMatch(/untrustedFields/);
+    expect(tool("mailbox_get_attachment").description).toMatch(/filename, mimeType, and content/);
   });
 });
