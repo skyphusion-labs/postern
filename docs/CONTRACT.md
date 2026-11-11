@@ -585,6 +585,11 @@ interface Transport {
 `providerMessageId` is **best-effort and provider-dependent**: populated only when the provider
 returns an id (CF Email Sending does; an SMTP relay may not). Callers must not treat its absence
 as failure, and must thread/store on the core-generated `messageId`, never on `providerMessageId`.
+The sent copy also records `providerMessageId` (angle brackets stripped) as its `claimed_id` when it
+differs from `messageId`. CF Email Sending replaces our Message-ID with its own, so the recipient
+sees only the provider id and quotes it when replying. Thread resolution matches `claimed_id`, and
+the sent copy is trusted, so such a reply joins the sent copy's thread. A read by id still uses
+`messageId` only.
 
 - **`CfEmailTransport` (default).** Wraps `env.EMAIL.send()`, byte-for-byte the current
   behavior. Selected when `OUTBOUND_TRANSPORT` is unset or `cf`.
@@ -1231,7 +1236,8 @@ than drop the message or widen a `delivered_to` to place it. Refs GHSA-pjv6-4xmx
 a read by that id (`GET /api/messages/:id`, MCP `mailbox_get`) returns that message. A
 later, DIFFERENT message that arrives with the same id is stored under its derived id with
 `claimed_id` set to the id it arrived with (migration 0018; rows forked before 0018 carry
-NULL). **A consumer that keys on a structured Message-ID, such as a GitHub notification id,
+NULL). An outbound sent copy also sets `claimed_id`, to the provider's Message-ID when the
+transport replaced ours (section on transports). **A consumer that keys on a structured Message-ID, such as a GitHub notification id,
 must check `trusted` on the message it reads.** Thread resolution (section 1) prefers a
 trusted message for an id: the holder when it is trusted, else the earliest trusted
 claimant, else the holder. An untrusted claimant is never chosen as a parent.
