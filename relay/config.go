@@ -104,6 +104,15 @@ type SubmissionCfg struct {
 	// Online brute-force throttle on the AUTH door (#105).
 	Throttle ThrottleCfg
 
+	// Deadlines and caps on the submission listener. Zero timeouts mean "wait
+	// forever" in go-smtp, so the defaults are set in loadConfig. A cap of 0
+	// means no cap. MaxConnsPerIP counts the PROXY-resolved address when a
+	// header was honored, and the raw peer otherwise.
+	ReadTimeout   time.Duration // SUBMISSION_READ_TIMEOUT_SECONDS, default 300
+	WriteTimeout  time.Duration // SUBMISSION_WRITE_TIMEOUT_SECONDS, default 300
+	MaxConns      int           // SUBMISSION_MAX_CONNECTIONS, default 200 (0 = no cap)
+	MaxConnsPerIP int           // SUBMISSION_MAX_CONNECTIONS_PER_IP, default 20 (0 = no cap)
+
 	// PROXY protocol on the listener edge (#155). The mail edge moved to an L4
 	// load balancer that prepends a PROXY header carrying the real client IP;
 	// honored only from a trusted source. Default off (mesh-internal / dev direct).
@@ -262,6 +271,12 @@ func loadConfig() (Config, error) {
 				Mode:    proxyMode(strings.ToLower(env("PROXY_PROTOCOL", "off"))),
 				Timeout: time.Duration(envInt("PROXY_PROTOCOL_TIMEOUT_SECONDS", 5)) * time.Second,
 			},
+			// RFC 5321 4.5.3.2 suggests five minutes for a command. A zero value
+			// in go-smtp means no deadline, so these defaults are the deadline.
+			ReadTimeout:   time.Duration(envInt("SUBMISSION_READ_TIMEOUT_SECONDS", 300)) * time.Second,
+			WriteTimeout:  time.Duration(envInt("SUBMISSION_WRITE_TIMEOUT_SECONDS", 300)) * time.Second,
+			MaxConns:      envInt("SUBMISSION_MAX_CONNECTIONS", 200),
+			MaxConnsPerIP: envInt("SUBMISSION_MAX_CONNECTIONS_PER_IP", 20),
 		},
 	}
 

@@ -242,18 +242,23 @@ This is inherent to optional + server-speaks-first; production uses `require`
 (header always present) and pays no such penalty.
 
 The timeout also bounds a trusted peer that connects and then stalls, so a slow
-or silent peer cannot pin a connection while the door waits for a header.
+or silent peer cannot pin a connection while the door waits for a header. On
+the submission door, after that read, the read deadline the protocol had set
+is put back, so the protocol idle limit still applies to the rest of the
+connection.
 
 ## 8. How the recovered IP is used
 
 - It becomes the connection's remote address for ALL logging on that connection,
   so logs name the true client, not the load balancer.
-- It is the key context any future per-IP control would use.
+- It is the address the submission listener counts for
+  `SUBMISSION_MAX_CONNECTIONS_PER_IP` (default 20). The global cap
+  (`SUBMISSION_MAX_CONNECTIONS`, default 200) is separate. Zero on either means
+  no cap.
 - It does NOT change the #105 throttle keying. #105 stays PER-ACCOUNT as designed
   (keyed on the presented login, enumeration-safe). PROXY protocol restores an
-  accurate remote IP for logs and leaves the per-account throttle exactly as is.
-  Per-IP control is a possible future layer that this accurate IP now enables; it
-  is not part of this contract.
+  accurate remote IP for logs and for the per-address connection cap, and leaves
+  the per-account throttle exactly as is.
 - The PROXY layer sits entirely BEFORE the auth code: header handling (including
   every reject in section 4) happens on the raw connection before a single SMTP/
   IMAP command is processed. So a health-check probe, an untrusted peer, or a

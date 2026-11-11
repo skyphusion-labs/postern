@@ -213,7 +213,7 @@ XSS is the main surface. The page is built to neutralize it:
 - **Locked-down CSP** on the served page. The full served policy is:
 
   ```
-  default-src none; style-src unsafe-inline; script-src unsafe-inline;
+  default-src none; style-src unsafe-inline; script-src sha256-<hash of the page script>;
   connect-src self; img-src self data:; frame-src self;
   base-uri none; form-action none; frame-ancestors none
   ```
@@ -222,19 +222,29 @@ XSS is the main surface. The page is built to neutralize it:
     ship the pasted token to another host); `frame-src self` permits only the
     sandboxed srcdoc body frame; `frame-ancestors none`, plus `nosniff` and
     `no-referrer`.
-  - `script-src unsafe-inline` and `style-src unsafe-inline` are present and
-    unavoidable: the app is one inline `<script>` and one inline `<style>` (no
-    build step, no external assets). Because inline script is allowed, the CSP is
-    NOT the top-frame XSS control; the sole top-frame control is the no-`innerHTML`
-    discipline (all message-derived content goes through text nodes / `setAttribute`),
-    guarded by a test.
+  - `script-src` allows exactly the page's one inline `<script>`, by its sha256.
+    `npm run sync-webmail` computes the hash and writes it into `WEBMAIL_CSP` in
+    `inbound/src/webmail.ts`, and refuses a page the hash cannot cover (a second
+    `<script>`, a script with attributes, an inline `on*=` handler, a `javascript:`
+    URL). So a script that is not the page's own does not run, and the CSP is a second
+    top-frame XSS control behind the no-`innerHTML` discipline (all message-derived
+    content goes through text nodes / `setAttribute`). `inbound/webmail.test.ts`
+    recomputes the hash, and `webmail/e2e` runs every journey under the served header
+    (`tests/script-csp.spec.ts` also checks that an injected script does not run).
+  - `style-src unsafe-inline` stays: the page has one inline `<style>` and sets
+    style attributes.
   - `img-src self data:` means remote images are **always blocked** on the served
     `/webmail` path. The reading pane is an `about:srcdoc` `sandbox=""` iframe, which
     inherits this policy, so remote subresources cannot load regardless of message
     content. There is no "load remote images" opt-in: a working one would require
     relaxing this directive for the whole top frame, defeating the tracking-pixel
     protection it provides. A per-message notice reports how many remote items were
-    blocked; it is informational, not an action (#343).
+    blocked; it is informational, not an action (#343). The count covers remote
+    `img`/`srcset`, media and embeds, legacy `background`, `<link>`, SVG
+    `image`/`use`/`feImage` `href` and `xlink:href`, and CSS `url()`, `@import` and
+    `image-set()` references. CSS is read with its escapes decoded and its comments
+    skipped, in one linear pass, so an escaped URL is counted and a commented-out one
+    is not. Each counted item is also removed from the frame's document.
 - **Attachment download via a Bearer fetch.** The API is token-gated, so a
   download fetches the bytes with the `Authorization` header and saves them from
   an object URL; the token is never placed in a URL. The endpoint returns the

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -353,6 +354,59 @@ func TestProxyConnMalformedFromTrustedIsLoud(t *testing.T) {
 
 // off mode must wrap nothing: the raw listener is returned unchanged so behavior
 // is byte-for-byte the prior deploy.
+type deadlineConn struct {
+	net.Conn
+	mu    sync.Mutex
+	reads []time.Time
+}
+
+func (c *deadlineConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.reads = append(c.reads, t)
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+func TestProxyConnRestoresCallerReadDeadline(t *testing.T) {
+	header := []byte("PROXY TCP4 203.0.113.9 192.0.2.1 1234 587\r\n")
+	inner := newScriptConn(header, tcp("127.0.0.1", 4000))
+	rec := &deadlineConn{Conn: inner}
+	_, trusted, err := net.ParseCIDR("127.0.0.1/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := &proxyConn{Conn: rec, cfg: ProxyProtocolCfg{
+		Mode:    proxyRequire,
+		Trusted: []*net.IPNet{trusted},
+		Timeout: time.Second,
+	}}
+	want := time.Now().Add(time.Hour)
+	if err := pc.SetReadDeadline(want); err != nil {
+		t.Fatal(err)
+	}
+	if got := pc.RemoteAddr().String(); got != "203.0.113.9:1234" {
+		t.Fatalf("remote = %s", got)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.reads) < 2 {
+		t.Fatalf("deadlines = %v", rec.reads)
+	}
+	last := rec.reads[len(rec.reads)-1]
+	if !last.Equal(want) {
+		t.Fatalf("restored %v, want %v; all %v", last, want, rec.reads)
+	}
+	sawHeaderDeadline := false
+	for _, dl := range rec.reads[:len(rec.reads)-1] {
+		if !dl.Equal(want) {
+			sawHeaderDeadline = true
+		}
+	}
+	if !sawHeaderDeadline {
+		t.Fatalf("header read did not set its own deadline: %v", rec.reads)
+	}
+}
+
 func TestWrapProxyListenerOffIsNoOp(t *testing.T) {
 	base := &fakeListener{}
 	if got := wrapProxyListener(base, ProxyProtocolCfg{Mode: proxyOff}); got != base {

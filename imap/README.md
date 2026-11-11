@@ -146,6 +146,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `AUTH_SYSTEM_DOMAIN` | no | -- | optional display suffix for `system` logins |
 | `POSTERN_IMAP_HOST` | no | `127.0.0.1` | listen interface |
 | `POSTERN_IMAP_PORT` | no | `1143` | listen port |
+| `POSTERN_IMAP_MAX_APPEND_BYTES` | no | `23068672` | largest APPEND literal, in octets. Over this the door answers NO [TOOBIG] before reading the literal. The default matches the worker import ceiling (22 MiB) |
 | `POSTERN_IMAP_TLS_CERT` | no | -- | PEM cert path (set with key for IMAPS; listener enforces TLS 1.2+) |
 | `POSTERN_IMAP_TLS_KEY` | no | -- | PEM key path |
 | `POSTERN_API_TIMEOUT` | no | `5` | per-request timeout to the API, seconds. Lowered from 15 on MEASUREMENT (#458, numbers below); must be `> 0` (a `0` makes every socket non-blocking, so the door refuses to start with it) |
