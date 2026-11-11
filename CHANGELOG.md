@@ -62,6 +62,14 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Fixed
 
+- **Submission deadlines.** The submission listener has a read timeout and a
+  write timeout (default 5 minutes each). The read timeout is an idle limit,
+  refreshed on each read. Open connections are capped globally
+  (`SUBMISSION_MAX_CONNECTIONS`, default 200) and per source address
+  (`SUBMISSION_MAX_CONNECTIONS_PER_IP`, default 20). Zero means no cap. The
+  per-source cap uses the address from a trusted PROXY header when one is
+  present. After that header is read, the door puts back the read deadline
+  the protocol had set.
 - **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
   (default 22 MiB, the same ceiling as the worker import) is refused before
   the bytes are read. The tagged reply starts `NO [TOOBIG]`. `CAPABILITY`
