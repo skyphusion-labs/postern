@@ -300,7 +300,12 @@ export const READ_TOOLS: ToolDef[] = [
       ),
       collapseThreads: z.boolean().optional().describe(
         "mode semantic only (#926): fold the hits of one thread into its best hit, which carries " +
-          "`threadHits: {count, ids}`. Refused in any other mode.",
+          "`threadHits: {count, ids}`. Defaults to true in semantic mode. Refused (true) in any other mode.",
+      ),
+      familyCap: z.number().int().min(0).max(10).optional().describe(
+        "mode hybrid only (#930): at most this many hits per family of near-identical notifications " +
+          "from one sender. Defaults to 2 in hybrid; 0 lists every member. When the cap leaves rows " +
+          "off, the result says complete: false. Refused (non-zero) in any other mode.",
       ),
       seen: z.boolean().optional().describe("filter on read state: true = seen, false = unread"),
       seenFor: z.string().optional().describe(
@@ -350,6 +355,12 @@ export const READ_TOOLS: ToolDef[] = [
       // It is refused BEFORE the request, so no unrestricted search runs under a name the
       // caller would misread. `mode` defaults to hybrid, so `{ query, field }` with no
       // mode at all is the likeliest way in, and it is refused too.
+      if (a.familyCap !== undefined && a.familyCap !== 0 && mode !== "hybrid") {
+        throw new PosternError(
+          `familyCap limits template families in mode hybrid and mode is "${mode}": ` +
+            "pass mode=hybrid, or remove familyCap",
+        );
+      }
       if (a.collapseThreads === true && mode !== "semantic") {
         throw new PosternError(
           `collapseThreads folds threads in mode semantic and mode is "${mode}": ` +
@@ -384,6 +395,7 @@ export const READ_TOOLS: ToolDef[] = [
         hasAttachment: a.hasAttachment,
         collapse: a.collapse,
         collapseThreads: a.collapseThreads,
+        familyCap: a.familyCap,
         seen: a.seen,
         seenFor: a.seenFor,
         fields: a.fields,
@@ -407,7 +419,8 @@ export const READ_TOOLS: ToolDef[] = [
         before: a.before ?? null,
         hasAttachment: a.hasAttachment ?? null,
         // Only where it means something (semantic): its default there is true.
-        ...(mode === "semantic" ? { collapse: a.collapse ?? true } : {}),
+        ...(mode === "semantic" ? { collapse: a.collapse ?? true, collapseThreads: a.collapseThreads ?? true } : {}),
+        ...(mode === "hybrid" ? { familyCap: a.familyCap ?? 2 } : {}),
         seen: a.seen ?? null,
         seenFor: a.seenFor ?? null,
         // Echo the projection that was APPLIED, so a reader of this result can tell a

@@ -41,22 +41,34 @@ EVAL_CACHE=/path/embeddings.json EVAL_OUT=/path/out npx vitest run --config eval
 
 **Metrics.** Recall at 1, 5 and 10 (strict: the gold id is a hit itself), and MRR over every single-gold query.
 
-## Result (2026-11-11, with #926)
+## Result (2026-11-11, #930 corpus: 485 messages, 132 queries)
 
 | variant | mode | token r@1 / r@10 | latest r@1 / r@10 | subject r@1 / r@10 | paraphrase r@1 / r@5 / r@10 | diversity coverage@10 | MRR (all single-gold) | distinct threads@10, paraphrase |
 |---|---|---|---|---|---|---|---|---|
-| V0 today (body only, no tiebreak) | semantic | 85% / 100% | 0% / 50% | 32% / 56% | 35% / 70% / 78% | 44% | 0.556 | 9.25 |
-| V0 today (body only, no tiebreak) | hybrid | 100% / 100% | 50% / 100% | 100% / 100% | 35% / 70% / 78% | 44% | 0.771 | 9.25 |
-| V1 + subject in chunk 0 | semantic | 85% / 100% | 0% / 0% | 100% / 100% | 88% / 100% / 100% | 39% | 0.902 | 8.00 |
-| V1 + subject in chunk 0 | hybrid | 100% / 100% | 0% / 100% | 100% / 100% | 88% / 100% / 100% | 39% | 0.942 | 8.00 |
-| V2 + family tiebreak | semantic | 100% / 100% | 75% / 75% | 100% / 100% | 88% / 100% / 100% | 39% | 0.960 | 8.00 |
-| V2 + family tiebreak | hybrid | 100% / 100% | 75% / 100% | 100% / 100% | 88% / 100% / 100% | 39% | 0.962 | 8.00 |
-| V3 + collapse | semantic | 100% / 100% | 75% / 75% | 100% / 100% | 88% / 100% / 100% | 69% | 0.960 | 8.25 |
-| V4 + thread collapse | semantic | 100% / 100% | 75% / 75% | 100% / 100% | 88% / 100% / 100% | 69% | 0.960 | 9.75 |
+| V0 today (body only, no tiebreak) | semantic | 85% / 100% | 17% / 67% | 20% / 44% | 37% / 63% / 72% | 51% | 0.511 | 9.22 |
+| V0 today (body only, no tiebreak) | hybrid | 100% / 100% | 67% / 100% | 100% / 100% | 37% / 63% / 72% | 51% | 0.712 | 9.22 |
+| V1 + subject in chunk 0 | semantic | 85% / 100% | 0% / 33% | 100% / 100% | 85% / 97% / 97% | 53% | 0.878 | 7.87 |
+| V1 + subject in chunk 0 | hybrid | 100% / 100% | 33% / 100% | 100% / 100% | 85% / 97% / 97% | 53% | 0.922 | 7.87 |
+| V2 + family tiebreak | semantic | 100% / 100% | 83% / 83% | 100% / 100% | 85% / 97% / 97% | 53% | 0.937 | 7.87 |
+| V2 + family tiebreak | hybrid | 100% / 100% | 83% / 100% | 100% / 100% | 85% / 97% / 97% | 53% | 0.939 | 7.87 |
+| V3 + collapse | semantic | 100% / 100% | 83% / 83% | 100% / 100% | 85% / 98% / 100% | 67% | 0.941 | 7.97 |
+| V4 + thread collapse | semantic | 100% / 100% | 83% / 83% | 100% / 100% | 85% / 98% / 100% | 71% | 0.943 | 9.72 |
+| H1 hybrid + family fold | hybrid | 100% / 100% | 83% / 83% | 100% / 100% | 85% / 98% / 100% | 67% | 0.941 | 7.97 |
+| H2 hybrid + cap 1 per family | hybrid | 100% / 100% | 83% / 83% | 100% / 100% | 85% / 98% / 100% | 67% | 0.941 | 7.97 |
+| H3 hybrid + cap 2 per family | hybrid | 100% / 100% | 83% / 100% | 100% / 100% | 85% / 98% / 100% | 64% | 0.944 | 7.42 |
+| H4 hybrid + cap 3 per family | hybrid | 100% / 100% | 83% / 100% | 100% / 100% | 85% / 98% / 98% | 63% | 0.943 | 7.67 |
 
-What ships: semantic is V3 (collapse on by default, `collapseThreads` off), and hybrid is V2.
+What ships: semantic is V4 (collapse and collapseThreads both on by default), and hybrid is H3 (cap 2 per family by default).
 
-**#926 thread collapse (V4).** V4 against V3: every recall family is equal, and distinct threads in the top 10 for the paraphrase queries rise from 8.25 to 9.75 (today, V0: 9.25). Embedding the subject made the messages of one thread cluster; folding them recovers more than that. No recall family improved, and by the same rule as collapse a default changes only on a recall gain. So `collapseThreads` ships opt-in.
+**The rule** (the lead's, from #813): a default changes only when a variant improves a recall family and no family gets worse.
+
+- **#930, hybrid.** H3 (cap 2) against V2 hybrid (no cap, as #813 shipped): diversity coverage 53% to 64%, MRR 0.939 to 0.944, paraphrase r@5 and r@10 up, every other family equal. It ships. H1 (fold) and H2 (cap 1) raise diversity further but drop `latest` r@10 from 100% to 83%: one family member stands for the family, and it is not always the newest. H4 (cap 3) passes with less gain. Distinct threads in the top 10 dip from 7.87 to 7.42 under H3; that is not a recall family, and it is reported here.
+- **The #930 premise.** The 44% to 39% hybrid drop was measured on 3 diversity queries. On 15 it does not reproduce: 51% before #813, 53% after.
+- **#926, re-judged on this corpus.** V4 (thread fold) against V3: diversity coverage 67% to 71%, MRR 0.941 to 0.943, every other family equal. So `collapseThreads` is on by default. On the smaller #813 corpus it moved no recall family and was off.
+
+**Corpus.** The #930 block is appended with its own seed, so the first 300 messages and 98 queries are byte-identical to the #813 run. It adds 5 notification families, 20 threads (35 in all), 12 diversity queries (15 in all) and 2 `latest` probes.
+
+**Read honestly.** The remaining `latest` miss is still the sign-in alerts. Exact kNN, not Vectorize ANN. 15 diversity queries is better than 3, but still a small sample.
 
 The new metric is "distinct threads@10": the number of different threads among the top 10 hits, with a folded thread counted once.
 

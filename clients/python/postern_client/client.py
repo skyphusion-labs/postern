@@ -659,6 +659,7 @@ class PosternClient:
         fields: Optional[Sequence[str]] = None,
         collapse: Optional[bool] = None,
         collapse_threads: Optional[bool] = None,
+        family_cap: Optional[int] = None,
     ) -> dict[str, Any]:
         """GET /api/search. Returns {items: [{message, ...}], cursor: str|None}.
 
@@ -677,7 +678,9 @@ class PosternClient:
         notifications from one sender into one hit carrying `similar` by default;
         False lists every member. True outside mode semantic is refused (400).
         `collapse_threads` (#926, semantic only) folds one thread's hits into its
-        best hit, which carries `threadHits`.
+        best hit, which carries `threadHits` (on by default). `family_cap` (#930,
+        hybrid only) keeps at most that many hits per notification family
+        (default 2; 0 lists all; non-zero outside hybrid is refused).
 
         Mind the PAIR here: `field` (singular) selects the substr COLUMN
         matched; `fields` (plural) projects each hit's `message` to the named
@@ -718,6 +721,8 @@ class PosternClient:
             params["collapse"] = _bool_param(collapse)
         if collapse_threads is not None:
             params["collapseThreads"] = _bool_param(collapse_threads)
+        if family_cap is not None:
+            params["familyCap"] = str(family_cap)
         if limit is not None:
             params["limit"] = str(limit)
         if cursor:

@@ -5,7 +5,7 @@
 
 import { sha256hex, representableId } from "./ingest";
 import { EMBED_VERSION, embedChunks } from "./embedtext";
-import { foldThreads, queryTokens, rankFamilies, templateKey } from "./semrank";
+import { capPerKey, foldThreads, queryTokens, rankFamilies, templateKey } from "./semrank";
 import { PROJECTION_VERSION, projectRfc822Size } from "./rfc822Project";
 import { allowedFromDomain } from "./fromdomain";
 
@@ -217,6 +217,13 @@ export interface SearchQuery {
   /** #926, semantic mode only: fold the hits of one thread into its best hit, which
    *  carries `threadHits`. Absent = off. Hybrid never folds threads. */
   collapseThreads?: boolean;
+  /** #930, hybrid mode: at most this many hits per template family in the blended page
+   *  (the rest are left off, and the page then says it is not complete). Absent or 0 = no
+   *  cap. The HTTP edge defaults it (api.ts HYBRID_FAMILY_CAP_DEFAULT). */
+  familyCap?: number;
+  /** #930, INTERNAL (no API parameter sets it): fold families in hybrid instead of capping,
+   *  for the recall eval to compare. It lost on the eval (latest r@10 regressed). */
+  hybridFamilies?: "fold";
   /** #813, INTERNAL (no API parameter sets it): `false` skips the template-family
    *  tiebreak, so the recall eval can measure the ranking as it was before #813. */
   familyRank?: boolean;
@@ -3326,6 +3333,22 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   return out;
 }
 
+/** #930: at most `cap` hits per template family, on the blended, scoped list. */
+function capFamilies(items: SearchHit[], cap: number): SearchHit[] {
+  return capPerKey(items.map((h) => ({ hit: h, key: templateKey(h.message.from, h.message.subject) })), cap).map((k) => k.hit);
+}
+
+/** #930, eval only: fold families in hybrid (the option the eval rejected). */
+function hybridFamilyView(items: SearchHit[], how: "fold"): SearchHit[] {
+  void how;
+  const keyed = items.map((h) => ({ hit: h, id: h.message.messageId, key: templateKey(h.message.from, h.message.subject) }));
+  const byId = new Map(keyed.map((k) => [k.id, k.hit]));
+  return foldThreads(keyed.map((k) => ({ id: k.id, thread: k.key }))).map((r) => {
+    const hit = byId.get(r.id) as SearchHit;
+    return r.threadHits ? { ...hit, similar: r.threadHits } : hit;
+  });
+}
+
 /** #926: fold scoped hits of one thread into its first (best) hit. */
 function foldThreadHits(items: SearchHit[]): SearchHit[] {
   const byId = new Map(items.map((h) => [h.message.messageId, h]));
@@ -3397,7 +3420,9 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     // #853: both halves carry the guard; a field left off here would leak through hybrid.
     agentGuard: q.agentGuard,
     familyRank: q.familyRank,
-    limit,
+    // #930: a family option folds or drops rows after the blend, so each half fetches more
+    // to refill the page. As shipped (no option) the halves fetch exactly `limit`.
+    limit: q.hybridFamilies || (q.familyCap ?? 0) > 0 ? Math.min(MAX_LIMIT, limit * 5) : limit,
   };
   const [ftsPage, semPage] = await Promise.all([
     ftsSearch(env, { ...shared, mode: "fts" }),
@@ -3421,20 +3446,28 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     else merged.set(id, { message: hit.message, score: add });
   }
 
-  const items: SearchHit[] = [...merged.values()]
+  const blended: SearchHit[] = [...merged.values()]
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
     .map((h) => ({ message: h.message, score: h.score }));
+  const cap = Math.floor(q.familyCap ?? 0);
+  const viewed = q.hybridFamilies ? hybridFamilyView(blended, q.hybridFamilies) : cap > 0 ? capFamilies(blended, cap) : blended;
+  // Rows the cap left off are matches this page does not show: it may not claim exhaustion.
+  const capped = blended.length - (q.hybridFamilies ? blended.length : viewed.length);
+  const items = viewed.slice(0, limit);
   // A blend is complete only if BOTH halves were. The FTS half is keyset-paginated, so it is
   // complete exactly when it handed back no continuation; the semantic half reports for
   // itself. This is the DEFAULT mode for the MCP door, which is why it mattered most that it
   // stopped claiming exhaustion it had not earned.
   const ftsComplete = ftsPage.complete ?? ftsPage.cursor === null;
   const semComplete = semPage.complete ?? semPage.cursor === null;
-  if (ftsComplete && semComplete) return { items, cursor: null, complete: true };
+  if (ftsComplete && semComplete && capped === 0) return { items, cursor: null, complete: true };
   const out: Page<SearchHit> = { items, complete: false };
   if (semPage.retrievalCap !== undefined) out.retrievalCap = semPage.retrievalCap;
-  const reasons = [semPage.degraded, ftsComplete ? undefined : "more keyword matches remain beyond this page"]
+  const reasons = [
+    semPage.degraded,
+    ftsComplete ? undefined : "more keyword matches remain beyond this page",
+    capped > 0 ? `${capped} more match(es) from repeated notification families were left off (familyCap=${cap}); pass familyCap=0 to list them, or mode=semantic to see them grouped` : undefined,
+  ]
     .filter(Boolean)
     .join("; ");
   if (reasons) out.degraded = reasons;

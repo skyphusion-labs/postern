@@ -125,6 +125,21 @@ describe("mailbox_search", () => {
     expect("collapse" in hybrid).toBe(false);
   });
 
+  it("#930 familyCap: non-zero refused outside hybrid before any request; hybrid forwards and echoes the default", async () => {
+    const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const search = tool("mailbox_search");
+    expect(Object.keys(search.inputSchema)).toContain("familyCap");
+    await expect(search.handler(client, { query: "x", mode: "semantic", familyCap: 2 })).rejects.toThrow(/familyCap limits template families in mode hybrid/);
+    expect(client.search).not.toHaveBeenCalled();
+    const hyb: any = await search.handler(client, { query: "x" });
+    expect(hyb.familyCap).toBe(2);
+    await search.handler(client, { query: "x", familyCap: 0 });
+    expect(client.search).toHaveBeenLastCalledWith(expect.objectContaining({ familyCap: 0 }));
+    const sem: any = await search.handler(client, { query: "x", mode: "semantic", familyCap: 0 });
+    expect("familyCap" in sem).toBe(false);
+    expect(sem.collapseThreads).toBe(true);
+  });
+
   it("#926 collapseThreads: true is refused outside semantic before any request; semantic forwards it", async () => {
     const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
     const search = tool("mailbox_search");
