@@ -5,8 +5,8 @@
 //
 // Env:
 //   POSTERN_BASE_URL            the instance (the deploy job's POSTERN_SMOKE_BASE_URL)
-//   POSTERN_DEPLOY_ADMIN_TOKEN  an admin-capable bearer (today the operator POSTERN_API_TOKEN;
-//                               #904 tracks a separate admin-only slot). Read from env only,
+//   POSTERN_DEPLOY_ADMIN_TOKEN  the admin-only credential slot from #904 (never the operator
+//                               POSTERN_API_TOKEN). Read from env only,
 //                               never argv, never printed.
 //   POSTERN_EXPECT_VERSION      the release tag (v1.11.0 or 1.11.0). The route exists only in
 //                               the new code, so the call waits until GET /health reports

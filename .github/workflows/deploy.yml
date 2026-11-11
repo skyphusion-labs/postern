@@ -35,10 +35,11 @@ name: deploy
 #   CLOUDFLARE_API_TOKEN   -- CF API token, Workers Scripts:Edit on the account
 #                             (plus D1 + Vectorize + R2 edit for the inbound store).
 #   CLOUDFLARE_ACCOUNT_ID  -- the Cloudflare account ID.
-#   POSTERN_DEPLOY_ADMIN_TOKEN -- an admin-capable bearer for the post-deploy principals
-#                             backfill (#901). Today the operator POSTERN_API_TOKEN; #904
-#                             tracks a separate admin-only slot. A tag deploy without it
-#                             fails at that step, by name.
+#   POSTERN_DEPLOY_ADMIN_TOKEN -- the bearer for the post-deploy principals backfill
+#                             (#901): the admin-only credential slot from #904, never the
+#                             operator POSTERN_API_TOKEN. A tag deploy needs #904 deployed
+#                             and this secret set first; without it the release fails at
+#                             that step, by name.
 #
 # Optional operator override:
 #   POSTERN_INBOUND_WRANGLER -- the full real inbound wrangler config (JSON) for
@@ -285,8 +286,8 @@ jobs:
       # says it runs on every deploy. Idempotent: a run with nothing to do changes nothing.
       # It waits until /health reports THIS tag, because the route exists only in the new
       # code. A missing secret, a non-200 or a malformed report fails the release by name.
-      # POSTERN_DEPLOY_ADMIN_TOKEN is a `production` ENVIRONMENT secret (today the operator
-      # token; #904 tracks a separate admin-only slot). Nothing prints the token or an address.
+      # POSTERN_DEPLOY_ADMIN_TOKEN is a `production` ENVIRONMENT secret holding the #904
+      # admin-only slot, not the operator token. Nothing prints the token or an address.
       - name: Converge the principal tables (principals backfill)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
