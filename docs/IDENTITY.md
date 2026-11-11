@@ -264,6 +264,12 @@ password does. Linking needs an already-signed-in principal or the operator, nev
 first sign-in, so an outside issuer can never create an account by itself. Self-host
 needs none of this.
 
+**S5 shows the agent roster to humans.** `GET /api/delegations/mine/grantees` lists every
+LIVE agent identity (id, display name, From) to every signed-in human on that deploy, so a
+human can pick whom to grant. It shows nothing else about an agent (no powers, no grants it
+holds, no creation data). An operator who does not want humans to see the roster leaves
+agents unminted or revokes them; there is no per-agent visibility flag in v1.
+
 ## 8. What each #740 slice keys on
 
 | Slice | Keys on | Needs this layer first? |

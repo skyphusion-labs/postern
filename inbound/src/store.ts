@@ -1199,14 +1199,22 @@ export type AccessScope = readonly string[] | "estate";
  *  the caller's own address writes no audit row. */
 export interface OrganizeAudit {
   addresses: readonly string[];
-  statement: (where: { sql: string; binds: unknown[] }) => D1PreparedStatement;
+  /** One audit INSERT for the touched messages reachable through `address`, which the
+   *  row then names (#740 S5: the trail says WHOSE mail it was, so each human's own audit
+   *  view shows only rows about their mail). */
+  statement: (where: { sql: string; binds: unknown[] }, address: string) => D1PreparedStatement;
 }
 
-function organizeAuditStatement(audit: OrganizeAudit, ids: readonly string[]): D1PreparedStatement {
-  const granted = accessClause(audit.addresses, "m");
-  return audit.statement({
-    sql: `m.message_id IN (${ids.map(() => "?").join(", ")}) AND ${granted.sql}`,
-    binds: [...ids, ...granted.binds],
+/** The audit INSERTs for an organize write: one per granted address, each covering the
+ *  touched messages that address reaches. A message reachable through two granted
+ *  addresses gets a row for each, because it is both humans' mail. */
+function organizeAuditStatements(audit: OrganizeAudit, ids: readonly string[]): D1PreparedStatement[] {
+  return audit.addresses.map((address) => {
+    const reach = accessClause([address], "m");
+    return audit.statement(
+      { sql: `m.message_id IN (${ids.map(() => "?").join(", ")}) AND ${reach.sql}`, binds: [...ids, ...reach.binds] },
+      address,
+    );
   });
 }
 
@@ -1315,7 +1323,7 @@ export async function setSeen(
     if (audit) {
       // #740 S2: a granted-address mark is ONE batch, every override plus its audit rows,
       // so the marks and their record land together or not at all.
-      await env.DB.batch([...ids.map(upsert), organizeAuditStatement(audit, ids)]);
+      await env.DB.batch([...ids.map(upsert), ...organizeAuditStatements(audit, ids)]);
       return ids.length;
     }
     for (const id of ids) await upsert(id).run();
@@ -1384,7 +1392,7 @@ export async function setFlags(
     return (res.results ?? []).length;
   }
   // #740 S2: the write and its audit rows in one batch, so a failed audit is a failed write.
-  const [res] = await env.DB.batch<{ message_id: string }>([update, organizeAuditStatement(audit, messageIds)]);
+  const [res] = await env.DB.batch<{ message_id: string }>([update, ...organizeAuditStatements(audit, messageIds)]);
   return (res.results ?? []).length;
 }
 
@@ -1458,7 +1466,7 @@ export async function moveMessages(
       );
     }
     // #740 S2: this message's audit row rides in its own batch, so it lands with the move.
-    if (audit) statements.push(organizeAuditStatement(audit, [id]));
+    if (audit) statements.push(...organizeAuditStatements(audit, [id]));
     await env.DB.batch(statements);
     updated++;
   }

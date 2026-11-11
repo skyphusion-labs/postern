@@ -26,6 +26,12 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Added
 
+- **A human manages delegation on their own address (#740 S5).** From a
+  webmail session: `GET /api/delegations/mine/grantees` (the live agents a
+  human may grant to), `GET`/`POST /api/delegations/mine`, `DELETE
+  /api/delegations/mine/{id}`, and `GET /api/audit/mine` (the audit rows
+  about the human own address). Session only: a token is refused. Grants
+  are audited with the human as actor. See `docs/DELEGATION.md` section 4.6.
 - **An admin-only token slot (#904).** `POSTERN_API_TOKEN_ADMIN` reaches the
   admin routes and nothing else: it cannot read, send, delete or organize
   mail. Its audit rows name the `svc_admin` service principal. Set and rotate
@@ -55,6 +61,10 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Changed
 
+- **An organize audit row names whose mail it touched (#740 S5).** Its
+  `detail` carries `address` (the granted human) instead of `granted` (every
+  granted address); a message two granted humans both receive gets a row
+  for each.
 - **Deploy runs the principals backfill (#901).** `.github/workflows/deploy.yml` calls it after
   the deployed artifact is verified, waits until `/health` reports the tag, and fails the release
   on a missing `POSTERN_DEPLOY_ADMIN_TOKEN`, a non-200 or a malformed report. Address conflicts
