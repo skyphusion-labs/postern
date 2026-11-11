@@ -11,6 +11,15 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+### Changed
+
+- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
+  The served CSP lists the sha256 of the page's one inline script, which
+  `npm run sync-webmail` computes, so a script that is not the page's
+  own does not run. `style-src 'unsafe-inline'` is unchanged.
+
 ## v1.11.0
 
 MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's
