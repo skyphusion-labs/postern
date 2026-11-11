@@ -1190,6 +1190,26 @@ function membershipClause(
  *  to share one representation (`undefined`) no longer have one. */
 export type AccessScope = readonly string[] | "estate";
 
+/** The audit half of an organize write that reaches a GRANTED address (#740 S2).
+ *
+ *  `addresses` are the granted addresses in the write's scope. `statement` builds the
+ *  audit INSERT from a predicate over `messages m`; the store hands it "the ids this
+ *  write touches AND reachable through `addresses`", and runs it in the same D1 batch
+ *  as the write, so an audit failure rolls the write back. Mail reachable only through
+ *  the caller's own address writes no audit row. */
+export interface OrganizeAudit {
+  addresses: readonly string[];
+  statement: (where: { sql: string; binds: unknown[] }) => D1PreparedStatement;
+}
+
+function organizeAuditStatement(audit: OrganizeAudit, ids: readonly string[]): D1PreparedStatement {
+  const granted = accessClause(audit.addresses, "m");
+  return audit.statement({
+    sql: `m.message_id IN (${ids.map(() => "?").join(", ")}) AND ${granted.sql}`,
+    binds: [...ids, ...granted.binds],
+  });
+}
+
 /** "delivered to V, or authored by V" for ANY address in the scope (#425). Authored
  *  means SENT by postern as V: direction 'outbound' and from_addr = V. The From header
  *  of inbound mail is written by the sender, so it never makes V the author.
@@ -1261,8 +1281,12 @@ export async function setSeen(
   seen: boolean,
   scope: AccessScope,
   forRecipient?: string,
+  audit?: OrganizeAudit,
 ): Promise<number> {
   if (messageIds.length === 0) return 0;
+  // An audited (granted-address) mark is always a per-recipient one: the row-level flag
+  // is the estate lens, and no grant reaches it.
+  if (audit && !forRecipient) throw new Error("store: an audited seen write needs a recipient");
   const placeholders = messageIds.map(() => "?").join(", ");
   // The accessibility predicate, identical to setFlags/moveMessages and to
   // messageAccessible: the message was delivered to the scope, or the scope sent it.
@@ -1282,14 +1306,19 @@ export async function setSeen(
       .bind(...messageIds, ...accessBinds)
       .all<{ message_id: string }>();
     const ids = (existing.results ?? []).map((r) => r.message_id);
-    for (const id of ids) {
-      await env.DB.prepare(
+    if (ids.length === 0) return 0;
+    const upsert = (id: string) =>
+      env.DB.prepare(
         "INSERT INTO message_seen_by (message_id, recipient, seen) VALUES (?, ?, ?) " +
           "ON CONFLICT(message_id, recipient) DO UPDATE SET seen = excluded.seen",
-      )
-        .bind(id, recipient, seen ? 1 : 0)
-        .run();
+      ).bind(id, recipient, seen ? 1 : 0);
+    if (audit) {
+      // #740 S2: a granted-address mark is ONE batch, every override plus its audit rows,
+      // so the marks and their record land together or not at all.
+      await env.DB.batch([...ids.map(upsert), organizeAuditStatement(audit, ids)]);
+      return ids.length;
     }
+    for (const id of ids) await upsert(id).run();
     return ids.length;
   }
 
@@ -1329,6 +1358,7 @@ export async function setFlags(
   messageIds: string[],
   set: { flagged?: boolean; answered?: boolean },
   scope: AccessScope,
+  audit?: OrganizeAudit,
 ): Promise<number> {
   if (messageIds.length === 0 || (set.flagged === undefined && set.answered === undefined)) return 0;
   const assignments: string[] = [];
@@ -1346,11 +1376,15 @@ export async function setFlags(
   // from the read it mirrors.
   const clause = accessClause(scope);
   const access = clause.sql ? ` AND ${clause.sql}` : "";
-  const res = await env.DB.prepare(
+  const update = env.DB.prepare(
     `UPDATE messages SET ${assignments.join(", ")} WHERE message_id IN (${placeholders})${access} RETURNING message_id`,
-  )
-    .bind(...binds, ...messageIds, ...clause.binds)
-    .all<{ message_id: string }>();
+  ).bind(...binds, ...messageIds, ...clause.binds);
+  if (!audit) {
+    const res = await update.all<{ message_id: string }>();
+    return (res.results ?? []).length;
+  }
+  // #740 S2: the write and its audit rows in one batch, so a failed audit is a failed write.
+  const [res] = await env.DB.batch<{ message_id: string }>([update, organizeAuditStatement(audit, messageIds)]);
   return (res.results ?? []).length;
 }
 
@@ -1395,6 +1429,7 @@ export async function moveMessages(
   messageIds: string[],
   mailbox: MailboxPlacement,
   scope: AccessScope,
+  audit?: OrganizeAudit,
 ): Promise<number> {
   let updated = 0;
   const clause = accessClause(scope);
@@ -1422,6 +1457,8 @@ export async function moveMessages(
         ).bind(id, mailbox, placement.uid, now),
       );
     }
+    // #740 S2: this message's audit row rides in its own batch, so it lands with the move.
+    if (audit) statements.push(organizeAuditStatement(audit, [id]));
     await env.DB.batch(statements);
     updated++;
   }

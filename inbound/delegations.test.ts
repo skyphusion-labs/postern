@@ -295,8 +295,8 @@ describe("#740 S1 every authority path is operator only (derived from the route 
   });
 });
 
-describe("#740 S1 changes no behaviour: a grant does not yet widen its grantee", () => {
-  it("a grantee with organize cannot mark a granted address's mail read, with or without the grant", async () => {
+describe("#740 S1 a grant widens only what it names, and only where S2 enforces it", () => {
+  it("seen without `for` stays the grantee's OWN read state: the grant does not reach it (S2 needs `for`)", async () => {
     const s = setup();
     const a = await s.identity(["read", "organize"]);
     await putInbound(s.env, s.ctx, { id: "<m1@example.com>", from: "x@example.com", to: HUMAN });
@@ -312,7 +312,7 @@ describe("#740 S1 changes no behaviour: a grant does not yet widen its grantee",
     expect((await s.call("POST", "/api/messages/seen", ADMIN, { ids: [id], seen: true })).body.updated).toBe(1);
   });
 
-  it("a grantee with send still sends as ITSELF, never as a granted address, with or without the grant", async () => {
+  it("a grantee with send still sends as ITSELF, never as a granted address, with or without the grant (send_as is S4)", async () => {
     const sent: Array<{ from: unknown }> = [];
     const s = setup({ EMAIL: { async send(m: { from: unknown }) { sent.push(m); return { messageId: "provider-1" }; } } });
     const a = await s.identity(["read", "send"]);

@@ -13,6 +13,20 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Upgrade.** Unset `AGENT_READ_SCOPE` means `estate`: an upgraded deploy keeps the
+estate-wide agent read until the operator sets `AGENT_READ_SCOPE = "granted"`. The
+installer writes `granted` for a new install and does not add it on upgrade.
+
+### Added
+
+- **Delegation grants enforce `read` and `organize` (#740 S2, #860).** The
+  `AGENT_READ_SCOPE` flag (`estate` or `granted`; an unknown value fails
+  closed to `granted`). Under `granted`, an agent reads its own address
+  plus the addresses it holds a grant on. An `organize` grant widens mark
+  read, flags and move to the granted address's mail, and every such
+  write is audited in the same batch. `GET /api/whoami` reports
+  `delegations`. See `docs/DELEGATION.md` section 4.
+
 ### Fixed
 
 - **Webmail shows attachment names with hidden characters made visible.**
@@ -111,8 +125,10 @@ uninstall command and an Email Routing report for the installer, PBKDF2-SHA512 f
 credentials, and write-scope and redirect fixes.
 
 **Upgrade.** Migrations `0016` (agent identities, audit log) and `0017` (delegation grants) are
-additive and are applied by the deploy. Nothing changes for an existing deploy until an operator
-mints an identity or a grant. Existing SHA-256 password hashes keep verifying and are upgraded to
+additive and are applied by the deploy. Apart from the write-scope fix below (an existing
+`POSTERN_SEND_IDENTITIES` entry that holds `organize` without `read` is now held to its own
+address), nothing changes for an existing deploy until an operator mints an identity or a grant.
+Existing SHA-256 password hashes keep verifying and are upgraded to
 SHA-512 on the next successful sign-in. The MCP changes below ship on the separate
 `postern-mcp-v*` track, not with this tag.
 
