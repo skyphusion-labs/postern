@@ -15,6 +15,10 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **Attachment download.** `postern attachment` without `-o` writes only the
+  final path segment of the remote name, refuses an empty or hidden name, and
+  does not replace a file that already exists. `-o` still writes the path you
+  name.
 - **Write scope binds to the bound identity.** An identity's write scope
   (flags, move, seen) now binds to its bound address whatever its other
   caps; previously a token without `read` could organize outside its own
