@@ -62,6 +62,10 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Fixed
 
+- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
+  (default 22 MiB, the same ceiling as the worker import) is refused before
+  the bytes are read. The tagged reply starts `NO [TOOBIG]`. `CAPABILITY`
+  advertises `APPENDLIMIT`.
 - **Door throttle key.** The throttle key is canonicalized like the Worker's:
   the ECMAScript trim set, then lower-case. In system (PAM) mode the key is
   the local part before `@`. native and ldap keep the whole trimmed name.
