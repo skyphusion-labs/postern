@@ -162,6 +162,9 @@ export function projectSummary(
 }
 
 export interface ListQuery {
+  /** #853: an AGENT reader. Hides every human-only thread of every owner from this read,
+   *  except the agent's own mail. Absent for human sessions and static tokens. */
+  agentGuard?: AgentGuard;
   to?: string;
   from?: string;
   thread?: string;
@@ -206,6 +209,8 @@ export type SearchField = "subject" | "body" | "text";
 
 export interface SearchQuery {
   q: string;
+  /** #853: the same guard as ListQuery.agentGuard, in every search mode. */
+  agentGuard?: AgentGuard;
   mode?: "fts" | "substr" | "semantic" | "hybrid"; // substr = #212; semantic/hybrid = M4
   // substr only (#212): which column(s) the substring matches; default "text".
   field?: SearchField;
@@ -303,6 +308,9 @@ export interface StoreInput {
    *  scope, so a parent it cannot read is treated like an id that does not exist.
    *  Absent means the whole store: inbound mail has no caller to scope to. */
   threadScope?: AccessScope;
+  /** #853: a send by an AGENT never threads onto a parent in a human-only thread; such a
+   *  parent reads like an id that does not exist, so the send starts a new thread. */
+  threadGuard?: AgentGuard;
   bodyText: string;
   /** Original HTML body to persist, if any (null/undefined when text-only). */
   bodyHtml?: string | null;
@@ -373,6 +381,7 @@ async function resolveThreadId(
   inReplyTo: string | null | undefined,
   references: string[] | undefined,
   scope: AccessScope = "estate",
+  guard?: AgentGuard,
 ): Promise<string> {
   const quoted = new Set<string>();
   if (inReplyTo) quoted.add(stripAngle(inReplyTo));
@@ -390,7 +399,7 @@ async function resolveThreadId(
   // A scoped lookup reads only rows the scope may read (the store.get predicate). Its
   // binds share D1's per-query limit with the candidates, so the lowest-priority
   // candidates are dropped to make room.
-  const access = accessClause(scope);
+  const access = accessClause(scope, undefined, guard);
   if (access.sql === "1=0") return messageId;
   const room = Math.floor((D1_MAX_BOUND - access.binds.length) / 2);
   const ids = [...candidates].slice(0, Math.max(0, room));
@@ -544,7 +553,7 @@ async function putRow(
   claimedId: string | null = null,
 ): Promise<PutResult> {
   const receivedAt = new Date().toISOString();
-  const threadId = await resolveThreadId(env.DB, input.messageId, input.inReplyTo, input.references, input.threadScope ?? "estate");
+  const threadId = await resolveThreadId(env.DB, input.messageId, input.inReplyTo, input.references, input.threadScope ?? "estate", input.threadGuard);
 
   // Envelope semantics (#178): the deduped, bare lower-cased set this delivery is
   // FOR, wrapped ",a,b," so membership is one delimiter-safe LIKE. Derived from
@@ -1231,7 +1240,14 @@ function organizeAuditStatements(audit: OrganizeAudit, ids: readonly string[]): 
  *  identity for this caller" and "this caller may see everything" were the same string.
  *  `alias` matches the surrounding statement, so list/search/folders share this definition
  *  instead of keeping aliased copies of it. */
-function accessClause(scope: AccessScope, alias?: string): { sql: string; binds: string[] } {
+function accessClause(scope: AccessScope, alias?: string, guard?: AgentGuard): { sql: string; binds: string[] } {
+  const base = baseAccessClause(scope, alias);
+  if (!guard || base.sql === "1=0") return base;
+  const hide = exclusionClause(guard, alias ?? "messages");
+  return base.sql ? { sql: `(${base.sql} AND ${hide.sql})`, binds: [...base.binds, ...hide.binds] } : hide;
+}
+
+function baseAccessClause(scope: AccessScope, alias?: string): { sql: string; binds: string[] } {
   if (scope === "estate") return { sql: "", binds: [] };
   const viewers = viewerList(scope);
   // Matches nothing rather than throwing: every call site already treats an id it cannot
@@ -1246,6 +1262,111 @@ function accessClause(scope: AccessScope, alias?: string): { sql: string; binds:
     binds.push(...member.binds, viewer);
   }
   return { sql: parts.length === 1 ? parts[0] : `(${parts.join(" OR ")})`, binds };
+}
+
+// --- #853: human-only threads -------------------------------------------------
+//
+// An owner marks a thread human-only (delegation_exclusions). From then on NO agent reads,
+// quotes, organizes or replies into that owner's mail in it, whatever its grants and under
+// either AGENT_READ_SCOPE value. ONE predicate, `exclusionClause`, is the whole rule, and
+// every agent path reaches it: the list/count/search predicates, semantic hydration,
+// folders, thread, the thread-parent lookup of a send, and `agentHidden` for the
+// single-message routes. Human sessions and static tokens never carry a guard.
+
+/** An AGENT reader (a Bearer bound to an identity, never a session): its own address. */
+export interface AgentGuard {
+  readonly agent: string;
+}
+
+/** "this row is NOT hidden from the guarded agent".
+ *
+ *  Hidden means: an ACTIVE exclusion names this row's thread, and the exclusion's owner
+ *  address is on this row's delivered set, or the row was sent by postern AS that owner.
+ *  So the mark hides exactly the owner's mail in the thread: a copy delivered only to
+ *  someone else is that person's mail, and their own mark governs it.
+ *
+ *  The agent's OWN mail is never hidden (delivered to it, or sent by postern as it): a
+ *  mark on a human's thread cannot take away what the agent already holds in its own box.
+ *
+ *  `instr` on the lower-cased delivered set, never LIKE: an address is DATA, and `_` is a
+ *  LIKE wildcard. The thread key is COALESCE(thread_id, message_id), the same id the read
+ *  routes report as threadId. `alias` is REQUIRED (an unqualified thread_id inside the
+ *  subquery would bind to the exclusion row). */
+function exclusionClause(guard: AgentGuard, alias: string): { sql: string; binds: string[] } {
+  const p = `${alias}.`;
+  const agent = guard.agent.trim().toLowerCase();
+  const own = membershipClause(agent, { alias });
+  const set = `lower(COALESCE(${p}delivered_to, ',' || ${p}to_addr || ','))`;
+  const hidden =
+    "EXISTS (SELECT 1 FROM delegation_exclusions x " +
+    `WHERE x.thread_id = COALESCE(${p}thread_id, ${p}message_id) AND x.revoked_at IS NULL ` +
+    `AND (instr(${set}, ',' || x.address || ',') > 0 OR (${p}direction = 'outbound' AND lower(${p}from_addr) = x.address)))`;
+  return {
+    sql: `(NOT ${hidden} OR ${own.sql} OR (${p}direction = 'outbound' AND lower(${p}from_addr) = ?))`,
+    binds: [...own.binds, agent],
+  };
+}
+
+/** Is this stored message hidden from this agent (#853)? False for an unknown id: the
+ *  caller's own lookup answers that, with the same 404. */
+export async function agentHidden(env: Env, messageId: string, guard: AgentGuard): Promise<boolean> {
+  const g = exclusionClause(guard, "messages");
+  const row = await env.DB.prepare(`SELECT 1 AS hit FROM messages WHERE message_id = ? AND NOT ${g.sql} LIMIT 1`)
+    .bind(messageId, ...g.binds)
+    .first<{ hit: number }>();
+  return !!row;
+}
+
+/** `ids` minus the ones hidden from this agent (#853), order kept. An organize write by an
+ *  agent runs on this, so a hidden message is skipped exactly like an unknown id. */
+export async function withoutHidden(env: Env, ids: readonly string[], guard: AgentGuard | undefined): Promise<string[]> {
+  if (!guard || ids.length === 0) return [...ids];
+  const g = exclusionClause(guard, "messages");
+  const hidden = new Set<string>();
+  const room = D1_MAX_BOUND - g.binds.length;
+  for (let i = 0; i < ids.length; i += room) {
+    const chunk = ids.slice(i, i + room);
+    const { results } = await env.DB.prepare(
+      `SELECT message_id FROM messages WHERE message_id IN (${chunk.map(() => "?").join(", ")}) AND NOT ${g.sql}`,
+    )
+      .bind(...chunk, ...g.binds)
+      .all<{ message_id: string }>();
+    for (const r of results ?? []) hidden.add(r.message_id);
+  }
+  return ids.filter((id) => !hidden.has(id));
+}
+
+/** The owner's view of one thread (#853): undefined when none of the owner's mail is in
+ *  it (the route answers that with the same 404 as an unknown id), else the subject of the
+ *  owner's earliest message there (null when it has none). Owner's mail is the ordinary
+ *  access predicate: delivered to the address, or sent by postern as it. */
+export async function ownerThreadSubject(env: Env, threadId: string, address: string): Promise<string | null | undefined> {
+  const acc = baseAccessClause([address], "m");
+  const row = await env.DB.prepare(
+    "SELECT m.subject FROM messages m WHERE (m.thread_id = ? OR (m.thread_id IS NULL AND m.message_id = ?)) " +
+      `AND ${acc.sql} ORDER BY m.date, m.id LIMIT 1`,
+  )
+    .bind(threadId, threadId, ...acc.binds)
+    .first<{ subject: string | null }>();
+  return row ? row.subject ?? null : undefined;
+}
+
+/** The ACTIVE human-only marks on one address, newest first (#853), each with the subject
+ *  the owner sees for it. Nothing about any other address's mail is read. */
+export async function exclusionsFor(
+  env: Env,
+  address: string,
+): Promise<Array<{ id: string; threadId: string; subject: string | null; createdAt: string }>> {
+  const acc = baseAccessClause([address], "m");
+  const { results } = await env.DB.prepare(
+    "SELECT x.id, x.thread_id, x.created_at, (SELECT m.subject FROM messages m " +
+      "WHERE (m.thread_id = x.thread_id OR (m.thread_id IS NULL AND m.message_id = x.thread_id)) " +
+      `AND ${acc.sql} ORDER BY m.date, m.id LIMIT 1) AS subject ` +
+      "FROM delegation_exclusions x WHERE x.address = ? AND x.revoked_at IS NULL ORDER BY x.created_at DESC, x.id DESC",
+  )
+    .bind(...acc.binds, address)
+    .all<{ id: string; thread_id: string; created_at: string; subject: string | null }>();
+  return (results ?? []).map((r) => ({ id: r.id, threadId: r.thread_id, subject: r.subject ?? null, createdAt: r.created_at }));
 }
 
 /** The READ paths' documented default: a read with no bound viewer is an ESTATE read.
@@ -1966,10 +2087,10 @@ export async function thread(
   env: Env,
   threadId: string,
   viewer?: string | readonly string[],
-  opts: { limit?: number; cursor?: string } = {},
+  opts: { limit?: number; cursor?: string; agentGuard?: AgentGuard } = {},
 ): Promise<Page<StoredMessage>> {
   const limit = clampThreadLimit(opts.limit);
-  const clause = accessClause(readScopeOf(viewer));
+  const clause = accessClause(readScopeOf(viewer), undefined, opts.agentGuard);
   const where: string[] = ["thread_id = ?"];
   const binds: unknown[] = [threadId];
   if (clause.sql) {
@@ -2362,6 +2483,11 @@ function listPredicate(
   // pre-existing bind order (seen, fts, membership, from, thread, direction, mailbox, then
   // the cursor seek) is unchanged for every caller that sends no bounds.
   pushDateRange(where, binds, q);
+  if (q.agentGuard) {
+    const hide = exclusionClause(q.agentGuard, "m");
+    where.push(hide.sql);
+    binds.push(...hide.binds);
+  }
 
   if (opts.cursor) {
     const cur = decodeCursor(q.cursor);
@@ -2486,6 +2612,7 @@ export async function folders(
   env: Env,
   viewer?: string,
   roles: readonly string[] = [],
+  guard?: AgentGuard,
 ): Promise<FolderSummary[]> {
   const identity = viewer?.trim().toLowerCase() || undefined;
   // The shared accessClause, aliased to this statement, so the rail counts exactly what
@@ -2585,10 +2712,13 @@ export async function folders(
       " ON sb.message_id = m.message_id AND sb.recipient = ?"
     : "FROM messages m";
   if (identity) binds.push(identity);
+  // #853: the rail counts what the agent's list would show, so hidden mail is not counted.
+  const hide = guard ? exclusionClause(guard, "m") : undefined;
+  if (hide) binds.push(...hide.binds);
 
   // A bare aggregate returns exactly one row, empty estate included, so the scalar
   // subqueries still answer when there is not a single message stored.
-  const row = await env.DB.prepare(`SELECT ${columns.join(", ")} ${from}`)
+  const row = await env.DB.prepare(`SELECT ${columns.join(", ")} ${from}${hide ? ` WHERE ${hide.sql}` : ""}`)
     .bind(...binds)
     .first<Record<string, number | null>>();
 
@@ -2703,6 +2833,11 @@ function pushCommonSearchFilters(
     }
   }
   pushDateRange(where, binds, q);
+  if (q.agentGuard) {
+    const hide = exclusionClause(q.agentGuard, "m");
+    where.push(hide.sql);
+    binds.push(...hide.binds);
+  }
   if (q.hasAttachment === true) {
     where.push("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.message_id)");
   } else if (q.hasAttachment === false) {
@@ -3008,7 +3143,7 @@ function hasPostRetrievalFilter(q: SearchQuery): boolean {
 
 // Hydrate summaries for a set of message ids in one query, returned as a map so
 // callers can preserve their own (score) ordering. Ids are bound params.
-async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise<Map<string, StoredMessageSummary>> {
+async function summariesByIds(env: Env, ids: string[], viewer?: string, guard?: AgentGuard): Promise<Map<string, StoredMessageSummary>> {
   const out = new Map<string, StoredMessageSummary>();
   if (ids.length === 0) return out;
   const placeholders = ids.map(() => "?").join(", ");
@@ -3016,6 +3151,8 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
   // subquery bind lives in the SELECT column list, so it precedes the id binds.
   const sp = seenProjection(viewer);
   const seenExpr = sp.expr;
+  // #853: a hidden message is never hydrated, so it is dropped like an unknown id.
+  const hide = guard ? exclusionClause(guard, "m") : undefined;
   const sql =
     `SELECT m.id, m.message_id, m.direction, m.thread_id, m.from_addr, m.to_addr, m.subject,
             m.date, m.in_reply_to, m.trusted, m.received_at, ${seenExpr} AS seen,
@@ -3024,8 +3161,8 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
             m.flagged, m.answered, m.mailbox, m.trashed_at, NULL AS folder_uid,
             ${SUMMARY_HAS_HTML_SQL},
             (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.message_id) AS attachment_count
-       FROM messages m WHERE m.message_id IN (${placeholders})`;
-  const res = await env.DB.prepare(sql).bind(...sp.binds, ...ids).all<SummaryRow>();
+       FROM messages m WHERE m.message_id IN (${placeholders})${hide ? ` AND ${hide.sql}` : ""}`;
+  const res = await env.DB.prepare(sql).bind(...sp.binds, ...ids, ...(hide?.binds ?? [])).all<SummaryRow>();
   for (const row of res.results ?? []) out.set(row.message_id, rowToSummary(row));
   return out;
 }
@@ -3116,7 +3253,7 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
 
   const wide = hasPostRetrievalFilter(q);
   const { ranked, exhausted, topK } = await nearestMessageIds(env, queryVec, limit, wide);
-  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), seenKey(q));
+  const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), seenKey(q), q.agentGuard);
   const items: SearchHit[] = [];
   for (const r of ranked) {
     const message = summaries.get(r.messageId);
@@ -3163,6 +3300,8 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     hasAttachment: q.hasAttachment,
     seen: q.seen,
     viewer: q.viewer,
+    // #853: both halves carry the guard; a field left off here would leak through hybrid.
+    agentGuard: q.agentGuard,
     limit,
   };
   const [ftsPage, semPage] = await Promise.all([

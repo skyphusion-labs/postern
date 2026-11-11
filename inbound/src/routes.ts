@@ -254,6 +254,17 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "self-delegations-grant", method: "POST", path: "/api/delegations/mine", match: "exact", scope: "read",
     auth: "session-cookie", body: ["granteeId", "powers", "label"],
     note: "#740 S5: grant on the session's own address; an address field is refused. Audited (delegation.grant, actor human)" },
+  // #853: human-only threads. Ahead of the generic revoke row, which would otherwise claim
+  // the DELETE (the table is first-match).
+  { id: "self-exclusions-list", method: "GET", path: "/api/delegations/mine/exclusions", match: "exact", scope: "read",
+    auth: "session-cookie",
+    note: "#853: the active human-only marks on the session's own address, newest first, each {id, threadId, subject, createdAt}" },
+  { id: "self-exclusion-create", method: "POST", path: "/api/delegations/mine/exclusions", match: "exact", scope: "read",
+    auth: "session-cookie", body: ["threadId"],
+    note: "#853: mark a thread human-only on the session's own address: no agent reads, quotes, organizes or replies into the owner's mail in it. 201 on create, 200 on a repeat; a thread with none of the owner's mail is the same 404 as an unknown one. Audited (delegation.exclude, actor human)" },
+  { id: "self-exclusion-delete", method: "DELETE", path: "/api/delegations/mine/exclusions/", match: "prefix", scope: "read",
+    auth: "session-cookie", requireChild: true, template: "/api/delegations/mine/exclusions/{id}",
+    note: "#853: remove a human-only mark; any id not active on the session's own address is the same 404. Audited (delegation.unexclude, actor human)" },
   { id: "self-delegation-revoke", method: "DELETE", path: "/api/delegations/mine/", match: "prefix", scope: "read",
     auth: "session-cookie", requireChild: true, template: "/api/delegations/mine/{id}",
     note: "#740 S5: revoke a grant on the session's own address; any other id is the same 404 as a missing one. Audited (delegation.revoke, actor human)" },

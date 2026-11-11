@@ -8,7 +8,8 @@
 // Grants and revokes reuse the operator code path (delegations.ts) with a human
 // Grantor (#854 M2): created_by and the audit actor are the human's principal id.
 
-import { AdminError, fail, json, parseLimit, runAudited, type AuditActor } from "./adminkit";
+import { AdminError, auditStatement, fail, generateId, json, parseLimit, readBody, runAudited, type AuditActor } from "./adminkit";
+import { exclusionsFor, ownerThreadSubject } from "./store";
 import { grant, revoke, DELEGATION_ID_RE, DELEGATION_POWERS, type Grantor } from "./delegations";
 
 /** What the routes need from the resolved caller. */
@@ -19,6 +20,12 @@ export interface SelfCaller {
 }
 
 const SELF_ITEM = /^\/api\/delegations\/mine\/([^/]+)$/;
+const EXCLUSIONS = "/api/delegations/mine/exclusions";
+const EXCLUSION_ITEM = /^\/api\/delegations\/mine\/exclusions\/([^/]+)$/;
+const EXCLUSION_ID_RE = /^exc_[0-9a-f]{24}$/;
+/** A thread id is the caller's own input and never a stable id we minted: a refusal row
+ *  names no target, so nothing the caller typed is copied into the audit trail. */
+const NO_TARGET = /(?!)/;
 
 function caller(resolution: SelfCaller): { address: string; principalId: string } {
   if (!resolution.viaSession || !resolution.identity) {
@@ -54,8 +61,17 @@ export async function handleSelfService(request: Request, env: Env, url: URL, re
       return await runAudited(env, "delegation.grant", target(null), () => grant(request, env, grantor), actor);
     }
     if (path === "/api/audit/mine" && request.method === "GET") return await auditMine(env, url, me.address);
+    // #853: human-only threads.
+    if (path === EXCLUSIONS && request.method === "GET") return json({ ok: true, items: await exclusionsFor(env, me.address) });
+    if (path === EXCLUSIONS && request.method === "POST") {
+      return await runAudited(env, "delegation.exclude", { kind: "thread", raw: null, idRe: NO_TARGET }, () => exclude(request, env, me, actor), actor);
+    }
+    const x = EXCLUSION_ITEM.exec(path);
+    if (x && request.method === "DELETE") {
+      return await runAudited(env, "delegation.unexclude", { kind: "exclusion", raw: x[1], idRe: EXCLUSION_ID_RE }, () => unexclude(env, x[1], me, actor), actor);
+    }
     const m = SELF_ITEM.exec(path);
-    if (m && m[1] !== "grantees" && request.method === "DELETE") {
+    if (m && m[1] !== "grantees" && m[1] !== "exclusions" && request.method === "DELETE") {
       return await runAudited(env, "delegation.revoke", target(m[1]), () => revoke(env, m[1], grantor), actor);
     }
   } catch (err) {
@@ -63,6 +79,73 @@ export async function handleSelfService(request: Request, env: Env, url: URL, re
     throw err;
   }
   return null;
+}
+
+/** Mark one thread human-only on my address (#853). Idempotent: a repeat answers 200 with
+ *  the existing mark and writes no audit row; the first mark answers 201, and its audit row
+ *  lands in the same batch as the insert. A thread with none of my mail in it is the same
+ *  404 as an unknown one, so the route says nothing about other people's mail. */
+async function exclude(request: Request, env: Env, me: { address: string; principalId: string }, actor: AuditActor): Promise<Response> {
+  const body = await readBody(request);
+  if ("address" in body) throw new AdminError(400, "E_VALIDATION_ERROR", "the address is always the session's own", "address");
+  const raw = body.threadId;
+  // eslint-disable-next-line no-control-regex
+  if (typeof raw !== "string" || !raw.trim() || raw.length > 1000 || /[\u0000-\u001f\u007f]/.test(raw)) {
+    throw new AdminError(400, "E_VALIDATION_ERROR", "threadId must be a thread id", "threadId");
+  }
+  const threadId = raw.trim();
+  const subject = await ownerThreadSubject(env, threadId, me.address);
+  if (subject === undefined) throw new AdminError(404, "E_NOT_FOUND", "not found");
+  const id = generateId("exc_");
+  const now = new Date().toISOString();
+  const insert = env.DB.prepare(
+    "INSERT OR IGNORE INTO delegation_exclusions (id, thread_id, address, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+  ).bind(id, threadId, me.address, me.principalId, now);
+  const audit = auditStatement(
+    env,
+    now,
+    { action: "delegation.exclude", targetKind: "thread", targetId: threadId, outcome: "ok", detail: { address: me.address, exclusionId: id } },
+    { sql: "SELECT 1 FROM delegation_exclusions WHERE id = ?", binds: [id] },
+    actor,
+  );
+  const results = await env.DB.batch([insert, audit]);
+  if ((results[0]?.meta?.changes ?? 0) === 1) {
+    return json({ ok: true, created: true, item: { id, threadId, subject, createdAt: now } }, 201);
+  }
+  const existing = await env.DB.prepare(
+    "SELECT id, created_at FROM delegation_exclusions WHERE thread_id = ? AND address = ? AND revoked_at IS NULL",
+  )
+    .bind(threadId, me.address)
+    .first<{ id: string; created_at: string }>();
+  if (!existing) throw new Error("exclusion was neither written nor found");
+  return json({ ok: true, created: false, item: { id: existing.id, threadId, subject, createdAt: existing.created_at } });
+}
+
+/** Remove one of MY active marks (#853). Anything else, unknown, already removed or on
+ *  another address, is the same 404. The audit row names the thread, like the mark's. */
+async function unexclude(env: Env, id: string, me: { address: string; principalId: string }, actor: AuditActor): Promise<Response> {
+  const notFound = new AdminError(404, "E_NOT_FOUND", "not found");
+  if (!EXCLUSION_ID_RE.test(id)) throw notFound;
+  const row = await env.DB.prepare(
+    "SELECT thread_id FROM delegation_exclusions WHERE id = ? AND address = ? AND revoked_at IS NULL",
+  )
+    .bind(id, me.address)
+    .first<{ thread_id: string }>();
+  if (!row) throw notFound;
+  const now = new Date().toISOString();
+  const update = env.DB.prepare(
+    "UPDATE delegation_exclusions SET revoked_at = ? WHERE id = ? AND address = ? AND revoked_at IS NULL",
+  ).bind(now, id, me.address);
+  const audit = auditStatement(
+    env,
+    now,
+    { action: "delegation.unexclude", targetKind: "thread", targetId: row.thread_id, outcome: "ok", detail: { address: me.address, exclusionId: id } },
+    { sql: "SELECT 1 FROM delegation_exclusions WHERE id = ? AND revoked_at = ?", binds: [id, now] },
+    actor,
+  );
+  const results = await env.DB.batch([update, audit]);
+  if ((results[0]?.meta?.changes ?? 0) !== 1) throw notFound;
+  return json({ ok: true });
 }
 
 /** The LIVE agent identities a human may grant to: exactly id, display name and From.
@@ -125,7 +208,7 @@ async function auditMine(env: Env, url: URL, address: string): Promise<Response>
     if (!Number.isInteger(before) || before < 1) throw new AdminError(400, "E_VALIDATION_ERROR", "malformed cursor", "cursor");
   }
   const about =
-    "((a.action IN ('delegation.grant', 'delegation.revoke', 'delegation.quote', 'delegation.organize') AND json_extract(a.detail, '$.address') = ?1) " +
+    "((a.action IN ('delegation.grant', 'delegation.revoke', 'delegation.quote', 'delegation.organize', 'delegation.exclude', 'delegation.unexclude') AND json_extract(a.detail, '$.address') = ?1) " +
     "OR (a.action = 'delegation.send_as' AND a.target_kind = 'address' AND a.target_id = ?1))";
   const sql =
     "SELECT a.id, a.at, a.actor_kind, a.actor_id, a.action, a.target_kind, a.target_id, a.outcome, a.detail FROM audit_log a " +

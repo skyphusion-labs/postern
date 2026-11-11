@@ -307,6 +307,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_delegation_active
 CREATE INDEX IF NOT EXISTS idx_delegation_address ON delegation_grants(address, grantee_id);
 CREATE INDEX IF NOT EXISTS idx_delegation_created ON delegation_grants(created_at, id);
 
+-- Human-only threads (#853, migration 0023): an owner's mark that hides the owner's mail
+-- in one thread from every agent. See inbound/src/store.ts exclusionClause.
+CREATE TABLE IF NOT EXISTS delegation_exclusions (
+  id          TEXT PRIMARY KEY,
+  thread_id   TEXT NOT NULL,
+  address     TEXT NOT NULL,
+  created_by  TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  revoked_at  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exclusion_active
+  ON delegation_exclusions(thread_id, address) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_exclusion_address ON delegation_exclusions(address, created_at);
+
 -- The principal layer (#854 M1, migration 0019). Store only in M1: nothing authorizes
 -- from these tables yet. See inbound/src/principals.ts and docs/IDENTITY.md.
 CREATE TABLE IF NOT EXISTS principals (

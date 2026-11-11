@@ -460,9 +460,12 @@ async function readQuotable(
   env: Env,
   messageId: string,
   readScope: MessageReadScope,
+  agentGuard?: store.AgentGuard,
 ): Promise<store.StoredMessage | null> {
   // An addressing-only caller quotes nothing: the answer is the plain not-found.
   if (readScope === "addressing") return null;
+  // #853: a message in a human-only thread is not there for an agent, the same not-found.
+  if (agentGuard && (await store.agentHidden(env, messageId, agentGuard))) return null;
   return readScope === "estate"
     ? await store.getUnscoped(env, messageId)
     : await store.get(env, messageId, readScope);
@@ -481,6 +484,7 @@ export async function send(
   readScope: MessageReadScope,
   quoteAudit?: QuoteAudit,
   sendAs?: SendAs,
+  agentGuard?: store.AgentGuard,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object") {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be an object");
@@ -490,7 +494,7 @@ export async function send(
     if (typeof req.forwardMessageId !== "string" || !req.forwardMessageId.trim()) {
       throw new MailboxError("E_VALIDATION_ERROR", "forwardMessageId must be a message id");
     }
-    original = await readQuotable(env, req.forwardMessageId.replace(/[<>]/g, "").trim(), readScope);
+    original = await readQuotable(env, req.forwardMessageId.replace(/[<>]/g, "").trim(), readScope, agentGuard);
     if (!original) throw new MailboxError("E_NOT_FOUND", "forward source message not found", 404);
   }
   if (!original && (typeof req.subject !== "string" || req.subject.trim() === "")) {
@@ -561,6 +565,7 @@ export async function send(
     inReplyTo: headers["In-Reply-To"] ?? null,
     references: parseReferences(headers["References"]),
     threadScope: threadScopeOf(readScope),
+    threadGuard: agentGuard,
   });
 }
 
@@ -585,6 +590,7 @@ export async function reply(
   readScope: MessageReadScope,
   quoteAudit?: QuoteAudit,
   sendAs?: SendAs,
+  agentGuard?: store.AgentGuard,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object" || typeof req.messageId !== "string" || !req.messageId.trim()) {
     throw new MailboxError("E_FIELD_MISSING", "messageId is required");
@@ -611,7 +617,7 @@ export async function reply(
   const targetId = req.messageId.replace(/[<>]/g, "").trim();
   const original = addressingOnly
     ? await store.getUnscoped(env, targetId)
-    : await readQuotable(env, targetId, readScope);
+    : await readQuotable(env, targetId, readScope, agentGuard);
   if (!original) {
     throw new MailboxError("E_NOT_FOUND", `no stored message with id ${req.messageId}`, 404);
   }
@@ -683,6 +689,7 @@ export async function reply(
     references,
     forcedThreadId: original.threadId,
     threadScope: threadScopeOf(readScope),
+    threadGuard: agentGuard,
   });
 }
 
@@ -704,6 +711,8 @@ interface DispatchInput {
   forcedThreadId?: string;
   /** Whose mail the thread parent may come from (store.StoreInput.threadScope). */
   threadScope: store.AccessScope;
+  /** #853: an agent's send never threads onto a parent in a human-only thread. */
+  threadGuard?: store.AgentGuard;
 }
 
 async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInput): Promise<SendResult> {
@@ -746,6 +755,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       inReplyTo: d.inReplyTo,
       references: d.references,
       threadScope: d.threadScope,
+      threadGuard: d.threadGuard,
       bodyText: deriveBodyText(safeHtml, d.text),
       bodyHtml: safeHtml ?? null,
       // The sent copy carries its attachments too (#470). We handed the transport the

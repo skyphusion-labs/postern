@@ -240,6 +240,12 @@
       ],
       "note": "#740 S5: grant on the session's own address; an address field is refused. Audited (delegation.grant, actor human)"
     },
+    "self-exclusion-create": {
+      "body": [
+        "threadId"
+      ],
+      "note": "#853: mark a thread human-only on the session's own address: no agent reads, quotes, organizes or replies into the owner's mail in it. 201 on create, 200 on a repeat; a thread with none of the owner's mail is the same 404 as an unknown one. Audited (delegation.exclude, actor human)"
+    },
     "self-audit": {
       "query": [
         "limit",

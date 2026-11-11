@@ -116,6 +116,12 @@ const EXEMPT: Record<string, string> = {
     "#740 S5: a DELETE that revokes a grant on the session's own address; a write of a grant record, not a read of mail",
   "self-audit":
     "#740 S5: audit rows about the session's own address; log records, not stored mail, and pinned to that one address by construction",
+  "self-exclusions-list":
+    "#853: the human-only marks on the session's own address, with the subject of the owner's own mail only; pinned to that one address by construction, never widened by a grant",
+  "self-exclusion-create":
+    "#853: a POST that marks a thread human-only on the session's own address; a write of a mark, not a read of mail",
+  "self-exclusion-delete":
+    "#853: a DELETE that removes a mark on the session's own address; a write of a mark, not a read of mail",
   mobileconfig:
     "serves an Apple .mobileconfig plist built from env, not a row set: nothing is " +
     "narrowed by the reader's authority, so there is no scope to announce",

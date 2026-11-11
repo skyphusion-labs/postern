@@ -226,10 +226,60 @@ an operator's (sections 4.2 to 4.5).
   handler and writes no row.
 - **Reads are not audited.** Organize writes and quotes are; a list, search or get of
   granted mail is not.
-- **Per-message exclusion is not in v1** (Conrad's Q2 ruling). A grant covers all of the
-  address's mail. Tracked in #853.
+- **Exclusion is per thread, not per message** (#853, section 4.8). A grant covers all
+  of the address's mail except the threads its owner marked human-only.
 - **`seen` with several granted addresses is one address per request.** `for` names one
   recipient, so marking two humans' state is two requests.
+
+### 4.8 #853: human-only threads (shipped)
+
+The owner of an address marks one THREAD human-only (the lead's D1 ruling: thread, not
+message). From then on no agent reaches the owner's mail in that thread, whatever its
+grants, and under BOTH `AGENT_READ_SCOPE` values (D2): an estate agent loses it too.
+
+| route (webmail session only, CSRF on writes) | does |
+|---|---|
+| `GET /api/delegations/mine/exclusions` | my active marks, newest first: `{id, threadId, subject, createdAt}`. `subject` is my earliest message in the thread, or null (D3). No paging. |
+| `POST /api/delegations/mine/exclusions` `{threadId}` | mark the thread. `201 {created: true, item}`; a repeat is `200 {created: false, item}` with the same item, never a `409`. A thread with none of my mail in it is the same `404 E_NOT_FOUND` as an unknown one. An `address` field is a `400`. |
+| `DELETE /api/delegations/mine/exclusions/{id}` | remove my mark: `200 {ok: true}`. Unknown, already removed, or someone else's: the same `404`. |
+
+`threadId` is the id every message row reports. A Bearer is `403 E_SESSION_REQUIRED`, and a
+session minted before migration `0020` is `401 E_REAUTH_REQUIRED`, as in section 4.6.
+
+**What a mark hides.** A message is hidden from an agent when an active mark names its
+thread AND the mark's owner is on its delivered set or sent it (the owner's mail, by the
+same predicate the read routes use). One predicate in `inbound/src/store.ts`
+(`exclusionClause`) is the whole rule. It applies to every agent path:
+
+- reads: list, `countOnly`, search in every mode (fts, substr, semantic, hybrid), folder
+  counts, get, attachments, thread;
+- writes: seen, flags and move skip a hidden id like an unknown one (`updated` does not count it);
+- quotes and replies: reply, `send_as` reply, forward and a draft's reply or forward are
+  the same `404` as a missing target;
+- threading: a send whose `In-Reply-To` or `References` names a hidden message starts a
+  new thread.
+
+A hidden message answers with exactly the bytes an absent one does. A refused agent read
+writes no audit row.
+
+**What a mark never hides.** The agent's OWN mail: a message delivered to the agent, or
+sent as it, stays visible even inside a marked thread. A mark never changes what a human
+session or a static token reads. A message delivered to the owner AND someone else is the
+owner's mail too, so the owner's mark hides that row from every agent, including an agent
+the other person delegated to.
+
+**Who counts as an agent.** A Bearer bound to an identity: a runtime agent identity or a
+registry entry. A webmail session is the human; a static token is the operator.
+
+**Audit.** `delegation.exclude` and `delegation.unexclude`: actor `human` / the owner's
+`prn_`, target `{kind: "thread", id: threadId}` on both, detail `{address, exclusionId}`.
+Both show in `GET /api/audit/mine`. A repeat mark writes no row.
+
+**Cost.** Measured before the build (50k messages, 500 marks, local SQLite): a paged
+list, search or get costs the same within noise; an unbounded estate `countOnly` for an
+agent rises from about 0 to about 19 ms. Human and operator queries carry no extra
+predicate, so their plans are unchanged. A denormalized flag was rejected: it would be a
+second source of truth for an access rule.
 
 ## 5. What is not built yet (the plan)
 
