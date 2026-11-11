@@ -14,8 +14,11 @@ mismatched MCP tag fails before it publishes.
 ## Unreleased
 
 **Upgrade.** Migration `0019` (the principal tables and six service-principal seeds) is
-additive and is applied by the deploy. Run `POST /api/admin/principals/backfill` once after
-upgrading to copy existing identities and users in; it is safe to run again.
+additive and is applied by the deploy. The backfill that copies existing identities and users
+in now runs automatically after each deploy: the release workflow calls
+`POST /api/admin/principals/backfill` once the new version answers (#901), and the self-host
+installer calls it after any run that deployed a Worker version or created the first admin.
+A manual run is still safe: it is idempotent.
 
 ### Added
 
@@ -37,6 +40,12 @@ upgrading to copy existing identities and users in; it is safe to run again.
   body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
 
 ### Changed
+
+- **Deploy runs the principals backfill (#901).** `.github/workflows/deploy.yml` calls it after
+  the deployed artifact is verified, waits until `/health` reports the tag, and fails the release
+  on a missing `POSTERN_DEPLOY_ADMIN_TOKEN`, a non-200 or a malformed report. Address conflicts
+  are warnings that name principal ids, never addresses (Actions logs are public).
+  `deploy/postern.mjs install` and `upgrade` make the same call with the install's own token.
 
 - **The operator is named in the audit log (#854 M1).** Rows the admin
   routes write now carry actor `service` / `svc_both` instead of
