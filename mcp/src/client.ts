@@ -417,6 +417,9 @@ export class PosternClient {
       roleQueues: (body.roleQueues as string[]) ?? [],
       capabilities: (body.capabilities as string[]) ?? [],
       via: body.via as WhoAmI["via"],
+      // Passed through when the worker sends it, and left OUT when it does not (an older
+      // worker), so absence is never reported as "no grants".
+      ...(Array.isArray(body.delegations) ? { delegations: body.delegations as WhoAmI["delegations"] } : {}),
     };
   }
 
