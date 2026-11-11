@@ -100,7 +100,7 @@ export async function ingest(
   // fallback when the message carries none. ONE normalizer, shared with the IMAP
   // APPEND path in api.ts.
   const messageId = await normalizeMessageId(env, parsed.messageId);
-  const date = parsed.date ? new Date(parsed.date).toISOString() : new Date().toISOString();
+  const date = messageDate(parsed.date, new Date());
 
   // Only index mail for addresses that opted in to crew RAG (VECTORIZE_FOR). The
   // SAME gate the #116 ws4 backfill applies (store.shouldVectorize), so live and
@@ -485,30 +485,114 @@ export function cleanBody(raw: string): string {
     .trim();
 }
 
-export function htmlToText(html: string): string {
-  // Drop <script>/<style> blocks and their contents. Loop until the string is
-  // stable so nested or reordered tags can't survive a single pass (a one-shot
-  // .replace is defeated by e.g. "<scr<script>ipt>"); the end-tag patterns allow
-  // whitespace before ">" so "</script >" is matched too. Body is stored for FTS
-  // and embeddings, not rendered, but we strip thoroughly regardless.
-  let out = html;
-  const blockTag = /<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
-  let prev: string;
-  do {
-    prev = out;
-    out = out.replace(blockTag, "");
-  } while (out !== prev);
+// The stored date of a message: its Date header when that parses to a valid
+// instant, else the time it was received. postal-mime passes an unparseable Date
+// header through as its raw string, so this is the one place that decides.
+export function messageDate(raw: string | undefined, receivedAt: Date): string {
+  const t = raw && raw.trim() ? new Date(raw).getTime() : NaN;
+  return Number.isNaN(t) ? receivedAt.toISOString() : new Date(t).toISOString();
+}
 
-  out = out
+// Longest HTML input converted to text. The stored bodyHtml keeps the same bound
+// (ingest.ts), and at most 32,000 characters of the result are kept.
+export const HTML_TO_TEXT_MAX_INPUT = 512_000;
+
+// ASCII-only lower-casing. It keeps every index aligned with the input, which
+// String.prototype.toLowerCase does not promise for all of Unicode.
+function asciiLower(s: string): string {
+  return s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+}
+
+function isWordChar(c: string | undefined): boolean {
+  return c !== undefined && /[A-Za-z0-9_]/.test(c);
+}
+
+// Remove <script>...</script> and <style>...</style> blocks in one left-to-right
+// pass: an opener is "<name" followed by a non-word character, up to the next ">";
+// the block ends at the first "</name" followed by optional whitespace and ">". An
+// opener with no end tag is left for the tag pass. Every search resumes where the
+// last one stopped, so the pass is linear in the input.
+function dropBlocks(src: string): string {
+  const lower = asciiLower(src);
+  const names = ["script", "style"];
+  const closeAt: Record<string, { from: number; at: number }> = {};
+  const findClose = (name: string, from: number): number => {
+    const c = closeAt[name];
+    if (c && from >= c.from && (c.at === -1 || from <= c.at)) return c.at;
+    let p = from;
+    for (;;) {
+      p = lower.indexOf("</" + name, p);
+      if (p === -1) break;
+      let q = p + 2 + name.length;
+      while (q < lower.length && /\s/.test(lower[q])) q++;
+      if (lower[q] === ">") break;
+      p += 1;
+    }
+    closeAt[name] = { from, at: p };
+    return p;
+  };
+  let out = "";
+  let i = 0;
+  let gtFrom = -1;
+  let gtAt = -1;
+  for (;;) {
+    const lt = lower.indexOf("<", i);
+    if (lt === -1) break;
+    const name = names.find((n) => lower.startsWith(n, lt + 1) && !isWordChar(lower[lt + 1 + n.length]));
+    if (name) {
+      const from = lt + 1 + name.length;
+      if (!(gtAt === -1 ? gtFrom !== -1 && from >= gtFrom : from >= gtFrom && from <= gtAt)) {
+        gtFrom = from;
+        gtAt = lower.indexOf(">", from);
+      }
+      if (gtAt !== -1) {
+        const close = findClose(name, gtAt + 1);
+        if (close !== -1) {
+          out += src.slice(i, lt);
+          i = lower.indexOf(">", close) + 1;
+          continue;
+        }
+      }
+    }
+    out += src.slice(i, lt + 1);
+    i = lt + 1;
+  }
+  return out + src.slice(i);
+}
+
+// Remove every "<...>" tag (at least one character between the brackets) in one
+// left-to-right pass. A "<" with no ">" after it, or directly followed by ">", is
+// text. One pass leaves no tag behind: removing a tag never joins a "<" to a later
+// ">" that it could not already reach.
+function dropTags(src: string): string {
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const lt = src.indexOf("<", i);
+    if (lt === -1) return out + src.slice(i);
+    const gt = src.indexOf(">", lt + 1);
+    if (gt === -1) return out + src.slice(i);
+    if (gt === lt + 1) {
+      out += src.slice(i, gt);
+      i = gt;
+      continue;
+    }
+    out += src.slice(i, lt);
+    i = gt + 1;
+  }
+}
+
+export function htmlToText(html: string): string {
+  // Drop <script>/<style> blocks and their contents, then turn <br> and </p> into
+  // newlines, then strip the remaining tags. Each pass walks the input once, so the
+  // time is linear in its length; the input is bounded first. The end-tag match
+  // allows whitespace before ">" so "</script >" is removed too. Body is stored for
+  // FTS and embeddings, not rendered.
+  const src = html.length > HTML_TO_TEXT_MAX_INPUT ? html.slice(0, HTML_TO_TEXT_MAX_INPUT) : html;
+  let out = dropBlocks(src)
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p\s*>/gi, "\n");
-
-  // Strip any remaining tags, looping so overlapping "<<>>" forms can't leave a
-  // partial tag behind after one pass.
-  do {
-    prev = out;
-    out = out.replace(/<[^>]+>/g, "");
-  } while (out !== prev);
+  out = dropTags(out);
 
   // Decode named entities. Decode &amp; LAST so an entity revealed by an earlier
   // pass (e.g. "&amp;lt;" -> "&lt;") is not then itself re-decoded.
