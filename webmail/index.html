@@ -568,7 +568,7 @@
   <!-- Human-only conversations (#853): session mode only -->
   <div id="excSection" style="display:none">
     <h3 id="excTitle">Human-only conversations</h3>
-    <p class="hint">No agent can read, organize, quote or reply to these, whatever access it has. Mark one from the message view with "Make human-only".</p>
+    <p class="hint">Agents cannot read, organize, quote or reply to these through your address, whatever access they have. Other people who got the same conversation decide for their own copies. Mark one from the message view with "Make human-only".</p>
     <ul id="excList" class="exc-list" aria-labelledby="excTitle"></ul>
     <p class="hint" id="excEmpty">None yet.</p>
     <div class="err" id="excErr" role="alert"></div>
@@ -1960,8 +1960,9 @@
   }
 
   // --- Human-only conversations (#853): session mode only ------------------------
-  // The owner marks a whole conversation human-only. No agent can then read, organize,
-  // quote or reply to it, whatever access it holds. The page keeps the owner's list (one
+  // The owner marks a whole conversation human-only. No agent can then reach it through
+  // the owner's address, whatever access it holds (#853 ruling (b): the mark covers the
+  // owner's copy; other recipients decide for theirs). The page keeps the owner's list (one
   // GET at sign-in, again after each change) and matches the open message on threadId.
   function exclusionFor(threadId) {
     if (!threadId) return null;
@@ -2009,7 +2010,7 @@
   function markHumanOnly(threadId, btn) {
     btn.disabled = true;
     sessionCall("POST", "/api/delegations/mine/exclusions", { threadId: threadId }).then(function () {
-      toast("Marked human-only. No agent can see this conversation.");
+      toast("Marked human-only. Agents can no longer reach this conversation through your address.");
       return loadExclusions();
     }).catch(function (e) {
       if (e.status === 401) { accessUnauthorized(e); return; }
@@ -2988,7 +2989,7 @@
       el("span", { class: "tag " + (m.trusted ? "trusted" : "untrusted"), text: m.trusted ? "trusted sender" : "untrusted sender" })
     ];
     var humanOnly = state.authMode === "session" && access.excAvailable ? exclusionFor(m.threadId) : null;
-    if (humanOnly) trustKids.push(el("span", { class: "tag human-only", text: "Human only", title: "No agent can see this conversation." }));
+    if (humanOnly) trustKids.push(el("span", { class: "tag human-only", text: "Human only", title: "Agents cannot reach this conversation through your address." }));
     if (m.auth) {
       trustKids.push(el("details", { class: "auth-detail" }, [
         el("summary", { text: "Authentication" }),
@@ -3067,7 +3068,7 @@
           type: "button",
           "aria-pressed": humanOnly ? "true" : "false",
           text: humanOnly ? "Let agents see it" : "Make human-only",
-          title: humanOnly ? "Agents with access can see this conversation again." : "Hide this whole conversation from every agent."
+          title: humanOnly ? "Agents with access can see this conversation again." : "Hide this whole conversation from agents that reach it through your address."
         });
         hoBtn.addEventListener("click", function () {
           if (humanOnly) unmarkHumanOnly(humanOnly, hoBtn, "Let agents see it");

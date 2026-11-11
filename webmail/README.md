@@ -218,7 +218,8 @@ header. Postern's default transport, Cloudflare Email Sending, cannot. On that t
 an agent that tries to send as you is refused, and nothing is sent. Your choice is still
 saved. The SMTP relay transport can set the header, so there it works.
 
-**Access covers all of your mail.** You cannot leave single messages out.
+**Access covers all of your mail.** You cannot leave single messages out, but you can
+leave out whole conversations. See **Human-only conversations** below.
 
 **To give access:** open Settings, go to **Give an agent access**, choose the agent,
 tick what it may do, add a note if you want one, and select **Give access**. An agent that
@@ -251,6 +252,32 @@ The list does not show:
   someone else both received, each of you gets your own row, and you see only yours.
   Other people never see your rows. Your admin can see all rows.
 - organize rows from before this release, which named several people in one row.
+
+**Human-only conversations.** You can keep a conversation away from agents that reach
+your mail through your address. Open a message in it and select **Make human-only**.
+Agents then cannot read, organize, quote or reply to any message in that conversation
+through your address, whatever access you gave them. This works on both kinds of server,
+also where agents can read all mail. The message shows a **Human only** tag, and
+**Settings** lists the conversation under **Human-only conversations**.
+
+- It covers the whole conversation, not one message, so a reply cannot show what an
+  earlier message said.
+- It hides your copy only. Other people who received the same conversation decide for
+  their own copies. Your mark does not change what their agents see.
+- An agent with access to your mail and to another person's mail can still read the
+  conversation through that person's copy, unless that person marks it too. It sees the
+  conversation when it reads their mailbox, and not when it reads yours.
+- Access is checked for each copy. Say an agent may organize your mail but may only read
+  the other person's mail. It can read the conversation through their copy, but it cannot
+  flag or move it.
+- An agent still sees a copy that it received or sent itself.
+- It does not change what you see, and it does not limit your admin.
+- An agent that can reach the conversation only through your address is told it does
+  not exist. That refusal is not in your activity list.
+
+To undo it, select **Let agents see it** in the message, or in Settings, then select
+**Confirm: let agents see it**. Agents with access can then see the conversation again.
+Your activity list shows each time you mark or undo a conversation.
 
 **If you are asked to sign in again.** After an update, a session that started before it
 cannot use these sections. Postern signs you out and asks you to sign in again. Sign in

@@ -17,8 +17,9 @@ mismatched MCP tag fails before it publishes.
 
 - **Webmail: mark a conversation human-only (#853).** Signed in with a
   session, a person marks a whole conversation human-only from the
-  message view, so no agent can read, organize, quote or reply to it,
-  whatever access it has. Settings lists those conversations and undoes a
+  message view, so no agent can read, organize, quote or reply to it
+  through that person's address, whatever access it has. Other recipients
+  decide for their own copies. Settings lists those conversations and undoes a
   mark in two clicks; the activity list shows each mark and unmark.
 
 ## v1.12.0
