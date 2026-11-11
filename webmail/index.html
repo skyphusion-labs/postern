@@ -1769,6 +1769,10 @@
       });
     });
   }
+  function accessUnauthorized(e) {
+    if (e.code === "E_REAUTH_REQUIRED") { signInAgain("Sign in again to manage agent access to your mail."); return; }
+    logout();
+  }
   function agentName(name, from, id) {
     if (name && from) return name + " (" + from + ")";
     return from || name || ("agent " + id);
@@ -1786,7 +1790,7 @@
     $("auditSection").style.display = on ? "" : "none";
   }
   function accessFailed(e, errNode) {
-    if (e.status === 401) { logout(); return; }
+    if (e.status === 401) { accessUnauthorized(e); return; }
     // The load routes never answer 404 for real data, so a 404 here is an older server
     // without them: hide the sections rather than show a broken form.
     if (e.status === 404) { access.available = false; setAccessVisible(false); return; }
@@ -1864,7 +1868,7 @@
       note.textContent = "Access given to " + (access.names[id] || id) + ".";
       return loadAccess();
     }).catch(function (e) {
-      if (e.status === 401) { logout(); return; }
+      if (e.status === 401) { accessUnauthorized(e); return; }
       err.textContent = grantErrorText(e);
     }).then(function () { $("grantSubmit").disabled = false; });
   }
@@ -1884,7 +1888,7 @@
       $("grantNote").textContent = "Access removed for " + (access.names[g.granteeId] || g.granteeId) + ".";
       return loadAccess();
     }).catch(function (e) {
-      if (e.status === 401) { logout(); return; }
+      if (e.status === 401) { accessUnauthorized(e); return; }
       btn.disabled = false;
       $("grantErr").textContent = e.status === 404
         ? "That access was already removed."
@@ -2007,6 +2011,16 @@
 
   // Sign out. Session mode: DELETE /api/session revokes the row server-side and clears
   // the cookies; token mode: drop the tokens from sessionStorage.
+  function signInAgain(note) {
+    fetch("/api/session", {
+      method: "DELETE",
+      headers: { "accept": "application/json", "x-postern-csrf": csrfFromCookie() },
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).catch(function () {}).then(function () {
+      sessionReset();
+      showSignin("", note);
+    });
+  }
   function logout() {
     if (state.authMode === "session") {
       var csrf = csrfFromCookie();

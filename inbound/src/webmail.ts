@@ -1787,6 +1787,10 @@ export const WEBMAIL_HTML = `<!doctype html>
       });
     });
   }
+  function accessUnauthorized(e) {
+    if (e.code === "E_REAUTH_REQUIRED") { signInAgain("Sign in again to manage agent access to your mail."); return; }
+    logout();
+  }
   function agentName(name, from, id) {
     if (name && from) return name + " (" + from + ")";
     return from || name || ("agent " + id);
@@ -1804,7 +1808,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     $("auditSection").style.display = on ? "" : "none";
   }
   function accessFailed(e, errNode) {
-    if (e.status === 401) { logout(); return; }
+    if (e.status === 401) { accessUnauthorized(e); return; }
     // The load routes never answer 404 for real data, so a 404 here is an older server
     // without them: hide the sections rather than show a broken form.
     if (e.status === 404) { access.available = false; setAccessVisible(false); return; }
@@ -1882,7 +1886,7 @@ export const WEBMAIL_HTML = `<!doctype html>
       note.textContent = "Access given to " + (access.names[id] || id) + ".";
       return loadAccess();
     }).catch(function (e) {
-      if (e.status === 401) { logout(); return; }
+      if (e.status === 401) { accessUnauthorized(e); return; }
       err.textContent = grantErrorText(e);
     }).then(function () { $("grantSubmit").disabled = false; });
   }
@@ -1902,7 +1906,7 @@ export const WEBMAIL_HTML = `<!doctype html>
       $("grantNote").textContent = "Access removed for " + (access.names[g.granteeId] || g.granteeId) + ".";
       return loadAccess();
     }).catch(function (e) {
-      if (e.status === 401) { logout(); return; }
+      if (e.status === 401) { accessUnauthorized(e); return; }
       btn.disabled = false;
       $("grantErr").textContent = e.status === 404
         ? "That access was already removed."
@@ -2025,6 +2029,16 @@ export const WEBMAIL_HTML = `<!doctype html>
 
   // Sign out. Session mode: DELETE /api/session revokes the row server-side and clears
   // the cookies; token mode: drop the tokens from sessionStorage.
+  function signInAgain(note) {
+    fetch("/api/session", {
+      method: "DELETE",
+      headers: { "accept": "application/json", "x-postern-csrf": csrfFromCookie() },
+      credentials: "include", referrerPolicy: "no-referrer"
+    }).catch(function () {}).then(function () {
+      sessionReset();
+      showSignin("", note);
+    });
+  }
   function logout() {
     if (state.authMode === "session") {
       var csrf = csrfFromCookie();
@@ -3235,7 +3249,7 @@ export const WEBMAIL_HTML = `<!doctype html>
 `;
 
 // sha256 of the page's one inline <script>, computed by scripts/sync-webmail.mjs.
-export const WEBMAIL_SCRIPT_HASH = "sha256-CUsjZI6jHEFBma/uUcaGdQVsUN+wIEqgFyCHCqhkNdQ=";
+export const WEBMAIL_SCRIPT_HASH = "sha256-BCruJd4ZhW6j6utEeE3JjYOTiUc5cjv7LiijtSaKVjE=";
 
 // The page CSP. It loads no third-party anything and only talks to the same origin
 // (its own API): connect-src 'self' means a hijacked page cannot send the pasted token
@@ -3244,7 +3258,7 @@ export const WEBMAIL_SCRIPT_HASH = "sha256-CUsjZI6jHEFBma/uUcaGdQVsUN+wIEqgFyCHC
 // the reading pane uses to render message bodies (sandbox="" = no scripts, no
 // same-origin), so stored body content can never execute or reach the API.
 // style-src keeps 'unsafe-inline' for the inline <style> and style attributes.
-export const WEBMAIL_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-CUsjZI6jHEFBma/uUcaGdQVsUN+wIEqgFyCHCqhkNdQ='; connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+export const WEBMAIL_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-BCruJd4ZhW6j6utEeE3JjYOTiUc5cjv7LiijtSaKVjE='; connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",

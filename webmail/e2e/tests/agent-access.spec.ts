@@ -16,7 +16,7 @@ const HOSTILE = "<img src=x onerror=\"window.__pwn=1\">";
 
 type Grant = { id: string; granteeId: string; granteeName: string | null; granteeFrom: string; powers: string[]; label: string | null; createdBy: string; createdAt: string };
 
-function server(opts: { mode?: "session" | "token"; routes?: "present" | "absent"; conflict?: boolean } = {}) {
+function server(opts: { mode?: "session" | "token"; routes?: "present" | "absent" | "reauth"; conflict?: boolean } = {}) {
   const mode = opts.mode ?? "session";
   const grantees = [
     { id: "agt_a", displayName: "Helper", from: "helper@agents.example" },
@@ -54,6 +54,7 @@ function server(opts: { mode?: "session" | "token"; routes?: "present" | "absent
     if (path.startsWith("/api/delegations/") || path.startsWith("/api/audit/")) {
       accessRequests.push(method + " " + path + url.search);
       if (opts.routes === "absent") return json(route, { ok: false, error: "E_NOT_FOUND", message: "not found" }, 404);
+      if (opts.routes === "reauth") return json(route, { ok: false, error: "E_REAUTH_REQUIRED", message: "sign in again to manage delegation" }, 401);
       if (path === "/api/delegations/mine/grantees") return json(route, { ok: true, items: grantees });
       if (path === "/api/delegations/mine" && method === "GET") return json(route, { ok: true, items: grants });
       if (path === "/api/delegations/mine" && method === "POST") {
@@ -198,6 +199,14 @@ test.describe("agent access and activity (#740 S5)", () => {
     await expect(page.locator("#accessSection")).toBeHidden();
     await expect(page.locator("#auditSection")).toBeHidden();
     expect(s.accessRequests).toEqual([]);
+  });
+
+  test("a session from before the principals migration is sent to sign in again, with a reason", async ({ page }) => {
+    const s = server({ routes: "reauth" });
+    await open(page, s);
+    await openSettings(page);
+    await expect(page.locator("#signin")).toBeVisible();
+    await expect(page.getByText("Sign in again to manage agent access to your mail.")).toBeVisible();
   });
 
   test("an older server without the routes hides the sections", async ({ page }) => {
