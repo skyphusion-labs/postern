@@ -31,8 +31,8 @@ const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|r
   Routing off (that deletes the zone's MX, SPF and DKIM records).
 
   --domain <d>        the domain Postern receives and sends for (required)
-  --hostname <h>      where the API and webmail answer (default mail.<domain>)
-  --admin <address>   the first admin login (default admin@<domain>)
+  --hostname <h>      where the API and webmail answer (default mail.<domain>; a re-run keeps the recorded one)
+  --admin <address>   the first admin login (default admin@<domain>; a re-run keeps the recorded one)
   --name <n>          Worker name (default postern); also names D1 and R2
   --prefix <p>        put <p> in front of the Worker, D1 and R2 names (e.g. a test prefix)
   --var KEY=VALUE     set a Worker var; remembered for later upgrades (repeatable)
@@ -45,6 +45,18 @@ const USAGE = `usage: node deploy/postern.mjs <install|upgrade|status|rollback|r
   --dry-run           print the plan; change nothing
 
 The Cloudflare API token is read from CLOUDFLARE_API_TOKEN and is never printed.`;
+
+// A plain DNS hostname: dot-separated labels of letters, digits and inner dashes, 1 to 63
+// characters each, 253 at most in all. Nothing that a URL would read as a path, query,
+// fragment, port or login. It must also come back unchanged as the host of https://<it>.
+const LABEL = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+const HOSTNAME_RE = new RegExp(`^${LABEL}(?:\\.${LABEL})+$`);
+export function plainHostname(h) {
+  if (typeof h !== "string" || h.length > 253 || !HOSTNAME_RE.test(h)) return false;
+  let u;
+  try { u = new URL(`https://${h}`); } catch { return false; }
+  return u.host === h && u.hostname === h && u.pathname === "/" && !u.search && !u.hash && !u.username && !u.password && !u.port;
+}
 
 export function parseArgs(argv) {
   const [cmd, ...rest] = argv;
@@ -77,10 +89,15 @@ export function parseArgs(argv) {
   }
   if (!["install", "upgrade", "status", "rollback", "routing", "uninstall"].includes(cmd)) throw new Error(cmd ? `unknown command ${cmd}` : "no command");
   if (!o.domain || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(o.domain)) throw new Error("--domain is required (for example --domain example.com)");
+  if (!plainHostname(o.domain)) throw new Error(`--domain must be a plain domain name (letters, digits, dashes and dots), got "${o.domain}"`);
   o.name = `${o.prefix ?? ""}${o.name ?? "postern"}`;
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(o.name)) throw new Error("--name must be lower-case letters, digits and dashes");
+  // Which of these the operator typed. A re-run keeps the recorded value for one that was
+  // not typed (#855); the default below is for a first install.
+  o.given = { hostname: o.hostname !== undefined, admin: o.admin !== undefined };
   o.hostname ??= `mail.${o.domain}`;
   o.admin ??= `admin@${o.domain}`;
+  if (!plainHostname(o.hostname)) throw new Error(`--hostname must be a plain hostname (letters, digits, dashes and dots), got "${o.hostname}"`);
   if (!o.hostname.endsWith(`.${o.domain}`) && o.hostname !== o.domain) throw new Error("--hostname must be inside --domain");
   if (!o.admin.endsWith(`@${o.domain}`)) throw new Error("--admin must be an address on --domain");
   o.dmarcPolicy ??= "none";
