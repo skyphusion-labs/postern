@@ -108,3 +108,37 @@ describe("#650 the client reports the worker's answer and invents nothing", () =
     })());
   });
 });
+
+describe("#740 S2 (#886) delegations pass through, and absence stays absence", () => {
+  const BASE = {
+    ok: true,
+    identity: "agent@skyphusion.org",
+    identityScope: { kind: "member", addresses: ["agent@skyphusion.org"] },
+    roleQueues: [],
+    capabilities: ["read", "organize"],
+    via: "bearer",
+  };
+
+  it("passes the worker's grants through unchanged", async () => {
+    const grants = [{ id: "dlg_" + "a".repeat(24), address: "conrad@skyphusion.org", powers: ["read", "organize"] }];
+    const { client } = clientWithBody({ ...BASE, delegations: grants });
+    expect((await client.whoami()).delegations).toEqual(grants);
+  });
+
+  it("an empty list from the worker is reported as an empty list", async () => {
+    const { client } = clientWithBody({ ...BASE, delegations: [] });
+    const out = await client.whoami();
+    expect(out).toHaveProperty("delegations");
+    expect(out.delegations).toEqual([]);
+  });
+
+  it("a worker that sends no delegations field yields NO key, never a confident []", async () => {
+    const { client } = clientWithBody(BASE);
+    expect(await client.whoami()).not.toHaveProperty("delegations");
+  });
+
+  it("the tool description tells the agent what delegations are for", () => {
+    expect(tool("mailbox_whoami").description).toMatch(/delegations/);
+    expect(tool("mailbox_whoami").description).toMatch(/'to'/);
+  });
+});
