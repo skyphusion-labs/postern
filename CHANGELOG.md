@@ -21,6 +21,10 @@ mismatched MCP tag fails before it publishes.
   read routes. `both` and `read` tokens and bound identities are
   unchanged.
 
+- **A Date header that does not parse falls back to the receive time.**
+  Mail whose Date header is not a valid date is stored with the time it
+  was received as its date. The IMAP APPEND import uses the same rule.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an

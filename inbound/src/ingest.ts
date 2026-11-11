@@ -100,7 +100,7 @@ export async function ingest(
   // fallback when the message carries none. ONE normalizer, shared with the IMAP
   // APPEND path in api.ts.
   const messageId = await normalizeMessageId(env, parsed.messageId);
-  const date = parsed.date ? new Date(parsed.date).toISOString() : new Date().toISOString();
+  const date = messageDate(parsed.date, new Date());
 
   // Only index mail for addresses that opted in to crew RAG (VECTORIZE_FOR). The
   // SAME gate the #116 ws4 backfill applies (store.shouldVectorize), so live and
@@ -483,6 +483,14 @@ export function cleanBody(raw: string): string {
     .filter((l) => !isQuotedReplyLine(l))
     .join("\n")
     .trim();
+}
+
+// The stored date of a message: its Date header when that parses to a valid
+// instant, else the time it was received. postal-mime passes an unparseable Date
+// header through as its raw string, so this is the one place that decides.
+export function messageDate(raw: string | undefined, receivedAt: Date): string {
+  const t = raw && raw.trim() ? new Date(raw).getTime() : NaN;
+  return Number.isNaN(t) ? receivedAt.toISOString() : new Date(t).toISOString();
 }
 
 export function htmlToText(html: string): string {
