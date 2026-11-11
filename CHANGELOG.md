@@ -26,6 +26,11 @@ installer writes `granted` for a new install and does not add it on upgrade.
   read, flags and move to the granted address's mail, and every such
   write is audited in the same batch. `GET /api/whoami` reports
   `delegations`. See `docs/DELEGATION.md` section 4.
+- **The `quote` power (#740 S3).** A `quote` grant lets an agent reply
+  to, quote and forward the granted address's mail, under either
+  `AGENT_READ_SCOPE` value. Each such quote writes a `delegation.quote`
+  audit row before it is sent, and nothing is sent if that row cannot be
+  written. See `docs/DELEGATION.md` section 4.4.
 
 ## v1.10.1
 
