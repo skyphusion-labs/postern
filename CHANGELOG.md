@@ -62,6 +62,9 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Fixed
 
+- **Door throttle key.** The throttle key is canonicalized like the Worker's:
+  the ECMAScript trim set, then lower-case. In system (PAM) mode the key is
+  the local part before `@`. native and ldap keep the whole trimmed name.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
