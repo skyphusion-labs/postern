@@ -227,6 +227,12 @@ describe("mailbox_get", () => {
     expect(d).toMatch(/identityScope/);
     expect(d).toMatch(/not in your slice/);
   });
+
+  it("the description says a message id is first-writer-wins and to check trusted", () => {
+    const d = tool("mailbox_get").description;
+    expect(d).toMatch(/FIRST message stored under it/);
+    expect(d).toMatch(/`trusted`/);
+  });
 });
 
 describe("mailbox_thread", () => {

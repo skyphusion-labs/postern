@@ -2,9 +2,9 @@
 //
 // A grant says that one agent identity (#801, agent_identities.id) may act on one human
 // address with a named set of powers. #740 is "delegated agent read AND send with an
-// audit trail", and the audit trail is a precondition for the write side, so this slice
-// lays the rails and changes NO behaviour: nothing reads a grant for authorization yet.
-// The powers are named now so a grant made today means what the later slices enforce:
+// audit trail", and the audit trail is a precondition for the write side. S1 laid the
+// store and the routes; S2 (the end of this file) enforces read and organize. The powers
+// are named so a grant made today means what the later slices enforce:
 //
 //   read      read the address's mail (under AGENT_READ_SCOPE=granted) (S2)
 //   organize  mark read / flags / move on the address's mail          (S2)
@@ -266,4 +266,91 @@ export async function handleAdminDelegations(request: Request, env: Env, url: UR
   const m = ADMIN_ITEM.exec(path);
   if (m && request.method === "DELETE") return runAudited(env, "delegation.revoke", target(m[1]), () => revoke(env, m[1]));
   return null;
+}
+
+// --- #740 S2: what a grant lets its grantee do ---------------------------------------
+
+export type AgentReadScope = "estate" | "granted";
+
+/** The audit_log action of an agent's organize write on a granted address. */
+export const ORGANIZE_AUDIT_ACTION = "delegation.organize";
+/** The audit_log action of an agent quoting a granted address's mail (#740 S3). */
+export const QUOTE_AUDIT_ACTION = "delegation.quote";
+
+let readScopeConfigLogged: string | undefined;
+
+/**
+ * The operator flag AGENT_READ_SCOPE (Conrad's Q1 ruling on #740, "opt-in fallback").
+ *
+ *   unset      "estate": an upgraded deploy keeps the #718 estate-wide agent read.
+ *   "estate"   "estate".
+ *   "granted"  an agent reads its own address (and its role queues) plus every address it
+ *              holds an active grant on. The installer writes this on a new install.
+ *   other      "granted", and a config error is logged once per value per isolate. A typo
+ *              must not widen reads on the very deploy whose operator tried to narrow them.
+ *
+ * Exact values only: "Granted" and "" are typos, so they fail closed with the rest.
+ */
+export function agentReadScope(env: Env): AgentReadScope {
+  const raw = env.AGENT_READ_SCOPE;
+  if (raw === undefined || raw === "estate") return "estate";
+  if (raw === "granted") return "granted";
+  if (readScopeConfigLogged !== raw) {
+    readScopeConfigLogged = raw;
+    console.error(
+      `config error: AGENT_READ_SCOPE=${JSON.stringify(raw)} is not "estate" or "granted"; agent reads fail closed to granted`,
+    );
+  }
+  return "granted";
+}
+
+export interface AgentDelegations {
+  /** Every address the grantee holds an ACTIVE grant on. Every power implies read. */
+  read: string[];
+  /** The subset whose grant carries organize. */
+  organize: string[];
+  /** The subset whose grant carries quote (#740 S3). */
+  quote: string[];
+  /** The active grants themselves, as GET /api/whoami reports them. */
+  grants: Array<{ id: string; address: string; powers: DelegationPower[] }>;
+}
+
+export function noDelegations(): AgentDelegations {
+  return { read: [], organize: [], quote: [], grants: [] };
+}
+
+/**
+ * The active grants one runtime agent identity holds. Read on every request that needs
+ * them, never cached across requests, so a revoke takes effect on the next request, the
+ * same rule the identity resolver follows for a revoked identity.
+ *
+ * A grant counts ONLY while its grantee identity is live: the lookup joins
+ * agent_identities on `revoked_at IS NULL`. Revoking an identity therefore cuts every
+ * grant it holds at once, from one source of truth, with no cascade write that could
+ * fail half way. The grant rows stay as they are (still listed by the operator routes),
+ * so the record of what was granted is not rewritten by the revoke.
+ *
+ * A row whose stored powers parse to nothing grants nothing (fail closed). Any power puts
+ * the address in `read`, because every power implies read; S1 stores read explicitly, and
+ * this does not depend on that.
+ */
+export async function activeDelegations(env: Env, granteeId: string): Promise<AgentDelegations> {
+  const rows = await env.DB.prepare(
+    "SELECT g.id AS id, g.address AS address, g.powers AS powers FROM delegation_grants g " +
+      "JOIN agent_identities i ON i.id = g.grantee_id AND i.revoked_at IS NULL " +
+      "WHERE g.grantee_id = ? AND g.revoked_at IS NULL ORDER BY g.address, g.id",
+  )
+    .bind(granteeId)
+    .all<{ id: string; address: string; powers: string }>();
+  const out = noDelegations();
+  for (const row of rows.results ?? []) {
+    const powers = parsePowers(row.powers);
+    if (powers.length === 0) continue;
+    const address = row.address.trim().toLowerCase();
+    out.grants.push({ id: row.id, address, powers });
+    if (!out.read.includes(address)) out.read.push(address);
+    if (powers.includes("organize") && !out.organize.includes(address)) out.organize.push(address);
+    if (powers.includes("quote") && !out.quote.includes(address)) out.quote.push(address);
+  }
+  return out;
 }

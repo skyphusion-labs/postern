@@ -354,8 +354,42 @@ function deriveBodyText(html?: string, text?: string): string {
  * array, so it cannot be reached by omission: a bare address is not assignable to this
  * type, and a member scope must be written as a one-element array. Every caller therefore
  * states which of the two it is.
+ *
+ * `"addressing"` is the third literal: a caller that may SEND but not READ (a static
+ * send-only token). It may reply to a stored message, because a reply goes to people
+ * already on that thread, but nothing from the message comes back out: the target is
+ * looked up only to address the reply, caller cc/bcc and quoteOriginal are refused, and a
+ * forward source is not found (a forward IS the body, sent where the caller chooses).
  */
-export type MessageReadScope = readonly string[] | "estate";
+export type MessageReadScope = readonly string[] | "estate" | "addressing";
+
+/**
+ * The audit half of a quote that reaches a GRANTED address (#740 S3). `addresses` are the
+ * quote-granted addresses the caller's scope was widened by. When the stored message a
+ * reply or forward resolves to is reachable through one of them, `record` writes one
+ * audit row BEFORE dispatch and throws if it cannot, so no audit means no send. The row
+ * records an ATTEMPT: a dispatch that then fails leaves it in place.
+ */
+export interface QuoteAudit {
+  addresses: readonly string[];
+  record: (messageId: string, op: "reply" | "forward", address: string) => Promise<void>;
+}
+
+/** Record the quote when the message is reachable through a granted address. */
+async function auditQuote(
+  env: Env,
+  messageId: string,
+  op: "reply" | "forward",
+  audit: QuoteAudit | undefined,
+): Promise<void> {
+  if (!audit) return;
+  for (const address of audit.addresses) {
+    if (await store.messageAccessible(env, messageId, [address])) {
+      await audit.record(messageId, op, address);
+      return;
+    }
+  }
+}
 
 /**
  * Read the message a write path is about to quote, under that path's scope.
@@ -371,6 +405,8 @@ async function readQuotable(
   messageId: string,
   readScope: MessageReadScope,
 ): Promise<store.StoredMessage | null> {
+  // An addressing-only caller quotes nothing: the answer is the plain not-found.
+  if (readScope === "addressing") return null;
   return readScope === "estate"
     ? await store.getUnscoped(env, messageId)
     : await store.get(env, messageId, readScope);
@@ -387,6 +423,7 @@ export async function send(
   ctx: ExecutionContext,
   identity: BoundIdentity | undefined,
   readScope: MessageReadScope,
+  quoteAudit?: QuoteAudit,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object") {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be an object");
@@ -440,6 +477,8 @@ export async function send(
     : req.subject!;
   rejectCRLF("subject", subject);
 
+  // #740 S3: the audit row for a forward of granted mail, written BEFORE dispatch.
+  if (original) await auditQuote(env, original.messageId, "forward", quoteAudit);
   return dispatchAndStore(env, ctx, {
     to,
     cc,
@@ -453,7 +492,15 @@ export async function send(
     attachments,
     inReplyTo: headers["In-Reply-To"] ?? null,
     references: parseReferences(headers["References"]),
+    threadScope: threadScopeOf(readScope),
   });
+}
+
+/** The thread-parent scope for a send. A bound member resolves its caller-supplied
+ *  In-Reply-To / References only among mail it can read. "estate" stays estate. The
+ *  send-only "addressing" token keeps the whole-store lookup it has always had. */
+function threadScopeOf(readScope: MessageReadScope): store.AccessScope {
+  return readScope === "estate" || readScope === "addressing" ? "estate" : readScope;
 }
 
 /**
@@ -468,6 +515,7 @@ export async function reply(
   ctx: ExecutionContext,
   identity: BoundIdentity | undefined,
   readScope: MessageReadScope,
+  quoteAudit?: QuoteAudit,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object" || typeof req.messageId !== "string" || !req.messageId.trim()) {
     throw new MailboxError("E_FIELD_MISSING", "messageId is required");
@@ -476,7 +524,25 @@ export async function reply(
     throw new MailboxError("E_FIELD_MISSING", "at least one of html or text is required");
   }
 
-  const original = await readQuotable(env, req.messageId.replace(/[<>]/g, "").trim(), readScope);
+  // An addressing-only caller (see MessageReadScope) replies to the thread's existing
+  // parties and gets nothing read back. Its extra recipients and the quote are refused
+  // BEFORE the lookup, out loud (400), never silently dropped.
+  const addressingOnly = readScope === "addressing";
+  if (addressingOnly) {
+    if (asArray(req.cc).length > 0 || asArray(req.bcc).length > 0) {
+      throw new MailboxError(
+        "E_VALIDATION_ERROR",
+        "cc and bcc require read access: a reply from this credential goes only to the thread's existing parties",
+      );
+    }
+    if (req.quoteOriginal) {
+      throw new MailboxError("E_VALIDATION_ERROR", "quoteOriginal requires read access");
+    }
+  }
+  const targetId = req.messageId.replace(/[<>]/g, "").trim();
+  const original = addressingOnly
+    ? await store.getUnscoped(env, targetId)
+    : await readQuotable(env, targetId, readScope);
   if (!original) {
     throw new MailboxError("E_NOT_FOUND", `no stored message with id ${req.messageId}`, 404);
   }
@@ -521,6 +587,9 @@ export async function reply(
   };
 
   const body = req.quoteOriginal ? appendQuote(original, req.html, req.text) : { html: req.html, text: req.text };
+  // #740 S3: a reply to granted mail reads it (its parties, subject and thread, and the
+  // body when quoted), so it is audited BEFORE dispatch, quoted or not.
+  await auditQuote(env, original.messageId, "reply", quoteAudit);
   return dispatchAndStore(env, ctx, {
     to,
     cc,
@@ -534,6 +603,7 @@ export async function reply(
     inReplyTo,
     references,
     forcedThreadId: original.threadId,
+    threadScope: threadScopeOf(readScope),
   });
 }
 
@@ -551,6 +621,8 @@ interface DispatchInput {
   inReplyTo: string | null;
   references: string[];
   forcedThreadId?: string;
+  /** Whose mail the thread parent may come from (store.StoreInput.threadScope). */
+  threadScope: store.AccessScope;
 }
 
 async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInput): Promise<SendResult> {
@@ -591,6 +663,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       date: new Date().toISOString(),
       inReplyTo: d.inReplyTo,
       references: d.references,
+      threadScope: d.threadScope,
       bodyText: deriveBodyText(safeHtml, d.text),
       bodyHtml: safeHtml ?? null,
       // The sent copy carries its attachments too (#470). We handed the transport the
