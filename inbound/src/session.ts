@@ -124,11 +124,16 @@ function posInt(raw: string | undefined, fallback: number): number {
 // `organize` (#685) lets the human door change read state, flags and placement. It is
 // snapshotted into the session row at mint, so a session minted before #685 does NOT
 // carry it and is refused on those routes until the user logs in again.
-export const NATIVE_SESSION_CAPS = ["read", "send", "delete", "organize"];
+export { NATIVE_SESSION_CAPS } from "./caps";
+import { NATIVE_SESSION_CAPS } from "./caps";
+import { ensureHumanPrincipal } from "./principals";
 
 export interface SessionResolution {
   identity: BoundIdentity;   // the bound From (authoritative sender for this session)
   username: string | null;   // the login that minted it; null on a pre-0015 row (#790)
+  /** The human principal behind the session (#854 M2), stable across sign-ins and
+   *  renames. null on a row minted before migration 0020. */
+  principalId: string | null;
   caps: string[];            // granted capability set, e.g. ["read","send"]
   csrfHash: string;          // sha256hex of the session synchronizer token
   expiresAt: string;         // ISO8601
@@ -145,6 +150,7 @@ interface SessionRow {
   expires_at: string;
   revoked: number;
   username: string | null;
+  principal_id: string | null;
   // From the LEFT JOIN on smtp_credentials (#790): null when the account row is gone.
   cred_username: string | null;
   cred_disabled: number | null;
@@ -231,14 +237,18 @@ export async function insertSession(env: Env, account: AuthenticatedAccount): Pr
   const expiresMs = Math.min(now + idle * 1000, now + absolute * 1000);
   const expiresAt = new Date(expiresMs).toISOString();
   const caps = NATIVE_SESSION_CAPS.slice();
+  // #854 M2: every new session names its human principal. The same per-user code the
+  // backfill runs, so the two can never disagree, and a user created after the last
+  // backfill still gets one here.
+  const principalId = await ensureHumanPrincipal(env, account.username);
 
   await env.DB.prepare(
     `INSERT INTO webmail_sessions
-       (id_hash, identity, display_name, caps, csrf_hash, issued_at, last_seen_at, expires_at, revoked, username)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+       (id_hash, identity, display_name, caps, csrf_hash, issued_at, last_seen_at, expires_at, revoked, username, principal_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
   )
     .bind(idHash, account.fromAddr, account.displayName, caps.join(","), csrfHash, issuedAt, issuedAt, expiresAt,
-      account.username)
+      account.username, principalId)
     .run();
 
   const identity: BoundIdentity = { from: account.fromAddr };
@@ -285,7 +295,7 @@ export async function resolveSession(env: Env, rawId: string): Promise<SessionRe
   // just after the disable ended the sessions.
   const row = await env.DB.prepare(
     `SELECT s.id_hash, s.identity, s.display_name, s.caps, s.csrf_hash, s.issued_at, s.last_seen_at,
-            s.expires_at, s.revoked, s.username, c.username AS cred_username, c.disabled AS cred_disabled
+            s.expires_at, s.revoked, s.username, s.principal_id, c.username AS cred_username, c.disabled AS cred_disabled
        FROM webmail_sessions s LEFT JOIN smtp_credentials c ON c.username = s.username
       WHERE s.id_hash = ? LIMIT 1`,
   )
@@ -320,7 +330,7 @@ export async function resolveSession(env: Env, rawId: string): Promise<SessionRe
       .run();
   }
 
-  return { identity, username: row.username, caps, csrfHash: row.csrf_hash, expiresAt };
+  return { identity, username: row.username, principalId: row.principal_id ?? null, caps, csrfHash: row.csrf_hash, expiresAt };
 }
 
 // Revoke the session behind a presented cookie (instant, contract 1.5.3). Deletes the
