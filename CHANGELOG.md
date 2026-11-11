@@ -77,6 +77,11 @@ mismatched MCP tag fails before it publishes.
   References, the parent is looked up among messages it can read; any
   other id starts a new thread, as an unknown id does.
 
+- **Webmail shows attachment names with hidden characters made visible.**
+  Control and invisible format characters in an attachment filename are
+  shown as `[U+XXXX]`, the name is isolated left to right, and the
+  download name replaces each such character with `_`.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
