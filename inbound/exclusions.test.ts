@@ -245,6 +245,10 @@ for (const flag of ["granted", "estate"] as const) {
       expect(idsOf((await s.call("GET", `/api/threads/${encodeURIComponent(s.threadOf(HUMAN_MSG))}`, { token: t })).body.messages)).toEqual([SHARED_MSG]);
       expect((await s.call("GET", `/api/messages/${OTHER_MSG}`, { token: t })).status).toBe(200);
       expect((await s.call("POST", "/api/reply", { token: t, body: { messageId: SHARED_MSG, text: "ok" } })).status).toBe(200);
+      // A to= view is that mailbox as its owner sees it: the agent's own copy shows in its OWN
+      // view, and not in the marking owner's view.
+      expect(idsOf((await s.call("GET", `/api/messages?to=${AGENT}`, { token: t })).body.items)).toContain(SHARED_MSG);
+      expect(idsOf((await s.call("GET", `/api/messages?to=${HUMAN}`, { token: t })).body.items)).not.toContain(SHARED_MSG);
     });
 
     it("the owner's OWN sent reply in the marked thread is hidden too", async () => {
@@ -337,7 +341,12 @@ for (const flag of ["granted", "estate"] as const) {
       const bobs = (await s.agentWith("bobagent@skyphusion.org", [{ address: BOB, powers: ["read"] }])).token;
       const both = (await s.agentWith("bothagent@skyphusion.org", [{ address: HUMAN, powers: ["read"] }, { address: BOB, powers: ["read"] }])).token;
       const reached = { get: 200, list: true, thread: true };
-      // CONTROL: before the mark every one of them reaches it.
+      // CONTROL: before the mark every one of them reaches it, through either view.
+      expect((await s.call("GET", `/api/messages?to=${HUMAN}`, { token: both })).body.items as Json[]).toEqual(
+        expect.arrayContaining([expect.objectContaining({ messageId: BOTH_MSG })]),
+      );
+      expect(idsOf((await s.call("GET", `/api/search?q=both&mode=substr&field=body&to=${HUMAN}`, { token: both })).body.items)).toContain(BOTH_MSG);
+      expect((((await s.call("GET", `/api/folders?to=${HUMAN}`, { token: both })).body.folders as Json[]).find((f) => f.id === "inbox") as Json).count).toBe(4);
       expect(await sees(s, alices, HUMAN)).toEqual(reached);
       expect(await sees(s, bobs, BOB)).toEqual(reached);
       expect(await sees(s, both, BOB)).toEqual(reached);
@@ -345,6 +354,17 @@ for (const flag of ["granted", "estate"] as const) {
       expect(await sees(s, alices, HUMAN)).toEqual({ get: 404, list: false, thread: false });
       expect(await sees(s, bobs, BOB)).toEqual(reached);
       expect(await sees(s, both, BOB)).toEqual(reached);
+      // A to= naming ONE held address reads that mailbox as its owner sees it (Joan's live
+      // finding on 174a90e): through Alice's view the row is gone, through Bob's it stays.
+      const views = async (token: string, via: string) => ({
+        list: idsOf((await s.call("GET", `/api/messages?to=${via}`, { token })).body.items).includes(BOTH_MSG),
+        search: idsOf((await s.call("GET", `/api/search?q=both&mode=substr&field=body&to=${via}`, { token })).body.items).includes(BOTH_MSG),
+        inbox: (((await s.call("GET", `/api/folders?to=${via}`, { token })).body.folders as Json[]).find((f) => f.id === "inbox") as Json).count,
+      });
+      // HUMAN's inbox: HUMAN_MSG, SHARED_MSG, OTHER_MSG (+ BOTH_MSG unless hidden); BOB's: BOB_MSG (+ BOTH_MSG).
+      expect(await views(both, HUMAN)).toEqual({ list: false, search: false, inbox: 3 });
+      expect(await views(both, BOB)).toEqual({ list: true, search: true, inbox: 2 });
+      expect(await views(alices, HUMAN)).toEqual({ list: false, search: false, inbox: 3 });
       // Bob's own mark on the same thread closes his door too, and then nobody reaches it.
       const bob = await s.signIn(BOB);
       expect((await s.mark(s.threadOf(BOTH_MSG), bob)).status).toBe(201);

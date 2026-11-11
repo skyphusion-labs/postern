@@ -269,6 +269,13 @@ Example: one message delivered to Alice and Bob; Alice marks its thread.
 
 If Bob marks the thread too, no agent reaches it through either of them.
 
+A list, search or folders `to=` that names one of the agent's held addresses reads THAT
+mailbox as its owner sees it (section 4.2), so the row is judged through that one address
+alone: in the example, the agent holding both grants sees the message under `to=` Bob and
+not under `to=` Alice. The same holds for the agent's own copy: it shows under the agent's
+own `to=` (and on get and thread), not under `to=` Alice. Any other `to=` is a plain filter
+and keeps the full held set.
+
 The rule applies to every agent path:
 
 - reads: list, `countOnly`, search in every mode (fts, substr, semantic, hybrid), folder

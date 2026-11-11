@@ -614,7 +614,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (role) applyRoleScope(query, role, sessionIdentity as string);
       else if (sessionIdentity) query.viewer = sessionIdentity;
       // #853: set before the count AND the rows, so neither sees a human-only thread.
-      query.agentGuard = await readGuardOf(env, resolution);
+      query.agentGuard = await readGuardOf(env, resolution, url.searchParams.get("to"));
       if (countOnly) {
         // AFTER the scope application above, deliberately: the count runs on the SAME
         // `query` object the rows would have been read from, so it cannot report a number
@@ -682,7 +682,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return json({
         ok: true,
         identityScope: scopeReportOf(foldersScope),
-        folders: await store.folders(env, viewer, roles, await readGuardOf(env, resolution)),
+        folders: await store.folders(env, viewer, roles, await readGuardOf(env, resolution, url.searchParams.get("to"))),
       });
     }
 
@@ -966,7 +966,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // A role read drops the account viewer: the queue IS the scope, and the account
         // boundary would otherwise intersect it down to the member own mail (#425).
         viewer: role ? undefined : sessionIdentity,
-        agentGuard: await readGuardOf(env, resolution),
+        agentGuard: await readGuardOf(env, resolution, url.searchParams.get("to")),
         limit: parseLimit(url),
         cursor: cursorParam,
       });
@@ -1309,6 +1309,7 @@ async function agentGuardOf(
   env: Env,
   resolution: AuthResolution,
   reach: MessageReadScope | store.AccessScope | undefined,
+  exact = false,
 ): Promise<store.AgentGuard | undefined> {
   if (resolution.viaSession || !resolution.identity) return undefined;
   // The short-circuit: no active mark anywhere means nothing to hide, so no predicate.
@@ -1317,18 +1318,26 @@ async function agentGuardOf(
   const agent = resolution.identity.from.trim().toLowerCase();
   // `reach` is the path's own scope: the addresses it may reach mail through. "estate"
   // and "addressing" name no address, so only the agent's own counts there.
-  const through = typeof reach === "string" || reach === undefined ? [] : reach;
-  return { agent, held: [...new Set([agent, ...through.map((a) => a.trim().toLowerCase())])] };
+  const through = (typeof reach === "string" || reach === undefined ? [] : reach).map((a) => a.trim().toLowerCase());
+  // `exact`: the path names its ONE address (a to= view), so nothing else is added.
+  return { agent, held: [...new Set(exact ? through : [agent, ...through])] };
 }
 
 /** The guard of a READ path: held = own + role queues + every address the agent holds a
  *  grant on (every power implies read), under BOTH flag values. Under estate the estate
  *  itself is not an address, so the owner's marked mail drops out unless one of these
  *  reaches it. */
-async function readGuardOf(env: Env, resolution: AuthResolution): Promise<store.AgentGuard | undefined> {
+async function readGuardOf(env: Env, resolution: AuthResolution, to?: string | null): Promise<store.AgentGuard | undefined> {
   if (resolution.viaSession || !resolution.identity) return undefined;
   const own = resolution.identity.from.trim().toLowerCase();
-  return agentGuardOf(env, resolution, [own, ...rolesForViewer(env, own), ...(await delegationsOf(env, resolution)).read]);
+  const held = [own, ...rolesForViewer(env, own), ...(await delegationsOf(env, resolution)).read];
+  // A list, search or folders `to=` naming one of these addresses reads THAT mailbox, as its
+  // owner sees it (DELEGATION.md 4.2), so the row is judged through that address alone: the
+  // owner's mark hides it there even when another held address would also reach it. Any
+  // other to= is a plain filter and keeps the full held set.
+  const view = (to ?? "").trim().toLowerCase();
+  if (view && held.includes(view)) return agentGuardOf(env, resolution, [view], true);
+  return agentGuardOf(env, resolution, held);
 }
 
 function writeReadScope(env: Env, resolution: AuthResolution): MessageReadScope {
