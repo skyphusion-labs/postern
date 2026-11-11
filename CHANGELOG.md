@@ -80,6 +80,10 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Fixed
 
+- **A refused address names the field.** An invalid to, cc, bcc, from, or
+  reply-to value is reported by field name. A reply whose stored address
+  cannot be used names the header it came from.
+
 - **Door session edges.** The IMAP wire trace redacts every received line of a
   LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
   port 993; set a certificate, or use port 143. Submission backend errors log
