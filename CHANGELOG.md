@@ -27,6 +27,14 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **Submission deadlines.** The submission listener has a read timeout and a
+  write timeout (default 5 minutes each). The read timeout is an idle limit,
+  refreshed on each read. Open connections are capped globally
+  (`SUBMISSION_MAX_CONNECTIONS`, default 200) and per source address
+  (`SUBMISSION_MAX_CONNECTIONS_PER_IP`, default 20). Zero means no cap. The
+  per-source cap uses the address from a trusted PROXY header when one is
+  present. After that header is read, the door puts back the read deadline
+  the protocol had set.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
@@ -67,9 +75,6 @@ deploy. A self-hosted install picks up the installer changes the next time it ru
 
 ### Fixed
 
-- **Submission deadlines.** The submission listener has a read timeout and a
-  write timeout (default 5 minutes each) and a cap on concurrent connections
-  (default 200, `SUBMISSION_MAX_CONNECTIONS`; 0 means no cap).
 - **The reply and forward quote follows the caller's read scope.** A
   static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
   quotes or forwards a stored message: the source is not found, as on the

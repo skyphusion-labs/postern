@@ -26,7 +26,7 @@ func clearRelayEnv(t *testing.T) {
 		"POSTERN_SEND_URL", "POSTERN_SEND_TOKEN", "POSTERN_SMTP_AUTH_URL",
 		"PROXY_PROTOCOL", "PROXY_PROTOCOL_TRUSTED", "PROXY_PROTOCOL_TIMEOUT_SECONDS",
 		"SUBMISSION_READ_TIMEOUT_SECONDS", "SUBMISSION_WRITE_TIMEOUT_SECONDS",
-		"SUBMISSION_MAX_CONNECTIONS",
+		"SUBMISSION_MAX_CONNECTIONS", "SUBMISSION_MAX_CONNECTIONS_PER_IP",
 	} {
 		t.Setenv(k, "") // t.Setenv restores the prior value at test end
 	}
@@ -186,6 +186,29 @@ func setSubmissionOnlyEnv(t *testing.T) {
 	// destination, so inbound stays inactive.
 	t.Setenv("POSTERN_SMTP_AUTH_URL", "https://core.example/api/smtp-auth")
 	t.Setenv("POSTERN_TRANSPORT_TOKEN", "transport-secret")
+}
+
+func TestSubmissionCapsDefaultAndZero(t *testing.T) {
+	setSubmissionOnlyEnv(t)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Submission.MaxConns != 200 || cfg.Submission.MaxConnsPerIP != 20 {
+		t.Fatalf("caps global=%d perIP=%d, want 200 and 20", cfg.Submission.MaxConns, cfg.Submission.MaxConnsPerIP)
+	}
+	if cfg.Submission.ReadTimeout != 300*time.Second || cfg.Submission.WriteTimeout != 300*time.Second {
+		t.Fatalf("timeouts read=%s write=%s, want 300s", cfg.Submission.ReadTimeout, cfg.Submission.WriteTimeout)
+	}
+	t.Setenv("SUBMISSION_MAX_CONNECTIONS", "0")
+	t.Setenv("SUBMISSION_MAX_CONNECTIONS_PER_IP", "0")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig zero caps: %v", err)
+	}
+	if cfg.Submission.MaxConns != 0 || cfg.Submission.MaxConnsPerIP != 0 {
+		t.Fatalf("zero caps global=%d perIP=%d", cfg.Submission.MaxConns, cfg.Submission.MaxConnsPerIP)
+	}
 }
 
 func TestLoadConfig_SubmissionOnlyLoadsClean(t *testing.T) {
