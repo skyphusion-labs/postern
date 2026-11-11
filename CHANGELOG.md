@@ -32,6 +32,14 @@ installer writes `granted` for a new install and does not add it on upgrade.
   audit row before it is sent, and nothing is sent if that row cannot be
   written. See `docs/DELEGATION.md` section 4.4.
 
+### Fixed
+
+- **The webmail remote-content notice counts every remote reference.**
+  SVG image, use and feImage links, CSS url() written with escapes,
+  @import of a plain string and image-set() strings are counted and
+  removed from the reading frame; a URL inside a CSS comment is not
+  counted.
+
 ## v1.10.1
 
 PATCH. Fixes across inbound, the installer and CI. Upgrade to pick them up; no config change
