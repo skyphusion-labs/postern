@@ -51,7 +51,7 @@ import {
   type AgentDelegations,
 } from "./delegations";
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
-import { agentAudit, agentMessageAudit, auditStatement } from "./adminkit";
+import { agentAudit, agentMessageAudit, auditStatement, OPERATOR_ACTOR, type AuditActor } from "./adminkit";
 import { backfillPrincipals } from "./principals";
 import { handleSelfService } from "./selfservice";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
@@ -438,12 +438,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // serves ONLY the methods its routes.ts rows declare and returns null otherwise,
     // because a method with no row has no scope gate in front of it.
     if (path === "/api/admin/identities" || path.startsWith("/api/admin/identities/")) {
-      const ires = await handleAdminIdentities(request, env, url);
+      const ires = await handleAdminIdentities(request, env, url, adminActorOf(resolution));
       if (ires) return ires;
     }
     // #740 S1: delegation grants, operator only, store and routes with no behaviour change.
     if (path === "/api/admin/delegations" || path.startsWith("/api/admin/delegations/")) {
-      const dres = await handleAdminDelegations(request, env, url);
+      const dres = await handleAdminDelegations(request, env, url, adminActorOf(resolution));
       if (dres) return dres;
     }
     if (path === "/api/admin/audit") {
@@ -463,6 +463,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // #854 M1: the principal backfill. Operator only, POST only (its one route row).
     if (request.method === "POST" && path === "/api/admin/principals/backfill") {
       const report = await backfillPrincipals(env);
+      const actor = adminActorOf(resolution);
       await auditStatement(env, new Date().toISOString(), {
         action: "principals.backfill",
         outcome: "ok",
@@ -475,7 +476,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           orphansRevoked: report.humans.orphansRevoked,
           addressConflicts: report.addressConflicts.length,
         },
-      }).run();
+      }, undefined, actor).run();
       return json({ ok: true, ...report });
     }
 
@@ -1393,6 +1394,12 @@ function readViewer(env: Env, resolution: AuthResolution): string | undefined {
 function memberWriteScope(resolution: AuthResolution): store.AccessScope {
   const member = boundWriteMember(resolution);
   return member ? [member] : "estate";
+}
+
+/** Who an admin-route action is audited as (#904): the `svc_admin` service principal for
+ *  the admin-only slot, else the operator (`svc_both`). Only those two reach an admin route. */
+function adminActorOf(resolution: AuthResolution): AuditActor {
+  return resolution.scope === "admin" && !resolution.caps ? { kind: "service", id: "svc_admin" } : OPERATOR_ACTOR;
 }
 
 /** The scope of a flags or move write, widened by organize grants (#740 S2).
@@ -2481,7 +2488,7 @@ function isStateChanging(method: string): boolean {
 //      not break on a match, so the check does not leak WHICH slot or WHICH set
 //      member matched via timing; per-token LENGTH may leak (tokens are
 //      high-entropy), the bytes must not. Precedence is fixed, and it is the order
-//      the table below lists: both, read, send, delete, imap, organize. Distinct
+//      the table below lists: both, read, send, delete, imap, organize, admin. Distinct
 //      values are expected, so at most one matches, but on an accidental value
 //      collision the more-permissive `both` wins, to avoid locking out the primary
 //      key. A static match carries NO bound identity
@@ -2506,6 +2513,7 @@ async function resolveToken(request: Request, env: Env): Promise<AuthResolution 
     ["delete", tokenSet(env.POSTERN_API_TOKEN_DELETE)],
     ["imap", tokenSet(env.POSTERN_API_TOKEN_IMAP)],
     ["organize", tokenSet(env.POSTERN_API_TOKEN_ORGANIZE)],
+    ["admin", tokenSet(env.POSTERN_API_TOKEN_ADMIN)],
   ];
 
   let matched: Scope | null = null;

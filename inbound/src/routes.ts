@@ -385,5 +385,8 @@ export function scopeSatisfies(have: Scope, need: RouteScope): boolean {
   if (need === "delete") return have === "delete";
   if (need === "imap") return have === "imap";
   if (need === "organize") return have === "organize" || have === "imap";
+  // #904: the admin slot holds admin and NOTHING else, so automation that runs an admin
+  // route (the post-deploy principal backfill) never holds a key that reads or sends mail.
+  if (need === "admin") return have === "admin";
   return false; // admin: only `both`
 }

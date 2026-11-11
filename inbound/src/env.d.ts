@@ -184,6 +184,15 @@ interface Env {
    */
   POSTERN_API_TOKEN_ORGANIZE?: string;
   /**
+   * The ADMIN-ONLY slot (#904). A comma SET like the others (#154). A match resolves to
+   * the `admin` scope, which satisfies the admin routes and nothing else: it cannot read,
+   * send, delete or organize mail. Its audit rows name the `svc_admin` service principal,
+   * so automation (the post-deploy principal backfill, #901) is told apart from the
+   * operator. Rotate it on its own with `wrangler secret put POSTERN_API_TOKEN_ADMIN`; no
+   * deploy is needed. Leave unset to keep admin on `both` only.
+   */
+  POSTERN_API_TOKEN_ADMIN?: string;
+  /**
    * Optional per-identity SEND registry (#28). A JSON object mapping the sha256 HEX
    * of a send token -> its bound sender identity { from, displayName? }. MANY tokens,
    * each the SAME send scope but a DISTINCT, authoritative From, so crew + released

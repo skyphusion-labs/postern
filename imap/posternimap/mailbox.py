@@ -941,6 +941,7 @@ class PosternMailbox:
                 existing is not None
                 and _same_stored_message(existing, parsed)
                 and self._placement_direction_matches(existing, parsed)
+                and self._viewer_owns_row(existing)
             ):
                 # APPEND's contract is persist-or-refuse with AppendRejectedError
                 # (#352 3.2), so an organize refusal is converted rather than raised
@@ -954,6 +955,20 @@ class PosternMailbox:
         # matching existing message) is now PERSISTED via the IMAP-service import
         # seam instead of refused -- never silently dropped.
         self._import_or_reject(raw, mailbox)
+
+    def _viewer_owns_row(self, existing: Message) -> bool:
+        """True when this session may place the stored row.
+
+        No viewer means an estate-wide session. A viewer may place a row only
+        when ``delivered_to`` includes that viewer. An old row that omits
+        ``deliveredTo`` already falls back to its ``to`` address in
+        ``_delivered_to``, so this check does not read ``to_addr`` again.
+        """
+        viewer = _bare_addr(self._viewer or "")
+        if not viewer:
+            return True
+        owned = {_bare_addr(addr) for addr in (existing.delivered_to or []) if addr}
+        return viewer in owned
 
     def _placement_direction_matches(self, existing: Message, parsed: PyMessage) -> bool:
         if not self._identity:

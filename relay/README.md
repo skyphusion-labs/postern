@@ -187,6 +187,21 @@ same From-enforcement applies to all three. Pick by `AUTH_BACKEND` (default
 > authorization gate. See `docs/AUTH-CONTRACT.md` section 5b and `imap/README.md`;
 > the two doors share one login by design (#75).
 
+### Submission deadlines
+
+The submission listener sets `ReadTimeout` and `WriteTimeout` (default 300
+seconds, `SUBMISSION_READ_TIMEOUT_SECONDS` and
+`SUBMISSION_WRITE_TIMEOUT_SECONDS`). go-smtp treats zero as no deadline, including
+the implicit-TLS handshake, so the defaults are the deadline. The read timeout
+is an idle limit: it is refreshed on each read, so a DATA transfer that keeps
+sending is not cut off at 300 seconds, and a stall still is.
+`SUBMISSION_MAX_CONNECTIONS` (default 200, `0` means no cap) closes a connection
+once that many are already open. `SUBMISSION_MAX_CONNECTIONS_PER_IP` (default
+20, `0` means no cap) does the same for one source address. That address is the
+one from a trusted PROXY header when one was honored, and the raw peer
+otherwise. After the header is read, the door puts back the read deadline the
+protocol had set.
+
 ### Online brute-force throttle (`AUTH_THROTTLE_*`, #105)
 
 PBKDF2 + dummy-hash timing equalization defeat OFFLINE cracking and user
@@ -194,7 +209,7 @@ enumeration, but ONLINE password guessing needs an application backstop. The
 submission AUTH door applies a **per-account** failure counter with lockout +
 exponential backoff (default: lock after 5 consecutive failures, 60s base
 doubling to a 900s cap), plus a **global** aggregate ceiling that cools down ALL
-auth for one window once tripped (default 100 failures / 60s). It is keyed on
+auth for one window once tripped (off unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set). It is keyed on
 the **account, not the source IP**: a door behind an L4 load balancer can see
 only the balancer's own address unless PROXY protocol is configured
 (`docs/PROXY-PROTOCOL.md`), so per-IP throttling (and fail2ban) cannot be relied

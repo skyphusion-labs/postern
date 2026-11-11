@@ -223,7 +223,8 @@ and also picks up rows a pre-M2 admin route wrote after M1 landed.
 - **One owner per address.** An address another principal already owns is reported in
   `addressConflicts` and left with its owner.
 - **The operator is no longer anonymous in the audit log** (D-ID-5): rows the admin routes
-  write now name `actor_kind` `service`, `actor_id` `svc_both`. Older rows keep `operator` +
+  write now name `actor_kind` `service`, `actor_id` `svc_both`, or `svc_admin` when the
+  caller is the admin-only `POSTERN_API_TOKEN_ADMIN` slot (#904, seeded by migration 0021). Older rows keep `operator` +
   NULL. `delegation_grants.created_by` is still the string `operator` until M2.
 - **Nothing reads the new tables to authorize anything.** Every credential resolves exactly
   as before; `inbound/principals.test.ts` asserts that across static, registry, runtime and
