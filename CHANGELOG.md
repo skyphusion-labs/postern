@@ -11,6 +11,19 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+### Fixed
+
+- **Sign-in attempts are counted atomically.** Webmail sign-in, change
+  password and first-run setup now reserve each attempt before the
+  password check, so attempts made at the same time are each counted
+  toward the lockout.
+- **`/api/smtp-auth` is throttled at the Worker** on the canonical
+  username (AUTH-CONTRACT.md section 5d), sharing the account budget with
+  webmail sign-in. A locked account answers `200 {ok: false, error:
+  "E_AUTH_THROTTLED"}`.
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an

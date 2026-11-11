@@ -37,10 +37,21 @@
 // STORE: D1 (migration 0014, webmail_auth_failures). The mint path already REQUIRES
 // D1 (it INSERTs the session row), the table is additive so the #112 deploy gate
 // auto-applies it, and the counters are inspectable and prunable with the same tools
-// as every other table here. Counting is a read-modify-write, not an atomic SQL
-// increment, so two failures landing in the same instant can under-count by one; the
-// lockout still trips within an attempt or two and every attempt costs a
-// 210k-iteration PBKDF2, so the race buys an attacker no meaningful budget.
+// as every other table here.
+//
+// COUNTING IS A RESERVATION, TAKEN ATOMICALLY BEFORE THE VERIFY. `gateAttempt` runs one
+// upsert per layer that increments the counter in SQL and RETURNS the new count, and
+// whose DO UPDATE ... WHERE refuses (returns no row) when the layer is locked or its
+// budget is already spent. Every attempt in flight therefore holds its own numbered
+// slot, so N concurrent guesses are counted as N, and at most `maxFailures` of them
+// reach the verifier before the lock. After the verify:
+//   - a definite rejection (`recordFailure`) KEEPS the reservation and sets the lock
+//     when the reserved count reached the threshold;
+//   - a success (`clearFailures`) deletes the account row and RELEASES the other
+//     layers' reservations (a success is not a client-IP or global failure);
+//   - anything else, an infra error above all (`releaseAttempt`), releases every
+//     reservation, so an outage still cannot lock users out.
+// The cost is one write per attempt, where the old read-only gate cost none.
 //
 // FAIL-CLOSED: every function here throws on a store error. The caller maps that to
 // a refusal (503), never to "proceed unthrottled" -- a control that silently degrades
@@ -90,25 +101,27 @@ function nonNegInt(rawValue: string | undefined, fallback: number): number {
   return Number.isInteger(n) && n >= 0 ? n : fallback;
 }
 
-interface FailureRow {
-  scope_key: string;
-  failures: number;
-  window_start_at: string;
-  last_failure_at: string;
-  locked_until: string | null;
-}
-
 /** The keyed layers a single attempt touches. */
 export interface AttemptKeys {
   account: string;
   client?: string;   // absent when the platform gave us no client IP
 }
 
-/** The verdict of the pre-verify gate, plus the rows it read (reused by the writer). */
+/** The verdict of the pre-verify gate, plus the count each layer reserved for this attempt. */
 export interface AttemptGate {
   allowed: boolean;
   retryAfter: number;              // whole seconds; 0 when allowed
-  rows: Map<string, FailureRow>;
+  reserved: Map<string, number>;   // scope key -> the failure count this attempt holds
+}
+
+/**
+ * Account-only keys, for a caller that is not the end user's client: the doors call
+ * /api/smtp-auth from their own address, so a client-IP layer there would lock every
+ * user of that door at once. Same normalization as the lookup, so variants that reach
+ * the same account share one budget.
+ */
+export function accountKeys(username: string): AttemptKeys {
+  return { account: "a:" + normalizeUsername(username).slice(0, MAX_ACCOUNT_KEY) };
 }
 
 /**
@@ -122,67 +135,148 @@ export function attemptKeys(request: Request, username: string): AttemptKeys {
 }
 
 /**
- * Read the counters for this attempt and decide whether it may reach the verifier.
- * ONE D1 read per attempt (every layer in a single statement) and NO write, so a
- * successful login against a clean account costs zero extra writes.
+ * Reserve this attempt on every layer, atomically, and decide whether it may reach the
+ * verifier. A layer refuses when it is locked, or when its budget is already held by
+ * attempts in flight. If any layer refuses, the layers that did reserve are released,
+ * so a refused attempt never extends its own lockout (the relay does not call fail()
+ * when allow() denied).
  */
 export async function gateAttempt(env: Env, keys: AttemptKeys): Promise<AttemptGate> {
   const cfg = throttleConfig(env);
-  if (!cfg.enabled) return { allowed: true, retryAfter: 0, rows: new Map() };
-
-  const wanted = scopeKeys(keys, cfg);
-  const placeholders = wanted.map(() => "?").join(", ");
-  const res = await env.DB.prepare(
-    "SELECT scope_key, failures, window_start_at, last_failure_at, locked_until " +
-      `FROM webmail_auth_failures WHERE scope_key IN (${placeholders})`,
-  )
-    .bind(...wanted)
-    .all<FailureRow>();
-
-  const rows = new Map<string, FailureRow>();
-  for (const row of res.results ?? []) rows.set(row.scope_key, row);
+  if (!cfg.enabled) return { allowed: true, retryAfter: 0, reserved: new Map() };
 
   const now = Date.now();
-  let retryAfter = 0;
-  for (const key of wanted) {
-    const row = rows.get(key);
-    if (!row || !row.locked_until) continue;
-    const untilMs = Date.parse(row.locked_until);
-    if (Number.isFinite(untilMs) && untilMs > now) {
-      retryAfter = Math.max(retryAfter, Math.ceil((untilMs - now) / 1000));
+  const reserved = new Map<string, number>();
+  let refusedKey: string | undefined;
+  for (const key of scopeKeys(keys, cfg)) {
+    const count = key === GLOBAL_KEY ? await reserveGlobal(env, cfg, now) : await reserveKeyed(env, cfg, key, now);
+    if (count === null) {
+      refusedKey = key;
+      break;
     }
+    reserved.set(key, count);
   }
-  return { allowed: retryAfter === 0, retryAfter, rows };
+  if (refusedKey === undefined) return { allowed: true, retryAfter: 0, reserved };
+
+  await release(env, reserved);
+  return { allowed: false, retryAfter: await retryAfterFor(env, cfg, refusedKey, now), reserved: new Map() };
 }
 
 /**
- * Record ONE real credential rejection across every layer. Called only when the
- * verifier returned a definite wrong-credential -- never for a validation error, a
- * throttled attempt, or an infra failure.
+ * Record ONE real credential rejection. The count was already taken by the gate; this
+ * sets the lock on each layer whose reserved count reached its threshold. Called only
+ * when the verifier returned a definite wrong-credential.
  */
 export async function recordFailure(env: Env, keys: AttemptKeys, gate: AttemptGate): Promise<void> {
   const cfg = throttleConfig(env);
   if (!cfg.enabled) return;
   const now = Date.now();
-  await bumpKeyed(env, cfg, keys.account, gate.rows.get(keys.account), now);
-  if (keys.client) await bumpKeyed(env, cfg, keys.client, gate.rows.get(keys.client), now);
-  if (cfg.globalMax > 0) await bumpGlobal(env, cfg, gate.rows.get(GLOBAL_KEY), now);
+  for (const [key, count] of gate.reserved) {
+    if (key === GLOBAL_KEY) {
+      if (count > cfg.globalMax) await lock(env, key, new Date(now + cfg.globalWindowS * 1000).toISOString());
+    } else if (count >= cfg.maxFailures) {
+      await lock(env, key, new Date(now + backoffMs(cfg, count)).toISOString());
+    }
+  }
 }
 
 /**
  * A correct password fully resets the ACCOUNT counter (relay throttle success), and
- * ONLY that one: clearing the client-IP layer on success would let an attacker who
- * holds one valid credential wipe their own spraying budget at will, and the global
- * window is a time window, not a per-account streak.
- *
- * The write is skipped entirely when the gate read found no account row, so an
- * ordinary clean login adds NO D1 write at all.
+ * ONLY that one: the client-IP and global reservations are released (a success is not
+ * a failure there), never cleared, so an attacker who holds one valid credential cannot
+ * wipe their own spraying budget.
  */
 export async function clearFailures(env: Env, keys: AttemptKeys, gate: AttemptGate): Promise<void> {
-  if (!gate.rows.has(keys.account)) return;
+  if (!throttleConfig(env).enabled) return;
   await env.DB.prepare("DELETE FROM webmail_auth_failures WHERE scope_key = ?")
     .bind(keys.account)
     .run();
+  const others = new Map([...gate.reserved].filter(([key]) => key !== keys.account));
+  await release(env, others);
+}
+
+/**
+ * Give back every reservation this attempt holds, for an outcome that is neither a
+ * rejection nor a success: an infra error in the verifier, or a lost race. Without it a
+ * D1 hiccup mid-verify would count against the user.
+ */
+export async function releaseAttempt(env: Env, gate: AttemptGate): Promise<void> {
+  await release(env, gate.reserved);
+}
+
+async function release(env: Env, reserved: Map<string, number>): Promise<void> {
+  for (const key of reserved.keys()) {
+    await env.DB.prepare(
+      "UPDATE webmail_auth_failures SET failures = MAX(failures - 1, 0) WHERE scope_key = ?",
+    )
+      .bind(key)
+      .run();
+  }
+}
+
+// Reserve one slot on a keyed (account / client-IP) layer: a consecutive-failure streak
+// with idle decay. Returns the reserved count, or null when the layer refuses: locked,
+// or at its budget with the lock still pending (attempts in flight hold every slot).
+// A counted attempt clears an EXPIRED lock, so after a lockout exactly one attempt
+// passes before the next lock is decided.
+async function reserveKeyed(env: Env, cfg: ThrottleConfig, key: string, now: number): Promise<number | null> {
+  const nowIso = new Date(now).toISOString();
+  const decayCutoff = new Date(now - cfg.maxLockoutS * 1000).toISOString();
+  const row = await env.DB.prepare(
+    "INSERT INTO webmail_auth_failures (scope_key, failures, window_start_at, last_failure_at, locked_until) " +
+      "VALUES (?1, 1, ?2, ?2, NULL) ON CONFLICT(scope_key) DO UPDATE SET " +
+      "failures = CASE WHEN last_failure_at < ?3 THEN 1 ELSE failures + 1 END, " +
+      "window_start_at = CASE WHEN last_failure_at < ?3 THEN ?2 ELSE window_start_at END, " +
+      "last_failure_at = ?2, locked_until = NULL " +
+      "WHERE NOT (locked_until IS NOT NULL AND locked_until > ?2) " +
+      "AND NOT (locked_until IS NULL AND failures >= ?4 AND last_failure_at >= ?3) " +
+      "RETURNING failures",
+  )
+    .bind(key, nowIso, decayCutoff, cfg.maxFailures)
+    .first<{ failures: number }>();
+  return row ? Number(row.failures) : null;
+}
+
+// Reserve one slot on the global layer: a sliding COUNT within globalWindowS; a count
+// past globalMax cools down every mint for one window (relay/throttle.go fail()).
+async function reserveGlobal(env: Env, cfg: ThrottleConfig, now: number): Promise<number | null> {
+  const nowIso = new Date(now).toISOString();
+  const windowCutoff = new Date(now - cfg.globalWindowS * 1000).toISOString();
+  const row = await env.DB.prepare(
+    "INSERT INTO webmail_auth_failures (scope_key, failures, window_start_at, last_failure_at, locked_until) " +
+      "VALUES (?1, 1, ?2, ?2, NULL) ON CONFLICT(scope_key) DO UPDATE SET " +
+      "failures = CASE WHEN window_start_at < ?3 THEN 1 ELSE failures + 1 END, " +
+      "window_start_at = CASE WHEN window_start_at < ?3 THEN ?2 ELSE window_start_at END, " +
+      "last_failure_at = ?2, locked_until = NULL " +
+      "WHERE NOT (locked_until IS NOT NULL AND locked_until > ?2) " +
+      "AND NOT (locked_until IS NULL AND failures > ?4 AND window_start_at >= ?3) " +
+      "RETURNING failures",
+  )
+    .bind(GLOBAL_KEY, nowIso, windowCutoff, cfg.globalMax)
+    .first<{ failures: number }>();
+  return row ? Number(row.failures) : null;
+}
+
+// Set a lock, never shortening one already in place.
+async function lock(env: Env, key: string, untilIso: string): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE webmail_auth_failures SET locked_until = CASE " +
+      "WHEN locked_until IS NULL OR locked_until < ?2 THEN ?2 ELSE locked_until END WHERE scope_key = ?1",
+  )
+    .bind(key, untilIso)
+    .run();
+}
+
+// Whole seconds until the refusing layer can admit an attempt: the live lock's
+// remainder, or, while the lock is still pending behind attempts in flight, one base
+// lockout (the earliest that lock can end).
+async function retryAfterFor(env: Env, cfg: ThrottleConfig, key: string, now: number): Promise<number> {
+  const row = await env.DB.prepare("SELECT locked_until FROM webmail_auth_failures WHERE scope_key = ?")
+    .bind(key)
+    .first<{ locked_until: string | null }>();
+  const untilMs = row?.locked_until ? Date.parse(row.locked_until) : NaN;
+  if (Number.isFinite(untilMs) && untilMs > now) return Math.ceil((untilMs - now) / 1000);
+  return key === GLOBAL_KEY ? cfg.globalWindowS : cfg.lockoutS;
 }
 
 /**
@@ -212,41 +306,6 @@ function scopeKeys(keys: AttemptKeys, cfg: ThrottleConfig): string[] {
   return out;
 }
 
-// A keyed (account / client-IP) layer: consecutive-failure streak with idle decay and
-// exponential backoff past the threshold, capped at maxLockoutS.
-async function bumpKeyed(
-  env: Env,
-  cfg: ThrottleConfig,
-  key: string,
-  row: FailureRow | undefined,
-  now: number,
-): Promise<void> {
-  const lastMs = row ? Date.parse(row.last_failure_at) : NaN;
-  const decayed = !row || !Number.isFinite(lastMs) || now - lastMs > cfg.maxLockoutS * 1000;
-  const failures = (decayed ? 0 : (row as FailureRow).failures) + 1;
-  const windowStart = decayed || !row ? new Date(now).toISOString() : row.window_start_at;
-  const lockedUntil =
-    failures >= cfg.maxFailures ? new Date(now + backoffMs(cfg, failures)).toISOString() : null;
-  await upsert(env, key, failures, windowStart, new Date(now).toISOString(), lockedUntil);
-}
-
-// The global layer: a sliding COUNT within globalWindowS; crossing the ceiling cools
-// down every mint for one window (relay/throttle.go fail(), global half).
-async function bumpGlobal(
-  env: Env,
-  cfg: ThrottleConfig,
-  row: FailureRow | undefined,
-  now: number,
-): Promise<void> {
-  const startMs = row ? Date.parse(row.window_start_at) : NaN;
-  const rolled = !row || !Number.isFinite(startMs) || now - startMs > cfg.globalWindowS * 1000;
-  const count = (rolled ? 0 : (row as FailureRow).failures) + 1;
-  const windowStart = rolled || !row ? new Date(now).toISOString() : row.window_start_at;
-  const lockedUntil =
-    count > cfg.globalMax ? new Date(now + cfg.globalWindowS * 1000).toISOString() : null;
-  await upsert(env, GLOBAL_KEY, count, windowStart, new Date(now).toISOString(), lockedUntil);
-}
-
 // The base lockout doubled once per failure beyond the threshold, capped (identical
 // shape to relay/throttle.go backoff()).
 function backoffMs(cfg: ThrottleConfig, failures: number): number {
@@ -254,22 +313,4 @@ function backoffMs(cfg: ThrottleConfig, failures: number): number {
   const cap = cfg.maxLockoutS * 1000;
   for (let i = 0; i < failures - cfg.maxFailures && d < cap; i++) d *= 2;
   return Math.min(d, cap);
-}
-
-async function upsert(
-  env: Env,
-  key: string,
-  failures: number,
-  windowStart: string,
-  lastFailure: string,
-  lockedUntil: string | null,
-): Promise<void> {
-  await env.DB.prepare(
-    "INSERT INTO webmail_auth_failures (scope_key, failures, window_start_at, last_failure_at, locked_until) " +
-      "VALUES (?, ?, ?, ?, ?) ON CONFLICT(scope_key) DO UPDATE SET " +
-      "failures = excluded.failures, window_start_at = excluded.window_start_at, " +
-      "last_failure_at = excluded.last_failure_at, locked_until = excluded.locked_until",
-  )
-    .bind(key, failures, windowStart, lastFailure, lockedUntil)
-    .run();
 }
