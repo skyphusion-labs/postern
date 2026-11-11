@@ -15,6 +15,9 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **Door throttle key.** IMAP and submission now trim and lower-case a username
+  the way the worker does. In system (PAM) mode the key is the local part
+  before `@`, which is the account PAM checks.
 - **Write scope binds to the bound identity.** An identity's write scope
   (flags, move, seen) now binds to its bound address whatever its other
   caps; previously a token without `read` could organize outside its own
