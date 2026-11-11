@@ -399,14 +399,22 @@ async function preflight(ctx) {
 // sign-in on explicitly (that is what the first admin is for). An existing Worker
 // keeps exactly what it has: upgrade never adds the var, and --adopt carries the
 // live value over (or its absence). The decision is stored once, in state.vars.
+//
+// #740 S2: AGENT_READ_SCOPE follows the same pattern in the opposite direction. UNSET
+// means "estate" (the #718 agent read), so an upgrade keeps it; a NEW install writes
+// "granted" explicitly (Conrad's Q1 ruling: estate-wide agent read is off on a new install).
+const NEW_INSTALL_VARS = { WEBMAIL_AUTH_BACKEND: "native", AGENT_READ_SCOPE: "granted" };
+
 async function decideAuthBackend(ctx, pf) {
   const { state, opts } = ctx;
   if (state.authBackendDecided) return;
-  if (!pf.script) {
-    if (state.vars.WEBMAIL_AUTH_BACKEND === undefined) state.vars.WEBMAIL_AUTH_BACKEND = "native";
-  } else if (state.vars.WEBMAIL_AUTH_BACKEND === undefined && !(opts.vars || {}).WEBMAIL_AUTH_BACKEND) {
-    const live = (pf.script.result?.bindings || []).find((b) => b.name === "WEBMAIL_AUTH_BACKEND" && b.type === "plain_text");
-    if (live) state.vars.WEBMAIL_AUTH_BACKEND = live.text;
+  for (const [name, fresh] of Object.entries(NEW_INSTALL_VARS)) {
+    if (!pf.script) {
+      if (state.vars[name] === undefined) state.vars[name] = fresh;
+    } else if (state.vars[name] === undefined && !(opts.vars || {})[name]) {
+      const live = (pf.script.result?.bindings || []).find((b) => b.name === name && b.type === "plain_text");
+      if (live) state.vars[name] = live.text;
+    }
   }
   state.authBackendDecided = true;
   saveState(opts, state);
@@ -595,9 +603,11 @@ async function ensureWorker(ctx, pf) {
   (live.length ? rep.updated : rep.created)(`Worker ${opts.name} version ${id} on https://${opts.hostname}`);
 }
 
+// Returns the records this call created, each with the id Cloudflare gave it.
 async function ensureDnsRecords(ctx, pf, wants, label) {
   const { cf, opts, rep } = ctx;
   const records = await cf.list("read DNS records", P.dns, `/zones/${pf.zone.id}/dns_records`);
+  const created = [];
   for (const w of wants) {
     const s = dnsSatisfied(records, w);
     const what = `DNS ${w.type} ${w.name} (${label})`;
@@ -606,10 +616,12 @@ async function ensureDnsRecords(ctx, pf, wants, label) {
     if (opts.dryRun) { rep.would(`create ${what}`); continue; }
     const body = { type: w.type, name: w.name, content: w.content, ttl: w.ttl || 1, comment: "postern installer" };
     if (w.priority !== undefined) body.priority = w.priority;
-    await cf.call(`create ${what}`, P.dns, "POST", `/zones/${pf.zone.id}/dns_records`, body);
+    const res = await cf.call(`create ${what}`, P.dns, "POST", `/zones/${pf.zone.id}/dns_records`, body);
     records.push(body);
+    created.push({ ...body, id: res?.result?.id });
     rep.created(what);
   }
+  return created;
 }
 
 async function ensureSending(ctx, pf) {
@@ -670,8 +682,15 @@ async function ensureDmarc(ctx, pf) {
   const records = await cf.list("read DNS records", P.dns, `/zones/${pf.zone.id}/dns_records?type=TXT`);
   const have = records.find((r) => r.type === "TXT" && norm(r.name) === norm(name) && /^v=DMARC1/i.test(unquote(r.content)));
   if (have) return rep.kept(`DNS TXT ${name} (your existing DMARC policy is left as it is)`);
-  await ensureDnsRecords(ctx, pf, [{ type: "TXT", name, content: `v=DMARC1; p=${opts.dmarcPolicy}` }], "DMARC");
+  const content = `v=DMARC1; p=${opts.dmarcPolicy}`;
+  const made = await ensureDnsRecords(ctx, pf, [{ type: "TXT", name, content }], "DMARC");
   ctx.dmarcWritten = !opts.dryRun;
+  // Recorded so that uninstall removes it (#856). Only a record this run CREATED is recorded;
+  // a DMARC the domain already had is never ours.
+  if (made[0]?.id) {
+    ctx.state.owned.dmarc = { id: made[0].id, content };
+    saveState(opts, ctx.state);
+  }
   if (opts.dmarcPolicy !== "reject") {
     ctx.log(`  note: Cloudflare Email Sending recommends p=reject. If only Postern sends as ${opts.domain}, use --dmarc reject (a new install only; an existing DMARC is never changed).`);
   }
@@ -1027,6 +1046,27 @@ async function uninstallRun(ctx, opts) {
       rep.removed(`Email Sending for ${opts.domain}`);
     }
   } else rep.kept(`Email Sending for ${opts.domain}: this installer did not record enabling it, so it is left as it is`);
+
+  // 3b. The DMARC record, only if this installer created it (#856), and only while it still
+  //     holds the value the installer wrote. A record the operator has edited is theirs.
+  if (owned.dmarc) {
+    const name = `_dmarc.${opts.domain}`;
+    const rec = (await cf.call("read the DMARC record", P.dns, "GET", `/zones/${z}/dns_records/${owned.dmarc.id}`, undefined, { allow404: true }))?.result;
+    const forget = () => { if (!dry) { delete owned.dmarc; saveState(opts, state); } };
+    if (!rec) {
+      rep.unchanged(`DNS TXT ${name} (already gone)`);
+      forget();
+    } else if (unquote(rec.content) !== owned.dmarc.content) {
+      rep.kept(`DNS TXT ${name}: it was changed after install, so it is yours now and is left as it is`);
+      forget();
+    } else if (dry) {
+      rep.would(`delete DNS TXT ${name} (the DMARC record this installer created)`);
+    } else {
+      await cf.call("delete the DMARC record", P.dns, "DELETE", `/zones/${z}/dns_records/${owned.dmarc.id}`, undefined, { allow404: true });
+      forget();
+      rep.removed(`DNS TXT ${name} (the DMARC record this installer created)`);
+    }
+  }
 
   // 4. Data: kept unless asked, exported before it is deleted.
   if (!opts.deleteData) {

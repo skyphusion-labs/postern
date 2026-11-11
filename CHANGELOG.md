@@ -13,6 +13,58 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+### Added
+
+- **The `send_as` power (#740 S4).** An agent holding a `send_as` grant
+  sends as the human by naming the address as `from`: From is the human
+  with the human display name, `Sender:` is the agent, Reply-To is the
+  human, and the response reports `from` and `sender`. Each send writes a
+  `delegation.send_as` audit row before dispatch, fail closed. It needs a
+  transport that can set `Sender:`: on the default Cloudflare transport
+  the send is refused with `422 E_SEND_AS_UNSUPPORTED`, never sent
+  without one (Cloudflare feature request: #896). The relay `/dispatch`
+  body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
+
+### Fixed
+
+- **Webmail shows attachment names with hidden characters made visible.**
+  Control and invisible format characters in an attachment filename are
+  shown as `[U+XXXX]`, the name is isolated left to right, and the
+  download name replaces each such character with `_`.
+
+## v1.11.0
+
+MINOR. Delegation grants are enforced: an agent can read, organize and quote a human's
+mail under an explicit, audited grant (#740 S2 and S3).
+
+**Upgrade.** Unset `AGENT_READ_SCOPE` means `estate`: an upgraded deploy keeps the
+estate-wide agent read until the operator sets `AGENT_READ_SCOPE = "granted"`. The
+installer writes `granted` for a new install and does not add it on upgrade.
+
+### Added
+
+- **Delegation grants enforce `read` and `organize` (#740 S2, #860).** The
+  `AGENT_READ_SCOPE` flag (`estate` or `granted`; an unknown value fails
+  closed to `granted`). Under `granted`, an agent reads its own address
+  plus the addresses it holds a grant on. An `organize` grant widens mark
+  read, flags and move to the granted address's mail, and every such
+  write is audited in the same batch. `GET /api/whoami` reports
+  `delegations`. See `docs/DELEGATION.md` section 4.
+- **The `quote` power (#740 S3, #892).** A `quote` grant lets an agent reply
+  to, quote and forward the granted address's mail, under either
+  `AGENT_READ_SCOPE` value. Each such quote writes a `delegation.quote`
+  audit row before it is sent, and nothing is sent if that row cannot be
+  written. See `docs/DELEGATION.md` section 4.4.
+
+## v1.10.1
+
+PATCH. Fixes across inbound, the installer and CI. Upgrade to pick them up; no config change
+is needed.
+
+**Upgrade.** Migration `0018` (adds `messages.claimed_id`) is additive and is applied by the
+deploy. A self-hosted install picks up the installer changes the next time it runs
+`node deploy/postern.mjs`.
+
 ### Fixed
 
 - **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
@@ -23,6 +75,18 @@ mismatched MCP tag fails before it publishes.
   quotes or forwards a stored message: the source is not found, as on the
   read routes. `both` and `read` tokens and bound identities are
   unchanged.
+
+- **The send-only token can reply again, to the thread's existing
+  parties.** `POSTERN_API_TOKEN_SEND` replies to a stored message as
+  documented: recipients come from the stored message, and a caller `cc`,
+  `bcc` or `quoteOriginal` is refused with `400`. Forwarding a stored
+  message with that token stays not found.
+
+- **The legacy `EmailService` RPC entrypoint is send-only, as documented.**
+  It exposes `send` and `reply` only (no `get`, `thread`, `list` or
+  `search`) and follows the same rule as the send-only token: a reply
+  goes to the thread's existing parties, and nothing is quoted or
+  forwarded. `MailboxService` is unchanged.
 
 - **HTML-to-text conversion runs in one pass.** Mail with only an HTML
   body is converted to its stored text body by a single linear scan, and
@@ -41,6 +105,44 @@ mismatched MCP tag fails before it publishes.
   Mail whose Date header is not a valid date is stored with the time it
   was received as its date. The IMAP APPEND import uses the same rule.
 
+- **Thread resolution looks up its candidates in one query.** A message's
+  thread is resolved from its In-Reply-To and its 20 most recent
+  References (`MAX_THREAD_REFERENCES`), deduplicated, in a single D1
+  query. The parent is chosen in the same order as before.
+
+- **"Authored by" means sent by postern.** Read access, the account
+  view, the Sent lens and the Sent folder count treat a message as
+  authored by V only when postern sent it as V (direction `outbound`).
+  An inbound message whose From header names V is reachable by V only
+  when it was delivered to V. Semantic and hybrid search apply the same
+  rule as the SQL paths.
+
+- **Thread resolution prefers a trusted message for a shared
+  Message-ID.** A different message that arrives with a Message-ID already
+  held by another is still stored under its derived id, and now records
+  the id it arrived with (`claimed_id`, migration `0018`, additive,
+  applied by the deploy). For that id, threading picks the holder when it
+  is trusted, else a trusted claimant, else the holder. A read by id still
+  returns the first message stored under it: `docs/CONTRACT.md` states
+  this, and the MCP `mailbox_get` description tells agents to check
+  `trusted`.
+
+- **A member's send threads only through mail that member can read.**
+  When a bound identity or session sends with In-Reply-To or
+  References, the parent is looked up among messages it can read; any
+  other id starts a new thread, as an unknown id does.
+
+### Changed
+
+- **Installer inputs are checked strictly (#873).** `--hostname` must be a plain hostname
+  under the domain, a second run waits on a per-install lock, an interrupted run leaves no
+  secrets file behind, and the documented token no longer asks for Email Routing Addresses.
+- **Uninstall removes the `_dmarc` record that install created (#863)**, and only if it is
+  unchanged since; an existing DMARC record is never touched.
+- **CI:** every GitHub Action is pinned to a full commit sha (#868); the production deploy
+  job runs in the `production` environment (#885); the one-off unscoped-package deprecation
+  workflow is removed (#883).
+
 ## v1.10.0
 
 MINOR. Runtime agent identities and delegation grants (the first two slices of #740), an
@@ -48,8 +150,10 @@ uninstall command and an Email Routing report for the installer, PBKDF2-SHA512 f
 credentials, and write-scope and redirect fixes.
 
 **Upgrade.** Migrations `0016` (agent identities, audit log) and `0017` (delegation grants) are
-additive and are applied by the deploy. Nothing changes for an existing deploy until an operator
-mints an identity or a grant. Existing SHA-256 password hashes keep verifying and are upgraded to
+additive and are applied by the deploy. Apart from the write-scope fix below (an existing
+`POSTERN_SEND_IDENTITIES` entry that holds `organize` without `read` is now held to its own
+address), nothing changes for an existing deploy until an operator mints an identity or a grant.
+Existing SHA-256 password hashes keep verifying and are upgraded to
 SHA-512 on the next successful sign-in. The MCP changes below ship on the separate
 `postern-mcp-v*` track, not with this tag.
 

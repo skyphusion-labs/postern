@@ -192,3 +192,46 @@ describe("redaction (#831)", () => {
     assert.ok(existsSync(c.stateDir));
   });
 });
+
+describe("uninstall and the DMARC record (#856)", () => {
+  const dmarc = (m) => m.dns.filter((r) => r.name === "_dmarc.acme-mail.test");
+  const stateOf = (c) => JSON.parse(readFileSync(join(c.stateDir, "postern.acme-mail.test.json"), "utf8"));
+
+  test("install records the _dmarc it created; uninstall removes it, and nothing else in DNS", async () => {
+    const c = await installed();
+    assert.equal(dmarc(c.m).length, 1, "positive control: install created _dmarc");
+    assert.equal(stateOf(c).owned.dmarc.id, dmarc(c.m)[0].id);
+    const others = JSON.stringify(c.m.dns.filter((r) => r.name !== "_dmarc.acme-mail.test" && !/cf-bounce/.test(r.name) && r.type !== "AAAA"));
+    await uninstall(c.deps, c.opts("uninstall"));
+    assert.equal(dmarc(c.m).length, 0, "uninstall left the _dmarc it created");
+    assert.equal(JSON.stringify(c.m.dns.filter((r) => r.name !== "_dmarc.acme-mail.test" && !/cf-bounce/.test(r.name) && r.type !== "AAAA")), others, "uninstall changed other DNS");
+    assert.match(text(c), /removed   DNS TXT _dmarc\.acme-mail\.test \(the DMARC record this installer created\)/);
+    assert.equal(stateOf(c).owned.dmarc, undefined);
+  });
+
+  test("a _dmarc the operator edited after install is kept", async () => {
+    const c = await installed();
+    dmarc(c.m)[0].content = "v=DMARC1; p=reject; rua=mailto:dmarc@acme-mail.test";
+    await uninstall(c.deps, c.opts("uninstall"));
+    assert.deepEqual(dmarc(c.m).map((r) => r.content), ["v=DMARC1; p=reject; rua=mailto:dmarc@acme-mail.test"]);
+    assert.match(text(c), /kept      DNS TXT _dmarc\.acme-mail\.test: it was changed after install/);
+    assert.equal(stateOf(c).owned.dmarc, undefined);
+  });
+
+  test("a DMARC the domain already had is never recorded, so never removed", async () => {
+    const c = setup();
+    c.m.dns.push({ id: "theirs", type: "TXT", name: "_dmarc.acme-mail.test", content: "v=DMARC1; p=quarantine" });
+    await install(c.deps, c.opts("install"));
+    assert.equal(stateOf(c).owned.dmarc, undefined);
+    await uninstall(c.deps, c.opts("uninstall"));
+    assert.deepEqual(dmarc(c.m).map((r) => r.id), ["theirs"]);
+  });
+
+  test("dry run names the delete and changes nothing", async () => {
+    const c = await installed();
+    await uninstall(c.deps, c.opts("uninstall", "--dry-run"));
+    assert.equal(dmarc(c.m).length, 1);
+    assert.match(text(c), /would     delete DNS TXT _dmarc\.acme-mail\.test/);
+    assert.ok(stateOf(c).owned.dmarc);
+  });
+});

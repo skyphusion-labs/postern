@@ -165,6 +165,13 @@ func renderMIME(msg OutboundMessage, mailFrom string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid From: %w", err)
 	}
 	writeHeader(&b, "From", fromHdr)
+	if msg.Sender != nil && msg.Sender.Email != "" {
+		senderHdr, err := formatAddress(*msg.Sender, "")
+		if err != nil {
+			return nil, fmt.Errorf("invalid Sender: %w", err)
+		}
+		writeHeader(&b, "Sender", senderHdr)
+	}
 
 	toHdr, err := headerAddressList(msg.To)
 	if err != nil {

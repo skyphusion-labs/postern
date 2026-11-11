@@ -279,6 +279,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     padding: var(--sp-2) var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md); overflow-wrap: anywhere;
   }
   .attachments .dl { min-height: 30px; flex-shrink: 0; }
+  .att-name { unicode-bidi: isolate; }
   .thread { margin-top: var(--sp-5); }
   .thread .t-item {
     padding: var(--sp-3); border: 1px solid var(--line); border-radius: var(--r-md);
@@ -704,6 +705,23 @@ export const WEBMAIL_HTML = `<!doctype html>
     return n;
   }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  // Attachment filenames are written by the sender. Control and invisible format
+  // characters (bidi overrides and isolates, zero-width characters, C0/C1 controls,
+  // line and paragraph separators) can make a name read differently from what it is,
+  // so the shown name marks each one as a visible [U+XXXX] and the name handed to the
+  // download replaces each one with "_". Shown names also sit in an LTR isolate.
+  var FILENAME_HIDDEN = /[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]/gu;
+  function codePointLabel(ch) {
+    var hex = ch.codePointAt(0).toString(16).toUpperCase();
+    while (hex.length < 4) hex = "0" + hex;
+    return "[U+" + hex + "]";
+  }
+  function shownFileName(name) { return String(name).replace(FILENAME_HIDDEN, codePointLabel); }
+  function savedFileName(name) { return String(name).replace(FILENAME_HIDDEN, "_"); }
+  function fileNameNode(name) {
+    return el("span", { class: "att-name", dir: "ltr", text: shownFileName(name) });
+  }
   function $(id) { return document.getElementById(id); }
 
   // --- session state ---------------------------------------------------------
@@ -1012,7 +1030,7 @@ export const WEBMAIL_HTML = `<!doctype html>
     }).then(function (blob) {
       var obj = URL.createObjectURL(blob);
       var a = document.createElement("a");
-      a.href = obj; a.download = filename || ("attachment-" + index);
+      a.href = obj; a.download = savedFileName(filename || ("attachment-" + index));
       document.body.appendChild(a); a.click(); a.remove();
       // Revoke on the next tick so the download has started.
       setTimeout(function () { URL.revokeObjectURL(obj); }, 0);
@@ -2385,7 +2403,7 @@ export const WEBMAIL_HTML = `<!doctype html>
           }).catch(function (e) { err.textContent = e.message; remove.disabled = false; });
         });
         fileList.appendChild(el("li", {}, [
-          el("span", { text: (a.filename || "attachment") + " (" + fmtSize(a.size) + ")" }), remove
+          el("span", {}, [fileNameNode(a.filename || "attachment"), " (" + fmtSize(a.size) + ")"]), remove
         ]));
       });
     }
@@ -2656,7 +2674,7 @@ export const WEBMAIL_HTML = `<!doctype html>
         var btn = el("button", { class: "dl", text: "Download" });
         btn.addEventListener("click", function () { downloadAttachment(m.messageId, i, name, btn); });
         ul.appendChild(el("li", {}, [
-          el("span", {}, [icon("clip"), document.createTextNode(" " + name + " "),
+          el("span", {}, [icon("clip"), " ", fileNameNode(name), " ",
             el("span", { class: "sender-addr", text: (a.mime || "?") + ", " + fmtSize(a.size) })]),
           btn
         ]));
