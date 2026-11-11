@@ -50,12 +50,13 @@ async function credential(db: DatabaseSync) {
 /** Make ONE statement fail, the way a partial D1 outage does. Everything else still
  *  runs against the real engine, so the test exercises the real path up to the fault. */
 function breakStatement(env: Env, match: RegExp) {
-  const real = (env as unknown as { DB: { prepare(sql: string): unknown } }).DB;
+  const real = (env as unknown as { DB: { prepare(sql: string): unknown; batch?(s: unknown[]): unknown } }).DB;
   (env as unknown as { DB: unknown }).DB = {
     prepare(sql: string) {
       if (match.test(sql)) throw new Error(SECRET_DETAIL);
       return real.prepare(sql);
     },
+    batch: (s: unknown[]) => real.batch?.(s),
   };
 }
 
