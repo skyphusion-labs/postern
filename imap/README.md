@@ -158,7 +158,7 @@ All config is environment-driven (no flags), so it drops into a systemd
 | `AUTH_THROTTLE_MAX_FAILURES` | no | `5` | consecutive failures per key before lockout. Key = the account in `native`/`ldap`/`system`; in `token`/`fixed` the key is the client SOURCE IP (the username there is attacker-chosen free text, #183) |
 | `AUTH_THROTTLE_LOCKOUT_SECONDS` | no | `60` | base lockout; doubles per failure past the threshold |
 | `AUTH_THROTTLE_MAX_LOCKOUT_SECONDS` | no | `900` | per-account backoff cap |
-| `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` | no | `100` | aggregate failures/window before a global cooldown (0 = off) |
+| `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` | no | `0` | aggregate failures/window before a global cooldown. 0 is off. Set it to turn the global layer on |
 | `AUTH_THROTTLE_GLOBAL_WINDOW_SECONDS` | no | `60` | aggregate window + global cooldown |
 | `POSTERN_IMAP_WINDOW` | no | `500` | cap INBOX/Sent to the most-recent N at SELECT (0 = unlimited; All is always unbounded) |
 | `POSTERN_IMAP_POLL_SECONDS` | no | `30` | live-refresh interval while selected: re-poll the store and push EXISTS for new mail (0 = disable) |

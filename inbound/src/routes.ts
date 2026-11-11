@@ -241,6 +241,25 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "admin-principals-parity", method: "GET", path: "/api/admin/principals/parity", match: "exact",
     scope: "admin", auth: "bearer",
     note: "#854 M2: compare every agent identity and human user with its principal and credential; counts plus sample ids. The evidence for retiring the old-table fallback. Audited (principals.parity)" },
+  // #740 S5: the human's own delegation and audit trail. A webmail SESSION only (the
+  // handler refuses every Bearer, E_SESSION_REQUIRED); `read` is held by every session, and
+  // the gate's CSRF check covers the state-changing verbs. The address is always the
+  // session's own, so no route takes one.
+  { id: "self-delegation-grantees", method: "GET", path: "/api/delegations/mine/grantees", match: "exact", scope: "read",
+    auth: "session-cookie",
+    note: "#740 S5: the live agent identities a human may grant to, exactly {id, displayName, from}. Every signed-in human on the deploy sees this roster" },
+  { id: "self-delegations-list", method: "GET", path: "/api/delegations/mine", match: "exact", scope: "read",
+    auth: "session-cookie",
+    note: "#740 S5: the active grants on the session's own address (live grantees only), newest first" },
+  { id: "self-delegations-grant", method: "POST", path: "/api/delegations/mine", match: "exact", scope: "read",
+    auth: "session-cookie", body: ["granteeId", "powers", "label"],
+    note: "#740 S5: grant on the session's own address; an address field is refused. Audited (delegation.grant, actor human)" },
+  { id: "self-delegation-revoke", method: "DELETE", path: "/api/delegations/mine/", match: "prefix", scope: "read",
+    auth: "session-cookie", requireChild: true, template: "/api/delegations/mine/{id}",
+    note: "#740 S5: revoke a grant on the session's own address; any other id is the same 404 as a missing one. Audited (delegation.revoke, actor human)" },
+  { id: "self-audit", method: "GET", path: "/api/audit/mine", match: "exact", scope: "read", auth: "session-cookie",
+    query: ["limit", "cursor"],
+    note: "#740 S5: the audit rows about the session's own address (grants, revokes, send_as, quotes, organize writes), newest first" },
   { id: "admin-audit", method: "GET", path: "/api/admin/audit", match: "exact", scope: "admin", auth: "bearer",
     query: ["limit", "cursor"],
     note: "the audit log (#801), newest first: actor, action, target, outcome, detail. Refusals are recorded too" },

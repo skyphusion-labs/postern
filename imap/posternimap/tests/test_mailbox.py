@@ -578,6 +578,104 @@ class MailboxTest(unittest.TestCase):
         self.assertEqual(stored[0]["bodyText"].strip(), "my real body")
         self.assertEqual(stored[0].get("mailbox"), "trash")
 
+    def test_append_placement_does_not_move_another_viewers_row(self):
+        """A matching payload does not move a row that belongs to someone else."""
+        msgs = [
+            make_message(
+                self._COLLIDING_ID,
+                direction="inbound",
+                body="my real body\r\n",
+                **{
+                    "from": "a@example.com",
+                    "to": "bob@example.org",
+                    "subject": "the message the user filed",
+                    "receivedAt": "2026-07-18T12:00:00Z",
+                    "date": "2026-07-18T12:00:00Z",
+                    "deliveredTo": ["bob@example.org"],
+                },
+            )
+        ]
+        mb, transport = self._trash_mailbox_with_import(msgs, identity="alice@example.org")
+        mb._viewer = "alice@example.org"
+        raw = self._colliding_raw("the message the user filed", "my real body")
+        self._append_ok(mb, raw)
+        self.assertIsNone(transport.last_move_payload)
+
+    def _envelope_row(self, to, delivered_to):
+        fields = {
+            "from": "outside@example.net",
+            "to": to,
+            "subject": "invoice",
+            "receivedAt": "2026-07-18T12:00:00Z",
+            "date": "2026-07-18T12:00:00Z",
+        }
+        if delivered_to is not None:
+            fields["deliveredTo"] = delivered_to
+        return make_message(
+            self._COLLIDING_ID,
+            direction="inbound",
+            body="pay me\r\n",
+            **fields,
+        )
+
+    def _envelope_raw(self, to):
+        text = (
+            "From: outside@example.net\r\n"
+            f"To: {to}\r\n"
+            "Subject: invoice\r\n"
+            f"Message-ID: <{self._COLLIDING_ID}>\r\n"
+            "Date: Sat, 18 Jul 2026 12:00:05 +0000\r\n"
+            "\r\n"
+            "pay me\r\n"
+        )
+        return text.encode()
+
+    def _place(self, viewer, to, delivered_to):
+        mb, transport = self._trash_mailbox_with_import(
+            [self._envelope_row(to, delivered_to)],
+            identity=viewer,
+        )
+        mb._viewer = viewer
+        self._append_ok(mb, self._envelope_raw(to))
+        original = next(
+            m for m in transport.messages if m["messageId"] == self._COLLIDING_ID
+        )
+        return transport, original
+
+    def test_append_placement_follows_delivered_to_not_the_header(self):
+        """Ownership is the envelope. The To header does not place the row.
+
+        The row was delivered to bob. Its To header names alice. Alice's
+        matching APPEND leaves the row where it is. Bob's own APPEND places it.
+        """
+        alice, alice_row = self._place(
+            "alice@example.org",
+            "alice@example.org",
+            ["bob@example.org"],
+        )
+        self.assertIsNone(alice.last_move_payload)
+        self.assertNotEqual(alice_row.get("mailbox"), "trash")
+
+        bob, bob_row = self._place(
+            "bob@example.org",
+            "alice@example.org",
+            ["bob@example.org"],
+        )
+        self.assertIsNotNone(bob.last_move_payload)
+        self.assertEqual(bob.last_move_payload["mailbox"], "trash")
+        self.assertEqual(bob_row.get("mailbox"), "trash")
+        self.assertEqual(len(bob.messages), 1)
+
+    def test_append_placement_old_row_follows_to(self):
+        """A row with no deliveredTo still places for the address in `to`."""
+        alice, alice_row = self._place("alice@example.org", "bob@example.org", None)
+        self.assertIsNone(alice.last_move_payload)
+        self.assertNotEqual(alice_row.get("mailbox"), "trash")
+
+        bob, bob_row = self._place("bob@example.org", "bob@example.org", None)
+        self.assertEqual(bob.last_move_payload["mailbox"], "trash")
+        self.assertEqual(bob_row.get("mailbox"), "trash")
+
     def test_append_placement_same_message_still_moves(self):
         """Positive control: when the id match IS the same message, the APPEND is a
         placement of that row; nothing is imported and nothing is duplicated."""
