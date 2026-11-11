@@ -13,6 +13,16 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Fix: a session from before the principals migration can read mail again in webmail.**
+Since #853, the page loads the human-only list on its own right after sign-in. Such a session
+gets `E_REAUTH_REQUIRED` for that list, and the page signed it out at once, before the person
+asked to manage anything. Now that background load just leaves the human-only mark off.
+Opening Settings to manage agent access still sends the person to sign in again, with the
+reason. A session that is gone still signs out. The webmail-e2e case that raced on this, and
+turned main red at the v1.14.0 release commit, now waits for the answer and checks that no
+sign-out was sent.
+
+- `inbound/reindex.mjs` tries a failed page (a network error, including mid-body, or HTTP 5xx) up to 6 times (5 retries, waits 2 s to 32 s), prints each page's cursor, and resumes from `--cursor`. A long `--stale-only` run (#813) no longer restarts at page 0 after one connection reset.
 - **docs(release):** the release procedure gains step 3, move postern-demo and postern-site to the new tag (#934). Both drifted unseen: the demo served v1.8.0 and the site linked v1.9.0 while v1.14.0 was current.
 - **fix(inbound):** the landing page names its write-up "identity-bound credentials (since v1.4.1)". The old "Postern v1.4.1 identity-bound credentials" sat on a page every instance serves, so it read as the running version (#934).
 
