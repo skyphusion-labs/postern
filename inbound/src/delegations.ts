@@ -320,13 +320,21 @@ export function noDelegations(): AgentDelegations {
  * them, never cached across requests, so a revoke takes effect on the next request, the
  * same rule the identity resolver follows for a revoked identity.
  *
+ * A grant counts ONLY while its grantee identity is live: the lookup joins
+ * agent_identities on `revoked_at IS NULL`. Revoking an identity therefore cuts every
+ * grant it holds at once, from one source of truth, with no cascade write that could
+ * fail half way. The grant rows stay as they are (still listed by the operator routes),
+ * so the record of what was granted is not rewritten by the revoke.
+ *
  * A row whose stored powers parse to nothing grants nothing (fail closed). Any power puts
  * the address in `read`, because every power implies read; S1 stores read explicitly, and
  * this does not depend on that.
  */
 export async function activeDelegations(env: Env, granteeId: string): Promise<AgentDelegations> {
   const rows = await env.DB.prepare(
-    "SELECT id, address, powers FROM delegation_grants WHERE grantee_id = ? AND revoked_at IS NULL ORDER BY address, id",
+    "SELECT g.id AS id, g.address AS address, g.powers AS powers FROM delegation_grants g " +
+      "JOIN agent_identities i ON i.id = g.grantee_id AND i.revoked_at IS NULL " +
+      "WHERE g.grantee_id = ? AND g.revoked_at IS NULL ORDER BY g.address, g.id",
   )
     .bind(granteeId)
     .all<{ id: string; address: string; powers: string }>();

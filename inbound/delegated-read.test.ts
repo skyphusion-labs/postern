@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { handleApi } from "./src/api";
 import { ROUTE_TABLE } from "./src/routes";
 import { realEnv, putInbound } from "./realdb";
+import { activeDelegations } from "./src/delegations";
 
 // #740 S2, the READ half: AGENT_READ_SCOPE and the read a grant adds. Real sqlite engine
 // built from schema.sql, through the real handleApi.
@@ -18,8 +19,17 @@ const AGENT_MSG2 = "<agent-2@example.com>";
 
 type Json = Record<string, unknown>;
 
+// The one stored attachment (on HUMAN_MSG), served by a minimal R2 stand-in, so the
+// attachment sub-route has a positive case and its probe can go red.
+const ATT_KEY = "att/human-1/0";
+const ATTACHMENTS = {
+  async get(key: string) {
+    return key === ATT_KEY ? { body: new TextEncoder().encode("ATT-BYTES") } : null;
+  },
+};
+
 async function setup(flag?: string) {
-  const r = realEnv(flag === undefined ? {} : { AGENT_READ_SCOPE: flag });
+  const r = realEnv({ ATTACHMENTS, ...(flag === undefined ? {} : { AGENT_READ_SCOPE: flag }) });
   const call = async (method: string, path: string, token: string, body?: unknown) => {
     const res = await handleApi(
       new Request(ORIGIN + path, {
@@ -31,11 +41,16 @@ async function setup(flag?: string) {
       r.ctx,
     );
     const text = await res.text();
-    return { status: res.status, text, body: (text ? JSON.parse(text) : {}) as Json };
+    // An attachment answers with its bytes, not JSON; only a JSON body is parsed.
+    const isJson = (res.headers.get("content-type") ?? "").includes("json");
+    return { status: res.status, text, body: (text && isJson ? JSON.parse(text) : {}) as Json };
   };
   await putInbound(r.env, r.ctx, { id: HUMAN_MSG, from: "x@example.com", to: HUMAN, subject: "zebraquartz invoice" });
   await putInbound(r.env, r.ctx, { id: AGENT_MSG, from: "y@example.com", to: AGENT, subject: "zebraquartz agent" });
   await putInbound(r.env, r.ctx, { id: AGENT_MSG2, from: "y@example.com", to: AGENT, subject: "second", date: "2026-02-01T00:00:00.000Z" });
+  r.raw
+    .prepare("INSERT INTO attachments (message_id, filename, mime, size, r2_key) VALUES (?, ?, ?, ?, ?)")
+    .run(HUMAN_MSG, "invoice.pdf", "application/pdf", 9, ATT_KEY);
   const minted = await call("POST", "/api/admin/identities", ADMIN, { from: AGENT, scopes: ["read", "organize"] });
   expect(minted.status, minted.text).toBe(201);
   const agent = minted.body as { id: string; token: string };
@@ -71,6 +86,12 @@ const MAIL_PROBES: Record<string, (s: S, token: string, id: string) => Promise<b
   "thread-get": async (s, t, id) =>
     ids((await s.call("GET", `/api/threads/${encodeURIComponent(s.threadOf(id))}`, t)).body.messages ?? []).includes(id),
 };
+// Sub-routes a route row covers (match: prefix) that read mail by a different handler.
+// Probed with the same arms; they are not separate ROUTE_TABLE rows.
+const SUBROUTE_PROBES: Record<string, (s: S, token: string, id: string) => Promise<boolean>> = {
+  "message-get /attachments/{i}": async (s, t, id) =>
+    (await s.call("GET", `/api/messages/${encodeURIComponent(id)}/attachments/0`, t)).status === 200,
+};
 const NOT_MAIL: Record<string, string> = {
   whoami: "reports the scope; asserted on its own below",
   "recipients-recent": "the bound identity's OWN outbound recipients; no grant widens it",
@@ -86,10 +107,11 @@ describe("#740 S2 every read route is classified (derived from the route table)"
 });
 
 describe("#740 S2 AGENT_READ_SCOPE=granted narrows each mail read route to own plus granted", () => {
-  for (const id of Object.keys(MAIL_PROBES)) {
+  const ALL_PROBES = { ...MAIL_PROBES, ...SUBROUTE_PROBES };
+  for (const id of Object.keys(ALL_PROBES)) {
     it(`${id}: hidden without a grant, visible with read, hidden after revoke; operator and own-mail controls`, async () => {
       const s = await setup("granted");
-      const probe = MAIL_PROBES[id];
+      const probe = ALL_PROBES[id];
       // CONTROL (operator): the message is there and this probe can see it.
       expect(await probe(s, ADMIN, HUMAN_MSG), "operator sees the human message").toBe(true);
       expect(await probe(s, s.agent.token, HUMAN_MSG), "no grant: hidden").toBe(false);
@@ -183,5 +205,42 @@ describe("#740 S2 whoami reports the grants and the narrowed scope", () => {
   it("a static token holds no grants (an empty list, never absent)", async () => {
     const s = await setup("granted");
     expect((await s.call("GET", "/api/whoami", ADMIN)).body.delegations).toEqual([]);
+  });
+});
+
+describe("#740 S2 a grant counts only while its grantee identity is live", () => {
+  it("revoking the IDENTITY cuts its delegated read and organize on the next request; a live grantee keeps them (control)", async () => {
+    const s = await setup("granted");
+    const g = await s.grant(["organize"]);
+    // A second identity with the same kind of grant: the control that stays live.
+    const other = await s.call("POST", "/api/admin/identities", ADMIN, { from: "agent2@skyphusion.org", scopes: ["read", "organize"] });
+    const otherId = other.body.id as string;
+    const otherToken = other.body.token as string;
+    expect((await s.call("POST", "/api/admin/delegations", ADMIN, { granteeId: otherId, address: HUMAN, powers: ["organize"] })).status).toBe(201);
+    const get = (t: string) => s.call("GET", `/api/messages/${encodeURIComponent(HUMAN_MSG)}`, t);
+    const flag = (t: string) => s.call("POST", "/api/messages/flags", t, { ids: [HUMAN_MSG], set: { flagged: true } });
+    expect((await get(s.agent.token)).status, "before: delegated read works").toBe(200);
+
+    expect((await s.call("DELETE", `/api/admin/identities/${s.agent.id}`, ADMIN)).status).toBe(200);
+    expect((await get(s.agent.token)).status, "revoked identity: read refused").toBe(401);
+    expect((await flag(s.agent.token)).status, "revoked identity: organize refused").toBe(401);
+    expect((s.raw.prepare("SELECT flagged FROM messages WHERE message_id = ?").get(HUMAN_MSG) as Json).flagged).toBe(0);
+    // The grant ROW is not rewritten by the identity revoke; it simply stops counting.
+    expect((s.raw.prepare("SELECT revoked_at FROM delegation_grants WHERE id = ?").get(g) as Json).revoked_at).toBe(null);
+
+    // CONTROL: the live grantee keeps both powers on the same address.
+    expect((await get(otherToken)).status).toBe(200);
+    expect((await flag(otherToken)).body.updated).toBe(1);
+  });
+
+  it("the grant lookup itself returns nothing for a revoked grantee whose grant row is still active", async () => {
+    // The API test above is refused at authentication already, since a revoked token no
+    // longer resolves. This pins the lookup on its own, so a grant can never authorize
+    // through any path that names a revoked grantee id.
+    const s = await setup("granted");
+    await s.grant(["organize"]);
+    expect((await activeDelegations(s.env, s.agent.id)).grants.length, "live: counts").toBe(1);
+    expect((await s.call("DELETE", `/api/admin/identities/${s.agent.id}`, ADMIN)).status).toBe(200);
+    expect(await activeDelegations(s.env, s.agent.id)).toEqual({ read: [], organize: [], grants: [] });
   });
 });

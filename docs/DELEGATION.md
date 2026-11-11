@@ -90,7 +90,10 @@ revoke and its row land in one D1 batch. Read the log at `GET /api/admin/audit`.
 ## 4. S2: what a grant enforces (shipped)
 
 A grant is read on every request that needs it and never cached across requests, so a
-revoke takes effect on the next request. Only a RUNTIME agent identity (an `idn_...`
+revoke takes effect on the next request. **A grant counts only while its grantee identity
+is live:** the lookup joins `agent_identities` on `revoked_at IS NULL`, so revoking the
+identity cuts every grant it holds at once. The grant rows are not rewritten; they stay
+listed, and simply stop counting. Only a RUNTIME agent identity (an `idn_...`
 id) can hold one. A webmail session, a static token and a `POSTERN_SEND_IDENTITIES`
 entry have no identity id for a grant to name, so they hold none and nothing below
 changes for them.
