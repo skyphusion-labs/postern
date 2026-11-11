@@ -15,7 +15,7 @@
 // replaces the token and every secret this installer generated or stored.
 
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CfError } from "./cf.mjs";
 import { renderConfig } from "./config.mjs";
@@ -63,6 +63,18 @@ function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
 }
+// The PID in a lock file, read through one descriptor; NaN when it is unreadable or empty.
+function lockPid(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    return parseInt(readFileSync(fd, "utf8"), 10);
+  } catch {
+    return NaN;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 export function takeLock(opts, log = () => {}) {
   ensureStateDir(opts);
   const p = statePaths(opts).lock;
@@ -74,14 +86,29 @@ export function takeLock(opts, log = () => {}) {
       return () => rmSync(p, { force: true });
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      let pid = NaN;
-      try { pid = parseInt(readFileSync(p, "utf8"), 10); } catch { /* unreadable: treated as stale */ }
-      if (pidAlive(pid)) {
-        throw new Refused([`another postern run (PID ${pid}) is working on this install (lock ${p}). Wait for it to finish. If no other run is going, delete that file and re-run.`]);
-      }
-      log(`  note: removed a stale lock from an earlier run that did not finish (PID ${Number.isNaN(pid) ? "unknown" : pid})`);
-      rmSync(p, { force: true });
     }
+    const pid = lockPid(p);
+    if (pidAlive(pid)) {
+      throw new Refused([`another postern run (PID ${pid}) is working on this install (lock ${p}). Wait for it to finish. If no other run is going, delete that file and re-run.`]);
+    }
+    // Take over a stale lock without racing another run doing the same: move it to a name
+    // only this run knows, then check the moved file is the stale lock that was judged. If a
+    // live run replaced it in between, put that lock back (link never overwrites) and stop.
+    const moved = `${p}.stale-${process.pid}-${randomBytes(6).toString("hex")}`;
+    try {
+      renameSync(p, moved);
+    } catch (e) {
+      if (e.code === "ENOENT") continue; // another run already moved it; try to create again
+      throw e;
+    }
+    const movedPid = lockPid(moved);
+    if (movedPid !== pid && !(Number.isNaN(movedPid) && Number.isNaN(pid)) && pidAlive(movedPid)) {
+      try { linkSync(moved, p); } catch { /* a third run holds p now; it keeps it */ }
+      rmSync(moved, { force: true });
+      throw new Refused([`another postern run (PID ${movedPid}) took the lock ${p} a moment ago. Wait for it to finish, then re-run.`]);
+    }
+    rmSync(moved, { force: true });
+    log(`  note: removed a stale lock from an earlier run that did not finish (PID ${Number.isNaN(pid) ? "unknown" : pid})`);
   }
   throw new Refused([`could not take the lock ${p}. Delete it if no other run is going, and re-run.`]);
 }

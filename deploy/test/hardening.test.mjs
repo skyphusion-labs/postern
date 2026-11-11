@@ -3,7 +3,7 @@
 // Run: node --test deploy/test/*.test.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, describe, test } from "node:test";
@@ -127,5 +127,36 @@ describe("a temporary secrets file left by an interrupted run is removed", () =>
     assert.ok(existsSync(join(c.stateDir, other)), "removed another install's file");
     assert.ok(existsSync(join(c.stateDir, young)), "removed a recent old-format file");
     assert.ok(!existsSync(join(c.stateDir, old)), "kept an hour-old old-format file");
+  });
+});
+
+describe("stale-lock takeover does not race", () => {
+  test("a takeover that finds a LIVE lock swapped in puts it back and refuses", () => {
+    // The interleaving: this run judged the lock stale (a dead PID), and before its rename a
+    // live run replaced the file with its own lock (this process's PID stands in for it).
+    const c = setup();
+    mkdirSync(c.stateDir, { recursive: true, mode: 0o700 });
+    const lock = join(c.stateDir, "postern.acme-mail.test.lock");
+    writeFileSync(lock, "2147483646\n");
+    const realKill = process.kill;
+    let swapped = false;
+    process.kill = (pid, sig) => {
+      if (pid === 2147483646 && !swapped) {
+        swapped = true;
+        writeFileSync(lock, `${process.pid}\n`);
+        const e = new Error("ESRCH");
+        e.code = "ESRCH";
+        throw e;
+      }
+      return realKill.call(process, pid, sig);
+    };
+    try {
+      assert.throws(() => takeLock(c.opts()), (e) => e instanceof Refused && /took the lock .* a moment ago/.test(e.message));
+    } finally {
+      process.kill = realKill;
+    }
+    assert.ok(swapped, "positive control: the swap happened");
+    assert.equal(readFileSync(lock, "utf8"), `${process.pid}\n`, "the live lock was not put back");
+    assert.deepEqual(readdirSync(c.stateDir).filter((f) => /\.stale-/.test(f)), [], "a moved lock was left behind");
   });
 });
