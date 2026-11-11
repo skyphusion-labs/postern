@@ -1061,12 +1061,106 @@ export const WEBMAIL_HTML = `<!doctype html>
   // A neutral inline placeholder so a blocked image degrades to a tidy box (not a
   // broken-image icon) and fires NO network request (data: is allowed by the CSP).
   var BLOCKED_IMG = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='90'%3E%3Crect width='100%25' height='100%25' fill='%23f3f3f3' stroke='%23cccccc'/%3E%3Ctext x='60' y='48' font-size='10' fill='%23999999' text-anchor='middle' font-family='sans-serif'%3Eimage blocked%3C/text%3E%3C/svg%3E";
-  function stripRemoteCssUrls(css) {
-    var n = 0;
-    var out = String(css).replace(/url\\(\\s*(['"]?)\\s*(?:https?:)?\\/\\/[^)'"]*\\1\\s*\\)/ig, function () {
-      n++; return "url('')";
+  // Remote references in CSS, read the way a CSS parser reads them, in one linear pass.
+  // Escapes (\\68 or \\h) are decoded in names and arguments, comments are skipped, and
+  // strings are read whole, so url(\\68ttps://x), u\\72l(https://x), @import "https://x"
+  // and image-set("https://x" 1x) are all seen. Each remote url() becomes url(''), each
+  // remote image-set() string becomes "", and each remote @import is dropped; every one
+  // is counted once. CSS the browser would not load from (comments, other strings) is
+  // left alone.
+  function cssUnescape(s) {
+    return s.replace(/\\\\(?:([0-9a-fA-F]{1,6})[ \\t\\n\\r\\f]?|([^\\n0-9a-fA-F]))/g, function (m, hex, ch) {
+      if (!hex) return ch;
+      var cp = parseInt(hex, 16);
+      return cp === 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) ? "�" : String.fromCodePoint(cp);
     });
-    return { css: out, count: n };
+  }
+  function stripRemoteCssUrls(css) {
+    css = String(css);
+    var len = css.length, out = "", last = 0, count = 0, i = 0, stack = [];
+    function isHex(c) { return /[0-9a-fA-F]/.test(c); }
+    function isSpace(c) { return c === " " || c === "\\t" || c === "\\n" || c === "\\r" || c === "\\f"; }
+    function isNameChar(c) { return /[A-Za-z0-9_\\-]/.test(c) || c.charCodeAt(0) >= 0x80; }
+    // css[j] is a backslash: the index just past the escape it starts.
+    function skipEscape(j) {
+      var k = j + 1, h = 0;
+      while (k < len && h < 6 && isHex(css[k])) { k++; h++; }
+      if (h > 0) return k < len && isSpace(css[k]) ? k + 1 : k;
+      return k < len && css[k] !== "\\n" ? k + 1 : k;
+    }
+    function skipName(j) {
+      var k = j;
+      while (k < len) {
+        if (css[k] === "\\\\" && css[k + 1] !== "\\n" && k + 1 < len) k = skipEscape(k);
+        else if (isNameChar(css[k])) k++;
+        else break;
+      }
+      return k;
+    }
+    // css[j] is a quote: the index just past the closing quote (or the end).
+    function skipString(j) {
+      var q = css[j], k = j + 1;
+      while (k < len && css[k] !== q && css[k] !== "\\n") k = css[k] === "\\\\" ? skipEscape(k) : k + 1;
+      return k < len && css[k] === q ? k + 1 : k;
+    }
+    function skipSpace(j) { while (j < len && isSpace(css[j])) j++; return j; }
+    function cut(from, to, replacement) { out += css.slice(last, from) + replacement; last = to; count++; }
+    while (i < len) {
+      var c = css[i];
+      if (c === "/" && css[i + 1] === "*") { var e = css.indexOf("*/", i + 2); i = e === -1 ? len : e + 2; continue; }
+      if (c === "\\"" || c === "'") {
+        var se = skipString(i);
+        var top = stack.length ? stack[stack.length - 1] : "";
+        if ((top === "image-set" || top === "-webkit-image-set") &&
+            isRemoteUrl(cssUnescape(css.slice(i + 1, css[se - 1] === c && se - 1 > i ? se - 1 : se)))) cut(i, se, "\\"\\"");
+        i = se; continue;
+      }
+      if (c === "(") { stack.push(""); i++; continue; }
+      if (c === ")") { stack.pop(); i++; continue; }
+      if (c === "@") {
+        var ae = skipName(i + 1);
+        if (cssUnescape(css.slice(i + 1, ae)).toLowerCase() === "import") {
+          var p = skipSpace(ae);
+          if (css[p] === "\\"" || css[p] === "'") {
+            var pe = skipString(p);
+            if (isRemoteUrl(cssUnescape(css.slice(p + 1, css[pe - 1] === css[p] && pe - 1 > p ? pe - 1 : pe)))) {
+              var semi = css.indexOf(";", pe);
+              cut(i, semi === -1 ? len : semi + 1, "");
+              i = semi === -1 ? len : semi + 1; continue;
+            }
+            i = pe; continue;
+          }
+        }
+        i = ae > i + 1 ? ae : i + 1; continue;
+      }
+      if (isNameChar(c) || (c === "\\\\" && css[i + 1] !== "\\n" && i + 1 < len)) {
+        var ne = skipName(i);
+        if (css[ne] === "(") {
+          var name = cssUnescape(css.slice(i, ne)).toLowerCase();
+          if (name === "url") {
+            var a = skipSpace(ne + 1), arg, close;
+            if (css[a] === "\\"" || css[a] === "'") {
+              var ae2 = skipString(a);
+              arg = css.slice(a + 1, css[ae2 - 1] === css[a] && ae2 - 1 > a ? ae2 - 1 : ae2);
+              close = css.indexOf(")", ae2);
+            } else {
+              var k = a;
+              while (k < len && css[k] !== ")") k = css[k] === "\\\\" ? skipEscape(k) : k + 1;
+              arg = css.slice(a, k);
+              close = k < len ? k : -1;
+            }
+            var end = close === -1 ? len : close + 1;
+            if (isRemoteUrl(cssUnescape(arg))) cut(i, end, "url('')");
+            i = end; continue;
+          }
+          stack.push(name);
+          i = ne + 1; continue;
+        }
+        i = ne > i ? ne : i + 1; continue;
+      }
+      i++;
+    }
+    return { css: out + css.slice(last), count: count };
   }
   function neutralizeRemoteHtml(html) {
     var blocked = 0, doc = null;
@@ -1110,6 +1204,14 @@ export const WEBMAIL_HTML = `<!doctype html>
       if (blockAttr(list[i], "data", "data-blocked-data")) hit = true;
       var ss2 = list[i].getAttribute("srcset");
       if (hasRemoteInSrcset(ss2)) { list[i].setAttribute("data-blocked-srcset", ss2); list[i].removeAttribute("srcset"); hit = true; }
+      if (hit) blocked++;
+    }
+    // SVG elements that fetch from href or xlink:href.
+    list = doc.querySelectorAll("image, use, feImage");
+    for (i = 0; i < list.length; i++) {
+      hit = false;
+      if (blockAttr(list[i], "href", "data-blocked-href")) hit = true;
+      if (blockAttr(list[i], "xlink:href", "data-blocked-xlink-href")) hit = true;
       if (hit) blocked++;
     }
     // Legacy background="" attribute (old HTML email tables).
