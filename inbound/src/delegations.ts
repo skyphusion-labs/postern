@@ -209,7 +209,7 @@ export async function grant(request: Request, env: Env, grantor: Grantor = OPERA
   );
 }
 
-async function list(url: URL, env: Env): Promise<Response> {
+async function list(url: URL, env: Env, actor: AuditActor = OPERATOR_ACTOR): Promise<Response> {
   const limit = parseLimit(url);
   const includeRevoked = parseIncludeRevoked(url);
   const cursor = decodeCursor(url, DELEGATION_ID_RE);
@@ -247,7 +247,7 @@ async function list(url: URL, env: Env): Promise<Response> {
     action: "delegation.list",
     outcome: "ok",
     detail: { returned: page.length, includeRevoked, grantee, address },
-  }).run();
+  }, undefined, actor).run();
   return json({ ok: true, items: page.map(project), cursor: next });
 }
 
@@ -280,16 +280,23 @@ const ADMIN_ITEM = /^\/api\/admin\/delegations\/([^/]+)$/;
  * for a method or path this does not serve (falls through to 404): a method with no
  * route row has no scope gate in front of it.
  */
-export async function handleAdminDelegations(request: Request, env: Env, url: URL): Promise<Response | null> {
+export async function handleAdminDelegations(
+  request: Request,
+  env: Env,
+  url: URL,
+  actor: AuditActor = OPERATOR_ACTOR,
+): Promise<Response | null> {
   const path = url.pathname;
   const target = (raw: string | null) => ({ kind: "delegation", raw, idRe: DELEGATION_ID_RE });
+  // Any operator-level credential makes an `operator` grant; the audit row names which.
+  const grantor: Grantor = { ...OPERATOR_GRANTOR, actor };
   if (path === "/api/admin/delegations") {
-    if (request.method === "POST") return runAudited(env, "delegation.grant", target(null), () => grant(request, env));
-    if (request.method === "GET") return runAudited(env, "delegation.list", target(null), () => list(url, env));
+    if (request.method === "POST") return runAudited(env, "delegation.grant", target(null), () => grant(request, env, grantor), actor);
+    if (request.method === "GET") return runAudited(env, "delegation.list", target(null), () => list(url, env, actor), actor);
     return null;
   }
   const m = ADMIN_ITEM.exec(path);
-  if (m && request.method === "DELETE") return runAudited(env, "delegation.revoke", target(m[1]), () => revoke(env, m[1]));
+  if (m && request.method === "DELETE") return runAudited(env, "delegation.revoke", target(m[1]), () => revoke(env, m[1], grantor), actor);
   return null;
 }
 

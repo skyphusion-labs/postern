@@ -10,6 +10,8 @@ import (
 	"net/mail"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/emersion/go-smtp"
 	"github.com/jhillyerd/enmime"
@@ -336,9 +338,8 @@ func startSubmission(cfg Config, listeners []submissionListener, errc chan error
 		if err != nil {
 			return fmt.Errorf("submission listen %s: %w", l.Addr, err)
 		}
-		ln = wrapProxyListener(ln, proxyCfg)
+		ln = wrapSubmissionListener(ln, cfg, l.Implicit, tlsCfg)
 		if l.Implicit {
-			ln = tls.NewListener(ln, tlsCfg)
 			log.Printf("submission (implicit TLS) listening on %s", l.Addr)
 		} else {
 			log.Printf("submission (STARTTLS) listening on %s", l.Addr)
@@ -360,6 +361,229 @@ func submissionBackendName(cfg Config) string {
 // ONLY over TLS: on a STARTTLS listener the client must upgrade first, on an
 // implicit-TLS listener the whole connection is TLS; a cleartext AUTH is answered
 // 523 (TLS required). GetCertificate picks up a renewed cert without a restart.
+// cappedListener accepts at most max connections at once. A connection past
+// the cap is closed inside Accept, so it does not become a server goroutine.
+// max <= 0 leaves the inner listener unchanged.
+type cappedListener struct {
+	net.Listener
+	slots chan struct{}
+}
+
+func newCappedListener(inner net.Listener, max int) net.Listener {
+	if max <= 0 {
+		return inner
+	}
+	return &cappedListener{Listener: inner, slots: make(chan struct{}, max)}
+}
+
+func (l *cappedListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case l.slots <- struct{}{}:
+			return &trackedConn{Conn: c, release: func() { <-l.slots }}, nil
+		default:
+			c.Close()
+		}
+	}
+}
+
+type trackedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *trackedConn) Close() error {
+	c.once.Do(func() {
+		if c.release != nil {
+			c.release()
+		}
+	})
+	return c.Conn.Close()
+}
+
+// wrapSubmissionListener applies the global cap, PROXY header parsing, the
+// per-address cap, and the per-read idle deadline. Implicit TLS wraps the
+// outside so the header is parsed before the handshake.
+func wrapSubmissionListener(ln net.Listener, cfg Config, implicit bool, tlsCfg *tls.Config) net.Listener {
+	ln = newCappedListener(ln, cfg.Submission.MaxConns)
+	ln = wrapProxyListener(ln, cfg.Submission.ProxyProtocol)
+	ln = newPerIPListener(ln, cfg.Submission.MaxConnsPerIP)
+	ln = newIdleListener(ln, submissionReadTimeout(cfg.Submission.ReadTimeout))
+	if implicit && tlsCfg != nil {
+		ln = tls.NewListener(ln, tlsCfg)
+	}
+	return ln
+}
+
+func submissionReadTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 5 * time.Minute
+	}
+	return d
+}
+
+func submissionWriteTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 5 * time.Minute
+	}
+	return d
+}
+
+// perIPListener caps how many open connections one source address may hold.
+// The address is the PROXY-resolved address when a header was honored, and the
+// raw peer otherwise. The count is taken on first use, after that resolve,
+// not in Accept.
+type perIPListener struct {
+	net.Listener
+	max int
+	mu  sync.Mutex
+	n   map[string]int
+}
+
+func newPerIPListener(inner net.Listener, max int) net.Listener {
+	if max <= 0 {
+		return inner
+	}
+	return &perIPListener{Listener: inner, max: max, n: map[string]int{}}
+}
+
+func (l *perIPListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &perIPConn{Conn: c, lim: l}, nil
+}
+
+type perIPConn struct {
+	net.Conn
+	lim     *perIPListener
+	key     string
+	held    bool
+	over    bool
+	decided bool
+	done    bool
+}
+
+func (c *perIPConn) decide() {
+	c.lim.mu.Lock()
+	if c.decided || c.done {
+		c.lim.mu.Unlock()
+		return
+	}
+	c.lim.mu.Unlock()
+
+	key := sourceKey(c.Conn.RemoteAddr())
+
+	c.lim.mu.Lock()
+	defer c.lim.mu.Unlock()
+	if c.decided || c.done {
+		return
+	}
+	c.decided = true
+	c.key = key
+	if c.lim.n[key] >= c.lim.max {
+		c.over = true
+		return
+	}
+	c.lim.n[key]++
+	c.held = true
+}
+
+func (c *perIPConn) Read(p []byte) (int, error) {
+	if c.blocked() {
+		_ = c.Close()
+		return 0, io.EOF
+	}
+	return c.Conn.Read(p)
+}
+
+func (c *perIPConn) blocked() bool {
+	c.decide()
+	c.lim.mu.Lock()
+	defer c.lim.mu.Unlock()
+	return c.done || c.over
+}
+
+func (c *perIPConn) Close() error {
+	c.release()
+	return c.Conn.Close()
+}
+
+func (c *perIPConn) release() {
+	c.lim.mu.Lock()
+	defer c.lim.mu.Unlock()
+	if c.done {
+		return
+	}
+	c.done = true
+	if !c.held {
+		return
+	}
+	c.lim.n[c.key]--
+	if c.lim.n[c.key] <= 0 {
+		delete(c.lim.n, c.key)
+	}
+	c.held = false
+}
+
+func sourceKey(addr net.Addr) string {
+	ip := addrIP(addr)
+	if ip == nil {
+		if addr == nil {
+			return ""
+		}
+		return addr.String()
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
+}
+
+// idleConn refreshes the read deadline at the start of every Read. go-smtp
+// sets a deadline once per command line, which also covers a whole DATA body.
+// Refreshing here keeps that body open while bytes keep arriving, and a stall
+// still ends at the same limit.
+type idleConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func newIdleListener(inner net.Listener, idle time.Duration) net.Listener {
+	if idle <= 0 {
+		return inner
+	}
+	return &idleListener{Listener: inner, idle: idle}
+}
+
+type idleListener struct {
+	net.Listener
+	idle time.Duration
+}
+
+func (l *idleListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &idleConn{Conn: c, idle: l.idle}, nil
+}
+
+func (c *idleConn) Read(p []byte) (int, error) {
+	if c.idle > 0 {
+		if err := c.Conn.SetReadDeadline(time.Now().Add(c.idle)); err != nil {
+			return 0, err
+		}
+	}
+	return c.Conn.Read(p)
+}
+
 func newSubmissionServer(be smtp.Backend, tlsCfg *tls.Config, cfg Config) *smtp.Server {
 	srv := smtp.NewServer(be)
 	srv.Domain = cfg.Submission.Hostname
@@ -367,5 +591,10 @@ func newSubmissionServer(be smtp.Backend, tlsCfg *tls.Config, cfg Config) *smtp.
 	srv.AllowInsecureAuth = false
 	srv.MaxMessageBytes = cfg.MaxSize
 	srv.MaxRecipients = MaxRecipients
+	// go-smtp treats a zero timeout as "no deadline", including the implicit-TLS
+	// handshake it runs on the accepted connection. Keep a deadline unless the
+	// operator set one.
+	srv.ReadTimeout = submissionReadTimeout(cfg.Submission.ReadTimeout)
+	srv.WriteTimeout = submissionWriteTimeout(cfg.Submission.WriteTimeout)
 	return srv
 }
