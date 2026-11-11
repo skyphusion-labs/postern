@@ -85,11 +85,12 @@ account and the one zone, with:
 | Account | D1: Edit                     |
 | Account | Workers R2 Storage: Edit     |
 | Account | Email Sending: Edit          |
-| Account | Email Routing Addresses: Edit|
 | Account | Account Settings: Read       |
 
-A token with exactly this set was measured (2026-11-10) on a full install, its re-runs,
-an upgrade that applied a migration, and the teardown. A smaller set may work; that has not been measured. Email Sending
+A token with this set plus Account: Email Routing Addresses: Edit was measured (2026-11-10) on
+a full install, its re-runs, an upgrade that applied a migration, and the teardown. No command
+reads or writes Email Routing destination addresses, so that permission is not needed and is
+left out here. A smaller set may work; that has not been measured. Email Sending
 is an ACCOUNT permission, even though it is enabled per domain. Scope the zone
 permissions to your mail domain only.
 

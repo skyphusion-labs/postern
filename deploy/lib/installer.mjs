@@ -15,7 +15,7 @@
 // replaces the token and every secret this installer generated or stored.
 
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CfError } from "./cf.mjs";
 import { renderConfig } from "./config.mjs";
@@ -49,7 +49,92 @@ export class Refused extends Error {
 
 function statePaths(opts) {
   const base = join(opts.stateDir, `${opts.name}.${opts.domain}`);
-  return { state: `${base}.json`, creds: `${base}.credentials.env`, config: `${base}.wrangler.json`, build: `${base}.build` };
+  return {
+    state: `${base}.json`, creds: `${base}.credentials.env`, config: `${base}.wrangler.json`, build: `${base}.build`,
+    lock: `${base}.lock`, secretsPrefix: `.${opts.name}.${opts.domain}.secrets-`,
+  };
+}
+
+// ONE RUN AT A TIME per install. Two runs on one state directory could each generate a
+// mailbox token and leave the credentials file holding one the Worker does not. The lock
+// holds the PID. A lock whose process is gone (a crash, Ctrl-C, a kill) is taken over, so
+// an interrupted run never blocks the next one.
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+}
+// The PID in a lock file, read through one descriptor; NaN when it is unreadable or empty.
+function lockPid(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    return parseInt(readFileSync(fd, "utf8"), 10);
+  } catch {
+    return NaN;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+export function takeLock(opts, log = () => {}) {
+  ensureStateDir(opts);
+  const p = statePaths(opts).lock;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(p, "wx", 0o600);
+      writeFileSync(fd, `${process.pid}\n`);
+      closeSync(fd);
+      return () => rmSync(p, { force: true });
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+    const pid = lockPid(p);
+    if (pidAlive(pid)) {
+      throw new Refused([`another postern run (PID ${pid}) is working on this install (lock ${p}). Wait for it to finish. If no other run is going, delete that file and re-run.`]);
+    }
+    // Take over a stale lock without racing another run doing the same: move it to a name
+    // only this run knows, then check the moved file is the stale lock that was judged. If a
+    // live run replaced it in between, put that lock back (link never overwrites) and stop.
+    const moved = `${p}.stale-${process.pid}-${randomBytes(6).toString("hex")}`;
+    try {
+      renameSync(p, moved);
+    } catch (e) {
+      if (e.code === "ENOENT") continue; // another run already moved it; try to create again
+      throw e;
+    }
+    const movedPid = lockPid(moved);
+    if (movedPid !== pid && !(Number.isNaN(movedPid) && Number.isNaN(pid)) && pidAlive(movedPid)) {
+      try { linkSync(moved, p); } catch { /* a third run holds p now; it keeps it */ }
+      rmSync(moved, { force: true });
+      throw new Refused([`another postern run (PID ${movedPid}) took the lock ${p} a moment ago. Wait for it to finish, then re-run.`]);
+    }
+    rmSync(moved, { force: true });
+    log(`  note: removed a stale lock from an earlier run that did not finish (PID ${Number.isNaN(pid) ? "unknown" : pid})`);
+  }
+  throw new Refused([`could not take the lock ${p}. Delete it if no other run is going, and re-run.`]);
+}
+
+// An interrupted deploy (Ctrl-C, a kill) skips the cleanup of its temporary secrets file.
+// Remove this install's leftovers before writing a new one; the lock means no other run of
+// this install is using them. Files from an older installer (unscoped .secrets-*.json) are
+// removed only when over an hour old, since a deploy never takes that long.
+function sweepSecretsFiles(ctx) {
+  const { opts, paths } = ctx;
+  let names = [];
+  try { names = readdirSync(opts.stateDir); } catch { return; }
+  const now = Date.now();
+  for (const n of names) {
+    const mine = n.startsWith(paths.secretsPrefix) && n.endsWith(".json");
+    const legacy = /^\.secrets-[0-9a-f]{24}\.json$/.test(n);
+    if (!mine && !legacy) continue;
+    const f = join(opts.stateDir, n);
+    if (legacy) {
+      let age = 0;
+      try { age = now - statSync(f).mtimeMs; } catch { continue; }
+      if (age < 3600e3) continue;
+    }
+    rmSync(f, { force: true });
+    ctx.log(`  note: removed ${n}, a temporary secrets file an interrupted run left behind`);
+  }
 }
 
 function loadState(opts) {
@@ -485,7 +570,8 @@ async function ensureWorker(ctx, pf) {
     }
     // Unpredictable name, exclusive create: never write the token through a
     // file or symlink that was already sitting at that path.
-    secretsFile = join(opts.stateDir, `.secrets-${randomBytes(12).toString("hex")}.json`);
+    sweepSecretsFiles(ctx);
+    secretsFile = join(opts.stateDir, `${ctx.paths.secretsPrefix}${randomBytes(12).toString("hex")}.json`);
     writeFileSync(secretsFile, JSON.stringify({ POSTERN_API_TOKEN: creds.POSTERN_API_TOKEN }), { mode: 0o600, flag: "wx" });
     args.push("--secrets-file", secretsFile);
   }
@@ -728,12 +814,17 @@ function writeConfig(ctx) {
 // Every error leaves through here, redacted: a wrangler failure's tail() can carry
 // whatever wrangler printed, and a refusal can quote API text.
 async function guarded(ctx, fn) {
+  // A dry run (and status) writes nothing, so it takes no lock.
+  let release = null;
   try {
+    if (!ctx.opts.dryRun) release = takeLock(ctx.opts, ctx.log);
     return await fn();
   } catch (e) {
     if (e && typeof e.message === "string") e.message = ctx.redact(e.message);
     if (e && Array.isArray(e.reasons)) e.reasons = e.reasons.map(ctx.redact);
     throw e;
+  } finally {
+    if (release) release();
   }
 }
 
