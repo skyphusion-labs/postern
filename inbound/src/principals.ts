@@ -17,7 +17,7 @@
 // SQL, because a copy is an INSERT ... SELECT, which the #112 deploy gate refuses.
 
 import { generateId } from "./adminkit";
-import { NATIVE_SESSION_CAPS } from "./session";
+import { NATIVE_SESSION_CAPS } from "./caps";
 
 /** The six static token slots as service principals (D-ID-5), fixed ids. */
 export const SERVICE_PRINCIPALS: ReadonlyArray<{ id: string; displayName: string }> = [
@@ -120,48 +120,7 @@ export async function backfillPrincipals(env: Env, now = new Date().toISOString(
     "SELECT username, from_addr, secret_hash, disabled, created_at, updated_at, display_name FROM smtp_credentials ORDER BY username",
   ).all<HumanRow>();
   for (const h of humans.results ?? []) {
-    const disabledAt = h.disabled ? (h.updated_at ?? now) : null;
-    const existing = await env.DB.prepare(
-      "SELECT c.id AS credential_id, c.principal_id AS principal_id FROM credentials c " +
-        "WHERE c.type = 'password' AND c.lookup = ? AND c.revoked_at IS NULL",
-    )
-      .bind(h.username)
-      .first<{ credential_id: string; principal_id: string }>();
-    if (!existing) {
-      const principalId = generateId("prn_");
-      try {
-        await env.DB.batch([
-          env.DB.prepare(
-            "INSERT INTO principals (id, kind, display_name, label, created_by, created_at, disabled_at) " +
-              "VALUES (?, 'human', ?, NULL, 'migration', ?, ?)",
-          ).bind(principalId, h.display_name, h.created_at ?? now, disabledAt),
-          env.DB.prepare(
-            "INSERT INTO credentials (id, principal_id, type, lookup, secret, caps, protocols, label, created_at) " +
-              "VALUES (?, ?, 'password', ?, ?, ?, NULL, NULL, ?)",
-          ).bind(generateId("crd_"), principalId, h.username, h.secret_hash, JSON.stringify(NATIVE_SESSION_CAPS), h.created_at ?? now),
-        ]);
-      } catch {
-        // A concurrent backfill took this username first (the unique lookup index):
-        // the batch rolled back, and the next run converges on the winner.
-        continue;
-      }
-      report.humans.added++;
-      await claimAddress(env, h.from_addr, principalId, report);
-      continue;
-    }
-    // Converge: a password change, a disable or re-enable, or a display-name change.
-    const c = await env.DB.prepare("UPDATE credentials SET secret = ? WHERE id = ? AND secret IS NOT ?")
-      .bind(h.secret_hash, existing.credential_id, h.secret_hash)
-      .run();
-    // Only the presence of disabled_at is mirrored, so re-running never moves the time.
-    const p = await env.DB.prepare(
-      "UPDATE principals SET disabled_at = CASE WHEN ? THEN COALESCE(disabled_at, ?) ELSE NULL END, display_name = ? " +
-        "WHERE id = ? AND ((? AND disabled_at IS NULL) OR (NOT ? AND disabled_at IS NOT NULL) OR display_name IS NOT ?)",
-    )
-      .bind(h.disabled ? 1 : 0, disabledAt, h.display_name, existing.principal_id, h.disabled ? 1 : 0, h.disabled ? 1 : 0, h.display_name)
-      .run();
-    if ((c.meta?.changes ?? 0) + (p.meta?.changes ?? 0) > 0) report.humans.synced++;
-    await claimAddress(env, h.from_addr, existing.principal_id, report);
+    await upsertHuman(env, h, now, report);
   }
 
   // A user deleted since the last run: its password credential stops being live, and its
@@ -181,6 +140,54 @@ export async function backfillPrincipals(env: Env, now = new Date().toISOString(
   return report;
 }
 
+/** Create or converge ONE human's principal from its smtp_credentials row; returns the
+ *  principal id, or null when a concurrent run won the insert (the next run converges). */
+async function upsertHuman(env: Env, h: HumanRow, now: string, report: BackfillReport): Promise<string | null> {
+  const disabledAt = h.disabled ? (h.updated_at ?? now) : null;
+  const existing = await env.DB.prepare(
+    "SELECT c.id AS credential_id, c.principal_id AS principal_id FROM credentials c " +
+      "WHERE c.type = 'password' AND c.lookup = ? AND c.revoked_at IS NULL",
+  )
+    .bind(h.username)
+    .first<{ credential_id: string; principal_id: string }>();
+  if (!existing) {
+    const principalId = generateId("prn_");
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          "INSERT INTO principals (id, kind, display_name, label, created_by, created_at, disabled_at) " +
+            "VALUES (?, 'human', ?, NULL, 'migration', ?, ?)",
+        ).bind(principalId, h.display_name, h.created_at ?? now, disabledAt),
+        env.DB.prepare(
+          "INSERT INTO credentials (id, principal_id, type, lookup, secret, caps, protocols, label, created_at) " +
+            "VALUES (?, ?, 'password', ?, ?, ?, NULL, NULL, ?)",
+        ).bind(generateId("crd_"), principalId, h.username, h.secret_hash, JSON.stringify(NATIVE_SESSION_CAPS), h.created_at ?? now),
+      ]);
+    } catch {
+      // A concurrent run took this username first (the unique lookup index): the batch
+      // rolled back, and the caller re-reads the winner (or the next run converges).
+      return null;
+    }
+    report.humans.added++;
+    await claimAddress(env, h.from_addr, principalId, report);
+    return principalId;
+  }
+  // Converge: a password change, a disable or re-enable, or a display-name change.
+  const c = await env.DB.prepare("UPDATE credentials SET secret = ? WHERE id = ? AND secret IS NOT ?")
+    .bind(h.secret_hash, existing.credential_id, h.secret_hash)
+    .run();
+  // Only the presence of disabled_at is mirrored, so re-running never moves the time.
+  const p = await env.DB.prepare(
+    "UPDATE principals SET disabled_at = CASE WHEN ? THEN COALESCE(disabled_at, ?) ELSE NULL END, display_name = ? " +
+      "WHERE id = ? AND ((? AND disabled_at IS NULL) OR (NOT ? AND disabled_at IS NOT NULL) OR display_name IS NOT ?)",
+  )
+    .bind(h.disabled ? 1 : 0, disabledAt, h.display_name, existing.principal_id, h.disabled ? 1 : 0, h.disabled ? 1 : 0, h.display_name)
+    .run();
+  if ((c.meta?.changes ?? 0) + (p.meta?.changes ?? 0) > 0) report.humans.synced++;
+  await claimAddress(env, h.from_addr, existing.principal_id, report);
+  return existing.principal_id;
+}
+
 /** Give an address its primary owner, once. An address another principal already owns is
  *  reported, never moved: one owner per address (IDENTITY.md section 3.3). */
 async function claimAddress(env: Env, rawAddress: string, principalId: string, report: BackfillReport): Promise<void> {
@@ -194,4 +201,41 @@ async function claimAddress(env: Env, rawAddress: string, principalId: string, r
   if (owner && owner.principal_id !== principalId) {
     report.addressConflicts.push({ address, principalId, ownerId: owner.principal_id });
   }
+}
+
+/**
+ * The principal id of one human login (#854 M2), creating it from smtp_credentials if
+ * the backfill has not reached it yet. Used by every session mint, so a webmail session
+ * always names a principal. Throws if the account row is gone (the caller just verified
+ * it, so that is a race the mint should fail on, not paper over).
+ */
+export async function ensureHumanPrincipal(env: Env, username: string): Promise<string> {
+  const live = await env.DB.prepare(
+    "SELECT principal_id FROM credentials WHERE type = 'password' AND lookup = ? AND revoked_at IS NULL",
+  )
+    .bind(username)
+    .first<{ principal_id: string }>();
+  if (live) return live.principal_id;
+  const row = await env.DB.prepare(
+    "SELECT username, from_addr, secret_hash, disabled, created_at, updated_at, display_name FROM smtp_credentials WHERE username = ?",
+  )
+    .bind(username)
+    .first<HumanRow>();
+  if (!row) throw new Error("ensureHumanPrincipal: no account row for this login");
+  const scratch: BackfillReport = {
+    services: { added: 0 },
+    agents: { added: 0, synced: 0 },
+    humans: { added: 0, synced: 0, orphansRevoked: 0 },
+    addressConflicts: [],
+  };
+  const id = await upsertHuman(env, row, new Date().toISOString(), scratch);
+  if (id) return id;
+  // A concurrent mint or backfill created it between our read and our insert.
+  const again = await env.DB.prepare(
+    "SELECT principal_id FROM credentials WHERE type = 'password' AND lookup = ? AND revoked_at IS NULL",
+  )
+    .bind(username)
+    .first<{ principal_id: string }>();
+  if (!again) throw new Error("ensureHumanPrincipal: could not create a principal for this login");
+  return again.principal_id;
 }
