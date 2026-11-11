@@ -333,6 +333,16 @@ export function fakeHttp(m) {
     const s = dom && m.scripts[dom.service];
     if (!s || !s.live) throw new Error("connection refused");
     if (u.pathname === "/health") return json(200, { ok: true });
+    // #901: the principals backfill. Admin-scoped: only the estate token. Convergent: the
+    // first call reports what it added, later calls report nothing to do.
+    if (u.pathname === "/api/admin/principals/backfill" && init.method === "POST") {
+      if (init.headers?.authorization !== `Bearer ${s.secrets.get("POSTERN_API_TOKEN")}`) return json(401, { ok: false, error: "E_UNAUTHORIZED" });
+      if (m.backfillStatus) return json(m.backfillStatus, { ok: false, error: m.backfillStatus === 404 ? "not_found" : "E_INTERNAL" });
+      m.backfills = (m.backfills || 0) + 1;
+      const first = m.backfills === 1;
+      return json(200, { ok: true, services: { added: first ? 3 : 0 }, agents: { added: 0, synced: 0 },
+        humans: { added: first ? 1 : 0, synced: 0, orphansRevoked: 0 }, addressConflicts: m.backfillConflicts || [] });
+    }
     // #810 contract: create only, never overwrite.
     if (u.pathname === "/api/admin/users" && init.method === "POST") {
       if (init.headers?.authorization !== `Bearer ${s.secrets.get("POSTERN_API_TOKEN")}`) return json(401, { ok: false, error: "E_UNAUTHORIZED" });

@@ -13,12 +13,24 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
-**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
-`0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. Run `POST /api/admin/principals/backfill` once after
+**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds),
+`0020` (`webmail_sessions.principal_id`) and `0021` (the `svc_admin` seed) are additive and
+are applied by the deploy. Run `POST /api/admin/principals/backfill` once after
 upgrading to copy existing identities and users in; it is safe to run again.
+**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
+`0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. The
+backfill that copies existing identities and users in now runs automatically after each
+deploy: the release workflow calls `POST /api/admin/principals/backfill` once the new version
+answers (#901), and the self-host installer calls it after any run that deployed a Worker
+version or created the first admin. A manual run is still safe: it is idempotent.
 
 ### Added
 
+- **An admin-only token slot (#904).** `POSTERN_API_TOKEN_ADMIN` reaches the
+  admin routes and nothing else: it cannot read, send, delete or organize
+  mail. Its audit rows name the `svc_admin` service principal. Set and rotate
+  it with `wrangler secret put POSTERN_API_TOKEN_ADMIN`; unset changes
+  nothing.
 - **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
   `principal_addresses` tables, the six static token slots as service
   principals, and `POST /api/admin/principals/backfill`, which copies agent
@@ -43,6 +55,12 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Changed
 
+- **Deploy runs the principals backfill (#901).** `.github/workflows/deploy.yml` calls it after
+  the deployed artifact is verified, waits until `/health` reports the tag, and fails the release
+  on a missing `POSTERN_DEPLOY_ADMIN_TOKEN`, a non-200 or a malformed report. Address conflicts
+  are warnings that name principal ids, never addresses (Actions logs are public).
+  `deploy/postern.mjs install` and `upgrade` make the same call with the install's own token.
+
 - **The operator is named in the audit log (#854 M1).** Rows the admin
   routes write now carry actor `service` / `svc_both` instead of
   `operator` with no id. Older rows are unchanged.
@@ -66,6 +84,43 @@ upgrading to copy existing identities and users in; it is safe to run again.
   reply-to value is reported by field name. A reply whose stored address
   cannot be used names the header it came from.
 
+- **Door session edges.** The IMAP wire trace redacts every received line of a
+  LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
+  port 993; set a certificate, or use port 143. Submission backend errors log
+  the username length, not the username. An APPEND places a stored row only
+  when `delivered_to` includes the session viewer. An old row that omits
+  `deliveredTo` still uses its `to` address. The global auth cooldown is off
+  unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set.
+- **Python client requests.** Authorization is not sent on a cross-origin
+  redirect. Returned `bodyText` and `bodyHtml` are capped (default 64 KiB,
+  `POSTERN_MAX_BODY_CHARS`) and flagged with `bodyTruncated`. An id that is
+  empty, `.`, or `..` is refused before a path is built. A base URL must be
+  https except on localhost, must not carry userinfo, and its query is not
+  kept.
+
+- **MCP results mark every sender-written field as untrusted.** Search, list,
+  get, thread, and attachment results name those fields and say they were
+  written by the sender.
+
+- **Attachment download.** `postern attachment` without `-o` writes only the
+  final path segment of the remote name, refuses an empty or hidden name, and
+  does not replace a file that already exists. `-o` still writes the path you
+  name.
+- **Submission deadlines.** The submission listener has a read timeout and a
+  write timeout (default 5 minutes each). The read timeout is an idle limit,
+  refreshed on each read. Open connections are capped globally
+  (`SUBMISSION_MAX_CONNECTIONS`, default 200) and per source address
+  (`SUBMISSION_MAX_CONNECTIONS_PER_IP`, default 20). Zero means no cap. The
+  per-source cap uses the address from a trusted PROXY header when one is
+  present. After that header is read, the door puts back the read deadline
+  the protocol had set.
+- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
+  (default 22 MiB, the same ceiling as the worker import) is refused before
+  the bytes are read. The tagged reply starts `NO [TOOBIG]`. `CAPABILITY`
+  advertises `APPENDLIMIT`.
+- **Door throttle key.** The throttle key is canonicalized like the Worker's:
+  the ECMAScript trim set, then lower-case. In system (PAM) mode the key is
+  the local part before `@`. native and ldap keep the whole trimmed name.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the

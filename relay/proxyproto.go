@@ -46,6 +46,11 @@ type ProxyProtocolCfg struct {
 	Mode    proxyMode     // PROXY_PROTOCOL
 	Trusted []*net.IPNet  // PROXY_PROTOCOL_TRUSTED, parsed CIDRs (the LB's private source)
 	Timeout time.Duration // PROXY_PROTOCOL_TIMEOUT_SECONDS, bound on reading the header
+
+	// deadlineRestore, when set, replaces the read deadline put back after the
+	// header. Nil puts back the deadline the caller set. Tests set this to
+	// clear that deadline.
+	deadlineRestore func(inner net.Conn, deadline time.Time, set bool)
 }
 
 // enabled reports whether any PROXY header parsing is configured. When false the
@@ -112,6 +117,49 @@ type proxyConn struct {
 	reader *bufio.Reader // set once a header peek has buffered bytes; nil means read straight from Conn
 	remote net.Addr      // effective remote addr after resolve()
 	err    error         // a rejection (require with no/forged-untrusted header) or a malformed-header parse error
+
+	dlMu      sync.Mutex
+	readDL    time.Time // the read deadline the caller set, put back after the header
+	readDLSet bool
+}
+
+// SetReadDeadline remembers the deadline as well as applying it. resolve puts
+// this deadline back after the header read.
+func (c *proxyConn) SetReadDeadline(t time.Time) error {
+	c.dlMu.Lock()
+	c.readDL = t
+	c.readDLSet = true
+	c.dlMu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+// SetDeadline sets both directions. The read half is remembered so the header
+// read can put it back.
+func (c *proxyConn) SetDeadline(t time.Time) error {
+	c.dlMu.Lock()
+	c.readDL = t
+	c.readDLSet = true
+	c.dlMu.Unlock()
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *proxyConn) callerReadDeadline() (time.Time, bool) {
+	c.dlMu.Lock()
+	defer c.dlMu.Unlock()
+	return c.readDL, c.readDLSet
+}
+
+func (c *proxyConn) restoreReadDeadline() {
+	dl, ok := c.callerReadDeadline()
+	if c.cfg.deadlineRestore != nil {
+		c.cfg.deadlineRestore(c.Conn, dl, ok)
+		return
+	}
+	if !ok {
+		_ = c.Conn.SetReadDeadline(time.Time{})
+		return
+	}
+	_ = c.Conn.SetReadDeadline(dl)
 }
 
 func (c *proxyConn) resolve() {
@@ -134,11 +182,12 @@ func (c *proxyConn) resolve() {
 			return
 		}
 
-		// Trusted peer: bound the header read so a peer that connects and then
-		// stalls cannot pin the connection goroutine forever.
+		// Trusted peer: bound the header read, then put back the deadline the
+		// caller had set. The temporary deadline is applied on the inner conn
+		// so it does not replace the remembered one.
 		if c.cfg.Timeout > 0 {
 			_ = c.Conn.SetReadDeadline(time.Now().Add(c.cfg.Timeout))
-			defer c.Conn.SetReadDeadline(time.Time{})
+			defer c.restoreReadDeadline()
 		}
 
 		br := bufio.NewReader(c.Conn)

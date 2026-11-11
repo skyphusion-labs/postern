@@ -97,7 +97,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.throttle_max_failures, 5)
         self.assertEqual(cfg.throttle_lockout_seconds, 60)
         self.assertEqual(cfg.throttle_max_lockout_seconds, 900)
-        self.assertEqual(cfg.throttle_global_max_failures, 100)
+        self.assertEqual(cfg.throttle_global_max_failures, 0)
         self.assertEqual(cfg.throttle_global_window_seconds, 60)
 
     def test_throttle_custom_and_disable(self):
@@ -121,10 +121,10 @@ class ConfigTest(unittest.TestCase):
 
     def test_custom_listener(self):
         cfg = Config.from_env(
-            {"POSTERN_API_URL": "https://x", "POSTERN_IMAP_HOST": "0.0.0.0", "POSTERN_IMAP_PORT": "993"}
+            {"POSTERN_API_URL": "https://x", "POSTERN_IMAP_HOST": "0.0.0.0", "POSTERN_IMAP_PORT": "143"}
         )
         self.assertEqual(cfg.listen_host, "0.0.0.0")
-        self.assertEqual(cfg.listen_port, 993)
+        self.assertEqual(cfg.listen_port, 143)
 
 
 class NativeModeConfigTest(unittest.TestCase):
