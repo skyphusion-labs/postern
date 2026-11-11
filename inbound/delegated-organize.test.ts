@@ -104,7 +104,7 @@ for (const flag of [undefined, "granted"]) {
         expect(audits[0]).toMatchObject({
           actor_kind: "agent", actor_id: s.agent.id, target_kind: "message", target_id: HUMAN_MSG, outcome: "ok",
         });
-        expect(JSON.parse(audits[0].detail)).toMatchObject({ op: req.op, granted: [HUMAN] });
+        expect(JSON.parse(audits[0].detail)).toMatchObject({ op: req.op, address: HUMAN });
 
         await s.revoke(g);
         const after = await s.call("POST", req.path, s.agent.token, build(HUMAN_MSG, true).body);
@@ -171,5 +171,22 @@ describe("#740 S2 known limit: a refusal at the scope gate is not audited", () =
       expect((await s.call("POST", req.path, READ_TOKEN, req.body)).status).toBe(403);
     }
     expect(s.raw.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'delegation.organize'").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("#740 S5 an organize audit row names WHOSE mail it touched", () => {
+  it("an agent granted on two humans flags one human's message: one row, naming that human only", async () => {
+    const s = await setup("granted");
+    await s.grant(["organize"]);
+    const other = "bob@skyphusion.org";
+    await putInbound(s.env, s.ctx, { id: "bob-1@example.com", from: "x@example.com", to: other });
+    expect((await s.call("POST", "/api/admin/delegations", ADMIN, { granteeId: s.agent.id, address: other, powers: ["organize"] })).status).toBe(201);
+    const res = await s.call("POST", "/api/messages/flags", s.agent.token, { ids: ["bob-1@example.com"], set: { flagged: true } });
+    expect(res.body.updated).toBe(1);
+    const rows = s.organizeAudits();
+    expect(rows.length).toBe(1);
+    expect(rows[0].target_id).toBe("bob-1@example.com");
+    expect(JSON.parse(rows[0].detail)).toMatchObject({ op: "flags", address: other });
+    expect(rows[0].detail, "the other granted human is not named").not.toContain(HUMAN);
   });
 });
