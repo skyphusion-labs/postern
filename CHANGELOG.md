@@ -80,6 +80,13 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Fixed
 
+- **Door session edges.** The IMAP wire trace redacts every received line of a
+  LOGIN or AUTHENTICATE until the tagged response. Plaintext is refused on
+  port 993; set a certificate, or use port 143. Submission backend errors log
+  the username length, not the username. An APPEND places a stored row only
+  when `delivered_to` includes the session viewer. An old row that omits
+  `deliveredTo` still uses its `to` address. The global auth cooldown is off
+  unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set.
 - **Python client requests.** Authorization is not sent on a cross-origin
   redirect. Returned `bodyText` and `bodyHtml` are capped (default 64 KiB,
   `POSTERN_MAX_BODY_CHARS`) and flagged with `bodyTruncated`. An id that is
@@ -95,7 +102,6 @@ version or created the first admin. A manual run is still safe: it is idempotent
   final path segment of the remote name, refuses an empty or hidden name, and
   does not replace a file that already exists. `-o` still writes the path you
   name.
-
 - **Submission deadlines.** The submission listener has a read timeout and a
   write timeout (default 5 minutes each). The read timeout is an idle limit,
   refreshed on each read. Open connections are capped globally
