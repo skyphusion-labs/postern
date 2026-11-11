@@ -27,6 +27,12 @@ mismatched MCP tag fails before it publishes.
   `bcc` or `quoteOriginal` is refused with `400`. Forwarding a stored
   message with that token stays not found.
 
+- **The legacy `EmailService` RPC entrypoint is send-only, as documented.**
+  It exposes `send` and `reply` only (no `get`, `thread`, `list` or
+  `search`) and follows the same rule as the send-only token: a reply
+  goes to the thread's existing parties, and nothing is quoted or
+  forwarded. `MailboxService` is unchanged.
+
 - **HTML-to-text conversion runs in one pass.** Mail with only an HTML
   body is converted to its stored text body by a single linear scan, and
   the converter reads at most the first 512,000 characters, the same bound
