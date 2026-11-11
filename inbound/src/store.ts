@@ -1149,7 +1149,9 @@ function membershipClause(
  *  to share one representation (`undefined`) no longer have one. */
 export type AccessScope = readonly string[] | "estate";
 
-/** "delivered to V, or authored by V" for ANY address in the scope (#425).
+/** "delivered to V, or authored by V" for ANY address in the scope (#425). Authored
+ *  means SENT by postern as V: direction 'outbound' and from_addr = V. The From header
+ *  of inbound mail is written by the sender, so it never makes V the author.
  *
  *  One address produces one fragment; a set produces a parenthesised OR of the same
  *  fragment, so a role member reaches ROLE mail and nothing else widens. `"estate"`
@@ -1171,7 +1173,7 @@ function accessClause(scope: AccessScope, alias?: string): { sql: string; binds:
   const binds: string[] = [];
   for (const viewer of viewers) {
     const member = membershipClause(viewer, { alias });
-    parts.push(`(${member.sql} OR lower(${p}from_addr) = ?)`);
+    parts.push(`(${member.sql} OR (${p}direction = 'outbound' AND lower(${p}from_addr) = ?))`);
     binds.push(...member.binds, viewer);
   }
   return { sql: parts.length === 1 ? parts[0] : `(${parts.join(" OR ")})`, binds };
@@ -1970,10 +1972,10 @@ function seenProjection(viewer: string | undefined): { expr: string; binds: unkn
  *    recipient INBOX, not only the sender Sent. A true self-send (from=V) stays
  *    Sent-only (correct: you wrote it). This is exactly the predicate that used to
  *    hide behind direction=inbound; it now has its own name.
- *  - lens=sent (needs V): sender-based (from_addr = V), never delivered-set based,
- *    so the membership fragment is dropped.
+ *  - lens=sent (needs V): what postern sent as V (direction 'outbound' AND
+ *    from_addr = V), never delivered-set based, so the membership fragment is dropped.
  *  Outbound from_addr is a bare address by construction (mailbox.send), so the
- *  lower() compare is exact; the lens branch only inspects outbound rows anyway. */
+ *  lower() compare is exact. */
 function recipientWhere(
   viewer: string | undefined,
   direction: "inbound" | "outbound" | undefined,
@@ -1991,7 +1993,7 @@ function recipientWhere(
     directionBinds: [] as unknown[],
   };
   if (viewer && lens === "sent") {
-    out.direction = "lower(m.from_addr) = ?";
+    out.direction = "m.direction = 'outbound' AND lower(m.from_addr) = ?";
     out.directionBinds = [viewer];
     return out;
   }
@@ -2062,14 +2064,14 @@ function accountWhere(
     // use: to=X under lens=sent is "my sent mail that went to X".
     return {
       ...filtered(null, []),
-      direction: "lower(m.from_addr) = ?",
+      direction: "m.direction = 'outbound' AND lower(m.from_addr) = ?",
       directionBinds: [viewer],
     };
   }
   // Account boundary (delivered to V or authored by V), plus the exact stored
   // direction when one was asked for.
   return {
-    ...filtered(`(${delivered} OR lower(m.from_addr) = ?)`, [...viewerMember.binds, viewer]),
+    ...filtered(`(${delivered} OR (m.direction = 'outbound' AND lower(m.from_addr) = ?))`, [...viewerMember.binds, viewer]),
     direction: direction ? "m.direction = ?" : null,
     directionBinds: direction ? [direction] : [],
   };
@@ -2433,7 +2435,7 @@ export async function folders(
       id: "sent",
       label: "Sent",
       predicate: identity
-        ? "m.mailbox IS NULL AND lower(m.from_addr) = ?"
+        ? "m.mailbox IS NULL AND m.direction='outbound' AND lower(m.from_addr) = ?"
         : "m.mailbox IS NULL AND m.direction='outbound'",
       binds: identity ? [identity] : [],
     },
@@ -2950,7 +2952,9 @@ async function summariesByIds(env: Env, ids: string[], viewer?: string): Promise
  *  - to=V: delivered-set membership (drop anything NOT delivered to V -- the leak the
  *    lead caught), then lens=inbox (inbound OR outbound-not-authored-by-V) or the
  *    EXACT stored direction (#403), never one silently standing in for the other.
- *  - lens=sent: sender-based (from == V), membership not required.
+ *  - lens=sent: sent by postern as V (outbound AND lower(from_addr) == V), membership
+ *    not required. Every from comparison here is lower(from_addr) on the stored column,
+ *    ASCII-only like SQLite lower(), never an address parsed out of a display name.
  *  - from= (#366): same lower(from_addr) substring match as list/fts/substr.
  *  - accountViewer + to= (#422): the account boundary decides WHAT the caller may
  *    see; `to=` is then an ordinary recipient filter ANDed inside it, matching the
@@ -2970,27 +2974,29 @@ function passesViewerScope(
     const needle = fromFilter.toLowerCase();
     if (!m.from.toLowerCase().includes(needle)) return false;
   }
-  const bareFrom = (parseRecipients(m.from)[0] ?? "").toLowerCase();
+  // SQLite lower() folds ASCII only; fold the same way so the comparison is the SQL one.
+  const fromLower = m.from.replace(/[A-Z]+/g, (c) => c.toLowerCase());
+  const authoredBy = (v: string) => m.direction === "outbound" && fromLower === v;
   const scope = accountViewer ?? viewer;
   // #422: under an account boundary, `viewer` here is the caller's to= RECIPIENT
   // FILTER, not the viewer, so it applies on top of every branch below (including
   // lens=sent, whose early return would otherwise swallow it).
   if (accountViewer && viewer && !m.deliveredTo.some((a) => a.toLowerCase() === viewer)) return false;
-  if (scope && lens === "sent") return bareFrom === scope;
+  if (scope && lens === "sent") return authoredBy(scope);
   if (accountViewer) {
     const delivered = m.deliveredTo.map((a) => a.toLowerCase());
     if (lens === "inbox") {
       return delivered.includes(accountViewer) &&
-        (m.direction === "inbound" || (m.direction === "outbound" && bareFrom !== accountViewer));
+        (m.direction === "inbound" || (m.direction === "outbound" && fromLower !== accountViewer));
     }
-    if (!delivered.includes(accountViewer) && bareFrom !== accountViewer) return false;
+    if (!delivered.includes(accountViewer) && !authoredBy(accountViewer)) return false;
     return !direction || m.direction === direction;
   }
   if (!viewer) return !direction || m.direction === direction;
   const delivered = m.deliveredTo.map((a) => a.toLowerCase());
   if (!delivered.includes(viewer)) return false;
   if (lens === "inbox") {
-    return m.direction === "inbound" || (m.direction === "outbound" && bareFrom !== viewer);
+    return m.direction === "inbound" || (m.direction === "outbound" && fromLower !== viewer);
   }
   return !direction || m.direction === direction;
 }
