@@ -25,7 +25,7 @@
 // The error envelope, body parsing, paging and the audit writer are shared with the
 // delegation grants (#740 S1) through ./adminkit.
 
-import { mirrorAgent } from "./principalmirror";
+import { agentCredentialAgrees, mirrorAgent, recordReadMiss } from "./principalmirror";
 import type { BoundIdentity, IdentityCap } from "./sendidentity";
 import { sha256Hex } from "./sendidentity";
 import { displayNameProblem } from "./smtpcreds";
@@ -126,6 +126,11 @@ export async function resolveRuntimeIdentity(env: Env, token: string, allowedDom
   } catch (err) {
     console.error("agent_identities lookup failed", err instanceof Error ? err.message : String(err));
     throw new IdentityStoreUnavailable("identity store unavailable");
+  }
+  // #854 M2 part ii: the credentials table is consulted too, and the OLD table's answer
+  // stands either way (agree-or-fallback). A disagreement is counted, never acted on.
+  if (!(await agentCredentialAgrees(env, hash, row ? { id: row.id, scopes: row.scopes } : null))) {
+    await recordReadMiss(env, "agent");
   }
   if (!row) return null;
   const from = row.from_addr.toLowerCase();
