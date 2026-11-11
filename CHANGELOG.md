@@ -49,6 +49,12 @@ upgrading to copy existing identities and users in; it is safe to run again.
   released notes passes with the commit trailer
   `Changelog-History-Edit: <reason>`.
 
+
+- **The webmail page allows its script by hash, not `'unsafe-inline'`.**
+  The served CSP lists the sha256 of the page's one inline script, which
+  `npm run sync-webmail` computes, so a script that is not the page's
+  own does not run. `style-src 'unsafe-inline'` is unchanged.
+
 ### Fixed
 
 - **Webmail shows attachment names with hidden characters made visible.**
