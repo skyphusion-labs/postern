@@ -53,6 +53,7 @@ import {
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 import { agentAudit, agentMessageAudit, auditStatement, OPERATOR_ACTOR, type AuditActor } from "./adminkit";
 import { backfillPrincipals } from "./principals";
+import { principalParity } from "./principalmirror";
 import { handleSelfService } from "./selfservice";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
@@ -449,6 +450,16 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (path === "/api/admin/audit") {
       const ares = await handleAudit(request, env, url);
       if (ares) return ares;
+    }
+    // #854 M2: does every old-table row agree with its principal and credential?
+    if (request.method === "GET" && path === "/api/admin/principals/parity") {
+      const parity = await principalParity(env);
+      await auditStatement(env, new Date().toISOString(), {
+        action: "principals.parity",
+        outcome: "ok",
+        detail: { agentDiffs: parity.agents.diffs, humanDiffs: parity.humans.diffs, orphans: parity.orphans.diffs },
+      }).run();
+      return json({ ok: true, ...parity });
     }
     // #740 S5: the human's own delegation and audit trail (webmail session only).
     if (

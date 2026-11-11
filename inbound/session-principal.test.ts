@@ -77,10 +77,12 @@ describe("#854 M2 every webmail session names its human principal", () => {
     expect((await resolveSession(s.env, two.raw))?.principalId).toBe(expected);
   });
 
-  it("a user created after the last backfill gets a principal at sign-in, and the next backfill agrees", async () => {
+  it("a login whose principal does not exist yet (written before dual-write) gets one at sign-in, and the next backfill agrees", async () => {
     const s = await setup();
     await s.user(ALICE);
-    expect(s.principalOf(ALICE), "no backfill has run").toBeUndefined();
+    // Model a user row written before dual-write (#854 M2): no principal yet.
+    s.raw.exec("DELETE FROM credentials; DELETE FROM principal_addresses; DELETE FROM principals WHERE kind <> 'service';");
+    expect(s.principalOf(ALICE), "no principal yet").toBeUndefined();
     await s.signIn();
     const minted = s.principalOf(ALICE);
     expect(String(minted)).toMatch(/^prn_/);
