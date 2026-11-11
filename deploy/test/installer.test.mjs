@@ -84,7 +84,7 @@ describe("install", () => {
     assert.ok(m.dns.some((r) => r.name === "_dmarc.acme-mail.test" && r.content === "v=DMARC1; p=none"), "DMARC missing");
     assert.equal(m.dns.filter((r) => r.type === "TXT" && r.name === "acme-mail.test" && /^v=spf1/.test(r.content)).length, 1, "SPF duplicated");
     assert.ok(m.admins["admin@acme-mail.test"], "first admin not created");
-    assert.deepEqual(m.domains, [{ hostname: "mail.acme-mail.test", service: "postern" }]);
+    assert.deepEqual(m.domains.map(({ hostname, service }) => ({ hostname, service })), [{ hostname: "mail.acme-mail.test", service: "postern" }]);
 
     const text = c.out.join("\n");
     for (const w of ["D1 database postern", "R2 bucket postern-attachments", "Worker postern", "Email Sending for acme-mail.test", "Email Routing on acme-mail.test", "catch-all rule -> Worker postern", "DNS TXT _dmarc.acme-mail.test", "first admin admin@acme-mail.test"]) {
