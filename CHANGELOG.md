@@ -27,6 +27,10 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
+  (default 22 MiB, the same ceiling as the worker import) is refused before
+  the bytes are read. The tagged reply starts `NO [TOOBIG]`. `CAPABILITY`
+  advertises `APPENDLIMIT`.
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
@@ -67,9 +71,6 @@ deploy. A self-hosted install picks up the installer changes the next time it ru
 
 ### Fixed
 
-- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
-  (default 22 MiB, the same ceiling as the worker import) is refused with
-  `NO [TOOBIG]` before the bytes are read. `CAPABILITY` advertises `APPENDLIMIT`.
 - **The reply and forward quote follows the caller's read scope.** A
   static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
   quotes or forwards a stored message: the source is not found, as on the

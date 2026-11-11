@@ -684,6 +684,21 @@ class PosternIMAP4Server(imap4.IMAP4Server):
             )
         return imap4.IMAP4Server._fileLiteral(self, size)
 
+    def sendNegativeResponse(self, tag=None, message=b""):
+        """A tagged NO.
+
+        Twisted's command dispatch prefixes ``IllegalOperation`` with
+        ``Illegal operation: `` before it calls this. A response code has to
+        be the first token after NO, so a ``[TOOBIG]`` refusal is written
+        that way.
+        """
+        if isinstance(message, str):
+            message = message.encode("utf-8", "replace")
+        prefix = b"Illegal operation: "
+        if message.startswith(prefix + b"[TOOBIG]"):
+            message = message[len(prefix):]
+        imap4.IMAP4Server.sendNegativeResponse(self, tag, message)
+
     # Route APPEND through the override in both states it is valid (authenticated +
     # selected). dispatchCommand reads the class tuple, not getattr(self, "do_APPEND").
     # The message literal is checked against the ceiling before the continuation.
