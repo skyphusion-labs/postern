@@ -55,6 +55,13 @@ mismatched MCP tag fails before it publishes.
   References (`MAX_THREAD_REFERENCES`), deduplicated, in a single D1
   query. The parent is chosen in the same order as before.
 
+- **"Authored by" means sent by postern.** Read access, the account
+  view, the Sent lens and the Sent folder count treat a message as
+  authored by V only when postern sent it as V (direction `outbound`).
+  An inbound message whose From header names V is reachable by V only
+  when it was delivered to V. Semantic and hybrid search apply the same
+  rule as the SQL paths.
+
 - **Thread resolution prefers a trusted message for a shared
   Message-ID.** A different message that arrives with a Message-ID already
   held by another is still stored under its derived id, and now records
