@@ -234,7 +234,7 @@ minted through `POST /api/admin/identities` is the same row in this table):
 
 | Credential | Reads | Sends as | May change |
 |---|---|---|---|
-| agent (registry token, `scopes` includes `read`) | **every address in the deployment** | its own bound address | **only its own mail** |
+| agent (registry token, `scopes` includes `read`) | **every address in the deployment** while `AGENT_READ_SCOPE` is unset or `estate`; under `granted`, its own address plus the addresses it holds a delegation grant on ([DELEGATION.md](docs/DELEGATION.md)) | its own bound address | **only its own mail**, plus addresses it holds an `organize` grant on (each write audited) |
 | human with a cookie SESSION (`WEBMAIL_AUTH_BACKEND = "native"`) | its own address, plus any role queue it is on | its own address | only its own mail |
 | human in DEFAULT BYO-token webmail, pasting a read-capable registry token | **every address in the deployment**, because the worker sees a registry Bearer and not a person | that token's bound address | only that address's mail |
 | static `POSTERN_API_TOKEN` / `_READ` | every address (unchanged, always did) | un-bound | per slot |

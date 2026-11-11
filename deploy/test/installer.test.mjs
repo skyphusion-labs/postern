@@ -562,6 +562,35 @@ describe("D-AUTH-3: unset WEBMAIL_AUTH_BACKEND means OFF", () => {
   });
 });
 
+describe("#740 S2: unset AGENT_READ_SCOPE means estate; a new install writes granted", () => {
+  test("a new install writes AGENT_READ_SCOPE=granted explicitly", async () => {
+    const c = setup();
+    await install(c.deps, c.opts);
+    assert.equal(c.m.scripts.postern.vars.AGENT_READ_SCOPE, "granted");
+  });
+
+  test("adopt and upgrade over a Worker with no AGENT_READ_SCOPE leave it absent (estate)", async () => {
+    const c = setup();
+    c.m.scripts.postern = { versions: ["v0"], secrets: new Map([["POSTERN_API_TOKEN", "old"]]), live: "v0", vars: { ALLOWED_FROM_DOMAIN: "acme-mail.test" } };
+    c.m.d1.push({ uuid: "d1-old", name: "postern" });
+    c.m.migrations["d1-old"] = [];
+    c.opts.adopt = true;
+    await install(c.deps, c.opts).catch(() => {}); // the admin step may stop; vars are what this asserts
+    assert.ok(!("AGENT_READ_SCOPE" in c.m.scripts.postern.vars), "an adopted install narrowed agent reads");
+    writeFileSync(join(c.repoRoot, "inbound", "src", "index.ts"), "export default { v: 9 };\n");
+    await install(c.deps, c.opts, "upgrade").catch(() => {});
+    assert.ok(!("AGENT_READ_SCOPE" in c.m.scripts.postern.vars), "upgrade added AGENT_READ_SCOPE");
+  });
+
+  test("an operator's explicit estate is kept across adopt", async () => {
+    const c = setup();
+    c.m.scripts.postern = { versions: ["v0"], secrets: new Map([["POSTERN_API_TOKEN", "old"]]), live: "v0", vars: { AGENT_READ_SCOPE: "estate" } };
+    c.opts.adopt = true;
+    await install(c.deps, c.opts).catch(() => {});
+    assert.equal(c.m.scripts.postern.vars.AGENT_READ_SCOPE, "estate");
+  });
+});
+
 describe("rollback --restore-db and the first admin", () => {
   test("an admin created after the bookmark is re-created by the next run after a restore", async () => {
     const c = setup();
