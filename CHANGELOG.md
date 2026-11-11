@@ -13,11 +13,28 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
-**Upgrade (#813).** Migration `0024` (`vector_ledger.embed_version`) is additive and is applied
-by the deploy. New mail embeds with the subject from the deploy on. To re-embed existing mail,
-run `node inbound/reindex.mjs --stale-only` (`--dry-run` first); it is resumable and search keeps
-working meanwhile. Cost: one bge-base embedding per chunk at $0.067 per million input tokens
-(at most about $1.40 for 61k chunks); Vectorize storage is unchanged (same ids, same count).
+## v1.14.0
+
+MINOR. Semantic search embeds the subject and folds template families and threads, and
+hybrid search caps each notification family (#813, #926, #930); sign-in tests hash at a
+lower PBKDF2 count, which a deploy refuses to ship (#909).
+
+**Upgrade.**
+
+- Migration `0024` (`vector_ledger.embed_version`, #813) is additive and is applied by the
+  deploy. New mail embeds with the subject from the deploy on.
+- After the deploy, re-embed existing mail. With `POSTERN_API_BASE` and a `both`-scoped
+  `POSTERN_API_TOKEN` set, run `node inbound/reindex.mjs --stale-only --dry-run` first for
+  the count, then `node inbound/reindex.mjs --stale-only`. It is resumable, and search keeps working meanwhile. Cost: one bge-base embedding per chunk at
+  $0.067 per million input tokens (about 61k chunks on a large estate, at most about
+  $1.40). Vectorize storage is unchanged (same ids, same count).
+- New deploy refusal (#909): the tagged deploy and the self-host installer refuse when
+  `POSTERN_TEST_PBKDF2_ITERATIONS` is in the wrangler vars being shipped or in the Worker
+  secret list. Shipping configs do not set it; if yours does, remove it before you tag.
+- Behaviour change for agents: semantic search now collapses template families and folds
+  threads by default (`collapse=0`, `collapseThreads=0` for one row per message), and
+  hybrid, the MCP default mode, shows at most 2 hits per family by default (`familyCap=0`
+  lists them all).
 
 ### Added
 
