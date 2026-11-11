@@ -160,3 +160,61 @@ describe("stale-lock takeover does not race", () => {
     assert.deepEqual(readdirSync(c.stateDir).filter((f) => /\.stale-/.test(f)), [], "a moved lock was left behind");
   });
 });
+
+describe("POSTERN_TEST_PBKDF2_ITERATIONS cannot ship (#909)", () => {
+  const VAR = "POSTERN_TEST_PBKDF2_ITERATIONS";
+  const PLANTED = "WEAK-ITER-77";
+
+  test("control: a clean install deploys without the test-only override", async () => {
+    const c = setup();
+    await install(c.deps, c.opts());
+    assert.ok(c.m.scripts.postern.live, "clean install did not deploy");
+    assert.ok(!(VAR in (c.m.scripts.postern.vars || {})), "clean install shipped the var");
+    assert.ok(!c.m.scripts.postern.secrets.has(VAR), "clean install shipped the secret");
+  });
+
+  test("a planted --var is refused before any write, naming the variable, not the value", async () => {
+    const c = setup();
+    const opts = c.opts("--var", `${VAR}=${PLANTED}`);
+    await assert.rejects(install(c.deps, opts), (e) => {
+      assert.ok(e instanceof Refused, `expected a refusal, got: ${e.message}`);
+      assert.match(e.message, /POSTERN_TEST_PBKDF2_ITERATIONS is set in the wrangler config vars/);
+      assert.equal(e.message.includes(PLANTED), false, "the planted value reached the refusal");
+      return true;
+    });
+    assert.equal(writes(c.m).length, 0, "a planted var still wrote");
+    assert.equal(c.m.wranglerCalls.filter((x) => !x.includes("--dry-run")).length, 0);
+  });
+
+  test("a planted template var is refused (the rendered config, not just --var)", async () => {
+    const c = setup();
+    const wrangler = join(c.deps.repoRoot, "inbound", "wrangler.jsonc");
+    const text = readFileSync(wrangler, "utf8");
+    writeFileSync(wrangler, text.replace('"vars": {', `"vars": {\n    "${VAR}": "${PLANTED}",`));
+    await assert.rejects(install(c.deps, c.opts()), (e) => {
+      assert.ok(e instanceof Refused);
+      assert.match(e.message, /POSTERN_TEST_PBKDF2_ITERATIONS is set in the wrangler config vars/);
+      assert.equal(e.message.includes(PLANTED), false, "the planted value reached the refusal");
+      return true;
+    });
+    assert.equal(writes(c.m).length, 0, "a planted template var still wrote");
+  });
+
+  test("a planted Worker secret is refused on the next run, with no further write", async () => {
+    const c = setup();
+    await install(c.deps, c.opts());
+    const before = {
+      api: writes(c.m).length,
+      wr: c.m.wranglerCalls.filter((x) => !x.includes("--dry-run")).length,
+    };
+    c.m.scripts.postern.secrets.set(VAR, PLANTED);
+    await assert.rejects(install(c.deps, c.opts()), (e) => {
+      assert.ok(e instanceof Refused);
+      assert.match(e.message, /POSTERN_TEST_PBKDF2_ITERATIONS is set in the Worker secret list/);
+      assert.equal(e.message.includes(PLANTED), false, "the planted value reached the refusal");
+      return true;
+    });
+    assert.equal(writes(c.m).length, before.api, "a planted secret still wrote");
+    assert.equal(c.m.wranglerCalls.filter((x) => !x.includes("--dry-run")).length, before.wr);
+  });
+});

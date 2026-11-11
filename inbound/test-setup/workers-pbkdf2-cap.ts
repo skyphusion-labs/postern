@@ -17,6 +17,10 @@ export const WORKERS_PBKDF2_MAX_ITERATIONS = 100_000;
 // not set it, so a production build stays at 100,000. 1,000 keeps a sign-in
 // burst under the default timeout and still leaves room for a fixture below
 // the target. One test derives at 100,000 with its own timeout.
+//
+// The marker is how hashing tells "this is the vitest suite" from a request
+// that happened to carry the override. A wrangler var cannot set a symbol.
+(globalThis as Record<symbol, unknown>)[Symbol.for("postern.vitest")] = true;
 const suiteEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
 if (suiteEnv) suiteEnv.POSTERN_TEST_PBKDF2_ITERATIONS = "1000";
 

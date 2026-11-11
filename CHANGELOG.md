@@ -50,8 +50,12 @@ working meanwhile. Cost: one bge-base embedding per chunk at $0.067 per million 
 - **Sign-in tests no longer derive PBKDF2 at the production count (#909).**
   A loaded runner was exceeding vitest's 5 second default because each password
   check ran PBKDF2-SHA512 at 100,000 iterations. `POSTERN_TEST_PBKDF2_ITERATIONS`
-  selects a lower count through the same Worker env path. Shipping configs do not
-  set it, so a production build still hashes at 100,000.
+  selects a lower count through the same Worker env path, and only while the
+  vitest setup marker is present: outside that environment hashing ignores it
+  and logs the variable name (never the value). The tagged deploy and the
+  installer refuse if the name appears in the wrangler vars being shipped or
+  in the Worker secret list. Shipping configs do not set it, so a production
+  build still hashes at 100,000.
 
 ## v1.13.0
 

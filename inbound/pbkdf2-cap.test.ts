@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 // node URL, not the workers-types global: these are file URLs fed to node:fs (#638).
 import { URL } from "node:url";
 import { handleApi } from "./src/api";
-import { hashIterations, hashSecret, PBKDF2_ITERATIONS, pbkdf2Iterations, TEST_PBKDF2_ITERATIONS_VAR, verifySecret } from "./src/smtpcreds";
+import { hashIterations, hashSecret, PBKDF2_ITERATIONS, pbkdf2Iterations, TEST_PBKDF2_ITERATIONS_VAR, VITEST_ENV_MARK, verifySecret } from "./src/smtpcreds";
 import { insertSession, SESSION_COOKIE, CSRF_COOKIE } from "./src/session";
 
 // #821, as RULED by the lead: the deployed Workers runtime caps PBKDF2 at 100,000
@@ -160,6 +160,27 @@ describe("#821 item 2: the target can never exceed the cap", () => {
       spy.mockRestore();
     }
   });
+
+  it("a set override outside vitest is ignored, and the log names the variable without the value", async () => {
+    const g = globalThis as Record<symbol, unknown>;
+    const prevMark = g[VITEST_ENV_MARK];
+    delete g[VITEST_ENV_MARK];
+    const planted = "2500";
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(pbkdf2Iterations({ POSTERN_TEST_PBKDF2_ITERATIONS: planted })).toBe(PBKDF2_ITERATIONS);
+      const lines = spy.mock.calls.map((c) => String(c[0]));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(TEST_PBKDF2_ITERATIONS_VAR);
+      expect(lines[0]).not.toContain(planted);
+      expect(lines[0].includes("\n")).toBe(false);
+      const h = await hashSecret(PASSWORD, { POSTERN_TEST_PBKDF2_ITERATIONS: planted });
+      expect(h.split("$")[1]).toBe(String(CAP));
+    } finally {
+      g[VITEST_ENV_MARK] = prevMark;
+      spy.mockRestore();
+    }
+  }, 60_000);
 });
 
 describe("#821 the auth paths work under the cap", () => {

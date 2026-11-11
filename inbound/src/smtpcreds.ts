@@ -37,8 +37,14 @@ const SALT_BYTES = 16;
 // name, so the vitest suite can lower the count for every direct call. A present
 // Env key wins over the process, and an empty one forces the production count
 // even while the suite override is set. A lower count weakens stored passwords,
-// which is why a deploy must not set it.
+// so a deploy must not set it (tag deploy + installer refuse it), and hashing
+// honors it only when the vitest setup marker is present.
 export const TEST_PBKDF2_ITERATIONS_VAR = "POSTERN_TEST_PBKDF2_ITERATIONS";
+
+// Set only by inbound/test-setup/workers-pbkdf2-cap.ts. A wrangler var or secret
+// cannot place a symbol on globalThis, so a deployed isolate never honors the
+// override even if the name leaked onto Env.
+export const VITEST_ENV_MARK = Symbol.for("postern.vitest");
 
 export interface Pbkdf2IterationSource {
   POSTERN_TEST_PBKDF2_ITERATIONS?: string;
@@ -59,6 +65,10 @@ function readProcessOverride(): number | "absent" | "invalid" {
   return parseIterationOverride(proc?.env?.[TEST_PBKDF2_ITERATIONS_VAR]);
 }
 
+function inVitestEnvironment(): boolean {
+  return (globalThis as Record<symbol, unknown>)[VITEST_ENV_MARK] === true;
+}
+
 function logBadOverride(): void {
   console.error(
     "config error: " + TEST_PBKDF2_ITERATIONS_VAR + " is not an integer from 1 to " +
@@ -66,18 +76,30 @@ function logBadOverride(): void {
   );
 }
 
+function logIgnoredOutsideVitest(): void {
+  console.error(
+    "config error: " + TEST_PBKDF2_ITERATIONS_VAR +
+      " is set outside the vitest environment; using " + PBKDF2_ITERATIONS,
+  );
+}
+
+function honorOverride(parsed: number | "absent" | "invalid"): number {
+  if (parsed === "absent") return PBKDF2_ITERATIONS;
+  if (!inVitestEnvironment()) {
+    logIgnoredOutsideVitest();
+    return PBKDF2_ITERATIONS;
+  }
+  if (typeof parsed === "number") return parsed;
+  logBadOverride();
+  return PBKDF2_ITERATIONS;
+}
+
 /** The count new hashes, the dummy hash, and the rehash target use. */
 export function pbkdf2Iterations(env?: Pbkdf2IterationSource): number {
   if (env !== undefined && Object.prototype.hasOwnProperty.call(env, TEST_PBKDF2_ITERATIONS_VAR)) {
-    const parsed = parseIterationOverride(env.POSTERN_TEST_PBKDF2_ITERATIONS);
-    if (typeof parsed === "number") return parsed;
-    if (parsed === "invalid") logBadOverride();
-    return PBKDF2_ITERATIONS;
+    return honorOverride(parseIterationOverride(env.POSTERN_TEST_PBKDF2_ITERATIONS));
   }
-  const fromProcess = readProcessOverride();
-  if (typeof fromProcess === "number") return fromProcess;
-  if (fromProcess === "invalid") logBadOverride();
-  return PBKDF2_ITERATIONS;
+  return honorOverride(readProcessOverride());
 }
 
 /** One supported KDF: the tag a stored hash starts with, its PRF, and its output length. */

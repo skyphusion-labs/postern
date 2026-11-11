@@ -221,7 +221,9 @@ and the credentials file is gone with it, so keep a copy.
 
 Worker vars: set them with `--var KEY=VALUE`. They are remembered for every later run.
 Do not edit vars in the dashboard: each deploy replaces the live vars with the configured
-set, so a dashboard-only var is lost at the next upgrade.
+set, so a dashboard-only var is lost at the next upgrade. `POSTERN_TEST_PBKDF2_ITERATIONS`
+is test-only and lowers password hashing strength; the installer refuses it in the
+rendered config vars and in the Worker secret list.
 
 ## Tests
 
