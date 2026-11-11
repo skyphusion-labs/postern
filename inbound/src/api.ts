@@ -2386,7 +2386,12 @@ function isPosternonlineZone(hostname: string): boolean {
 function redirectApexToDemo(url: URL): Response | null {
   const host = url.hostname.toLowerCase();
   if (host !== "posternonline.com" && host !== "www.posternonline.com") return null;
-  const target = new URL(url.pathname + url.search, DEMO_CANONICAL_ORIGIN);
+  // Build on a FIXED origin and set the path, never resolve the request path as a
+  // relative reference: a path starting with "//" is scheme-relative and would put
+  // its first segment in the authority, sending the visitor to another host.
+  const target = new URL(DEMO_CANONICAL_ORIGIN);
+  target.pathname = url.pathname;
+  target.search = url.search;
   return Response.redirect(target.toString(), 301);
 }
 
