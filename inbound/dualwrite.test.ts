@@ -172,7 +172,8 @@ describe("#854 M2 parity sees every kind of disagreement (CONTROLS for the zeros
     const s = setup();
     const NAME = "planted-login-zq7@skyphusion.org";
     await user(s, NAME);
-    const a = await s.call("POST", "/api/admin/identities", { token: ADMIN, body: { from: "planted-agent-zq7@skyphusion.org", scopes: ["read"] } });
+    await s.call("PATCH", `/api/admin/users/${encodeURIComponent(NAME)}`, { token: ADMIN, body: { displayName: "Planted Human Zq7" } });
+    const a = await s.call("POST", "/api/admin/identities", { token: ADMIN, body: { from: "planted-agent-zq7@skyphusion.org", scopes: ["read"], displayName: "Planted Agent Zq7" } });
     const tokenHash = (s.raw.prepare("SELECT token_hash FROM agent_identities WHERE id = ?").get(a.body.id as string) as Json).token_hash as string;
     // Plant a diff of every kind, each carrying a distinctive value.
     s.raw.prepare("UPDATE credentials SET secret = 'PLANTED-SECRET-ZQ7' WHERE lookup = ?").run(NAME);
@@ -180,9 +181,10 @@ describe("#854 M2 parity sees every kind of disagreement (CONTROLS for the zeros
     s.raw.prepare("INSERT INTO credentials (id, principal_id, type, lookup, secret, caps, created_at) VALUES ('crd_orphan', 'prn_x', 'password', 'planted-orphan-zq7@skyphusion.org', 'ORPHAN-SECRET-ZQ7', '[]', '2026-11-11T00:00:00.000Z')").run();
     // A human row with NO principal at all (written before dual-write).
     s.raw.prepare("INSERT INTO smtp_credentials (username, from_addr, secret_hash, disabled) VALUES ('planted-nop-zq7@skyphusion.org', 'planted-nop-zq7@skyphusion.org', 'NOP-HASH-ZQ7', 0)").run();
+    const secretHash = (s.raw.prepare("SELECT secret_hash FROM smtp_credentials WHERE username = ?").get(NAME) as Json).secret_hash as string;
     const res = await s.call("GET", "/api/admin/principals/parity", { token: ADMIN });
     const text = JSON.stringify(res.body);
-    for (const leak of ["zq7", "ZQ7", tokenHash, "PLANTED", "ORPHAN-SECRET", "NOP-HASH", "@skyphusion.org"]) {
+    for (const leak of ["zq7", "ZQ7", "Zq7", "Planted Human", "Planted Agent", tokenHash, secretHash, "PLANTED", "ORPHAN-SECRET", "NOP-HASH", "@skyphusion.org"]) {
       expect(text, `the report must not contain ${leak}`).not.toContain(leak);
     }
     expect(res.body).toMatchObject({ agents: { diffs: 1 }, humans: { diffs: 2, withoutPrincipal: 1 }, orphans: { diffs: 1 } });
