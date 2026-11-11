@@ -27,6 +27,12 @@ mismatched MCP tag fails before it publishes.
   `bcc` or `quoteOriginal` is refused with `400`. Forwarding a stored
   message with that token stays not found.
 
+- **The legacy `EmailService` RPC entrypoint is send-only, as documented.**
+  It exposes `send` and `reply` only (no `get`, `thread`, `list` or
+  `search`) and follows the same rule as the send-only token: a reply
+  goes to the thread's existing parties, and nothing is quoted or
+  forwarded. `MailboxService` is unchanged.
+
 - **HTML-to-text conversion runs in one pass.** Mail with only an HTML
   body is converted to its stored text body by a single linear scan, and
   the converter reads at most the first 512,000 characters, the same bound
@@ -43,6 +49,11 @@ mismatched MCP tag fails before it publishes.
 - **A Date header that does not parse falls back to the receive time.**
   Mail whose Date header is not a valid date is stored with the time it
   was received as its date. The IMAP APPEND import uses the same rule.
+
+- **Thread resolution looks up its candidates in one query.** A message's
+  thread is resolved from its In-Reply-To and its 20 most recent
+  References (`MAX_THREAD_REFERENCES`), deduplicated, in a single D1
+  query. The parent is chosen in the same order as before.
 
 ## v1.10.0
 
