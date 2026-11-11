@@ -13,6 +13,13 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Fix: the principal parity check no longer reads as a pass when it compared nothing (#854).**
+`GET /api/admin/principals/parity` now answers a `gate`: `fail` on any disagreement, `unmeasured`
+when no runtime agent identity and no native login exists (so there was nothing to compare), else
+`pass`, plus which kinds were compared. It also names what it cannot see: the env-registry agents
+and the webmail auth backend. Production read zero rows of both kinds while it had registry agents,
+which the old report showed as all zeros, the same as a clean pass.
+
 **Fix: a session from before the principals migration can read mail again in webmail.**
 Since #853, the page loads the human-only list on its own right after sign-in. Such a session
 gets `E_REAUTH_REQUIRED` for that list, and the page signed it out at once, before the person
@@ -26,6 +33,7 @@ sign-out was sent.
 - **docs(release):** the release procedure gains step 3, move postern-demo and postern-site to the new tag (#934). Both drifted unseen: the demo served v1.8.0 and the site linked v1.9.0 while v1.14.0 was current.
 - **fix(inbound):** the landing page names its write-up "identity-bound credentials (since v1.4.1)". The old "Postern v1.4.1 identity-bound credentials" sat on a page every instance serves, so it read as the running version (#934).
 - `inbound/eval/replay813.mjs` reports FOUND as its primary known-item metric (the gold is a top-10 row, or folded into a top-10 hit's `similar`), with STRICT beside it, and splits known-item probes by whether their template family repeats (#940). With collapse on, a strict miss on a repeated family is usually a sibling standing for the group.
+- **docs(readme):** the README opens with the problem Postern solves, then a 5-minute path on the public demo, running it yourself (locally with no Cloudflare account, then the one-command installer), and honest limits. The apex line is corrected: posternonline.com is the project site, not a redirect to the demo.
 - **feat(mcp):** `@skyphusion/postern-mcp` carries the metadata the official MCP Registry needs: `mcpName` (`io.github.skyphusion-labs/postern-mcp`) in `mcp/package.json`, and `mcp/server.json` (validated against the 2025-12-11 schema). `mcp/test/server-json.test.ts` keeps both in step with `package.json`. Nothing is published until the next `postern-mcp-v*` release.
 
 ## v1.14.0
