@@ -25,6 +25,14 @@ mismatched MCP tag fails before it publishes.
   body is converted to its stored text body by a single linear scan, and
   the converter reads at most the first 512,000 characters, the same bound
   as the stored HTML. Output on ordinary HTML is unchanged.
+- **Sign-in attempts are counted atomically.** Webmail sign-in, change
+  password and first-run setup now reserve each attempt before the
+  password check, so attempts made at the same time are each counted
+  toward the lockout.
+- **`/api/smtp-auth` is throttled at the Worker** on the canonical
+  username (AUTH-CONTRACT.md section 5d), sharing the account budget with
+  webmail sign-in. A locked account answers `200 {ok: false, error:
+  "E_AUTH_THROTTLED"}`.
 
 - **A Date header that does not parse falls back to the receive time.**
   Mail whose Date header is not a valid date is stored with the time it

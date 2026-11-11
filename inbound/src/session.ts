@@ -35,7 +35,7 @@ import {
 import { sha256Hex } from "./sendidentity";
 import type { BoundIdentity } from "./sendidentity";
 import { readBodyCapped, PayloadTooLargeError } from "./body";
-import { attemptKeys, gateAttempt, recordFailure, clearFailures } from "./auththrottle";
+import { attemptKeys, gateAttempt, recordFailure, clearFailures, releaseAttempt } from "./auththrottle";
 import { anyUser } from "./smtpcreds";
 
 export const SESSION_COOKIE = "__Host-postern_session";
@@ -415,8 +415,9 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
     }
 
     // Durable brute-force throttle (#409 part 1, ./auththrottle). A malformed request
-    // never reaches here, so a client bug cannot burn an account budget. The gate is
-    // ONE D1 read and no write; a clean successful login adds no write at all.
+    // never reaches here, so a client bug cannot burn an account budget. The gate
+    // RESERVES this attempt's slot atomically before the verify, so concurrent guesses
+    // are each counted.
     const keys = attemptKeys(request, username);
     let gate;
     try {
@@ -431,10 +432,16 @@ export async function handleSession(request: Request, env: Env): Promise<Respons
       return throttled(gate.retryAfter);
     }
 
-    // Only a definite credential REJECTION counts. An infra error inside
-    // mintNativeSession throws past this point without recording anything, so a D1
-    // outage cannot lock users out (the relay draws the same line).
-    const minted = await mintNativeSession(env, username, password);
+    // Only a definite credential REJECTION keeps its reservation. An infra error inside
+    // mintNativeSession releases it and rethrows, so a D1 outage cannot lock users out
+    // (the relay draws the same line).
+    let minted;
+    try {
+      minted = await mintNativeSession(env, username, password);
+    } catch (err) {
+      await releaseAttempt(env, gate).catch(() => {});
+      throw err;
+    }
     if (!minted) {
       try {
         await recordFailure(env, keys, gate);
@@ -593,9 +600,17 @@ async function handleChangePassword(request: Request, env: Env, url: URL, rawId:
   if (!gate.allowed) return throttled(gate.retryAfter);
 
   // The session resolved, so the account existed and was enabled a moment ago; a
-  // vanished row here is a race and reads as a plain rejection.
-  const cred = await lookup(env, resolved.username);
-  const ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash, cred.username) : false;
+  // vanished row here is a race and reads as a plain rejection. An infra error releases
+  // the reservation the gate took, as on sign-in.
+  let cred: Awaited<ReturnType<typeof lookup>>;
+  let ok: boolean;
+  try {
+    cred = await lookup(env, resolved.username);
+    ok = cred && !cred.disabled ? await verifySecret(current, cred.secretHash, cred.username) : false;
+  } catch (err) {
+    await releaseAttempt(env, gate).catch(() => {});
+    throw err;
+  }
   if (!cred || !ok) {
     try {
       await recordFailure(env, keys, gate);
