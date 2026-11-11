@@ -5,7 +5,7 @@
 
 import { sha256hex, representableId } from "./ingest";
 import { EMBED_VERSION, embedChunks } from "./embedtext";
-import { capPerKey, foldThreads, queryTokens, rankFamilies, templateKey } from "./semrank";
+import { SIMILAR_IDS_CAP, capPerKey, foldThreads, queryTokens, rankFamilies, templateKey } from "./semrank";
 import { PROJECTION_VERSION, projectRfc822Size } from "./rfc822Project";
 import { allowedFromDomain } from "./fromdomain";
 
@@ -304,7 +304,8 @@ export interface SearchHit {
   score?: number;
   /** #813, semantic mode with collapse: the OTHER visible members of this hit's template
    *  family (near-identical mail from the same sender), best first. `ids` capped at 20,
-   *  `count` exact. Absent when the hit stands alone. */
+   *  `count` exact. Absent when the hit stands alone. #940, hybrid with a family cap: the
+   *  members the cap left off, on the family's best kept hit, same shape. */
   similar?: { count: number; ids: string[] };
   /** #926, semantic mode with collapseThreads: the OTHER visible hits of this hit's thread
    *  (not already inside some hit's `similar`), best first. `ids` capped at 20, `count`
@@ -3333,9 +3334,30 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   return out;
 }
 
-/** #930: at most `cap` hits per template family, on the blended, scoped list. */
+/** #930: at most `cap` hits per template family, on the blended, scoped list.
+ *  #940: the members the cap leaves off are not discarded silently. They ride on the family's
+ *  best kept hit as `similar: { count, ids }` (best first, `ids` capped at 20), the same shape
+ *  and meaning as semantic: same-family messages not listed as rows. The rows themselves are
+ *  exactly what the cap kept, so hybrid still never folds. Input is scoped, so `similar`
+ *  covers visible mail only, and only the members inside the fetched window. */
 function capFamilies(items: SearchHit[], cap: number): SearchHit[] {
-  return capPerKey(items.map((h) => ({ hit: h, key: templateKey(h.message.from, h.message.subject) })), cap).map((k) => k.hit);
+  const keyed = items.map((h) => ({ hit: h, key: templateKey(h.message.from, h.message.subject) }));
+  const kept = capPerKey(keyed, cap);
+  const keptHits = new Set(kept.map((k) => k.hit));
+  const leftOff = new Map<string, string[]>();
+  for (const k of keyed) {
+    if (keptHits.has(k.hit)) continue;
+    const ids = leftOff.get(k.key) ?? [];
+    ids.push(k.hit.message.messageId);
+    leftOff.set(k.key, ids);
+  }
+  const carried = new Set<string>();
+  return kept.map(({ hit, key }) => {
+    const ids = leftOff.get(key);
+    if (!ids || carried.has(key)) return hit;
+    carried.add(key);
+    return { ...hit, similar: { count: ids.length, ids: ids.slice(0, SIMILAR_IDS_CAP) } };
+  });
 }
 
 /** #930, eval only: fold families in hybrid (the option the eval rejected). */

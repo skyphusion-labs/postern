@@ -305,7 +305,8 @@ export const READ_TOOLS: ToolDef[] = [
       familyCap: z.number().int().min(0).max(10).optional().describe(
         "mode hybrid only (#930): at most this many hits per family of near-identical notifications " +
           "from one sender. Defaults to 2 in hybrid; 0 lists every member. When the cap leaves rows " +
-          "off, the result says complete: false. Refused (non-zero) in any other mode.",
+          "off, the result says complete: false, and the family's best kept hit lists them in "
+          + "`similar: {count, ids}` (#940). Refused (non-zero) in any other mode.",
       ),
       seen: z.boolean().optional().describe("filter on read state: true = seen, false = unread"),
       seenFor: z.string().optional().describe(
