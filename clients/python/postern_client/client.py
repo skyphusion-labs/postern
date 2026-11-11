@@ -121,20 +121,115 @@ class OutboundAttachment:
         return out
 
 
+# A returned message body longer than this is cut, and the result says so.
+# POSTERN_MAX_BODY_CHARS overrides it. 64 KiB is enough for a normal message
+# and small enough that one row cannot fill a caller on its own.
+_DEFAULT_MAX_BODY_CHARS = 64 * 1024
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _prepare_base(base_url: str) -> str:
+    """Normalize an API base URL.
+
+    https is required except for localhost. Userinfo is refused. The query and
+    fragment are dropped, so a token or other parameter on the base is neither
+    stored nor sent nor repeated in an error.
+    """
+    raw = (base_url or "").strip()
+    parts = urllib.parse.urlsplit(raw)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise PosternError("POSTERN_API_URL must be an http or https origin")
+    if parts.username or parts.password:
+        raise PosternError("POSTERN_API_URL must not include userinfo")
+    host = parts.hostname.lower()
+    if parts.scheme != "https" and host not in _LOOPBACK_HOSTS:
+        raise PosternError(
+            f"POSTERN_API_URL must use https (got http://{host}). "
+            "http is accepted only for localhost."
+        )
+    path = parts.path.rstrip("/")
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def _origin_of(url: str) -> tuple[str, str, int]:
+    parts = urllib.parse.urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").lower()
+    if parts.port is not None:
+        port = parts.port
+    elif scheme == "https":
+        port = 443
+    else:
+        port = 80
+    return scheme, host, port
+
+
+def _same_origin(base: str, newurl: str) -> bool:
+    absolute = urllib.parse.urljoin(base, newurl)
+    return _origin_of(base) == _origin_of(absolute)
+
+
+class _DropCrossOriginAuth(urllib.request.HTTPRedirectHandler):
+    """Copy of urllib's redirect, minus Authorization when the origin changes.
+
+    Same-origin redirects keep the header. A different scheme, host, or port
+    does not: the configured origin is the only one that should see the token.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None or _same_origin(req.full_url, newurl):
+            return new
+        for key in list(new.headers):
+            if key.lower() == "authorization":
+                del new.headers[key]
+        extra = getattr(new, "unredirected_hdrs", None)
+        if isinstance(extra, dict):
+            for key in list(extra):
+                if key.lower() == "authorization":
+                    del extra[key]
+        return new
+
+
+def _cap_bodies(node: Any, limit: int) -> None:
+    """Cut bodyText and bodyHtml over `limit` and flag the object that held them."""
+    if isinstance(node, dict):
+        truncated = False
+        for key in ("bodyText", "bodyHtml"):
+            value = node.get(key)
+            if isinstance(value, str) and len(value) > limit:
+                node[key + "Length"] = len(value)
+                node[key] = value[:limit]
+                node[key + "Truncated"] = True
+                truncated = True
+        if truncated:
+            node["bodyTruncated"] = True
+        for value in list(node.values()):
+            if isinstance(value, (dict, list)):
+                _cap_bodies(value, limit)
+    elif isinstance(node, list):
+        for value in node:
+            if isinstance(value, (dict, list)):
+                _cap_bodies(value, limit)
+
+
 # Injectable transport so tests supply a fake without a live server. Takes a
 # fully-formed urllib Request, returns (status, headers, body_bytes).
 class _UrllibTransport:
     def __init__(self, timeout: float) -> None:
         self._timeout = timeout
+        self._opener = urllib.request.build_opener(_DropCrossOriginAuth)
 
     def __call__(self, req: urllib.request.Request) -> tuple[int, Mapping[str, str], bytes]:
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with self._opener.open(req, timeout=self._timeout) as resp:
                 return resp.status, dict(resp.headers), resp.read()
         except urllib.error.HTTPError as e:
             return e.code, dict(e.headers or {}), e.read()
         except urllib.error.URLError as e:
-            raise PosternError(f"request failed: {e.reason}") from e
+            # The reason can carry the request URL. Keep the part before any query.
+            reason = str(e.reason).split("?", 1)[0]
+            raise PosternError(f"request failed: {reason}") from e
 
 
 def _addr_list(value: Optional[Addresses]) -> Optional[list[str]]:
@@ -168,6 +263,10 @@ def _bool_param(value: bool) -> str:
 
 
 def _quote(value: str) -> str:
+    # `.` and `..` survive quoting and then change which route the path names.
+    # Refuse them, and an empty id, before the path is built.
+    if not value or value in (".", ".."):
+        raise PosternError("id must not be empty, '.' or '..'")
     return urllib.parse.quote(value, safe="")
 
 
@@ -180,15 +279,28 @@ class PosternClient:
     CONTRACT exactly; callers read the documented keys.
     """
 
-    def __init__(self, base_url: str, token: str, timeout: float = 30.0, transport: Any = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        timeout: float = 30.0,
+        transport: Any = None,
+        max_body_chars: Optional[int] = None,
+    ) -> None:
         if not base_url:
             raise PosternError("base_url (POSTERN_API_URL) is required")
         if not token:
             raise PosternError("token (POSTERN_API_TOKEN) is required")
-        self._base = base_url.rstrip("/")
+        self._base = _prepare_base(base_url)
         self._token = token
         self._transport = transport or _UrllibTransport(timeout)
         self._ua = "postern-client"
+        if max_body_chars is None:
+            self._max_body_chars = _DEFAULT_MAX_BODY_CHARS
+        elif max_body_chars < 1:
+            raise PosternError("max_body_chars must be a positive integer")
+        else:
+            self._max_body_chars = max_body_chars
 
     # --- write half ---------------------------------------------------------
 
@@ -1100,6 +1212,7 @@ class PosternClient:
                 code=parsed.get("error"),
                 body=parsed,
             )
+        _cap_bodies(parsed, self._max_body_chars)
         return parsed
 
 
@@ -1185,4 +1298,13 @@ def from_env(
             timeout = float(timeout_raw)
         except ValueError as exc:
             raise PosternError("POSTERN_API_TIMEOUT must be a number") from exc
-    return PosternClient(base, token, timeout=timeout, transport=transport)
+    body_raw = (e.get("POSTERN_MAX_BODY_CHARS") or "").strip()
+    max_body: Optional[int] = None
+    if body_raw:
+        try:
+            max_body = int(body_raw)
+        except ValueError as exc:
+            raise PosternError("POSTERN_MAX_BODY_CHARS must be a positive integer") from exc
+        if max_body < 1:
+            raise PosternError("POSTERN_MAX_BODY_CHARS must be a positive integer")
+    return PosternClient(base, token, timeout=timeout, transport=transport, max_body_chars=max_body)
