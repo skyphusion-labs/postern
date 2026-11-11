@@ -644,6 +644,10 @@ none touches D1 directly (#25, #26).
 | DELETE | `/api/admin/identities/{id}` | revoke an identity; the next request with its token is `401`. Idempotent | #801 |
 | GET/POST | `/api/admin/delegations` | list delegation grants (keyset `limit`/`cursor`, `includeRevoked=1`, `grantee=`, `address=`) or grant one `{granteeId, address, powers, label?}`: the grantee must be a LIVE agent identity (`400 E_GRANTEE_INVALID`), powers from `read`, `organize`, `quote`, `send_as` (every power implies `read`), one active grant per (grantee, address) (`409 E_CONFLICT`). Stored only; nothing enforces a grant yet. See DELEGATION.md | #740 S1 |
 | DELETE | `/api/admin/delegations/{id}` | revoke a grant. Idempotent | #740 S1 |
+| GET | `/api/delegations/mine/grantees` | #740 S5, webmail SESSION only (a Bearer is 403 E_SESSION_REQUIRED): live agent identities, exactly `{id, displayName, from}` | #740 S5 |
+| GET/POST | `/api/delegations/mine` | #740 S5, session only: list the active grants on my address / grant on it `{granteeId, powers, label?}` (no address field; audited, actor human). CSRF on POST | #740 S5 |
+| DELETE | `/api/delegations/mine/{id}` | #740 S5, session only: revoke a grant on my address; any other id is 404. CSRF | #740 S5 |
+| GET | `/api/audit/mine` | #740 S5, session only: the audit rows about my address, newest first (keyset `limit`/`cursor`), the `/api/admin/audit` row shape | #740 S5 |
 | GET | `/api/admin/audit` | the audit log, newest first (keyset `limit`/`cursor`): actor, action, target, outcome, detail; refusals included. The operator is actor `{kind: "service", id: "svc_both"}` since #854 M1 (older rows: `operator`, `null`) | #801 |
 | POST | `/api/admin/principals/backfill` | copy agent identities, human users and the static slots into the principal tables; idempotent and convergent; returns `{services, agents, humans, addressConflicts}`. Store only: nothing authorizes from these tables yet (IDENTITY.md section 6) | #854 M1 |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |

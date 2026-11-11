@@ -53,6 +53,7 @@ import {
 import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 import { agentAudit, agentMessageAudit, auditStatement } from "./adminkit";
 import { backfillPrincipals } from "./principals";
+import { handleSelfService } from "./selfservice";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
 // be an if-chain further down this file, which is precisely the knowledge every client
@@ -448,6 +449,16 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (path === "/api/admin/audit") {
       const ares = await handleAudit(request, env, url);
       if (ares) return ares;
+    }
+    // #740 S5: the human's own delegation and audit trail (webmail session only).
+    if (
+      path === "/api/audit/mine" ||
+      path === "/api/delegations/mine" ||
+      path === "/api/delegations/mine/grantees" ||
+      path.startsWith("/api/delegations/mine/")
+    ) {
+      const sres = await handleSelfService(request, env, url, resolution);
+      if (sres) return sres;
     }
     // #854 M1: the principal backfill. Operator only, POST only (its one route row).
     if (request.method === "POST" && path === "/api/admin/principals/backfill") {
@@ -1417,7 +1428,7 @@ function organizeAudit(
   const actor = resolution.identityId as string;
   return {
     addresses,
-    statement: (where) => agentMessageAudit(env, at, actor, ORGANIZE_AUDIT_ACTION, { ...detail, granted: addresses }, where),
+    statement: (where, address) => agentMessageAudit(env, at, actor, ORGANIZE_AUDIT_ACTION, { ...detail, address }, where),
   };
 }
 

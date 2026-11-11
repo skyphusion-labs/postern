@@ -19,6 +19,12 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Added
 
+- **A human manages delegation on their own address (#740 S5).** From a
+  webmail session: `GET /api/delegations/mine/grantees` (the live agents a
+  human may grant to), `GET`/`POST /api/delegations/mine`, `DELETE
+  /api/delegations/mine/{id}`, and `GET /api/audit/mine` (the audit rows
+  about the human own address). Session only: a token is refused. Grants
+  are audited with the human as actor. See `docs/DELEGATION.md` section 4.6.
 - **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
   `principal_addresses` tables, the six static token slots as service
   principals, and `POST /api/admin/principals/backfill`, which copies agent
@@ -43,6 +49,10 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Changed
 
+- **An organize audit row names whose mail it touched (#740 S5).** Its
+  `detail` carries `address` (the granted human) instead of `granted` (every
+  granted address); a message two granted humans both receive gets a row
+  for each.
 - **The operator is named in the audit log (#854 M1).** Rows the admin
   routes write now carry actor `service` / `svc_both` instead of
   `operator` with no id. Older rows are unchanged.
