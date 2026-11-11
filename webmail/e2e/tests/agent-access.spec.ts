@@ -37,6 +37,7 @@ function server(opts: { mode?: "session" | "token"; routes?: "present" | "absent
   ];
   const writes: Array<{ method: string; path: string; body: unknown; csrf?: string }> = [];
   const accessRequests: string[] = [];
+  const signOuts: string[] = [];
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
   async function handle(route: Route, req: Request) {
@@ -46,6 +47,7 @@ function server(opts: { mode?: "session" | "token"; routes?: "present" | "absent
     if (path === "/webmail") {
       return route.fulfill({ status: 200, headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": CSP! }, body: HTML });
     }
+    if (path === "/api/session" && method === "DELETE") { signOuts.push(path); return json(route, { ok: true }); }
     if (path === "/api/session" && method === "GET") {
       return mode === "session"
         ? json(route, { ok: true, identity: { from: "me@skyphusion.org", displayName: "Me" }, capabilities: ["read", "send"], csrfToken: CSRF, authBackend: "native" })
@@ -78,7 +80,7 @@ function server(opts: { mode?: "session" | "token"; routes?: "present" | "absent
     if (path === "/api/messages") return json(route, { ok: true, items: [], cursor: null });
     return json(route, { ok: true });
   }
-  return { handle, writes, accessRequests };
+  return { handle, writes, accessRequests, signOuts };
 }
 
 async function open(page: Page, s: ReturnType<typeof server>) {
@@ -223,10 +225,25 @@ test.describe("agent access and activity (#740 S5)", () => {
 
   test("a session from before the principals migration is sent to sign in again, with a reason", async ({ page }) => {
     const s = server({ routes: "reauth" });
+    // The page loads the human-only list on its own at sign-in, and this session gets
+    // E_REAUTH_REQUIRED for it. Wait for that answer, so the check below cannot pass by
+    // catching the mailbox before the answer lands (it raced, and main went red).
+    const exclusions = page.waitForResponse((r) => r.url().endsWith("/api/delegations/mine/exclusions"));
     await open(page, s);
+    await exclusions;
+    await page.waitForLoadState("networkidle");
+    // The background load does not sign a session out: it can still read mail, and the
+    // human-only mark is simply not offered. Signing out is a DELETE /api/session, so its
+    // absence is the measurement; the visibility checks below agree with it.
+    expect(s.signOuts).toEqual([]);
+    await expect(page.locator("#app")).toBeVisible();
+    await expect(page.locator("#signin")).toBeHidden();
+    await expect(page.locator("#excSection")).toBeHidden();
+    // Asking to manage access is what sends it to sign in again, with the reason.
     await openSettings(page);
     await expect(page.locator("#signin")).toBeVisible();
     await expect(page.getByText("Sign in again to manage agent access to your mail.")).toBeVisible();
+    expect(s.signOuts).toEqual(["/api/session"]);
   });
 
   test("an older server without the routes hides the sections", async ({ page }) => {
