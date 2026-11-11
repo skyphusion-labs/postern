@@ -32,6 +32,12 @@ applied by the deploy. Nothing changes until a human marks a thread.
   queries are unchanged too. Marks are
   audited (`delegation.exclude` / `delegation.unexclude`, actor human) and
   show in `GET /api/audit/mine`. See `docs/DELEGATION.md` section 4.8.
+- **Webmail: mark a conversation human-only (#853).** Signed in with a
+  session, a person marks a whole conversation human-only from the
+  message view, so no agent can read, organize, quote or reply to it
+  through that person's address, whatever access it has. Other recipients
+  decide for their own copies. Settings lists those conversations and undoes a
+  mark in two clicks; the activity list shows each mark and unmark.
 
 ### Changed
 
