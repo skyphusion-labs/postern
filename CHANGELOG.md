@@ -13,6 +13,10 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds),
+`0020` (`webmail_sessions.principal_id`) and `0021` (the `svc_admin` seed) are additive and
+are applied by the deploy. Run `POST /api/admin/principals/backfill` once after
+upgrading to copy existing identities and users in; it is safe to run again.
 **Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
 `0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. The
 backfill that copies existing identities and users in now runs automatically after each
@@ -22,6 +26,11 @@ version or created the first admin. A manual run is still safe: it is idempotent
 
 ### Added
 
+- **An admin-only token slot (#904).** `POSTERN_API_TOKEN_ADMIN` reaches the
+  admin routes and nothing else: it cannot read, send, delete or organize
+  mail. Its audit rows name the `svc_admin` service principal. Set and rotate
+  it with `wrangler secret put POSTERN_API_TOKEN_ADMIN`; unset changes
+  nothing.
 - **The principal layer, phase M1 (#854).** The `principals`, `credentials` and
   `principal_addresses` tables, the six static token slots as service
   principals, and `POST /api/admin/principals/backfill`, which copies agent

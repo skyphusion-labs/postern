@@ -45,6 +45,8 @@ import {
   readBody,
   requireDomain,
   runAudited,
+  OPERATOR_ACTOR,
+  type AuditActor,
 } from "./adminkit";
 
 /** What a runtime identity may hold: exactly the registry caps. Never delete or admin. */
@@ -191,7 +193,7 @@ function project(row: IdentityRow) {
 
 // --- the three operations ---
 
-async function mint(request: Request, env: Env): Promise<Response> {
+async function mint(request: Request, env: Env, actor: AuditActor): Promise<Response> {
   const body = await readBody(request);
   const domain = requireDomain(env);
   const caps = requestedCaps(body);
@@ -218,7 +220,7 @@ async function mint(request: Request, env: Env): Promise<Response> {
     targetId: id,
     outcome: "ok",
     detail: { from, scopes: caps },
-  });
+  }, undefined, actor);
   await env.DB.batch([insert, audit]);
   return json(
     {
@@ -236,7 +238,7 @@ async function mint(request: Request, env: Env): Promise<Response> {
   );
 }
 
-async function list(url: URL, env: Env): Promise<Response> {
+async function list(url: URL, env: Env, actor: AuditActor): Promise<Response> {
   const limit = parseLimit(url);
   const includeRevoked = parseIncludeRevoked(url);
   const cursor = decodeCursor(url, IDENTITY_ID_RE);
@@ -263,11 +265,11 @@ async function list(url: URL, env: Env): Promise<Response> {
     action: "identity.list",
     outcome: "ok",
     detail: { returned: page.length, includeRevoked },
-  }).run();
+  }, undefined, actor).run();
   return json({ ok: true, items: page.map(project), cursor: next });
 }
 
-async function revoke(env: Env, rawId: string): Promise<Response> {
+async function revoke(env: Env, rawId: string, actor: AuditActor): Promise<Response> {
   const id = pathId(rawId, IDENTITY_ID_RE, "identity");
   const row = await env.DB.prepare(`SELECT ${COLUMNS} FROM agent_identities WHERE id = ?`).bind(id).first<IdentityRow>();
   if (!row) throw new AdminError(404, "E_NOT_FOUND", "no such identity");
@@ -281,7 +283,7 @@ async function revoke(env: Env, rawId: string): Promise<Response> {
     targetId: id,
     outcome: "ok",
     detail: { alreadyRevoked: row.revoked_at !== null },
-  });
+  }, undefined, actor);
   const results = await env.DB.batch([update, audit]);
   const revoked = results[0]?.meta?.changes ?? 0;
   return json({ ok: true, id, revoked, alreadyRevoked: row.revoked_at !== null });
@@ -297,16 +299,21 @@ const ADMIN_ITEM = /^\/api\/admin\/identities\/([^/]+)$/;
  * method with no row in routes.ts has no scope gate in front of it, so serving it here
  * would be a door.
  */
-export async function handleAdminIdentities(request: Request, env: Env, url: URL): Promise<Response | null> {
+export async function handleAdminIdentities(
+  request: Request,
+  env: Env,
+  url: URL,
+  actor: AuditActor = OPERATOR_ACTOR,
+): Promise<Response | null> {
   const path = url.pathname;
   const target = (raw: string | null) => ({ kind: "identity", raw, idRe: IDENTITY_ID_RE });
   if (path === "/api/admin/identities") {
-    if (request.method === "POST") return runAudited(env, "identity.mint", target(null), () => mint(request, env));
-    if (request.method === "GET") return runAudited(env, "identity.list", target(null), () => list(url, env));
+    if (request.method === "POST") return runAudited(env, "identity.mint", target(null), () => mint(request, env, actor), actor);
+    if (request.method === "GET") return runAudited(env, "identity.list", target(null), () => list(url, env, actor), actor);
     return null;
   }
   const m = ADMIN_ITEM.exec(path);
-  if (m && request.method === "DELETE") return runAudited(env, "identity.revoke", target(m[1]), () => revoke(env, m[1]));
+  if (m && request.method === "DELETE") return runAudited(env, "identity.revoke", target(m[1]), () => revoke(env, m[1], actor), actor);
   return null;
 }
 
