@@ -240,7 +240,15 @@ export async function insertSession(env: Env, account: AuthenticatedAccount): Pr
   // #854 M2: every new session names its human principal. The same per-user code the
   // backfill runs, so the two can never disagree, and a user created after the last
   // backfill still gets one here.
-  const principalId = await ensureHumanPrincipal(env, account.username);
+  // A failure on the principal side never blocks a sign-in (#854 M2: a new-side failure
+  // falls back to today's behaviour, never a deny). The session then carries no principal,
+  // and the self-service routes (#740 S5) ask for a fresh sign-in.
+  let principalId: string | null = null;
+  try {
+    principalId = await ensureHumanPrincipal(env, account.username);
+  } catch (err) {
+    console.error("session principal lookup failed; minting without one", err instanceof Error ? err.message : String(err));
+  }
 
   await env.DB.prepare(
     `INSERT INTO webmail_sessions
