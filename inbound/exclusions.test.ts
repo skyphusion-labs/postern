@@ -123,6 +123,8 @@ async function setup(flag: "granted" | "estate", roles = `${QUEUE}=${HUMAN}+${BO
   return { ...r, call, signIn, agent, agentWith, recordSql, threadOf, owner, mark, unmark, audit, vectorIds: ids };
 }
 type S = Awaited<ReturnType<typeof setup>>;
+const surfaces = (items: unknown, id: string) =>
+  ((items ?? []) as Json[]).some((h) => (h.message as Json)?.messageId === id || (((h.similar as Json | undefined)?.ids as string[] | undefined) ?? []).includes(id));
 const idsOf = (items: unknown) => ((items ?? []) as Json[]).map((m) => (m.message ? (m.message as Json).messageId : m.messageId));
 
 // Every path an agent reaches the owner's mail by, as "does this credential reach `id`".
@@ -139,7 +141,9 @@ const PROBES: Record<string, Probe> = {
   "search fts": async (s, t, id) => idsOf((await s.call("GET", `/api/search?q=zebraquartz&mode=fts&to=${HUMAN}`, { token: t })).body.items).includes(id),
   "search substr": async (s, t, id) =>
     idsOf((await s.call("GET", `/api/search?q=zebraquartz&mode=substr&field=subject&to=${HUMAN}`, { token: t })).body.items).includes(id),
-  "search semantic": async (s, t, id) => idsOf((await s.call("GET", `/api/search?q=zebraquartz&mode=semantic&to=${HUMAN}`, { token: t })).body.items).includes(id),
+  // #813: semantic folds template families by default, so "reached" counts the id as a hit
+  // OR inside a hit's `similar` ids: a hidden message must not surface in either place.
+  "search semantic": async (s, t, id) => surfaces((await s.call("GET", `/api/search?q=zebraquartz&mode=semantic&to=${HUMAN}`, { token: t })).body.items, id),
   "search hybrid": async (s, t, id) => idsOf((await s.call("GET", `/api/search?q=zebraquartz&mode=hybrid&to=${HUMAN}`, { token: t })).body.items).includes(id),
   folders: async (s, t) => {
     // HUMAN's inbox holds HUMAN_MSG, SHARED_MSG and OTHER_MSG: 3 means HUMAN_MSG is counted.

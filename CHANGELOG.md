@@ -13,8 +13,60 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
-**Upgrade.** Migration `0023` (the `delegation_exclusions` table, #853) is additive and is
-applied by the deploy. Nothing changes until a human marks a thread.
+**Upgrade (#813).** Migration `0024` (`vector_ledger.embed_version`) is additive and is applied
+by the deploy. New mail embeds with the subject from the deploy on. To re-embed existing mail,
+run `node inbound/reindex.mjs --stale-only` (`--dry-run` first); it is resumable and search keeps
+working meanwhile. Cost: one bge-base embedding per chunk at $0.067 per million input tokens
+(at most about $1.40 for 61k chunks); Vectorize storage is unchanged (same ids, same count).
+
+### Added
+
+- **Semantic search can fold a thread into one hit (#926).** `collapseThreads=1` (semantic only)
+  keeps a thread's best hit and lists its other visible hits as `threadHits: {count, ids}`.
+  Off by default: in the recall eval it raised the distinct threads in the top 10 from 8.25 to
+  9.75 but moved no recall family, and a default changes only on a recall gain. Refused outside
+  `mode=semantic`; hybrid never folds threads. MCP `mailbox_search` and the Python client take it.
+- **Semantic search embeds the subject and ranks template families (#813).** Chunk 0 now
+  carries `Subject: <subject>` (an empty-body message gets a subject chunk), recorded as
+  `vector_ledger.embed_version` 2. Near-identical notifications from one sender are ranked by
+  the query's exact tokens (a commit hash, an order number), then newest first.
+  `POST /api/admin/reindex` takes `staleOnly`, and reconcile reports `staleEmbedMessages`.
+  The MCP `mailbox_search` tool and the Python client take `collapse`. The recall eval behind
+  the defaults is in `inbound/eval/` (see its README).
+
+### Changed
+
+- **Semantic search collapses template families by default (#813).** A family of
+  near-identical notifications is one hit carrying `similar: {count, ids}` (its other
+  visible members). Pass `collapse=0` for one row per message. `collapse=1` outside
+  `mode=semantic` is refused (400); hybrid never collapses. The default follows the eval:
+  family coverage at 10 rose from 39% to 69% with no query family worse.
+- **Semantic search always retrieves to the ceiling (#813).** The family ranking acts after
+  retrieval, so an unfiltered semantic query now asks for `topK` 50 (it asked for `3 x limit`):
+  `retrievalCap` reads 50.
+
+### Fixed
+
+- **Sign-in tests no longer derive PBKDF2 at the production count (#909).**
+  A loaded runner was exceeding vitest's 5 second default because each password
+  check ran PBKDF2-SHA512 at 100,000 iterations. `POSTERN_TEST_PBKDF2_ITERATIONS`
+  selects a lower count through the same Worker env path. Shipping configs do not
+  set it, so a production build still hashes at 100,000.
+
+## v1.13.0
+
+MINOR. A human can mark a conversation human-only, so agents cannot reach it through
+that person's address (#853, API and webmail), and the htmlToText running-time tests
+no longer depend on machine load (#923).
+
+**Upgrade.**
+
+- Migration `0023` (the `delegation_exclusions` table, #853) is additive and is applied
+  by the deploy. Nothing changes until a human marks a thread.
+- Behaviour change on estate deploys (`AGENT_READ_SCOPE=estate`, or unset): an owner's
+  human-only mark applies there too. An agent that reaches a marked thread only through
+  that owner's address no longer reads it. With no mark on the deploy, agent reads are
+  unchanged.
 
 ### Added
 
@@ -49,11 +101,10 @@ applied by the deploy. Nothing changes until a human marks a thread.
 
 ### Fixed
 
-- **Sign-in tests no longer derive PBKDF2 at the production count (#909).**
-  A loaded runner was exceeding vitest's 5 second default because each password
-  check ran PBKDF2-SHA512 at 100,000 iterations. `POSTERN_TEST_PBKDF2_ITERATIONS`
-  selects a lower count through the same Worker env path. Shipping configs do not
-  set it, so a production build still hashes at 100,000.
+- **The htmlToText running-time tests count work instead of timing it
+  (#923).** They bound how many characters the converter's scans examine,
+  which is the same on every run, so a loaded machine no longer fails them.
+  A quadratic control is counted the same way and still fails the bound.
 
 ## v1.12.0
 

@@ -142,7 +142,7 @@ async function emissions(): Promise<Emitted[]> {
       q: "x", mode: "substr", field: "subject", limit: 5, cursor: "c", direction: "inbound",
       to: "a@x.com", from: "b@x.com", lens: "inbox", mailbox: "archive", seenFor: "a@x.com",
       after: "2026-01-01", before: "2026-02-01", hasAttachment: true, seen: false,
-      fields: ["uid", "date", "from", "subject"],
+      fields: ["uid", "date", "from", "subject"], collapse: false, collapseThreads: false,
     }),
   );
   await run("list", () =>
@@ -414,6 +414,10 @@ const SAMPLE: Record<string, unknown> = {
   mailbox: "archive", seenFor: "a@example.com", after: "2026-01-01", before: "2026-02-01",
   viewer: "v@example.com",
   hasAttachment: true, seen: false, thread: "t-1", message_id: "m-1", thread_id: "t-1",
+  // #813: false, because "do not collapse" is accepted in every mode (true is refused
+  // outside semantic, and the shared sample mode is substr).
+  collapse: false,
+  collapseThreads: false,
   index: 0, subject: "s", text: "t", html: "<p>h</p>", cc: "c@example.com",
   bcc: "d@example.com", reply_to: "r@example.com", quote_original: true,
   attachments: [{ content: "QQ==", filename: "a.txt", mime_type: "text/plain" }],

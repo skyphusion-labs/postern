@@ -323,7 +323,30 @@ read-back marker comes close to it. All filter values are bound params. `search`
 Vectorize index the store populates for BOTH inbound and outbound mail, #116 ws2). `semantic` embeds the query with the same model
 (`@cf/baai/bge-base-en-v1.5`) and queries Vectorize, collapsing chunk-hits to unique messages
 (best chunk score wins) and hydrating from D1; `hybrid` blends the fts and semantic result sets
-by `message_id` on a normalized score. semantic/hybrid are SCORE-ranked, so they return a single
+by `message_id` on a normalized score.
+
+**What is embedded (#813).** Each message embeds as body chunks (1200 chars, 150 overlap, at most
+24), with `Subject: <subject>` ahead of chunk 0 (`inbound/src/embedtext.ts`, recipe
+`EMBED_VERSION` 2). A message with an empty body and a subject is one subject-only chunk.
+`vector_ledger.embed_version` records the recipe of every vector.
+
+**Template families (#813).** After hydration and every access filter (the viewer scope, the
+#853 agent guard, the post-retrieval filters), semantic ranking groups hits into template
+families: the sender plus the subject with hex runs of 7 or more, `#`-ids and digit runs masked
+(`inbound/src/semrank.ts`). Inside a family, hits within 0.03 cosine of the family's best are
+reordered by exact query-token overlap with subject and body (a commit hash, an order number), then
+newest first; each takes the score of the slot it lands in, so hybrid inherits the order.
+`collapse` (semantic only, default **on**) then folds each family into its winner, which carries
+`similar: { count, ids }`: the family's OTHER visible members, best first, `ids` capped at 20,
+`count` exact. `collapse=0` lists every member. `collapse=1` (or `true`) in any other mode is
+refused (`E_VALIDATION_ERROR`, HTTP 400), never accepted and ignored; hybrid never collapses.
+`similar` covers only mail the caller may see: a member hidden from it is not counted.
+
+**Thread collapse (#926).** `collapseThreads=1` (semantic only, default **off**) then folds the
+hits of one thread (`threadId`) into its best hit, which carries `threadHits: { count, ids }`: the
+thread's other visible hits that are not already inside some hit's `similar`, best first, `ids`
+capped at 20. `collapseThreads=1` in any other mode is refused (`E_VALIDATION_ERROR`, HTTP 400);
+hybrid never folds threads. Like `similar`, it covers visible mail only. semantic/hybrid are SCORE-ranked, so they return a single
 ranked page of up to `limit` hits. A date keyset `cursor` does not continue them: supplying one
 with `mode=semantic` or `mode=hybrid` is refused (`E_VALIDATION_ERROR`, HTTP 400) rather than
 accepted and dropped (#803). `fts` and `substr` still page on that cursor, and so does a search
@@ -725,12 +748,14 @@ any of the three refusals.
 `POST /api/admin/reindex` is the **backfill** (#116 ws4): it (re)embeds the EXISTING mailbox into
 the semantic index so history predating the live index -- and all historical outbound -- becomes
 queryable. It is `both`-scoped (admin, #85), so a read or send token gets `403`. Body
-`{ cursor?, limit?, dryRun? }`; it processes ONE keyset page per call (same `(date DESC, id DESC)`
+`{ cursor?, limit?, dryRun?, staleOnly? }`; it processes ONE keyset page per call (same `(date DESC, id DESC)`
 order + opaque cursor as the read API), applies the SAME `VECTORIZE_FOR` gate as live ingest
 (`store.shouldVectorize`: outbound always, inbound per allowlist), and AWAITS the embeds so a page
 finishes inside request limits. It returns
-`{ ok, total?, processed, indexed, vectors, skippedByGate, nextCursor, done, dryRun }` (`total` only
-on the first call). Each message is embedded through the SAME `embedAndUpsert` the live path uses, so
+`{ ok, total?, processed, indexed, vectors, skippedByGate, skippedCurrent, nextCursor, done, dryRun,
+embedVersion }` (`total` only on the first call). `staleOnly: true` (#813) skips every message
+whose ledger rows are all at the current embed recipe (`skippedCurrent` counts them), so a re-embed
+after a recipe change resumes without paying twice; `inbound/reindex.mjs --stale-only`. Each message is embedded through the SAME `embedAndUpsert` the live path uses, so
 backfilled vectors are byte-identical to live ones, and the vector id is deterministic
 (`sha256(messageId).slice + chunk`) so a re-run OVERWRITES -- the backfill is **idempotent** and safe
 to resume or repeat. `dryRun: true` does everything except the embed/upsert, summing the chunk count

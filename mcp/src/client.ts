@@ -142,6 +142,8 @@ export class PosternClient {
     after?: string;
     before?: string;
     hasAttachment?: boolean;
+    collapse?: boolean;
+    collapseThreads?: boolean;
     seen?: boolean;
     seenFor?: string;
     fields?: string[];
@@ -175,6 +177,8 @@ export class PosternClient {
     // Booleans forward as "true"/"false"; the worker accepts 0|1|true|false
     // (worker #354, api.ts) and 400s anything else.
     if (args.hasAttachment !== undefined) params.hasAttachment = String(args.hasAttachment);
+    if (args.collapse !== undefined) params.collapse = args.collapse ? "1" : "0";
+    if (args.collapseThreads !== undefined) params.collapseThreads = args.collapseThreads ? "1" : "0";
     if (args.seen !== undefined) params.seen = String(args.seen);
     // Read-state projection key (worker #404): whose message_seen_by row the
     // effective-seen COALESCE reads, separate from which rows come back. An MCP

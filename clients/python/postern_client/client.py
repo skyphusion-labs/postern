@@ -657,6 +657,8 @@ class PosternClient:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
         fields: Optional[Sequence[str]] = None,
+        collapse: Optional[bool] = None,
+        collapse_threads: Optional[bool] = None,
     ) -> dict[str, Any]:
         """GET /api/search. Returns {items: [{message, ...}], cursor: str|None}.
 
@@ -670,6 +672,12 @@ class PosternClient:
         bare date or a full timestamp, a bare `before` covering its whole named
         day (#647); `has_attachment` and `seen` are booleans. The worker validates all of these strictly, so a typo is a
         clean 400 rather than a silently-dropped filter.
+
+        `collapse` (#813, mode semantic only): the worker folds near-identical
+        notifications from one sender into one hit carrying `similar` by default;
+        False lists every member. True outside mode semantic is refused (400).
+        `collapse_threads` (#926, semantic only) folds one thread's hits into its
+        best hit, which carries `threadHits`.
 
         Mind the PAIR here: `field` (singular) selects the substr COLUMN
         matched; `fields` (plural) projects each hit's `message` to the named
@@ -706,6 +714,10 @@ class PosternClient:
             params["hasAttachment"] = _bool_param(has_attachment)
         if seen is not None:
             params["seen"] = _bool_param(seen)
+        if collapse is not None:
+            params["collapse"] = _bool_param(collapse)
+        if collapse_threads is not None:
+            params["collapseThreads"] = _bool_param(collapse_threads)
         if limit is not None:
             params["limit"] = str(limit)
         if cursor:

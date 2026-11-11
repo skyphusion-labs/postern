@@ -129,6 +129,10 @@ Then finish the store and the worker:
   tokens), then `npm run deploy`.
 - **Vectorize (optional):** if you use semantic search, rebuild the index with
   `POST /api/admin/reindex` (admin-scoped token).
+- **After an embed recipe change** (for example #813, `EMBED_VERSION` 2): `POST
+  /api/admin/reconcile` reports `staleEmbedMessages`; re-embed only those with
+  `node inbound/reindex.mjs --stale-only` (dry-run first for the vector count). Search
+  keeps working during the re-embed: an older vector is still a valid body embedding.
 - **Verify:** run `inbound/smoke.mjs` (DEPLOY.md section 2). A green run means the
   store reads, sends, threads, and searches again.
 

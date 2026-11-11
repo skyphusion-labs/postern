@@ -110,6 +110,31 @@ describe("mailbox_search", () => {
     }
   });
 
+  it("#813 collapse: true is refused outside semantic, before any request; semantic forwards it and echoes the default", async () => {
+    const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const search = tool("mailbox_search");
+    expect(Object.keys(search.inputSchema)).toContain("collapse");
+    await expect(search.handler(client, { query: "x", collapse: true })).rejects.toThrow(/collapse folds template families in mode semantic/);
+    await expect(search.handler(client, { query: "x", mode: "fts", collapse: true })).rejects.toThrow(/mode semantic/);
+    expect(client.search).not.toHaveBeenCalled();
+    const sem: any = await search.handler(client, { query: "x", mode: "semantic" });
+    expect(sem.collapse).toBe(true);
+    await search.handler(client, { query: "x", mode: "semantic", collapse: false });
+    expect(client.search).toHaveBeenLastCalledWith(expect.objectContaining({ collapse: false }));
+    const hybrid: any = await search.handler(client, { query: "x", collapse: false });
+    expect("collapse" in hybrid).toBe(false);
+  });
+
+  it("#926 collapseThreads: true is refused outside semantic before any request; semantic forwards it", async () => {
+    const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const search = tool("mailbox_search");
+    expect(Object.keys(search.inputSchema)).toContain("collapseThreads");
+    await expect(search.handler(client, { query: "x", collapseThreads: true })).rejects.toThrow(/collapseThreads folds threads in mode semantic/);
+    expect(client.search).not.toHaveBeenCalled();
+    await search.handler(client, { query: "x", mode: "semantic", collapseThreads: true });
+    expect(client.search).toHaveBeenLastCalledWith(expect.objectContaining({ collapseThreads: true }));
+  });
+
   it("forwards from, mailbox, after, before, hasAttachment, and seen to client.search (#419 sync)", async () => {
     const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
     const out: any = await tool("mailbox_search").handler(client, {

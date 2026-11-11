@@ -37,7 +37,7 @@ func TestMIMEParseCorpus_NoPanic(t *testing.T) {
 		"",
 		"From: \r\n\r\n",
 		"From: a@example.com\r\nSubject: \x00\xFF nested\r\n\r\n",
-		strings.Repeat("X: " + strings.Repeat("v", 200) + "\r\n", 50) + "\r\nbody",
+		strings.Repeat("X: "+strings.Repeat("v", 200)+"\r\n", 50) + "\r\nbody",
 		"Content-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain\r\n\r\na\r\n--x--",
 	}
 	for _, raw := range corpus {
