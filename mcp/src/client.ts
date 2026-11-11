@@ -34,6 +34,43 @@ import type {
 
 export const USER_AGENT = "postern-mcp (+https://github.com/skyphusion-labs/postern)";
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+/** Why an API URL is refused, or null when it may be used. http is only for loopback. */
+export function apiUrlProblem(apiUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(apiUrl);
+  } catch {
+    return "POSTERN_API_URL must be an http or https URL";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return "POSTERN_API_URL must start with http:// or https://";
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(host)) {
+    return `POSTERN_API_URL must use https (got http://${host}). http is accepted only for localhost.`;
+  }
+  return null;
+}
+
+/** Origin only. The path, query, and userinfo are not part of the startup line. */
+export function apiUrlForLog(apiUrl: string): string {
+  try {
+    return new URL(apiUrl).origin;
+  } catch {
+    return "";
+  }
+}
+
+/** Encode one path id. `.` and `..` survive encodeURIComponent and change the route. */
+export function pathId(id: string): string {
+  if (id === "" || id === "." || id === "..") {
+    throw new PosternError("id must not be empty, '.' or '..'");
+  }
+  return encodeURIComponent(id);
+}
+
 export class PosternError extends Error {
   readonly status?: number;
   /**
@@ -258,7 +295,7 @@ export class PosternClient {
 
   async get(messageId: string): Promise<{ message: Message | null; identityScope?: ReadScopeReport }> {
     try {
-      const body = await this.requestGet(`/api/messages/${encodeURIComponent(messageId)}`, {});
+      const body = await this.requestGet(`/api/messages/${pathId(messageId)}`, {});
       return {
         message: (body.message as Message) ?? null,
         identityScope: body.identityScope as ReadScopeReport | undefined,
@@ -287,7 +324,7 @@ export class PosternClient {
     index: number,
     maxBytes: number,
   ): Promise<{ base64: string; contentType: string; size: number } | null> {
-    const path = `/api/messages/${encodeURIComponent(messageId)}/attachments/${index}`;
+    const path = `/api/messages/${pathId(messageId)}/attachments/${index}`;
     const url = this.base + path;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
@@ -359,7 +396,7 @@ export class PosternClient {
     const params: Record<string, string> = {};
     if (args.limit !== undefined) params.limit = String(args.limit);
     if (args.cursor) params.cursor = args.cursor;
-    const body = await this.requestGet(`/api/threads/${encodeURIComponent(threadId)}`, params);
+    const body = await this.requestGet(`/api/threads/${pathId(threadId)}`, params);
     return page<Message>(body, (body.messages as Message[]) ?? []);
   }
 
@@ -454,7 +491,7 @@ export class PosternClient {
   // deliberately the same answer, so a probe learns nothing about another identity.
   async getDraft(id: string): Promise<Draft | null> {
     try {
-      const body = await this.requestGet(`/api/drafts/${encodeURIComponent(id)}`, {});
+      const body = await this.requestGet(`/api/drafts/${pathId(id)}`, {});
       return (body.draft as Draft) ?? null;
     } catch (err) {
       if (err instanceof PosternError && err.status === 404) return null;
@@ -478,7 +515,7 @@ export class PosternClient {
   async updateDraft(id: string, input: DraftInput, updatedAt?: string): Promise<Draft | null> {
     const payload: Record<string, unknown> = { ...input };
     if (updatedAt !== undefined) payload.updatedAt = updatedAt;
-    const body = await this.request("PUT", `/api/drafts/${encodeURIComponent(id)}`, payload);
+    const body = await this.request("PUT", `/api/drafts/${pathId(id)}`, payload);
     return (body.draft as Draft) ?? null;
   }
 
@@ -486,7 +523,7 @@ export class PosternClient {
   // an error to an agent, and saying so beats making it parse one.
   async deleteDraft(id: string): Promise<boolean> {
     try {
-      await this.request("DELETE", `/api/drafts/${encodeURIComponent(id)}`, undefined);
+      await this.request("DELETE", `/api/drafts/${pathId(id)}`, undefined);
       return true;
     } catch (err) {
       if (err instanceof PosternError && err.status === 404) return false;
@@ -498,7 +535,7 @@ export class PosternClient {
   // the draft ONLY after both succeed, so any failure leaves the draft retryable. This
   // client therefore reports a failure as a failure and never as a partial success.
   async sendDraft(id: string): Promise<SendResult> {
-    const body = await this.requestPost(`/api/drafts/${encodeURIComponent(id)}/send`, {});
+    const body = await this.requestPost(`/api/drafts/${pathId(id)}/send`, {});
     return this.asSendResult(body);
   }
 

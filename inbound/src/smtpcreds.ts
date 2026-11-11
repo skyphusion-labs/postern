@@ -16,7 +16,7 @@
 // production. Do NOT raise this from a local result: the suite runs under the edge's limit
 // (test-setup/workers-pbkdf2-cap.ts) and goes red above it. A stronger KDF (scrypt or
 // Argon2 in WASM) is a separate design item.
-import { mirrorHuman } from "./principalmirror";
+import { humanCredentialAgrees, mirrorHuman, recordReadMiss } from "./principalmirror";
 
 export const RUNTIME_PBKDF2_MAX_ITERATIONS = 100_000;
 
@@ -212,6 +212,11 @@ export async function authenticateAccount(
   secret: string,
 ): Promise<AuthenticatedAccount | null> {
   const cred = await lookup(env, username);
+  // #854 M2 part ii: consult the credentials table too; the OLD row's answer stands either
+  // way (agree-or-fallback), and a disagreement is only counted.
+  if (!(await humanCredentialAgrees(env, normalizeUsername(username), cred ? { secretHash: cred.secretHash, disabled: cred.disabled } : null))) {
+    await recordReadMiss(env, "human");
+  }
   if (!cred || cred.disabled) {
     // Equalize timing: do the same work, ignore the result.
     await verifySecret(secret, DUMMY_HASH);

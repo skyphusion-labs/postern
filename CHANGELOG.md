@@ -14,15 +14,12 @@ mismatched MCP tag fails before it publishes.
 ## Unreleased
 
 **Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds),
-`0020` (`webmail_sessions.principal_id`) and `0021` (the `svc_admin` seed) are additive and
-are applied by the deploy. Run `POST /api/admin/principals/backfill` once after
-upgrading to copy existing identities and users in; it is safe to run again.
-**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
-`0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. The
-backfill that copies existing identities and users in now runs automatically after each
-deploy: the release workflow calls `POST /api/admin/principals/backfill` once the new version
-answers (#901), and the self-host installer calls it after any run that deployed a Worker
-version or created the first admin. A manual run is still safe: it is idempotent.
+`0020` (`webmail_sessions.principal_id`), `0021` (the `svc_admin` seed) and `0022` (the
+principal read-miss counter) are additive and are applied by the deploy. The backfill that
+copies existing identities and users in runs automatically after each deploy: the release
+workflow calls `POST /api/admin/principals/backfill` once the new version answers (#901), and
+the self-host installer calls it after any run that deployed a Worker version or created the
+first admin. A manual run is still safe: it is idempotent.
 
 **Upgrade (#853).** Migration `0023` (the `delegation_exclusions` table) is additive and is
 applied by the deploy. Nothing changes until a human marks a thread.
@@ -46,6 +43,11 @@ applied by the deploy. Nothing changes until a human marks a thread.
   /api/delegations/mine/{id}`, and `GET /api/audit/mine` (the audit rows
   about the human own address). Session only: a token is refused. Grants
   are audited with the human as actor. See `docs/DELEGATION.md` section 4.6.
+- **Sign-ins compare the principal tables with the old ones (#854 M2).**
+  Agent tokens and password checks also read the new `credentials` table,
+  always act on the old table's answer, and count any disagreement (one
+  write, only on a miss). `GET /api/admin/principals/parity` reports the
+  counts. A failure on the new side never blocks a sign-in.
 - **An admin-only token slot (#904).** `POSTERN_API_TOKEN_ADMIN` reaches the
   admin routes and nothing else: it cannot read, send, delete or organize
   mail. Its audit rows name the `svc_admin` service principal. Set and rotate
@@ -117,6 +119,10 @@ applied by the deploy. Nothing changes until a human marks a thread.
 
 ### Fixed
 
+- **MCP bounds the API URL, path ids, and returned bodies.** The API URL must
+  be https, or http on localhost. An id that is empty, `.`, or `..` is
+  refused. A long message body is cut and marked truncated, and the startup
+  line shows only the API origin.
 - **A sign-in survives a failure on the principal side (#854).** If the
   principal lookup at sign-in fails, the session is minted without one
   (the self-service routes then ask for a fresh sign-in) instead of the
@@ -172,6 +178,12 @@ applied by the deploy. Nothing changes until a human marks a thread.
   @import of a plain string and image-set() strings are counted and
   removed from the reading frame; a URL inside a CSS comment is not
   counted.
+- **Webmail: the agent-access checkboxes sit beside their text.** In
+  Settings, each "It may" checkbox showed above and to the left of its
+  label, because the general input height applied to it.
+- **The relay builds with Go 1.27.4.** `relay/go.mod` (`toolchain`) and
+  `relay/Dockerfile` (`FROM golang:1.27.4-bookworm`) move together; the
+  standard library in 1.27.4 clears GO-2026-6859 in `net/http`.
 
 ## v1.11.0
 

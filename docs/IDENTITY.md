@@ -263,12 +263,20 @@ and also picks up rows a pre-M2 admin route wrote after M1 landed.
   no principal yet is counted (`withoutPrincipal`), not sampled.
 - **Reads still use only the old tables.** The new tables authorize nothing yet.
 
-**The next M2 slice, and how its fallback is retired.** Resolution will read `credentials`
-first but act on a credential only when its old-table row AGREES (same hash or secret, same
-revoked or disabled state); on any disagreement it resolves from the old table, as today, and
-counts a parity miss. So a stale credential can never allow what the old table denies. The
-fallback is retired (M3: credentials become the authority, the old tables stop being written)
-only when all of these hold: the deploy backfill runs on every release (#901, #906); one full
+**M2 reads, agree-or-fallback (shipped).** A runtime agent token and every password check
+(webmail sign-in, `/api/smtp-auth`, change password) consult `credentials` beside the old
+table, and ALWAYS act on the old table's answer: a credential is only compared (same hash or
+secret, same principal and caps, same revoked or disabled state, including "the old table
+denies it and no live credential exists"). A disagreement is counted in
+`principal_read_misses` (migration `0022`: per UTC day and kind, counts only), with one upsert
+made only on a miss, so an agreeing sign-in writes nothing. A stale credential therefore can
+never allow what the old table denies. A failure on the new side (the credentials read, the
+counter write, or the session mint's principal lookup) falls back to today's resolution and is
+logged; it never denies. `GET /api/admin/principals/parity` reports the miss counts.
+
+**How the fallback is retired.** It is the lead's call, made from the parity route (it needs
+no spend and is not a ruling). M3 (credentials become the authority, the old tables stop being
+written) happens only when all of these hold: the deploy backfill runs on every release (#901, #906); one full
 release ran with dual-write; and parity returns zero diffs after that release's backfill, with
 zero read-path misses across the release.
 

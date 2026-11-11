@@ -9,7 +9,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { PosternClient } from "./client.js";
+import { PosternClient, apiUrlForLog, apiUrlProblem } from "./client.js";
 import { ORGANIZE_TOOLS, READ_TOOLS, SEND_TOOLS, organizeTokenFrom, registerTools, type Scope } from "./tools.js";
 import { VERSION } from "./version.js";
 
@@ -24,8 +24,9 @@ function requireEnv(name: string): string {
 
 async function main(): Promise<void> {
   const apiUrl = requireEnv("POSTERN_API_URL");
-  if (!/^https?:\/\//.test(apiUrl)) {
-    console.error("postern-mcp: POSTERN_API_URL must start with http:// or https://");
+  const problem = apiUrlProblem(apiUrl);
+  if (problem) {
+    console.error(`postern-mcp: ${problem}`);
     process.exit(1);
   }
   const token = requireEnv("POSTERN_API_TOKEN");
@@ -82,7 +83,7 @@ async function main(): Promise<void> {
     console.error("postern-mcp: organize tools ENABLED -- read state, flags and placement are writable");
   }
 
-  console.error(`postern-mcp: ready (${registered.length} tools: ${registered.join(", ")}) -> ${apiUrl}`);
+  console.error(`postern-mcp: ready (${registered.length} tools: ${registered.join(", ")}) -> ${apiUrlForLog(apiUrl)}`);
 
   await server.connect(new StdioServerTransport());
 }

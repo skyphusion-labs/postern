@@ -72,7 +72,8 @@ describe("#854 M1 migration 0019 matches schema.sql", () => {
   // 0019 creates the tables and six seeds; 0021 (#904) seeds the admin-only slot.
   const MIGRATION =
     readFileSync(new URL("./migrations/0019_principals.sql", import.meta.url), "utf8") +
-    readFileSync(new URL("./migrations/0021_admin_slot_principal.sql", import.meta.url), "utf8");
+    readFileSync(new URL("./migrations/0021_admin_slot_principal.sql", import.meta.url), "utf8") +
+    readFileSync(new URL("./migrations/0022_principal_read_misses.sql", import.meta.url), "utf8");
   const SCHEMA = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
   const shape = (sql: string) => {
     const db = new DatabaseSync(":memory:");

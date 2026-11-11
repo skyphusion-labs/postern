@@ -366,3 +366,11 @@ INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, cre
 INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_organize', 'service', 'POSTERN_API_TOKEN_ORGANIZE', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
 -- The admin-only slot (#904, migration 0021).
 INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_admin', 'service', 'POSTERN_API_TOKEN_ADMIN', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
+
+-- Read-path parity misses (#854 M2 part ii, migration 0022). Counts only, no identifiers.
+CREATE TABLE IF NOT EXISTS principal_read_misses (
+  day     TEXT NOT NULL,
+  kind    TEXT NOT NULL,
+  misses  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, kind)
+);

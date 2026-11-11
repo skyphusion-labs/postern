@@ -128,6 +128,32 @@ export function maxAttachmentBytes(): number {
   return DEFAULT_MAX_ATTACHMENT_BYTES;
 }
 
+// Cap on bodyText and bodyHtml returned by mailbox_get and mailbox_thread.
+// Longer text is cut and the result says so. Default 64 KiB.
+const DEFAULT_MAX_BODY_CHARS = 64 * 1024;
+export function maxBodyChars(): number {
+  const raw = (process.env.POSTERN_MCP_MAX_BODY_CHARS ?? "").trim();
+  const n = Number(raw);
+  if (raw && Number.isFinite(n) && n > 0) return Math.floor(n);
+  return DEFAULT_MAX_BODY_CHARS;
+}
+
+function capMessageBodies(message: Record<string, unknown>, limit: number): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...message };
+  let truncated = false;
+  for (const key of ["bodyText", "bodyHtml"]) {
+    const value = out[key];
+    if (typeof value === "string" && value.length > limit) {
+      out[key + "Length"] = value.length;
+      out[key] = value.slice(0, limit);
+      out[key + "Truncated"] = true;
+      truncated = true;
+    }
+  }
+  if (truncated) out.bodyTruncated = true;
+  return out;
+}
+
 // Map the tool snake_case attachment input to the worker SendAttachment shape
 // (content + optional filename/mimeType). Returns undefined when there are none, so
 // the send request stays byte-for-byte the no-attachment request.
@@ -178,7 +204,9 @@ const CONTENT_NOTICE =
 // Every sender-written field the read API returns. Summary names come from
 // store.SUMMARY_FIELDS; body and attachment names are on the full message.
 // Store-assigned names (uid, direction, threadId, trusted, receivedAt, flags,
-// placement, sizes) stay off this list.
+// placement, sizes) stay off this list. So do the body cap flags the server
+// writes (bodyTruncated, bodyTextTruncated, bodyHtmlTruncated, bodyTextLength,
+// bodyHtmlLength).
 const UNTRUSTED_FIELDS = [
   "messageId",
   "date",
@@ -506,7 +534,12 @@ export const READ_TOOLS: ToolDef[] = [
       // miss without ever saying whether something was withheld.
       const scope = identityScope === undefined ? {} : { identityScope };
       if (!message) return { ...untrustedEnvelope(), found: false, messageId: a.message_id, ...scope };
-      return { ...untrustedEnvelope(), found: true, ...scope, message };
+      return {
+        ...untrustedEnvelope(),
+        found: true,
+        ...scope,
+        message: capMessageBodies(message as unknown as Record<string, unknown>, maxBodyChars()),
+      };
     },
   },
   {
@@ -550,7 +583,7 @@ export const READ_TOOLS: ToolDef[] = [
         // message in it you may read". Dropping this field here left the strongest
         // unqualified claim in the whole read surface sitting in front of the agent.
         ...(page.identityScope === undefined ? {} : { identityScope: page.identityScope }),
-        messages: page.items,
+        messages: page.items.map((item) => capMessageBodies(item as unknown as Record<string, unknown>, maxBodyChars())),
       };
     },
   },

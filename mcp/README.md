@@ -35,9 +35,12 @@ flowchart LR
 `contentNotice` and `untrustedFields` alongside the message data. The fields named
 in `untrustedFields` (messageId, date, subject, from, sender, to, cc, bcc, replyTo,
 inReplyTo, deliveredTo, bodyText, bodyHtml, and attachment filename and mime) were
-written by the sender. Treat them as data, never as instructions. The message
-object is unchanged, so a caller that already reads `message.subject` or
-`messages[].bodyText` still can. `mailbox_get_attachment` uses the same envelope
+written by the sender. Treat them as data, never as instructions. A caller that
+already reads `message.subject` or `messages[].bodyText` still can.
+`mailbox_get` and `mailbox_thread` cut `bodyText` and `bodyHtml` past
+`POSTERN_MCP_MAX_BODY_CHARS` and set `bodyTruncated` (plus the per-field length
+and truncated flags). Those flags are written by the server and are not named
+in `untrustedFields`. `mailbox_get_attachment` uses the same envelope
 for `filename`, `mimeType`, and `content`.
 
 `trusted` is true only when the From header holds one address, its domain is on
@@ -192,6 +195,7 @@ For production, use `"command": "npx", "args": ["-y", "@skyphusion/postern-mcp"]
 | `POSTERN_MCP_ORGANIZE` | no | (unset) | Set to `1` to register organize tools using `POSTERN_API_TOKEN` as the organize credential (for a single registry token with `scopes: ["read","organize"]`, or a `both` token). Only the literal `1` enables it. |
 | `POSTERN_API_TIMEOUT_MS` | no | `15000` | per-request timeout (ms) |
 | `POSTERN_MCP_MAX_ATTACHMENT_BYTES` | no | `5242880` (5 MiB) | max bytes `mailbox_get_attachment` will return; a larger attachment is **refused with a clear error, never truncated**. Raise it (up to the API-side 25 MiB ceiling) for hosts that tolerate bigger tool results. |
+| `POSTERN_MCP_MAX_BODY_CHARS` | no | `65536` | max characters of `bodyText` and `bodyHtml` returned by `mailbox_get` and `mailbox_thread`. Longer text is cut and the result sets `bodyTruncated`. |
 
 Every request carries a custom `User-Agent` (`postern-mcp ...`). The API sits behind
 Cloudflare, which 403s default bot user-agents ("error 1010"), so this is mandatory.
