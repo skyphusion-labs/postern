@@ -350,6 +350,13 @@ export interface PutResult {
  * At most MAX_THREAD_REFERENCES References are read, the most recent ones: threading
  * needs the closest ancestors, not the whole chain. Every candidate is looked up in ONE
  * query, and the first candidate in the order above that has a row wins.
+ *
+ * A Message-ID can be claimed by more than one row: the first message stored under it
+ * (the holder) and any DIFFERENT message that arrived with it later and was stored
+ * under a derived id with claimed_id set (put). For a candidate id the parent is the
+ * holder when it is trusted, else the earliest trusted claimant, else the holder. An
+ * untrusted claimant is never the parent, so with no trusted message involved the
+ * result is the same as matching message_id alone.
  */
 export const MAX_THREAD_REFERENCES = 20;
 
@@ -373,17 +380,31 @@ async function resolveThreadId(
   }
   if (candidates.size === 0) return messageId;
   const ids = [...candidates];
+  const marks = ids.map(() => "?").join(", ");
+  type Row = { id: number; message_id: string; claimed_id: string | null; thread_id: string | null; trusted: number | null };
   const { results } = await db
-    .prepare(`SELECT message_id, thread_id FROM messages WHERE message_id IN (${ids.map(() => "?").join(", ")})`)
-    .bind(...ids)
-    .all<{ message_id: string; thread_id: string | null }>();
-  const threadOf = new Map<string, string>();
+    .prepare(
+      `SELECT id, message_id, claimed_id, thread_id, trusted FROM messages WHERE message_id IN (${marks}) OR claimed_id IN (${marks})`,
+    )
+    .bind(...ids, ...ids)
+    .all<Row>();
+  const wanted = new Set(ids);
+  const holder = new Map<string, Row>();
+  const trustedClaimant = new Map<string, Row>();
   for (const row of results ?? []) {
-    if (row.thread_id && !threadOf.has(row.message_id)) threadOf.set(row.message_id, row.thread_id);
+    if (!row.thread_id) continue;
+    if (wanted.has(row.message_id) && !holder.has(row.message_id)) holder.set(row.message_id, row);
+    if (row.claimed_id && row.trusted === 1) {
+      const seen = trustedClaimant.get(row.claimed_id);
+      if (!seen || row.id < seen.id) trustedClaimant.set(row.claimed_id, row);
+    }
   }
   for (const id of ids) {
-    const t = threadOf.get(id);
-    if (t) return t;
+    const h = holder.get(id);
+    if (h && h.trusted === 1) return h.thread_id!;
+    const c = trustedClaimant.get(id);
+    if (c) return c.thread_id!;
+    if (h) return h.thread_id!;
   }
   return messageId;
 }
@@ -496,12 +517,14 @@ export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): P
 }
 
 /** `forked` marks the one retry `put` allows itself: the stored id was already taken by
- *  a different message, so this call is storing the delivery under its derived id. */
+ *  a different message, so this call is storing the delivery under its derived id, and
+ *  `claimedId` is the id it arrived with (stored as claimed_id). */
 async function putRow(
   env: Env,
   input: StoreInput,
   ctx: ExecutionContext,
   forked: boolean,
+  claimedId: string | null = null,
 ): Promise<PutResult> {
   const receivedAt = new Date().toISOString();
   const threadId = await resolveThreadId(env.DB, input.messageId, input.inReplyTo, input.references);
@@ -566,8 +589,8 @@ async function putRow(
        (message_id, from_addr, to_addr, subject, date, in_reply_to,
         body_text, body_html, spf, dkim, dmarc, trusted, received_at, direction, thread_id,
         delivered_to, cc_addr, bcc_addr, sender_addr, reply_to_addr, wire_size,
-        projected_size, projection_version, seen)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        projected_size, projection_version, seen, claimed_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(message_id) DO UPDATE SET
        delivered_to = COALESCE(messages.delivered_to, ',' || messages.to_addr || ',') || ? || ','
        WHERE ${mergeGuard.sql}
@@ -603,6 +626,7 @@ async function putRow(
       // setSeen() (the IMAP \Seen flag). The ON CONFLICT merge below never touches
       // seen, so a redelivery to a new recipient keeps the row's current read state.
       input.direction === "outbound" ? 1 : 0,
+      claimedId,
       mergeRcpt,
       ...mergeGuard.binds,
       input.from,
@@ -670,7 +694,7 @@ async function putRow(
         // it -- rather than drop the message or widen a delivered_to to place it.
         throw new Error("store: message identity could not be resolved without a collision");
       }
-      return await putRow(env, { ...input, messageId: await forkedMessageId(input) }, ctx, true);
+      return await putRow(env, { ...input, messageId: await forkedMessageId(input) }, ctx, true, input.messageId);
     }
     return { messageId: input.messageId, stored: false, merged: false, threadId: existing?.thread_id ?? threadId };
   }
