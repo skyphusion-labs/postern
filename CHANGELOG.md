@@ -15,6 +15,9 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **IMAP APPEND size.** A literal larger than `POSTERN_IMAP_MAX_APPEND_BYTES`
+  (default 22 MiB, the same ceiling as the worker import) is refused with
+  `NO [TOOBIG]` before the bytes are read. `CAPABILITY` advertises `APPENDLIMIT`.
 - **Write scope binds to the bound identity.** An identity's write scope
   (flags, move, seen) now binds to its bound address whatever its other
   caps; previously a token without `read` could organize outside its own
