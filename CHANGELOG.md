@@ -21,6 +21,12 @@ mismatched MCP tag fails before it publishes.
   read routes. `both` and `read` tokens and bound identities are
   unchanged.
 
+- **The send-only token can reply again, to the thread's existing
+  parties.** `POSTERN_API_TOKEN_SEND` replies to a stored message as
+  documented: recipients come from the stored message, and a caller `cc`,
+  `bcc` or `quoteOriginal` is refused with `400`. Forwarding a stored
+  message with that token stays not found.
+
 - **HTML-to-text conversion runs in one pass.** Mail with only an HTML
   body is converted to its stored text body by a single linear scan, and
   the converter reads at most the first 512,000 characters, the same bound
