@@ -1266,45 +1266,62 @@ function baseAccessClause(scope: AccessScope, alias?: string): { sql: string; bi
 
 // --- #853: human-only threads -------------------------------------------------
 //
-// An owner marks a thread human-only (delegation_exclusions). From then on NO agent reads,
-// quotes, organizes or replies into that owner's mail in it, whatever its grants and under
-// either AGENT_READ_SCOPE value. ONE predicate, `exclusionClause`, is the whole rule, and
-// every agent path reaches it: the list/count/search predicates, semantic hydration,
-// folders, thread, the thread-parent lookup of a send, and `agentHidden` for the
-// single-message routes. Human sessions and static tokens never carry a guard.
+// An owner marks a thread human-only (delegation_exclusions). From then on no agent reaches
+// the owner's mail in that thread THROUGH THE OWNER'S ADDRESS, whatever its grants and under
+// either AGENT_READ_SCOPE value. Reach through any other address the agent holds on that
+// path (its own, a role queue, another human's grant) is untouched: one owner never governs
+// another person's mail or that person's agent (the lead's ruling on #921). ONE predicate,
+// `exclusionClause`, is the whole rule, and every agent path reaches it: the
+// list/count/search predicates, semantic hydration, folders, thread, the thread-parent
+// lookup of a send, and `agentHidden` / `withoutHidden` for the single-message and
+// organize routes. Human sessions and static tokens never carry a guard, and an agent
+// carries none while no mark exists anywhere (api.ts agentGuardOf), so their SQL is
+// unchanged.
 
-/** An AGENT reader (a Bearer bound to an identity, never a session): its own address. */
+/** An AGENT reader (a Bearer bound to an identity, never a session).
+ *  `held` is every address the agent reaches mail THROUGH on this path, lower-cased, its
+ *  own address included: own + role queues + the addresses it holds the path's grant on
+ *  (read for reads, quote for a quote or reply target, organize for an organize write). */
 export interface AgentGuard {
   readonly agent: string;
+  readonly held: readonly string[];
 }
 
 /** "this row is NOT hidden from the guarded agent".
  *
- *  Hidden means: an ACTIVE exclusion names this row's thread, and the exclusion's owner
- *  address is on this row's delivered set, or the row was sent by postern AS that owner.
- *  So the mark hides exactly the owner's mail in the thread: a copy delivered only to
- *  someone else is that person's mail, and their own mark governs it.
+ *  Hidden means BOTH:
+ *   - an ACTIVE mark names this row's thread, and that mark's owner reaches the row (the
+ *     owner is on the delivered set, or the row was sent by postern as the owner); and
+ *   - NO held address reaches the row unmarked: every address the agent could have reached
+ *     it through has its own active mark on this thread, or does not reach it at all.
+ *  So under estate read, a marked owner's mail drops out of the estate view unless the
+ *  agent also reaches the row through another address it legitimately holds.
  *
- *  The agent's OWN mail is never hidden (delivered to it, or sent by postern as it): a
- *  mark on a human's thread cannot take away what the agent already holds in its own box.
- *
- *  `instr` on the lower-cased delivered set, never LIKE: an address is DATA, and `_` is a
- *  LIKE wildcard. The thread key is COALESCE(thread_id, message_id), the same id the read
- *  routes report as threadId. `alias` is REQUIRED (an unqualified thread_id inside the
- *  subquery would bind to the exclusion row). */
+ *  "Reaches" is the ordinary access predicate (delivered to A, or sent by postern as A),
+ *  written with `instr` on the lower-cased delivered set, never LIKE: an address is DATA,
+ *  and `_` is a LIKE wildcard. `held` binds as ONE JSON array (json_each), so the bind
+ *  count stays 1 whatever the number of grants. The thread key is
+ *  COALESCE(thread_id, message_id), the id the read routes report as threadId. `alias` is
+ *  REQUIRED (an unqualified thread_id inside a subquery would bind to the mark row). */
 function exclusionClause(guard: AgentGuard, alias: string): { sql: string; binds: string[] } {
   const p = `${alias}.`;
-  const agent = guard.agent.trim().toLowerCase();
-  const own = membershipClause(agent, { alias });
   const set = `lower(COALESCE(${p}delivered_to, ',' || ${p}to_addr || ','))`;
-  const hidden =
-    "EXISTS (SELECT 1 FROM delegation_exclusions x " +
-    `WHERE x.thread_id = COALESCE(${p}thread_id, ${p}message_id) AND x.revoked_at IS NULL ` +
-    `AND (instr(${set}, ',' || x.address || ',') > 0 OR (${p}direction = 'outbound' AND lower(${p}from_addr) = x.address)))`;
-  return {
-    sql: `(NOT ${hidden} OR ${own.sql} OR (${p}direction = 'outbound' AND lower(${p}from_addr) = ?))`,
-    binds: [...own.binds, agent],
-  };
+  const key = `COALESCE(${p}thread_id, ${p}message_id)`;
+  const reaches = (a: string) => `(instr(${set}, ',' || ${a} || ',') > 0 OR (${p}direction = 'outbound' AND lower(${p}from_addr) = ${a}))`;
+  const marked =
+    `EXISTS (SELECT 1 FROM delegation_exclusions x WHERE x.thread_id = ${key} AND x.revoked_at IS NULL AND ${reaches("x.address")})`;
+  const clear =
+    `EXISTS (SELECT 1 FROM json_each(?) h WHERE ${reaches("h.value")} ` +
+    `AND NOT EXISTS (SELECT 1 FROM delegation_exclusions y WHERE y.thread_id = ${key} AND y.revoked_at IS NULL AND y.address = h.value))`;
+  return { sql: `(NOT ${marked} OR ${clear})`, binds: [JSON.stringify(guard.held)] };
+}
+
+/** Does any active mark exist on this deploy (#853)? One indexed probe (the partial index
+ *  idx_exclusion_active). While it says no, an agent carries no guard and its queries keep
+ *  today's plans exactly: most deploys have no marks. */
+export async function anyActiveExclusion(env: Env): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT 1 AS hit FROM delegation_exclusions WHERE revoked_at IS NULL LIMIT 1").first<{ hit: number }>();
+  return !!row;
 }
 
 /** Is this stored message hidden from this agent (#853)? False for an unknown id: the

@@ -22,11 +22,14 @@ applied by the deploy. Nothing changes until a human marks a thread.
   `GET`/`POST /api/delegations/mine/exclusions` (list my marks; mark one
   thread `{threadId}`, 201 on create, 200 on a repeat) and `DELETE
   /api/delegations/mine/exclusions/{id}`. No agent then reads, quotes,
-  organizes or replies into the owner's mail in that thread, whatever its
-  grants: list, count, search (every mode), folders, get, attachments,
-  thread, seen/flags/move, reply, forward, drafts and the thread parent of a
-  send all treat it as absent, with the same 404. The agent's own mail is
-  never hidden; human sessions and static tokens are not affected. Marks are
+  organizes or replies into mail in that thread THROUGH the owner's address,
+  whatever its grants: list, count, search (every mode), folders, get,
+  attachments, thread, seen/flags/move, reply, forward, drafts and the thread
+  parent of a send all treat it as absent, with the same 404. A copy that
+  also reached someone else stays visible to an agent acting through that
+  person's grant, and the agent's own mail is never hidden. Human sessions
+  and static tokens are not affected; with no mark on the deploy, agent
+  queries are unchanged too. Marks are
   audited (`delegation.exclude` / `delegation.unexclude`, actor human) and
   show in `GET /api/audit/mine`. See `docs/DELEGATION.md` section 4.8.
 
@@ -34,8 +37,9 @@ applied by the deploy. Nothing changes until a human marks a thread.
 
 - **Estate deploys: a human-only mark also binds an estate agent (#853).**
   Under `AGENT_READ_SCOPE=estate` (or unset) an agent still reads the whole
-  estate, except the owner's mail in a thread its owner marked human-only.
-  Before #853 no such mark existed, so nothing changes until one is made.
+  estate, except mail in a thread a human marked human-only that it reaches
+  only through that human's address. Before #853 no such mark existed, so
+  nothing changes until one is made.
 
 ## v1.12.0
 

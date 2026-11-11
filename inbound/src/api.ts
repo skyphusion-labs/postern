@@ -271,7 +271,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "POST" && (path === "/api/send" || path === "/send")) {
       const body = await readJson<SendRequest>(request);
       const q = await quoteScope(env, resolution);
-      const result = await send(env, body, ctx, resolution.identity, q.scope, q.audit, await sendAsOf(env, resolution), agentGuardOf(resolution));
+      const result = await send(env, body, ctx, resolution.identity, q.scope, q.audit, await sendAsOf(env, resolution), await agentGuardOf(env, resolution, q.scope));
       return json({ ok: true, ...result });
     }
 
@@ -279,7 +279,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     if (request.method === "POST" && path === "/api/reply") {
       const body = await readJson<ReplyRequest>(request);
       const q = await quoteScope(env, resolution);
-      const result = await reply(env, body, ctx, resolution.identity, q.scope, q.audit, await sendAsOf(env, resolution), agentGuardOf(resolution));
+      const result = await reply(env, body, ctx, resolution.identity, q.scope, q.audit, await sendAsOf(env, resolution), await agentGuardOf(env, resolution, q.scope));
       return json({ ok: true, ...result });
     }
 
@@ -295,8 +295,6 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (!Array.isArray(body.ids) || !body.ids.every((x) => typeof x === "string")) {
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "ids must be an array of message ids" }, 400);
       }
-      // #853: an agent skips mail in a human-only thread, exactly as it skips an unknown id.
-      body.ids = await store.withoutHidden(env, body.ids as string[], agentGuardOf(resolution));
       if (typeof body.seen !== "boolean") {
         return json({ ok: false, error: "E_FIELD_MISSING", message: "seen (boolean) is required" }, 400);
       }
@@ -338,6 +336,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           }
           scope = [forRecipient];
           audit = organizeAudit(env, resolution, [forRecipient], { op: "seen", seen: body.seen, for: forRecipient });
+          // #853: hidden ids are skipped like unknown ones, judged on THIS write's reach.
+          body.ids = await store.withoutHidden(env, body.ids as string[], await agentGuardOf(env, resolution, scope));
           const updated = await store.setSeen(env, body.ids as string[], body.seen, scope, forRecipient, audit);
           return json({ ok: true, updated });
         }
@@ -355,6 +355,8 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // may also read.
         scope = [bound, ...rolesForViewer(env, bound)];
       }
+      // #853: hidden ids are skipped like unknown ones, judged on THIS write's reach.
+      body.ids = await store.withoutHidden(env, body.ids as string[], await agentGuardOf(env, resolution, scope));
       const updated = await store.setSeen(env, body.ids as string[], body.seen, scope, forRecipient);
       return json({ ok: true, updated });
     }
@@ -376,10 +378,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // Bound identity: only touch own mail, plus (#740 S2) the mail of addresses it holds
       // an organize grant on, each such message audited in the same batch as the write.
       // Static estate tokens name `"estate"` and keep IMAP/operator behavior.
-      // #853: hidden ids are skipped like unknown ones.
-      body.ids = await store.withoutHidden(env, body.ids as string[], agentGuardOf(resolution));
       const flagSet = { flagged: raw.flagged as boolean | undefined, answered: raw.answered as boolean | undefined };
       const flagWrite = await organizeWriteScope(env, resolution, { op: "flags", set: flagSet });
+      // #853: hidden ids are skipped like unknown ones, judged on THIS write's reach.
+      body.ids = await store.withoutHidden(env, body.ids as string[], await agentGuardOf(env, resolution, flagWrite.scope));
       const updated = await store.setFlags(env, body.ids as string[], flagSet, flagWrite.scope, flagWrite.audit);
       return json({ ok: true, updated });
     }
@@ -392,10 +394,10 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (body.mailbox !== null && body.mailbox !== "archive" && body.mailbox !== "trash" && body.mailbox !== "junk") {
         return json({ ok: false, error: "E_VALIDATION_ERROR", message: "mailbox must be archive, trash, junk, or null" }, 400);
       }
-      // #853: hidden ids are skipped like unknown ones.
-      body.ids = await store.withoutHidden(env, body.ids as string[], agentGuardOf(resolution));
       // Same scope rule as flags (#740 S2): own mail plus organize-granted addresses, audited.
       const moveWrite = await organizeWriteScope(env, resolution, { op: "move", mailbox: body.mailbox });
+      // #853: hidden ids are skipped like unknown ones, judged on THIS write's reach.
+      body.ids = await store.withoutHidden(env, body.ids as string[], await agentGuardOf(env, resolution, moveWrite.scope));
       const updated = await store.moveMessages(env, body.ids as string[], body.mailbox, moveWrite.scope, moveWrite.audit);
       return json({ ok: true, updated });
     }
@@ -612,7 +614,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       if (role) applyRoleScope(query, role, sessionIdentity as string);
       else if (sessionIdentity) query.viewer = sessionIdentity;
       // #853: set before the count AND the rows, so neither sees a human-only thread.
-      query.agentGuard = agentGuardOf(resolution);
+      query.agentGuard = await readGuardOf(env, resolution);
       if (countOnly) {
         // AFTER the scope application above, deliberately: the count runs on the SAME
         // `query` object the rows would have been read from, so it cannot report a number
@@ -680,7 +682,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       return json({
         ok: true,
         identityScope: scopeReportOf(foldersScope),
-        folders: await store.folders(env, viewer, roles, agentGuardOf(resolution)),
+        folders: await store.folders(env, viewer, roles, await readGuardOf(env, resolution)),
       });
     }
 
@@ -744,7 +746,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             html: draft.bodyHtml ?? undefined,
             bcc: draft.bcc ? splitRecipientInput(draft.bcc) : undefined,
             attachments,
-          }, ctx, resolution.identity, draftQuote.scope, draftQuote.audit, undefined, agentGuardOf(resolution));
+          }, ctx, resolution.identity, draftQuote.scope, draftQuote.audit, undefined, await agentGuardOf(env, resolution, draftQuote.scope));
         } else {
           if (!draft.to) throw new MailboxError("E_FIELD_MISSING", "draft recipient required");
           result = await send(env, {
@@ -758,7 +760,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
             ...(draft.composeMode === "forward" && draft.sourceMessageId
               ? { forwardMessageId: draft.sourceMessageId }
               : {}),
-          }, ctx, resolution.identity, draftQuote.scope, draftQuote.audit, undefined, agentGuardOf(resolution));
+          }, ctx, resolution.identity, draftQuote.scope, draftQuote.audit, undefined, await agentGuardOf(env, resolution, draftQuote.scope));
         }
         // Delete only after dispatch + sent-copy storage succeeds. Every validation,
         // transport, or storage failure leaves the draft and staged bytes retryable.
@@ -964,7 +966,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         // A role read drops the account viewer: the queue IS the scope, and the account
         // boundary would otherwise intersect it down to the member own mail (#425).
         viewer: role ? undefined : sessionIdentity,
-        agentGuard: agentGuardOf(resolution),
+        agentGuard: await readGuardOf(env, resolution),
         limit: parseLimit(url),
         cursor: cursorParam,
       });
@@ -1047,7 +1049,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         );
       if (attScope && !(await store.messageAccessible(env, id, attScope))) return attNotFound();
       // #853: the same body as withheld or absent.
-      const attGuard = agentGuardOf(resolution);
+      const attGuard = await readGuardOf(env, resolution);
       if (attGuard && (await store.agentHidden(env, id, attGuard))) return attNotFound();
       const att = await store.getAttachment(env, id, index);
       if (!att) return attNotFound();
@@ -1089,7 +1091,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           404,
         );
       // #853: an agent cannot delete what it cannot see; the same 404 as absent.
-      const deleteGuard = agentGuardOf(resolution);
+      const deleteGuard = await readGuardOf(env, resolution);
       if (deleteGuard && (await store.agentHidden(env, id, deleteGuard))) return notFound();
       if (deleteScope && !(await store.messageAccessible(env, id, deleteScope, true))) {
         // #745: ONE refusal is not a "not found", and it is the only one that may say so.
@@ -1139,7 +1141,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       // and one D1 round trip fewer. Refs GHSA-49mc-vh6w-95h4.
       const readScope = await readAccessScope(env, resolution);
       // #853: hidden from an agent reads exactly like absent, down the same 404 below.
-      const getGuard = agentGuardOf(resolution);
+      const getGuard = await readGuardOf(env, resolution);
       const hidden = getGuard ? await store.agentHidden(env, id, getGuard) : false;
       const msg = hidden
         ? null
@@ -1176,7 +1178,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
       const page = await store.thread(env, id, threadScope, {
         limit: parseLimit(url),
         cursor: url.searchParams.get("cursor") ?? undefined,
-        agentGuard: agentGuardOf(resolution),
+        agentGuard: await readGuardOf(env, resolution),
       });
       // `messages` keeps its name and its position, so a caller that read the whole thread
       // before still reads messages; what changed is that it is now a bounded page and the
@@ -1303,9 +1305,30 @@ async function quoteScope(
  *  runtime agent identity or a registry entry). A webmail session is the human and a
  *  static token is the operator; neither is guarded. Every agent read, quote, organize
  *  and reply path passes this, and the store applies the one exclusion predicate. */
-function agentGuardOf(resolution: AuthResolution): store.AgentGuard | undefined {
+async function agentGuardOf(
+  env: Env,
+  resolution: AuthResolution,
+  reach: MessageReadScope | store.AccessScope | undefined,
+): Promise<store.AgentGuard | undefined> {
   if (resolution.viaSession || !resolution.identity) return undefined;
-  return { agent: resolution.identity.from.trim().toLowerCase() };
+  // The short-circuit: no active mark anywhere means nothing to hide, so no predicate.
+  // Every agent route asks this once (each takes one guard), so it is one probe a request.
+  if (!(await store.anyActiveExclusion(env))) return undefined;
+  const agent = resolution.identity.from.trim().toLowerCase();
+  // `reach` is the path's own scope: the addresses it may reach mail through. "estate"
+  // and "addressing" name no address, so only the agent's own counts there.
+  const through = typeof reach === "string" || reach === undefined ? [] : reach;
+  return { agent, held: [...new Set([agent, ...through.map((a) => a.trim().toLowerCase())])] };
+}
+
+/** The guard of a READ path: held = own + role queues + every address the agent holds a
+ *  grant on (every power implies read), under BOTH flag values. Under estate the estate
+ *  itself is not an address, so the owner's marked mail drops out unless one of these
+ *  reaches it. */
+async function readGuardOf(env: Env, resolution: AuthResolution): Promise<store.AgentGuard | undefined> {
+  if (resolution.viaSession || !resolution.identity) return undefined;
+  const own = resolution.identity.from.trim().toLowerCase();
+  return agentGuardOf(env, resolution, [own, ...rolesForViewer(env, own), ...(await delegationsOf(env, resolution)).read]);
 }
 
 function writeReadScope(env: Env, resolution: AuthResolution): MessageReadScope {

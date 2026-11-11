@@ -35,7 +35,7 @@ const ATTACHMENTS = {
 // can drop HUMAN_MSG from a semantic or hybrid page is a filter.
 const AI = { async run() { return { data: [[0.1, 0.2, 0.3]] }; } };
 
-async function setup(flag: "granted" | "estate") {
+async function setup(flag: "granted" | "estate", roles = `${QUEUE}=${HUMAN}+${BOB}`) {
   const ids = [HUMAN_MSG, SHARED_MSG, OTHER_MSG, BOB_MSG];
   const VECTORIZE = {
     async query() {
@@ -45,7 +45,7 @@ async function setup(flag: "granted" | "estate") {
     async deleteByIds() { return {}; },
   };
   const r = realEnv({
-    ATTACHMENTS, AI, VECTORIZE, AGENT_READ_SCOPE: flag, POSTERN_VIEWER_ROLES: `${QUEUE}=${HUMAN}+${BOB}`, WEBMAIL_AUTH_BACKEND: "native", DEFAULT_FROM: "noreply@skyphusion.org",
+    ATTACHMENTS, AI, VECTORIZE, AGENT_READ_SCOPE: flag, POSTERN_VIEWER_ROLES: roles, WEBMAIL_AUTH_BACKEND: "native", DEFAULT_FROM: "noreply@skyphusion.org",
     EMAIL: { async send() { return { messageId: "p" }; } },
   });
   const call = async (method: string, path: string, opts: { token?: string; session?: Session; body?: unknown } = {}) => {
@@ -97,8 +97,30 @@ async function setup(flag: "granted" | "estate") {
   const mark = async (threadId = threadOf(HUMAN_MSG), session = owner) =>
     call("POST", "/api/delegations/mine/exclusions", { session, body: { threadId } });
   const unmark = async (id: string, session = owner) => call("DELETE", `/api/delegations/mine/exclusions/${id}`, { session });
+  // Another agent identity holding exactly these grants.
+  const agentWith = async (from: string, grants: Array<{ address: string; powers: string[] }>) => {
+    const res = await call("POST", "/api/admin/identities", { token: OPERATOR, body: { from, scopes: ["read", "send", "organize"] } });
+    expect(res.status, res.text).toBe(201);
+    const a = res.body as { token: string; id: string };
+    for (const g of grants) {
+      const gr = await call("POST", "/api/admin/delegations", { token: OPERATOR, body: { granteeId: a.id, ...g } });
+      expect(gr.status, gr.text).toBe(201);
+    }
+    return a;
+  };
+  // Every SQL text the store prepares from now on, to see which plan a request ran.
+  const recordSql = () => {
+    const log: string[] = [];
+    const db = r.env.DB as unknown as { prepare(sql: string): unknown };
+    const orig = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      log.push(sql);
+      return orig(sql);
+    };
+    return log;
+  };
   const audit = () => r.raw.prepare("SELECT actor_kind, actor_id, action, target_kind, target_id, outcome, detail FROM audit_log ORDER BY id").all() as Json[];
-  return { ...r, call, signIn, agent, threadOf, owner, mark, unmark, audit };
+  return { ...r, call, signIn, agent, agentWith, recordSql, threadOf, owner, mark, unmark, audit };
 }
 type S = Awaited<ReturnType<typeof setup>>;
 const idsOf = (items: unknown) => ((items ?? []) as Json[]).map((m) => (m.message ? (m.message as Json).messageId : m.messageId));
@@ -291,6 +313,125 @@ for (const flag of ["granted", "estate"] as const) {
     });
   });
 }
+
+const BOTH_MSG = "both-1@example.com"; // ONE row delivered to HUMAN and BOB, its own thread
+async function withBoth(flag: "granted" | "estate") {
+  const s = await setup(flag);
+  await store.put(s.env, {
+    messageId: BOTH_MSG, direction: "inbound", from: "x@example.com", to: `${HUMAN}, ${BOB}`, subject: "to both", date: "2026-02-06T00:00:00.000Z",
+    bodyText: "both", auth: AUTH, trusted: false, deliveredTo: [HUMAN, BOB],
+  }, s.ctx);
+  return s;
+}
+const sees = async (s: S, token: string, via: string) => ({
+  get: (await s.call("GET", `/api/messages/${BOTH_MSG}`, { token })).status,
+  list: idsOf((await s.call("GET", `/api/messages?to=${via}`, { token })).body.items).includes(BOTH_MSG),
+  thread: idsOf((await s.call("GET", `/api/threads/${encodeURIComponent(s.threadOf(BOTH_MSG))}`, { token })).body.messages).includes(BOTH_MSG),
+});
+
+for (const flag of ["granted", "estate"] as const) {
+  describe(`#853 AGENT_READ_SCOPE=${flag}: a mark hides the row only from reach THROUGH the owner's address`, () => {
+    it("Alice's agent loses the shared row; Bob's agent and the agent holding both grants keep it", async () => {
+      const s = await withBoth(flag);
+      const alices = s.agent.token; // holds HUMAN's grant only
+      const bobs = (await s.agentWith("bobagent@skyphusion.org", [{ address: BOB, powers: ["read"] }])).token;
+      const both = (await s.agentWith("bothagent@skyphusion.org", [{ address: HUMAN, powers: ["read"] }, { address: BOB, powers: ["read"] }])).token;
+      const reached = { get: 200, list: true, thread: true };
+      // CONTROL: before the mark every one of them reaches it.
+      expect(await sees(s, alices, HUMAN)).toEqual(reached);
+      expect(await sees(s, bobs, BOB)).toEqual(reached);
+      expect(await sees(s, both, BOB)).toEqual(reached);
+      expect((await s.mark(s.threadOf(BOTH_MSG))).status).toBe(201);
+      expect(await sees(s, alices, HUMAN)).toEqual({ get: 404, list: false, thread: false });
+      expect(await sees(s, bobs, BOB)).toEqual(reached);
+      expect(await sees(s, both, BOB)).toEqual(reached);
+      // Bob's own mark on the same thread closes his door too, and then nobody reaches it.
+      const bob = await s.signIn(BOB);
+      expect((await s.mark(s.threadOf(BOTH_MSG), bob)).status).toBe(201);
+      expect((await sees(s, bobs, BOB)).get).toBe(404);
+      expect((await sees(s, both, BOB)).get).toBe(404);
+    });
+
+    it("an agent with no grant reaches the shared row only through the estate, and loses it", async () => {
+      const s = await withBoth(flag);
+      const none = (await s.agentWith("noneagent@skyphusion.org", [])).token;
+      const before = (await s.call("GET", `/api/messages/${BOTH_MSG}`, { token: none })).status;
+      expect(before, "CONTROL: estate reads it, granted never did").toBe(flag === "estate" ? 200 : 404);
+      await s.mark(s.threadOf(BOTH_MSG));
+      expect((await s.call("GET", `/api/messages/${BOTH_MSG}`, { token: none })).status).toBe(404);
+    });
+
+    it("each path judges by ITS OWN reach: read through Bob's grant, but no organize through Alice's marked one", async () => {
+      const s = await withBoth(flag);
+      const a = (await s.agentWith("mixagent@skyphusion.org", [{ address: HUMAN, powers: ["organize"] }, { address: BOB, powers: ["read"] }])).token;
+      const flag1 = await s.call("POST", "/api/messages/flags", { token: a, body: { ids: [BOTH_MSG], set: { flagged: true } } });
+      expect(flag1.body.updated, "CONTROL: organize through HUMAN's grant before the mark").toBe(1);
+      await s.mark(s.threadOf(BOTH_MSG));
+      expect((await s.call("GET", `/api/messages/${BOTH_MSG}`, { token: a })).status).toBe(200);
+      const flag2 = await s.call("POST", "/api/messages/flags", { token: a, body: { ids: [BOTH_MSG], set: { flagged: false } } });
+      expect(flag2.body.updated).toBe(0);
+    });
+  });
+}
+
+describe("#853 a mark by a role queue's own owner binds the agent members of that queue", () => {
+  for (const flag of ["granted", "estate"] as const) {
+    it(`${flag}: the agent reads and marks queue mail read through the queue; after the queue's owner marks the thread, neither`, async () => {
+      const s = await setup(flag, `${QUEUE}=${AGENT}`);
+      expect((await s.call("POST", "/api/admin/users", { token: OPERATOR, body: { username: QUEUE, password: PASSWORD } })).status).toBe(201);
+      const id = "queue-only-1@example.com";
+      await putInbound(s.env, s.ctx, { id, from: "x@example.com", to: QUEUE, subject: "for the queue" });
+      const t = s.agent.token;
+      expect((await s.call("GET", `/api/messages/${id}`, { token: t })).status, "CONTROL: read through the queue").toBe(200);
+      expect((await s.call("POST", "/api/messages/seen", { token: t, body: { ids: [id], seen: true } })).body.updated, "CONTROL: seen through the queue").toBe(1);
+      const queue = await s.signIn(QUEUE);
+      expect((await s.mark(s.threadOf(id), queue)).status).toBe(201);
+      expect((await s.call("GET", `/api/messages/${id}`, { token: t })).status).toBe(404);
+      expect((await s.call("POST", "/api/messages/seen", { token: t, body: { ids: [id], seen: false } })).body.updated).toBe(0);
+    });
+  }
+});
+
+describe("#853 the short-circuit: no mark anywhere, no predicate", () => {
+  const PREDICATE = "json_each(";
+  const PROBE = "SELECT 1 AS hit FROM delegation_exclusions WHERE revoked_at IS NULL LIMIT 1";
+  it("with no active mark an agent request runs today's SQL, after ONE probe", async () => {
+    const s = await setup("granted");
+    const log = s.recordSql();
+    const res = await s.call("GET", `/api/messages?to=${HUMAN}`, { token: s.agent.token });
+    expect(idsOf(res.body.items)).toContain(HUMAN_MSG);
+    expect(log.filter((q) => q.includes(PREDICATE))).toEqual([]);
+    expect(log.filter((q) => q === PROBE)).toHaveLength(1);
+  });
+
+  it("a REVOKED mark is no mark: still skipped", async () => {
+    const s = await setup("granted");
+    const m = await s.mark();
+    expect((await s.unmark((m.body.item as Json).id as string)).status).toBe(200);
+    const log = s.recordSql();
+    await s.call("GET", `/api/messages?to=${HUMAN}`, { token: s.agent.token });
+    expect(log.filter((q) => q.includes(PREDICATE))).toEqual([]);
+  });
+
+  it("one active mark anywhere (even on someone else's thread) turns the predicate on, probed once per request", async () => {
+    const s = await setup("granted");
+    const bob = await s.signIn(BOB);
+    expect((await s.mark(s.threadOf(BOB_MSG), bob)).status).toBe(201);
+    const log = s.recordSql();
+    const res = await s.call("GET", `/api/messages?to=${HUMAN}`, { token: s.agent.token });
+    expect(idsOf(res.body.items)).toContain(HUMAN_MSG);
+    expect(log.filter((q) => q.includes(PREDICATE)).length).toBeGreaterThan(0);
+    expect(log.filter((q) => q === PROBE)).toHaveLength(1);
+  });
+
+  it("a human session never probes and never carries the predicate", async () => {
+    const s = await setup("granted");
+    await s.mark();
+    const log = s.recordSql();
+    await s.call("GET", "/api/messages", { session: s.owner });
+    expect(log.filter((q) => q.includes(PREDICATE) || q === PROBE)).toEqual([]);
+  });
+});
 
 describe("#853 the owner's marks", () => {
   it("marks idempotently: 201 then 200 with the same item, one row, one audit row", async () => {

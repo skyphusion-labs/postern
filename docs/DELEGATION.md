@@ -234,8 +234,9 @@ an operator's (sections 4.2 to 4.5).
 ### 4.8 #853: human-only threads (shipped)
 
 The owner of an address marks one THREAD human-only (the lead's D1 ruling: thread, not
-message). From then on no agent reaches the owner's mail in that thread, whatever its
-grants, and under BOTH `AGENT_READ_SCOPE` values (D2): an estate agent loses it too.
+message). From then on no agent reaches mail in that thread THROUGH THE OWNER'S ADDRESS,
+whatever its grants, and under BOTH `AGENT_READ_SCOPE` values (D2). One owner never governs
+another person's mail or that person's agent (the lead's ruling on #921).
 
 | route (webmail session only, CSRF on writes) | does |
 |---|---|
@@ -246,10 +247,29 @@ grants, and under BOTH `AGENT_READ_SCOPE` values (D2): an estate agent loses it 
 `threadId` is the id every message row reports. A Bearer is `403 E_SESSION_REQUIRED`, and a
 session minted before migration `0020` is `401 E_REAUTH_REQUIRED`, as in section 4.6.
 
-**What a mark hides.** A message is hidden from an agent when an active mark names its
-thread AND the mark's owner is on its delivered set or sent it (the owner's mail, by the
-same predicate the read routes use). One predicate in `inbound/src/store.ts`
-(`exclusionClause`) is the whole rule. It applies to every agent path:
+**What a mark hides.** An agent reaches a message THROUGH an address when that address is
+on the message's delivered set or the message was sent by postern as it. On each path the
+agent holds a set of addresses: its own, its role queues, and the addresses it holds that
+path's grant on (any grant for a read, since every power implies read; `quote` for a quote
+or reply target; `organize` for seen, flags and move). A message is hidden from the agent
+when an active mark names its thread, the mark's owner reaches it, and NONE of the agent's
+held addresses reaches it unmarked. One predicate in `inbound/src/store.ts`
+(`exclusionClause`) is the whole rule.
+
+Example: one message delivered to Alice and Bob; Alice marks its thread.
+
+| agent | sees it? |
+|---|---|
+| holds Alice's grant only | no |
+| holds Bob's grant only | yes, through Bob |
+| holds both grants | yes, through Bob |
+| no grant, `AGENT_READ_SCOPE=estate` | no: the estate is not an address it holds |
+| the message was also delivered to the agent | yes, it is the agent's own mail |
+| holds Bob's read grant and Alice's organize grant | reads it through Bob; a flag write is `updated: 0`, since organize reaches it only through Alice |
+
+If Bob marks the thread too, no agent reaches it through either of them.
+
+The rule applies to every agent path:
 
 - reads: list, `countOnly`, search in every mode (fts, substr, semantic, hybrid), folder
   counts, get, attachments, thread;
@@ -260,13 +280,7 @@ same predicate the read routes use). One predicate in `inbound/src/store.ts`
   new thread.
 
 A hidden message answers with exactly the bytes an absent one does. A refused agent read
-writes no audit row.
-
-**What a mark never hides.** The agent's OWN mail: a message delivered to the agent, or
-sent as it, stays visible even inside a marked thread. A mark never changes what a human
-session or a static token reads. A message delivered to the owner AND someone else is the
-owner's mail too, so the owner's mark hides that row from every agent, including an agent
-the other person delegated to.
+writes no audit row. A mark never changes what a human session or a static token reads.
 
 **Who counts as an agent.** A Bearer bound to an identity: a runtime agent identity or a
 registry entry. A webmail session is the human; a static token is the operator.
@@ -275,11 +289,14 @@ registry entry. A webmail session is the human; a static token is the operator.
 `prn_`, target `{kind: "thread", id: threadId}` on both, detail `{address, exclusionId}`.
 Both show in `GET /api/audit/mine`. A repeat mark writes no row.
 
-**Cost.** Measured before the build (50k messages, 500 marks, local SQLite): a paged
-list, search or get costs the same within noise; an unbounded estate `countOnly` for an
-agent rises from about 0 to about 19 ms. Human and operator queries carry no extra
-predicate, so their plans are unchanged. A denormalized flag was rejected: it would be a
-second source of truth for an access rule.
+**Cost.** While no active mark exists on the deploy, an agent request carries no
+predicate at all: one indexed probe (`SELECT 1 FROM delegation_exclusions WHERE revoked_at
+IS NULL LIMIT 1`, once per request) decides that, and every query keeps today's plan. With
+marks present (measured before the build: 50k messages, 500 marks, local SQLite, a loaded
+machine so only the order of magnitude counts), a paged list, search or get costs the same
+within noise, and an unbounded estate `countOnly` for an agent rises from about 0 to about
+19 ms. Human and operator queries never carry the predicate. A denormalized flag was
+rejected: it would be a second source of truth for an access rule.
 
 ## 5. What is not built yet (the plan)
 
