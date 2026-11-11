@@ -436,6 +436,7 @@ describe("#417 the two contract files join", () => {
       "admin-identity-revoke", "admin-delegation-revoke",
       "admin-principals-backfill", "admin-principals-parity",
       "self-delegation-grantees", "self-delegations-list", "self-delegation-revoke",
+      "self-exclusions-list", "self-exclusion-delete",
     ];
     const withRows = new Set(Object.keys(PARAMS.params));
     const all = ROUTES.routes.map((r) => r.id);

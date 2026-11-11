@@ -84,6 +84,8 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   // it; the handler refuses Bearer callers).
   if (method === "GET" && (path === "/api/delegations/mine" || path === "/api/delegations/mine/grantees" || path === "/api/audit/mine")) return "read";
   if (method === "POST" && path === "/api/delegations/mine") return "read";
+  // #853 adds the human-only marks on the session's own address, same door, same scope.
+  if ((method === "GET" || method === "POST") && path === "/api/delegations/mine/exclusions") return "read";
   if (method === "DELETE" && /^\/api\/delegations\/mine\/.+$/.test(path)) return "read";
   if (method === "DELETE" && path.startsWith("/api/messages/") && !path.includes("/attachments/")) return "delete";
   // #650 adds GET /api/whoami at `read` scope (the Bearer-reachable self-identity call).
@@ -119,6 +121,8 @@ const CORPUS = [
   "/api/admin/principals/parity", "/api/admin/principals/parityx",
   "/api/delegations/mine", "/api/delegations/mine/", "/api/delegations/mine/grantees", "/api/delegations/mine/dlg_0123",
   "/api/delegations/minex", "/api/audit/mine", "/api/audit/minex",
+  "/api/delegations/mine/exclusions", "/api/delegations/mine/exclusions/", "/api/delegations/mine/exclusions/exc_0123",
+  "/api/delegations/mine/exclusionsx",
   "/api/identities", "/api/identities/idn_0123",
   // Pre-gate rows: they never reach the gate, and the table says so.
   "/health", "/", "/robots.txt", "/sitemap.xml", "/webmail", "/.well-known/mta-sts.txt", "/api/smtp-auth", "/api/session",
