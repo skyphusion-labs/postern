@@ -1530,7 +1530,7 @@ export const WEBMAIL_HTML = `<!doctype html>
       access.available = true; access.cursor = null;
       access.excAvailable = true; access.exclusions = [];
       setAccessVisible(true);
-      loadExclusions();
+      loadExclusions(true);
     } else {
       $("identity").textContent = "";
       $("who").textContent = state.origin;
@@ -1987,13 +1987,24 @@ export const WEBMAIL_HTML = `<!doctype html>
     for (var i = 0; i < access.exclusions.length; i++) if (access.exclusions[i].threadId === threadId) return access.exclusions[i];
     return null;
   }
-  function loadExclusions() {
+  // atSignIn: the one GET the page makes on its own after sign-in. A session from before the
+  // principals migration gets E_REAUTH_REQUIRED here. That session can still read mail, so this
+  // background load must not sign it out: the human-only mark is simply not offered until the
+  // person signs in again. Opening Settings, where they ask to manage access, still sends them to
+  // sign in with the reason. A plain 401 (the session is gone) signs out either way.
+  function loadExclusions(atSignIn) {
     if (state.authMode !== "session" || !access.available || !access.excAvailable) return Promise.resolve();
     return sessionCall("GET", "/api/delegations/mine/exclusions").then(function (body) {
       access.exclusions = body.items || [];
       renderExclusions();
       if (state.selected) renderReading(state.selected);
     }).catch(function (e) {
+      if (atSignIn && e.status === 401 && e.code === "E_REAUTH_REQUIRED") {
+        access.excAvailable = false; access.exclusions = [];
+        $("excSection").style.display = "none";
+        if (state.selected) renderReading(state.selected);
+        return;
+      }
       if (e.status === 401) { accessUnauthorized(e); return; }
       // A server without the route answers 404: no mark button, no section.
       if (e.status === 404) {
@@ -3368,7 +3379,7 @@ export const WEBMAIL_HTML = `<!doctype html>
 `;
 
 // sha256 of the page's one inline <script>, computed by scripts/sync-webmail.mjs.
-export const WEBMAIL_SCRIPT_HASH = "sha256-OhYXmXM7zxz2LLLPI30iip4qpBbp4wI59I12YONo5vI=";
+export const WEBMAIL_SCRIPT_HASH = "sha256-OA0SSqWhevGav0vE5EG/cm6eA13Y98QVzbXkEVwSl+k=";
 
 // The page CSP. It loads no third-party anything and only talks to the same origin
 // (its own API): connect-src 'self' means a hijacked page cannot send the pasted token
@@ -3377,7 +3388,7 @@ export const WEBMAIL_SCRIPT_HASH = "sha256-OhYXmXM7zxz2LLLPI30iip4qpBbp4wI59I12Y
 // the reading pane uses to render message bodies (sandbox="" = no scripts, no
 // same-origin), so stored body content can never execute or reach the API.
 // style-src keeps 'unsafe-inline' for the inline <style> and style attributes.
-export const WEBMAIL_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-OhYXmXM7zxz2LLLPI30iip4qpBbp4wI59I12YONo5vI='; connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+export const WEBMAIL_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-OA0SSqWhevGav0vE5EG/cm6eA13Y98QVzbXkEVwSl+k='; connect-src 'self'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",

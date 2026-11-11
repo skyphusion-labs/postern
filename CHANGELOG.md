@@ -13,6 +13,15 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Fix: a session from before the principals migration can read mail again in webmail.**
+Since #853, the page loads the human-only list on its own right after sign-in. Such a session
+gets `E_REAUTH_REQUIRED` for that list, and the page signed it out at once, before the person
+asked to manage anything. Now that background load just leaves the human-only mark off.
+Opening Settings to manage agent access still sends the person to sign in again, with the
+reason. A session that is gone still signs out. The webmail-e2e case that raced on this, and
+turned main red at the v1.14.0 release commit, now waits for the answer and checks that no
+sign-out was sent.
+
 ## v1.14.0
 
 MINOR. Semantic search embeds the subject and folds template families and threads, and
