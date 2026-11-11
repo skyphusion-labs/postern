@@ -352,7 +352,11 @@ mail only.
 **Hybrid family cap (#930).** Hybrid does not fold, it caps: at most `familyCap` hits per template
 family in the blended page (an integer 0..10, default **2**; `0` lists every member). Each half
 fetches up to 5x `limit` so the page refills. When the cap left any match off, the page is not
-complete: no `cursor`, `complete: false`, and `degraded` names how many rows were left off. A
+complete: no `cursor`, `complete: false`, and `degraded` names how many rows were left off. The
+members left off are not lost (#940): the family's best kept hit carries them as
+`similar: { count, ids }`, best first, `ids` capped at 20, the same shape and meaning as in
+semantic (same-family messages not listed as rows). The rows are exactly what the cap kept;
+only members inside the fetched window are known. A
 non-zero `familyCap` in any other mode is refused (400). The cap counts visible mail only. semantic/hybrid are SCORE-ranked, so they return a single
 ranked page of up to `limit` hits. A date keyset `cursor` does not continue them: supplying one
 with `mode=semantic` or `mode=hybrid` is refused (`E_VALIDATION_ERROR`, HTTP 400) rather than

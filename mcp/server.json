@@ -1,0 +1,53 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.skyphusion-labs/postern-mcp",
+  "title": "Postern",
+  "description": "Email for agents: read, search and send mail as yourself on your own domain, via Postern.",
+  "websiteUrl": "https://github.com/skyphusion-labs/postern/tree/main/mcp#readme",
+  "repository": {
+    "url": "https://github.com/skyphusion-labs/postern",
+    "source": "github",
+    "subfolder": "mcp"
+  },
+  "version": "1.7.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@skyphusion/postern-mcp",
+      "version": "1.7.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "POSTERN_API_URL",
+          "description": "The Postern mailbox API origin (https; http only for localhost).",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "POSTERN_API_TOKEN",
+          "description": "Bearer for the read tools. Prefer a per-identity token with the read scope.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "POSTERN_SEND_TOKEN",
+          "description": "Optional bearer for the send tools. When set, the send tools register.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "POSTERN_ORGANIZE_TOKEN",
+          "description": "Optional bearer for the organize tools (read state, flags, placement).",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

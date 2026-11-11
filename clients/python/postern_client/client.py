@@ -680,7 +680,9 @@ class PosternClient:
         `collapse_threads` (#926, semantic only) folds one thread's hits into its
         best hit, which carries `threadHits` (on by default). `family_cap` (#930,
         hybrid only) keeps at most that many hits per notification family
-        (default 2; 0 lists all; non-zero outside hybrid is refused).
+        (default 2; 0 lists all; non-zero outside hybrid is refused); the
+        members it leaves off ride on the family's best kept hit as
+        `similar` (#940).
 
         Mind the PAIR here: `field` (singular) selects the substr COLUMN
         matched; `fields` (plural) projects each hit's `message` to the named

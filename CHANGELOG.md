@@ -40,6 +40,8 @@ sign-out was sent.
 - **fix(inbound):** the landing page names its write-up "identity-bound credentials (since v1.4.1)". The old "Postern v1.4.1 identity-bound credentials" sat on a page every instance serves, so it read as the running version (#934).
 - `inbound/eval/replay813.mjs` reports FOUND as its primary known-item metric (the gold is a top-10 row, or folded into a top-10 hit's `similar`), with STRICT beside it, and splits known-item probes by whether their template family repeats (#940). With collapse on, a strict miss on a repeated family is usually a sibling standing for the group.
 - **docs(readme):** the README opens with the problem Postern solves, then a 5-minute path on the public demo, running it yourself (locally with no Cloudflare account, then the one-command installer), and honest limits. The apex line is corrected: posternonline.com is the project site, not a redirect to the demo.
+- **feat(mcp):** `@skyphusion/postern-mcp` carries the metadata the official MCP Registry needs: `mcpName` (`io.github.skyphusion-labs/postern-mcp`) in `mcp/package.json`, and `mcp/server.json` (validated against the 2025-12-11 schema). `mcp/test/server-json.test.ts` keeps both in step with `package.json`. Nothing is published until the next `postern-mcp-v*` release.
+- **feat(search):** hybrid no longer drops the family members its cap leaves off. They ride on the family's best kept hit as `similar: { count, ids }`, the same shape and meaning as in semantic (#940). The rows are unchanged, so hybrid still never folds, and a known item that is a family's third member is now one expand away instead of missing.
 
 ## v1.14.0
 

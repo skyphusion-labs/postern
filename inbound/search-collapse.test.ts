@@ -319,6 +319,24 @@ describe("#930 hybrid caps each template family (default 2)", () => {
     expect(runs(await hyb(s, "&familyCap=10"))).toHaveLength(5);
   });
 
+  it("#940: the members the cap left off ride on the family's best kept hit as `similar`, not as rows", async () => {
+    const s = await setup();
+    const all = runs(await hyb(s, "&familyCap=0")).map((h) => h.id);
+    expect(all, "CONTROL: five family members match uncapped").toHaveLength(5);
+    const capped = runs(await hyb(s));
+    expect(capped.map((h) => h.id), "rows are unchanged: the first two members, in order").toEqual(all.slice(0, 2));
+    const third = all[2];
+    expect(capped.map((h) => h.id)).not.toContain(third);
+    // Same shape and meaning as semantic: same-family messages not listed as rows, best first.
+    expect(capped[0].similar).toEqual({ count: 3, ids: all.slice(2) });
+    expect((capped[0].similar as Json).ids).toContain(third);
+    expect(capped[1].similar, "only the family's best kept hit carries it").toBeUndefined();
+    // familyCap=1 leaves four off; familyCap=0 and a cap above the family leave none.
+    expect(runs(await hyb(s, "&familyCap=1"))[0].similar).toEqual({ count: 4, ids: all.slice(1) });
+    expect(runs(await hyb(s, "&familyCap=10")).every((h) => h.similar === undefined)).toBe(true);
+    expect(runs(await hyb(s, "&familyCap=0")).every((h) => h.similar === undefined)).toBe(true);
+  });
+
   it("familyCap is validated, and refused outside hybrid; 0 is accepted anywhere", async () => {
     const s = await setup();
     for (const bad of ["11", "-1", "2.5", "x", ""]) {
