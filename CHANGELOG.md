@@ -44,6 +44,10 @@ upgrading to copy existing identities and users in; it is safe to run again.
 
 ### Fixed
 
+- **MCP results mark every sender-written field as untrusted.** Search, list,
+  get, thread, and attachment results name those fields and say they were
+  written by the sender.
+
 - **Webmail shows attachment names with hidden characters made visible.**
   Control and invisible format characters in an attachment filename are
   shown as `[U+XXXX]`, the name is isolated left to right, and the
