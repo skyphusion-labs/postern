@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import re
 import sys
+from typing import Optional
 
 from twisted.cred import credentials
 from twisted.cred.error import UnauthorizedLogin
@@ -87,16 +88,48 @@ _SEARCH_BYTES_ARG1 = frozenset(
 _WIRE_TRACE_REDACT = re.compile(rb"^(\s*\S+\s+(?:LOGIN|AUTHENTICATE))\b.*$", re.IGNORECASE)
 
 
+_CRED_CMD = re.compile(rb"^\s*(\S+)\s+(?:LOGIN|AUTHENTICATE)\b", re.IGNORECASE)
+
+
+def _trace_inbound(line: bytes, open_tag: Optional[bytes]) -> tuple[bytes, Optional[bytes]]:
+    """Redact one received line for the wire trace.
+
+    A LOGIN or AUTHENTICATE line is redacted and opens a credential command.
+    Every received line until that command's tagged response is replaced, so a
+    password that arrives on the following line is not written out.
+    """
+    if open_tag:
+        return b"<REDACTED>", open_tag
+    match = _CRED_CMD.match(line)
+    tag = match.group(1) if match else None
+    return _redact_wire_trace(line), tag
+
+
+def _append_byte_limit(protocol) -> int:
+    """The APPEND literal ceiling for this connection, in octets.
+
+    Falls back to the worker import ceiling when the factory has no config,
+    which is what a unit that builds a bare protocol sees.
+    """
+    from .config import DEFAULT_MAX_APPEND_BYTES
+
+    cfg = getattr(getattr(protocol, "factory", None), "_cfg", None)
+    n = getattr(cfg, "max_append_bytes", None)
+    if isinstance(n, int) and n > 0:
+        return n
+    return DEFAULT_MAX_APPEND_BYTES
+
+
 def _redact_wire_trace(line: bytes) -> bytes:
     """Redact a credential-bearing IMAP command line for the wire trace (#218).
 
     Keeps only `<tag> LOGIN` / `<tag> AUTHENTICATE` and replaces everything after the
     command word with ` <REDACTED>`; any non-credential line passes through unchanged.
     Note: this door advertises no SASL mechanism and known clients (iOS Mail included)
-    send LOGIN as inline quoted strings, which this catches. A LOGIN that used IMAP
-    literals for its arguments would carry the password on a raw literal continuation
-    delivered via rawDataReceived, NOT lineReceived, so it never reaches this trace at
-    all (the trace only hooks lineReceived + sendLine). Redaction happens AT CAPTURE."""
+    send LOGIN as inline quoted strings, which this catches. A LOGIN that splits an
+    argument into a literal leaves the rest of the command on the next received line.
+    `_trace_inbound` redacts that line too, until the tagged response. Redaction
+    happens AT CAPTURE."""
     return _WIRE_TRACE_REDACT.sub(rb"\1 <REDACTED>", line)
 
 
@@ -644,16 +677,55 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         d.addCallback(_selected)
         d.addErrback(self._IMAP4Server__ebAppend, tag)
 
+    def arg_append_literal(self, line):
+        """Parse an APPEND literal and refuse one over the configured ceiling.
+
+        The refusal is raised before ``_fileLiteral`` sends the continuation, so
+        the bytes are not read. ``IllegalOperation`` becomes a tagged NO.
+        """
+        if not line:
+            raise imap4.IllegalClientResponse("Missing argument")
+        if line[:1] != b"{":
+            raise imap4.IllegalClientResponse("Missing literal")
+        if line[-1:] != b"}":
+            raise imap4.IllegalClientResponse("Malformed literal")
+        try:
+            size = int(line[1:-1])
+        except ValueError:
+            raise imap4.IllegalClientResponse(f"Bad literal size: {line[1:-1]!r}")
+        if size < 0:
+            raise imap4.IllegalClientResponse("Bad literal size")
+        limit = _append_byte_limit(self)
+        if size > limit:
+            raise imap4.IllegalOperation(
+                f"[TOOBIG] APPEND literal is {size} octets, over the {limit} octet limit"
+            )
+        return imap4.IMAP4Server._fileLiteral(self, size)
+
+    def sendNegativeResponse(self, tag=None, message=b""):
+        """A tagged NO.
+
+        Twisted's command dispatch prefixes ``IllegalOperation`` with
+        ``Illegal operation: `` before it calls this. A response code has to
+        be the first token after NO, so a ``[TOOBIG]`` refusal is written
+        that way.
+        """
+        if isinstance(message, str):
+            message = message.encode("utf-8", "replace")
+        prefix = b"Illegal operation: "
+        if message.startswith(prefix + b"[TOOBIG]"):
+            message = message[len(prefix):]
+        imap4.IMAP4Server.sendNegativeResponse(self, tag, message)
+
     # Route APPEND through the override in both states it is valid (authenticated +
-    # selected). dispatchCommand reads the class tuple, not getattr(self, "do_APPEND");
-    # the parse callables (astring name, optional flag-list, optional datetime, and the
-    # message literal) are the stock ones, so the literal is still consumed identically.
+    # selected). dispatchCommand reads the class tuple, not getattr(self, "do_APPEND").
+    # The message literal is checked against the ceiling before the continuation.
     auth_APPEND = (  # type: ignore[assignment]
         do_APPEND,
         imap4.IMAP4Server.arg_astring,
         imap4.IMAP4Server.opt_plist,
         imap4.IMAP4Server.opt_datetime,
-        imap4.IMAP4Server.arg_literal,
+        arg_append_literal,
     )
     select_APPEND = auth_APPEND  # type: ignore[assignment]
 
@@ -788,7 +860,10 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         parser, so auth is unaffected. OFF => a pure passthrough (zero behavior
         change), so the un-instrumented read path is byte-for-byte preserved."""
         if self._wire_trace_enabled():
-            log.msg("wire C: " + _redact_wire_trace(line).decode("latin-1", "replace"))
+            shown, tag = _trace_inbound(line, getattr(self, "_wire_credential_tag", None))
+            if tag:
+                self._wire_credential_tag: Optional[bytes] = tag
+            log.msg("wire C: " + shown.decode("latin-1", "replace"))
         return imap4.IMAP4Server.lineReceived(self, line)
 
     def sendLine(self, line):
@@ -796,6 +871,11 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         no credential). OFF => pure passthrough."""
         if self._wire_trace_enabled():
             log.msg("wire S: " + line.decode("latin-1", "replace"))
+            tag = getattr(self, "_wire_credential_tag", None)
+            if tag and line.startswith(tag + b" "):
+                rest = line[len(tag) + 1:]
+                if re.match(rb"(?i)(OK|NO|BAD)\b", rest):
+                    self._wire_credential_tag = None
         return imap4.IMAP4Server.sendLine(self, line)
 
     def capabilities(self):
@@ -816,6 +896,8 @@ class PosternIMAP4Server(imap4.IMAP4Server):
         # RFC 6851: advertise MOVE (#304). do_MOVE implements it fully for the Trash
         # delete sink (untagged EXPUNGE per moved message, then tagged OK).
         cap[b"MOVE"] = None
+        # RFC 7889: tell the client the largest literal APPEND will accept.
+        cap[b"APPENDLIMIT"] = [str(_append_byte_limit(self)).encode("ascii")]
         # RFC 6855: advertise UTF8=ACCEPT (#504). listCapabilities renders a list-valued
         # entry as NAME=VALUE, so this emits exactly "UTF8=ACCEPT". Advertising it is
         # honest only because do_ENABLE below actually implements it and the serve gate

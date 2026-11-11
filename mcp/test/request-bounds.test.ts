@@ -61,12 +61,20 @@ describe("path ids", () => {
 });
 
 describe("returned bodies", () => {
-  it("caps mailbox_get and mailbox_thread and sets a truncation flag", async () => {
+  it("caps mailbox_get and mailbox_thread, keeps the envelope, and sets bodyTruncated", async () => {
     const body = "x".repeat(70_000);
     const getClient: any = {
       get: async () => ({ message: { messageId: "m", bodyText: body, bodyHtml: body } }),
     };
     const got: any = await tool("mailbox_get").handler(getClient, { message_id: "m" });
+    expect(got.contentNotice).toMatch(/untrustedFields/);
+    expect(got.untrustedFields).toContain("bodyText");
+    expect(got.untrustedFields).toContain("bodyHtml");
+    expect(got.untrustedFields).not.toContain("bodyTruncated");
+    expect(got.untrustedFields).not.toContain("bodyTextTruncated");
+    expect(got.untrustedFields).not.toContain("bodyHtmlTruncated");
+    expect(got.untrustedFields).not.toContain("bodyTextLength");
+    expect(got.untrustedFields).not.toContain("bodyHtmlLength");
     expect(got.message.bodyTruncated).toBe(true);
     expect(got.message.bodyTextLength).toBe(70_000);
     expect(got.message.bodyHtmlLength).toBe(70_000);

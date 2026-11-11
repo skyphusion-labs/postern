@@ -350,3 +350,5 @@ INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, cre
 INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_delete', 'service', 'POSTERN_API_TOKEN_DELETE', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
 INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_imap', 'service', 'POSTERN_API_TOKEN_IMAP', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
 INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_organize', 'service', 'POSTERN_API_TOKEN_ORGANIZE', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');
+-- The admin-only slot (#904, migration 0021).
+INSERT OR IGNORE INTO principals (id, kind, display_name, label, created_by, created_at) VALUES ('svc_admin', 'service', 'POSTERN_API_TOKEN_ADMIN', 'static slot', 'migration', '2026-11-11T00:00:00.000Z');

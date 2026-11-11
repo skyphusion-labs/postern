@@ -19,7 +19,7 @@
 import { generateId } from "./adminkit";
 import { NATIVE_SESSION_CAPS } from "./caps";
 
-/** The six static token slots as service principals (D-ID-5), fixed ids. */
+/** The static token slots as service principals (D-ID-5; svc_admin is #904), fixed ids. */
 export const SERVICE_PRINCIPALS: ReadonlyArray<{ id: string; displayName: string }> = [
   { id: "svc_both", displayName: "Operator (POSTERN_API_TOKEN)" },
   { id: "svc_read", displayName: "POSTERN_API_TOKEN_READ" },
@@ -27,6 +27,7 @@ export const SERVICE_PRINCIPALS: ReadonlyArray<{ id: string; displayName: string
   { id: "svc_delete", displayName: "POSTERN_API_TOKEN_DELETE" },
   { id: "svc_imap", displayName: "POSTERN_API_TOKEN_IMAP" },
   { id: "svc_organize", displayName: "POSTERN_API_TOKEN_ORGANIZE" },
+  { id: "svc_admin", displayName: "POSTERN_API_TOKEN_ADMIN" },
 ];
 
 /** The principal every operator (static `both`) action is audited as. */
