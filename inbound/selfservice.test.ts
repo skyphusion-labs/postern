@@ -70,10 +70,13 @@ const REQUEST: Record<string, (agentId: string) => { method: string; path: strin
   "self-delegations-grant": (id) => ({ method: "POST", path: "/api/delegations/mine", body: { granteeId: id, powers: ["read"] } }),
   "self-delegation-revoke": () => ({ method: "DELETE", path: `/api/delegations/mine/dlg_${"a".repeat(24)}` }),
   "self-audit": () => ({ method: "GET", path: "/api/audit/mine" }),
+  "self-exclusions-list": () => ({ method: "GET", path: "/api/delegations/mine/exclusions" }),
+  "self-exclusion-create": () => ({ method: "POST", path: "/api/delegations/mine/exclusions", body: { threadId: "no-such-thread@x" } }),
+  "self-exclusion-delete": () => ({ method: "DELETE", path: `/api/delegations/mine/exclusions/exc_${"a".repeat(24)}` }),
 };
 
 describe("#740 S5 every self-service route is the human's door only (derived from the route table)", () => {
-  it("the table has exactly these five rows, all session-cookie (the loop is not vacuous)", () => {
+  it("the table has exactly these rows, all session-cookie (the loop is not vacuous)", () => {
     expect(ROWS.map((r) => r.id).sort()).toEqual(Object.keys(REQUEST).sort());
     expect(ROWS.every((r) => r.auth === "session-cookie")).toBe(true);
   });
