@@ -5,12 +5,12 @@ import { readFileSync } from "node:fs";
 // node URL, not the workers-types global: these are file URLs fed to node:fs (#638).
 import { URL } from "node:url";
 import { handleApi } from "./src/api";
-import { hashIterations, hashSecret, PBKDF2_ITERATIONS, verifySecret } from "./src/smtpcreds";
+import { hashIterations, hashSecret, PBKDF2_ITERATIONS, pbkdf2Iterations, TEST_PBKDF2_ITERATIONS_VAR, verifySecret } from "./src/smtpcreds";
 import { insertSession, SESSION_COOKIE, CSRF_COOKIE } from "./src/session";
 
 // #821, as RULED by the lead: the deployed Workers runtime caps PBKDF2 at 100,000
 // iterations and the target was 210,000, so no native credential could be created or
-// verified in production. The target is now PBKDF2-SHA256 at 100,000 (contract
+// verified in production. The target is PBKDF2-SHA512 at 100,000 (contract
 // webmail-v2-contracts 1.10.2); a stored hash above the cap fails closed with a logged
 // config error and the wrong-password answer.
 //
@@ -88,7 +88,9 @@ describe("#821 the suite runs under the Workers PBKDF2 cap", () => {
     ).rejects.toThrow(/iteration counts above 100000 are not supported/);
     const ok = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: CAP }, key, 256);
     expect(ok.byteLength).toBe(32);
-  });
+    // One derive at the production count. The default 5000ms budget is what #909
+    // exists to get the rest of the suite off; this one stays, with room.
+  }, 60_000);
 });
 
 describe("#821 item 2: the target can never exceed the cap", () => {
@@ -96,18 +98,66 @@ describe("#821 item 2: the target can never exceed the cap", () => {
     expect(PBKDF2_ITERATIONS).toBeLessThanOrEqual(CAP);
   });
 
-  it("every hash hashSecret writes parses to at most 100,000, and is SHA-512 at exactly the target (#828)", async () => {
+  it("every hash hashSecret writes parses to at most 100,000, and is SHA-512 at the active target (#828)", async () => {
+    const count = pbkdf2Iterations();
+    // The suite override is on. Equal to PBKDF2_ITERATIONS means #909 is gone and
+    // the sign-in tests are back on vitest's 5000ms default.
+    expect(count).toBeLessThan(PBKDF2_ITERATIONS);
+    expect(count).toBeLessThanOrEqual(CAP);
     for (let i = 0; i < 3; i++) {
       const h = await hashSecret(PASSWORD + i);
-      expect(hashIterations(h)).toBeLessThanOrEqual(CAP);
-      expect(hashIterations(h)).toBe(PBKDF2_ITERATIONS);
+      expect(hashIterations(h)).toBe(count);
       const [tag, iters, saltB64, hashB64] = h.split("$");
-      expect([tag, iters]).toEqual(["pbkdf2-sha512", "100000"]);
+      expect([tag, iters]).toEqual(["pbkdf2-sha512", String(count)]);
       // Independent derivation: the stored bytes ARE PBKDF2-HMAC-SHA512 at that count (#828).
       const salt = Uint8Array.from(atob(saltB64), (c) => c.charCodeAt(0));
       const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(PASSWORD + i), "PBKDF2", false, ["deriveBits"]);
-      const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-512", salt, iterations: CAP }, key, 512));
+      const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-512", salt, iterations: count }, key, 512));
       expect(b64(bits)).toBe(hashB64);
+    }
+  });
+
+  it("an unset override hashes at 100,000, and the shipping configs never set it", async () => {
+    for (const name of ["wrangler.jsonc", "wrangler.dev.jsonc"]) {
+      const text = readFileSync(new URL("./" + name, import.meta.url), "utf8");
+      expect(text, name).not.toContain(TEST_PBKDF2_ITERATIONS_VAR);
+    }
+    // An empty binding is "not set" and must not consult the suite's process override.
+    const prod = { POSTERN_TEST_PBKDF2_ITERATIONS: "" };
+    expect(pbkdf2Iterations(prod)).toBe(PBKDF2_ITERATIONS);
+    expect(PBKDF2_ITERATIONS).toBe(CAP);
+    const h = await hashSecret(PASSWORD, prod);
+    const [tag, iters, saltB64, hashB64] = h.split("$");
+    expect([tag, iters]).toEqual(["pbkdf2-sha512", String(CAP)]);
+    const salt = Uint8Array.from(atob(saltB64), (c) => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(PASSWORD), "PBKDF2", false, ["deriveBits"]);
+    const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-512", salt, iterations: CAP }, key, 512));
+    expect(b64(bits)).toBe(hashB64);
+  }, 60_000);
+
+  it("the Worker env binding selects the count, and an invalid one stays at the production count", async () => {
+    const h = await hashSecret(PASSWORD, { POSTERN_TEST_PBKDF2_ITERATIONS: "2500" });
+    expect(h.split("$")[1]).toBe("2500");
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(pbkdf2Iterations({ POSTERN_TEST_PBKDF2_ITERATIONS: "nope" })).toBe(PBKDF2_ITERATIONS);
+      expect(pbkdf2Iterations({ POSTERN_TEST_PBKDF2_ITERATIONS: "100001" })).toBe(PBKDF2_ITERATIONS);
+      expect(spy.mock.calls.map((c) => String(c[0])).join("\n")).toContain("config error");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("an invalid process override is ignored in favour of the production count", () => {
+    const prev = process.env.POSTERN_TEST_PBKDF2_ITERATIONS;
+    process.env.POSTERN_TEST_PBKDF2_ITERATIONS = "nope";
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(pbkdf2Iterations()).toBe(PBKDF2_ITERATIONS);
+    } finally {
+      if (prev === undefined) delete process.env.POSTERN_TEST_PBKDF2_ITERATIONS;
+      else process.env.POSTERN_TEST_PBKDF2_ITERATIONS = prev;
+      spy.mockRestore();
     }
   });
 });
@@ -127,12 +177,13 @@ describe("#821 the auth paths work under the cap", () => {
     expect(await res.json()).toEqual({ ok: false, error: "E_AUTH_FAILED" });
   });
 
-  it("item 4: a lower-count row is re-hashed at exactly 100,000 on sign-in, never above", async () => {
+  it("item 4: a lower-count row is re-hashed at the active target on sign-in, never above the cap", async () => {
     const { env, raw } = realEnv();
-    seed(raw, await sha256Hash(PASSWORD, 1000));
+    seed(raw, await sha256Hash(PASSWORD, 1));
     expect((await signIn(env)).status).toBe(200);
     const after = (raw.prepare("SELECT secret_hash FROM smtp_credentials").get() as { secret_hash: string }).secret_hash;
-    expect(hashIterations(after)).toBe(CAP);
+    expect(hashIterations(after)).toBe(pbkdf2Iterations());
+    expect(hashIterations(after)).toBeLessThanOrEqual(CAP);
     expect((await signIn(env)).status).toBe(200);
   });
 
@@ -159,7 +210,7 @@ describe("#821 item 3: a row above the cap fails closed as a wrong password", ()
     }
   });
 
-  it("costs exactly the work of a wrong password: one derive at 100,000, none above (timing)", async () => {
+  it("costs exactly the work of a wrong password: one derive at the active target, none above (timing)", async () => {
     // Build both rows BEFORE spying: building them derives too, and must not be counted.
     const capped = await aboveCapRow();
     const real = await hashSecret(PASSWORD);
@@ -175,7 +226,7 @@ describe("#821 item 3: a row above the cap fails closed as a wrong password", ()
       // The comparison: a wrong password against a real row at the target.
       expect(await verifySecret("not-the-password", real, USER)).toBe(false);
       const wrong = counts();
-      expect(wrong).toEqual([CAP]);
+      expect(wrong).toEqual([pbkdf2Iterations()]);
       expect(overCap).toEqual(wrong);
     } finally {
       spy.mockRestore();

@@ -426,7 +426,9 @@ more, so only the edge shows it: the former target of 210,000 could neither crea
 verify any credential in production, and a green local suite could not see that. The cap
 and its reason sit next to the constant in `smtpcreds.ts`, and the suite runs under the
 edge's limit, so raising it goes red locally. A different KDF (scrypt or Argon2 in WASM)
-is a separate design item, not part of this contract.
+is a separate design item, not part of this contract. Tests may set
+`POSTERN_TEST_PBKDF2_ITERATIONS` to a lower count on that same path. The shipping
+configs do not set it, so a deploy still hashes at 100,000.
 
 **A row above the cap fails closed as a wrong password.** A stored hash above 100,000
 iterations (it could only have been minted outside the Worker) is never derived. The

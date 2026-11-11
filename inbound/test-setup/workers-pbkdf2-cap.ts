@@ -10,6 +10,16 @@
 
 export const WORKERS_PBKDF2_MAX_ITERATIONS = 100_000;
 
+// #909. vitest's default test timeout is 5000ms. PBKDF2-SHA512 at the production
+// count (100,000) exceeds that on a loaded GitHub runner, and the time scales
+// with however many verifies a test does. The suite sets the same override the
+// Worker reads (POSTERN_TEST_PBKDF2_ITERATIONS). Shipping wrangler configs do
+// not set it, so a production build stays at 100,000. 1,000 keeps a sign-in
+// burst under the default timeout and still leaves room for a fixture below
+// the target. One test derives at 100,000 with its own timeout.
+const suiteEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+if (suiteEnv) suiteEnv.POSTERN_TEST_PBKDF2_ITERATIONS = "1000";
+
 type DeriveBits = (algorithm: unknown, baseKey: unknown, length?: unknown) => Promise<ArrayBuffer>;
 interface SubtleLike { deriveBits: DeriveBits }
 

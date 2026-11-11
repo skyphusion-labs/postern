@@ -107,7 +107,7 @@ export async function handleSetup(request: Request, env: Env): Promise<Response>
     created = await createFirstUser(
       env,
       { username: user.username, fromAddr: user.fromAddr, displayName: user.displayName },
-      await hashSecret(user.password as string),
+      await hashSecret(user.password as string, env),
       new Date().toISOString(),
     );
   } catch (err) {

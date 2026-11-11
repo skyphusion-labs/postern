@@ -1021,6 +1021,9 @@ POST /api/smtp-auth          Authorization: Bearer <POSTERN_TRANSPORT_TOKEN>
   (#790, webmail-v2-contracts 1.10.4) or the legacy `POST` / `DELETE /api/admin/smtp-credentials`
   upsert (the secret is returned once and never logged). A hash not at the current target (a
   legacy SHA-256 row, or a lower iteration count) is re-hashed on the next successful sign-in.
+  The production target is 100,000. `POSTERN_TEST_PBKDF2_ITERATIONS` is a test-only
+  override the shipping Worker configs do not set; unset, new hashes and the dummy
+  hash stay at 100,000.
 
   The 2xx body is the only one a daemon parses; every other status is an INFRA failure, not a
   verdict on the credential. That split is load-bearing (#442): the worker answers an unexpected

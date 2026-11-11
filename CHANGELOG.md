@@ -47,6 +47,14 @@ applied by the deploy. Nothing changes until a human marks a thread.
   only through that human's address. Before #853 no such mark existed, so
   nothing changes until one is made.
 
+### Fixed
+
+- **Sign-in tests no longer derive PBKDF2 at the production count (#909).**
+  A loaded runner was exceeding vitest's 5 second default because each password
+  check ran PBKDF2-SHA512 at 100,000 iterations. `POSTERN_TEST_PBKDF2_ITERATIONS`
+  selects a lower count through the same Worker env path. Shipping configs do not
+  set it, so a production build still hashes at 100,000.
+
 ## v1.12.0
 
 MINOR. Delegation the address owner manages from webmail, and sending as the owner

@@ -26,9 +26,59 @@ export const RUNTIME_PBKDF2_MAX_ITERATIONS = 100_000;
 // are encoded into each stored hash, so a legacy `pbkdf2$` (SHA-256) row keeps verifying
 // at its own parameters, and a successful sign-in re-hashes any row that is not at the
 // target (a different KDF, or a lower count) to the target, never above it (contract
-// 1.10.2). DUMMY_HASH below is at the target too.
+// 1.10.2). dummyHash() below is at the same count hashing uses.
 export const PBKDF2_ITERATIONS = RUNTIME_PBKDF2_MAX_ITERATIONS;
 const SALT_BYTES = 16;
+
+// Test-only override (#909). Production wrangler configs never set this. Unset,
+// empty, or not an integer from 1 to the cap, the target stays PBKDF2_ITERATIONS.
+// The Worker reads it off Env, the same object every credential path already
+// receives. hashSecret() with no Env falls through to process.env of the same
+// name, so the vitest suite can lower the count for every direct call. A present
+// Env key wins over the process, and an empty one forces the production count
+// even while the suite override is set. A lower count weakens stored passwords,
+// which is why a deploy must not set it.
+export const TEST_PBKDF2_ITERATIONS_VAR = "POSTERN_TEST_PBKDF2_ITERATIONS";
+
+export interface Pbkdf2IterationSource {
+  POSTERN_TEST_PBKDF2_ITERATIONS?: string;
+}
+
+function parseIterationOverride(raw: string | undefined): number | "absent" | "invalid" {
+  if (raw === undefined) return "absent";
+  const trimmed = raw.trim();
+  if (trimmed === "") return "absent";
+  if (!/^[1-9][0-9]*$/.test(trimmed)) return "invalid";
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < 1 || n > RUNTIME_PBKDF2_MAX_ITERATIONS) return "invalid";
+  return n;
+}
+
+function readProcessOverride(): number | "absent" | "invalid" {
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  return parseIterationOverride(proc?.env?.[TEST_PBKDF2_ITERATIONS_VAR]);
+}
+
+function logBadOverride(): void {
+  console.error(
+    "config error: " + TEST_PBKDF2_ITERATIONS_VAR + " is not an integer from 1 to " +
+      RUNTIME_PBKDF2_MAX_ITERATIONS + "; using " + PBKDF2_ITERATIONS,
+  );
+}
+
+/** The count new hashes, the dummy hash, and the rehash target use. */
+export function pbkdf2Iterations(env?: Pbkdf2IterationSource): number {
+  if (env !== undefined && Object.prototype.hasOwnProperty.call(env, TEST_PBKDF2_ITERATIONS_VAR)) {
+    const parsed = parseIterationOverride(env.POSTERN_TEST_PBKDF2_ITERATIONS);
+    if (typeof parsed === "number") return parsed;
+    if (parsed === "invalid") logBadOverride();
+    return PBKDF2_ITERATIONS;
+  }
+  const fromProcess = readProcessOverride();
+  if (typeof fromProcess === "number") return fromProcess;
+  if (fromProcess === "invalid") logBadOverride();
+  return PBKDF2_ITERATIONS;
+}
 
 /** One supported KDF: the tag a stored hash starts with, its PRF, and its output length. */
 interface Kdf {
@@ -44,18 +94,20 @@ const KDFS: readonly Kdf[] = [LEGACY_SHA256, TARGET_SHA512];
 export const PBKDF2_TARGET_TAG = TARGET_SHA512.tag;
 export const PBKDF2_TARGET_HASH = TARGET_SHA512.hash;
 
-// A well-formed dummy hash at the TARGET (same KDF, same count), verified against when a
-// username is unknown or disabled, so a missing user costs the same work as a wrong
-// secret on a current row (no user enumeration by timing). It never matches. A row still
-// on the legacy SHA-256 KDF costs a little less to verify until its owner next signs in
-// and it is re-hashed; that is the same transitional property a lower iteration count
-// had under #810, and it closes per row on the next sign-in.
-const DUMMY_HASH = [
-  TARGET_SHA512.tag,
-  String(PBKDF2_ITERATIONS),
-  "A".repeat(22) + "==",
-  "A".repeat(86) + "==",
-].join("$");
+// A well-formed dummy hash at the active target (same KDF, same count), verified
+// against when a username is unknown or disabled, so a missing user costs the same
+// work as a wrong secret on a current row (no user enumeration by timing). It never
+// matches. A row still on the legacy SHA-256 KDF costs a little less to verify until
+// its owner next signs in and it is re-hashed; that is the same transitional property
+// a lower iteration count had under #810, and it closes per row on the next sign-in.
+function dummyHash(env?: Pbkdf2IterationSource): string {
+  return [
+    TARGET_SHA512.tag,
+    String(pbkdf2Iterations(env)),
+    "A".repeat(22) + "==",
+    "A".repeat(86) + "==",
+  ].join("$");
+}
 
 // Contract 1.10.1 bounds.
 export const PASSWORD_MIN = 12;
@@ -121,10 +173,11 @@ function parseHash(encoded: string): ParsedHash | null {
 }
 
 /** Encode a secret at the target: pbkdf2-sha512$<iterations>$<saltB64>$<hashB64>. */
-export async function hashSecret(secret: string): Promise<string> {
+export async function hashSecret(secret: string, env?: Pbkdf2IterationSource): Promise<string> {
+  const iterations = pbkdf2Iterations(env);
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
-  const derived = await pbkdf2(secret, salt, PBKDF2_ITERATIONS, TARGET_SHA512);
-  return [TARGET_SHA512.tag, String(PBKDF2_ITERATIONS), toB64(salt), toB64(derived)].join("$");
+  const derived = await pbkdf2(secret, salt, iterations, TARGET_SHA512);
+  return [TARGET_SHA512.tag, String(iterations), toB64(salt), toB64(derived)].join("$");
 }
 
 /** The iteration count an encoded hash was made with (any supported KDF), or null if malformed. */
@@ -142,10 +195,10 @@ export function hashPrf(encoded: string): "SHA-256" | "SHA-512" | null {
  * below the target count. A malformed row is false (it never verifies, so it is never
  * reached with a good password anyway).
  */
-export function needsRehash(encoded: string): boolean {
+export function needsRehash(encoded: string, env?: Pbkdf2IterationSource): boolean {
   const p = parseHash(encoded);
   if (!p) return false;
-  return p.kdf.tag !== TARGET_SHA512.tag || p.iterations < PBKDF2_ITERATIONS;
+  return p.kdf.tag !== TARGET_SHA512.tag || p.iterations < pbkdf2Iterations(env);
 }
 
 /**
@@ -153,7 +206,12 @@ export function needsRehash(encoded: string): boolean {
  * malformed encoding (including an unknown KDF tag, or an output of the wrong length for
  * its KDF) rather than throwing, so a corrupt row fails closed.
  */
-export async function verifySecret(secret: string, encoded: string, account = "?"): Promise<boolean> {
+export async function verifySecret(
+  secret: string,
+  encoded: string,
+  account = "?",
+  env?: Pbkdf2IterationSource,
+): Promise<boolean> {
   const parsed = parseHash(encoded);
   if (parsed === null) return false;
   const iterations = parsed.iterations;
@@ -170,7 +228,7 @@ export async function verifySecret(secret: string, encoded: string, account = "?
         " PBKDF2 iterations, above the runtime cap of " + RUNTIME_PBKDF2_MAX_ITERATIONS +
         "; it cannot sign in until an operator resets its password",
     );
-    await verifySecret(secret, DUMMY_HASH);
+    await verifySecret(secret, dummyHash(env), account, env);
     return false;
   }
   const salt = fromB64(parsed.salt);
@@ -219,14 +277,14 @@ export async function authenticateAccount(
   }
   if (!cred || cred.disabled) {
     // Equalize timing: do the same work, ignore the result.
-    await verifySecret(secret, DUMMY_HASH);
+    await verifySecret(secret, dummyHash(env), "?", env);
     return null;
   }
-  const ok = await verifySecret(secret, cred.secretHash, cred.username);
+  const ok = await verifySecret(secret, cred.secretHash, cred.username, env);
   if (!ok) return null;
-  if (needsRehash(cred.secretHash)) {
+  if (needsRehash(cred.secretHash, env)) {
     try {
-      await setPassword(env, cred.username, await hashSecret(secret), new Date().toISOString(), cred.secretHash);
+      await setPassword(env, cred.username, await hashSecret(secret, env), new Date().toISOString(), cred.secretHash);
     } catch (err) {
       console.error("hash upgrade failed:", err instanceof Error ? err.message : String(err));
     }

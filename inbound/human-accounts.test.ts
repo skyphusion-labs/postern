@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 // node URL, not the workers-types global: these are file URLs fed to node:fs (#638).
 import { URL } from "node:url";
 import { handleApi } from "./src/api";
-import { hashSecret } from "./src/smtpcreds";
+import { hashSecret, pbkdf2Iterations } from "./src/smtpcreds";
 import { SESSION_COOKIE, CSRF_COOKIE } from "./src/session";
 
 // #790: human account management (contract docs/design/webmail-v2-contracts.md 1.10).
@@ -114,7 +114,7 @@ describe("#790 admin user management (both token)", () => {
     });
     expect(body.password).toMatch(/^[A-Za-z0-9_-]{32}$/);
     const stored = row(raw, "bob@skyphusion.org")!;
-    expect(String(stored.secret_hash)).toMatch(/^pbkdf2-sha512\$100000\$/);
+    expect(String(stored.secret_hash)).toMatch(new RegExp("^pbkdf2-sha512\\$" + pbkdf2Iterations() + "\\$"));
     expect(String(stored.secret_hash)).not.toContain(body.password);
 
     const list = await call(env, "GET", "/api/admin/users", { token: ADMIN });
@@ -387,12 +387,12 @@ describe("#790 no enumeration, per-row hash upgrade", () => {
 
   it("upgrades a low-iteration hash on a successful sign-in, and only then", async () => {
     const { env, raw } = realEnv();
-    const weak = await lowIterationHash(PASSWORD, 1000);
+    const weak = await lowIterationHash(PASSWORD, 1);
     await seed(raw, USER, PASSWORD, weak);
     await call(env, "POST", "/api/session", { body: { username: USER, password: "wrong-password-x" } });
     expect(row(raw)!.secret_hash).toBe(weak);
     await signIn(env);
-    expect(String(row(raw)!.secret_hash)).toMatch(/^pbkdf2-sha512\$100000\$/);
+    expect(String(row(raw)!.secret_hash)).toMatch(new RegExp("^pbkdf2-sha512\\$" + pbkdf2Iterations() + "\\$"));
     await signIn(env); // still the same password
   });
 });
