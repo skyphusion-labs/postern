@@ -62,6 +62,9 @@ export interface ReplyRequest {
 export interface SendResult {
   messageId: string;
   threadId: string;
+  /** Present only on a send_as send (#740 S4): the agent identity that actually sent
+   *  it, written as the RFC 5322 `Sender:` header, while `from` is the human. */
+  sender?: string;
   /**
    * The From address this send actually used, after identity binding (#804).
    * A registry token's bound address wins over any caller-supplied from, and
@@ -375,6 +378,59 @@ export interface QuoteAudit {
   record: (messageId: string, op: "reply" | "forward", address: string) => Promise<void>;
 }
 
+/**
+ * The send_as half of a send or reply (#740 S4). `addresses` are the addresses the
+ * caller's identity holds an ACTIVE `send_as` grant on. When the caller names one of
+ * them as `from`, the mail goes out with From = that address and the HUMAN's display
+ * name (never the caller's), Sender = the identity itself, and Reply-To = the human.
+ * `displayName` looks up the human's name; `record` writes the audit row BEFORE
+ * dispatch and throws if it cannot (no audit, no send).
+ */
+export interface SendAs {
+  addresses: readonly string[];
+  displayName: (address: string) => Promise<string | undefined>;
+  record: (address: string, op: "send" | "reply") => Promise<void>;
+}
+
+interface Delegated {
+  from: EmailAddress;
+  sender: EmailAddress;
+  address: string;
+}
+
+/** Resolve a send_as From, or null for an ordinary send (resolveFrom then applies). */
+async function delegatedFrom(
+  env: Env,
+  requested: SendRequest["from"],
+  identity: BoundIdentity | undefined,
+  sendAs: SendAs | undefined,
+): Promise<Delegated | null> {
+  if (!identity || !sendAs || requested === undefined) return null;
+  const email = (typeof requested === "string" ? requested : requested.email ?? "").trim().toLowerCase();
+  if (!email || email === identity.from.trim().toLowerCase()) return null;
+  if (!sendAs.addresses.includes(email)) return null;
+  // The transport must be able to say who really sent it. Refused here, before the
+  // audit row and before any dispatch, never sent without a Sender (Conrad's S4 ruling).
+  if (!selectTransport(env).canSetSender) {
+    throw new MailboxError(
+      "E_SEND_AS_UNSUPPORTED",
+      "send_as needs an outbound transport that can set the Sender header; the Cloudflare Email " +
+        "Sending transport cannot (it has no Sender field or allowlisted header). Use " +
+        "OUTBOUND_TRANSPORT=relay, or send as your own address",
+      422,
+    );
+  }
+  const name = await sendAs.displayName(email);
+  // The same shape, domain and CRLF checks every From gets, with no bound override.
+  const from = resolveFrom(env, name ? { email, name } : email, undefined);
+  const sender = resolveFrom(
+    env,
+    identity.displayName ? { email: identity.from, name: identity.displayName } : identity.from,
+    undefined,
+  );
+  return { from, sender, address: email };
+}
+
 /** Record the quote when the message is reachable through a granted address. */
 async function auditQuote(
   env: Env,
@@ -424,6 +480,7 @@ export async function send(
   identity: BoundIdentity | undefined,
   readScope: MessageReadScope,
   quoteAudit?: QuoteAudit,
+  sendAs?: SendAs,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object") {
     throw new MailboxError("E_VALIDATION_ERROR", "request body must be an object");
@@ -457,7 +514,8 @@ export async function send(
     throw new MailboxError("E_TOO_MANY_RECIPIENTS", `combined to/cc/bcc exceeds ${MAX_RECIPIENTS}`);
   }
 
-  const from = resolveFrom(env, req.from, identity);
+  const delegated = await delegatedFrom(env, req.from, identity, sendAs);
+  const from = delegated ? delegated.from : resolveFrom(env, req.from, identity);
   const attachments = validateAttachments(req.attachments);
 
   let replyTo: EmailAddress | undefined;
@@ -469,6 +527,13 @@ export async function send(
     }
     if (replyTo?.name !== undefined) rejectCRLF("replyTo name", replyTo.name);
   }
+  if (delegated) {
+    // Under send_as, Reply-To is the human. A caller may set it only inside the grant.
+    if (replyTo && replyTo.email.trim().toLowerCase() !== delegated.address) {
+      throw new MailboxError("E_VALIDATION_ERROR", "under send_as, replyTo may only be the granted address");
+    }
+    replyTo = delegated.from;
+  }
 
   const headers = validateHeaders(req.headers);
   const body = original ? appendQuote(original, req.html, req.text, true) : { html: req.html, text: req.text };
@@ -479,11 +544,14 @@ export async function send(
 
   // #740 S3: the audit row for a forward of granted mail, written BEFORE dispatch.
   if (original) await auditQuote(env, original.messageId, "forward", quoteAudit);
+  // #740 S4: the send_as audit row, also BEFORE dispatch, fail closed.
+  if (delegated) await sendAs!.record(delegated.address, "send");
   return dispatchAndStore(env, ctx, {
     to,
     cc,
     bcc,
     from,
+    sender: delegated?.sender,
     replyTo,
     subject,
     html: body.html,
@@ -516,6 +584,7 @@ export async function reply(
   identity: BoundIdentity | undefined,
   readScope: MessageReadScope,
   quoteAudit?: QuoteAudit,
+  sendAs?: SendAs,
 ): Promise<SendResult> {
   if (!req || typeof req !== "object" || typeof req.messageId !== "string" || !req.messageId.trim()) {
     throw new MailboxError("E_FIELD_MISSING", "messageId is required");
@@ -550,7 +619,8 @@ export async function reply(
   // Route replies from stored state, never caller input. Inbound: Reply-To or From
   // (RFC 5322 fidelity, #189). Outbound sent copy: the original To, since From is
   // us and excluding the sender would leave no recipient (smoke-staging #25).
-  const from = resolveFrom(env, req.from, identity);
+  const delegated = await delegatedFrom(env, req.from, identity, sendAs);
+  const from = delegated ? delegated.from : resolveFrom(env, req.from, identity);
   const primary =
     original.direction === "outbound"
       ? firstAddress(original.to)
@@ -590,11 +660,15 @@ export async function reply(
   // #740 S3: a reply to granted mail reads it (its parties, subject and thread, and the
   // body when quoted), so it is audited BEFORE dispatch, quoted or not.
   await auditQuote(env, original.messageId, "reply", quoteAudit);
+  // #740 S4: the send_as audit row, BEFORE dispatch, fail closed.
+  if (delegated) await sendAs!.record(delegated.address, "reply");
   return dispatchAndStore(env, ctx, {
     to,
     cc,
     bcc,
     from,
+    sender: delegated?.sender,
+    replyTo: delegated?.from,
     subject: replySubject,
     html: body.html,
     text: body.text,
@@ -612,6 +686,8 @@ interface DispatchInput {
   cc: string[];
   bcc: string[];
   from: EmailAddress;
+  /** RFC 5322 Sender, on a send_as send only (#740 S4). */
+  sender?: EmailAddress;
   replyTo?: EmailAddress;
   subject: string;
   html?: string;
@@ -640,6 +716,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
   if (d.cc.length) outbound.cc = d.cc;
   if (d.bcc.length) outbound.bcc = d.bcc;
   if (d.replyTo) outbound.replyTo = d.replyTo;
+  if (d.sender) outbound.sender = d.sender;
   if (safeHtml) outbound.html = safeHtml;
   if (d.text) outbound.text = d.text;
   if (d.attachments && d.attachments.length) outbound.attachments = d.attachments;
@@ -710,7 +787,8 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
   // `from` is the address resolveFrom settled on, the same string store.put
   // wrote to from_addr above. Reporting it is how a caller sees a substitution
   // a bound identity made (#804), instead of echoing the from they asked for.
-  return { messageId, threadId, from: d.from.email, providerMessageId };
+  // Under send_as, `sender` reports the identity that really sent it (#740 S4).
+  return { messageId, threadId, from: d.from.email, ...(d.sender ? { sender: d.sender.email } : {}), providerMessageId };
 }
 
 function validateHeaders(headers: Record<string, string> | undefined): Record<string, string> {

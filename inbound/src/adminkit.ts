@@ -199,6 +199,25 @@ export function agentMessageAudit(
 }
 
 /**
+ * One audit_log row with an AGENT identity as actor and a plain target (#740 S4: the
+ * address a send_as send went out as). The caller runs it before the act it records
+ * and treats a failed insert as a failed act.
+ */
+export function agentAudit(
+  env: Env,
+  at: string,
+  actorId: string,
+  action: string,
+  target: { kind: string; id: string },
+  detail: Record<string, unknown>,
+) {
+  return env.DB.prepare(
+    "INSERT INTO audit_log (at, actor_kind, actor_id, action, target_kind, target_id, outcome, detail) " +
+      "VALUES (?, 'agent', ?, ?, ?, ?, 'ok', ?)",
+  ).bind(at, actorId, action, target.kind, target.id, JSON.stringify(detail));
+}
+
+/**
  * Record a refusal. Best effort BY DESIGN: the refusal already happened and its answer
  * is the same either way, so a failed write is logged and the refusal is still returned.
  */

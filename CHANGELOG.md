@@ -13,6 +13,18 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+### Added
+
+- **The `send_as` power (#740 S4).** An agent holding a `send_as` grant
+  sends as the human by naming the address as `from`: From is the human
+  with the human display name, `Sender:` is the agent, Reply-To is the
+  human, and the response reports `from` and `sender`. Each send writes a
+  `delegation.send_as` audit row before dispatch, fail closed. It needs a
+  transport that can set `Sender:`: on the default Cloudflare transport
+  the send is refused with `422 E_SEND_AS_UNSUPPORTED`, never sent
+  without one (Cloudflare feature request: #896). The relay `/dispatch`
+  body gains an optional `sender`. See `docs/DELEGATION.md` section 4.5.
+
 ### Changed
 
 - **The webmail page allows its script by hash, not `'unsafe-inline'`.**
