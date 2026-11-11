@@ -14,7 +14,7 @@
 
 import PostalMime from "postal-mime";
 import * as store from "./store";
-import { cleanBody, htmlToText, ingest, normalizeMessageId, type ParsedInbound } from "./ingest";
+import { cleanBody, htmlToText, ingest, messageDate, normalizeMessageId, type ParsedInbound } from "./ingest";
 import { toArrayBuffer } from "./headers";
 import {
   send,
@@ -31,6 +31,7 @@ import { serveWebmail } from "./webmail";
 import { authenticate } from "./smtpcreds";
 import { handleCredentialDelete, handleCredentialUpsert, handleUserAdmin } from "./useradmin";
 import { handleSetup } from "./setup";
+import { accountKeys, clearFailures, gateAttempt, recordFailure, releaseAttempt } from "./auththrottle";
 import {
   IdentityStoreUnavailable,
   handleAdminIdentities,
@@ -1760,8 +1761,7 @@ async function handleImapImport(
   // own Message-ID verbatim, so a Sent copy imported here and the delivered copy that
   // arrives over SMTP resolve to one identity.
   const messageId = await normalizeMessageId(env, parsed.messageId);
-  const parsedDate = parsed.date ? new Date(parsed.date) : new Date();
-  const date = Number.isNaN(parsedDate.getTime()) ? new Date().toISOString() : parsedDate.toISOString();
+  const date = messageDate(parsed.date, new Date());
   const attachments: NonNullable<store.StoreInput["attachments"]> = [];
   for (const attachment of parsed.attachments ?? []) {
     const content = toArrayBuffer(attachment.content);
@@ -1845,12 +1845,37 @@ async function smtpAuthResponse(request: Request, env: Env): Promise<Response> {
   if (!username || !secret) {
     return json({ ok: false, error: "E_FIELD_MISSING", message: "username and secret are required" }, 400);
   }
-  const from = await authenticate(env, username, secret);
+  // The Worker-side throttle for this door (#409 semantics, ./auththrottle), keyed on
+  // the canonical username ONLY: the caller is the relay or the IMAP door, so a
+  // client-IP layer here would be the door's own address. It shares the account key
+  // with webmail sign-in, so one credential has one budget whichever door is guessed
+  // at. A store error fails closed (503, which the doors read as a backend fault).
+  const keys = accountKeys(username);
+  let gate;
+  try {
+    gate = await gateAttempt(env, keys);
+  } catch {
+    return json({ ok: false, error: "E_SERVICE_UNAVAILABLE", message: "auth throttle unavailable" }, 503);
+  }
+  if (!gate.allowed) {
+    // 200 ok:false like any refusal, so a door maps it to an auth failure, never to its
+    // own misconfiguration; the code says why and when to try again.
+    return json({ ok: false, error: "E_AUTH_THROTTLED", retryAfter: gate.retryAfter });
+  }
+  let from;
+  try {
+    from = await authenticate(env, username, secret);
+  } catch (err) {
+    await releaseAttempt(env, gate).catch(() => {});
+    throw err;
+  }
   if (!from) {
+    await recordFailure(env, keys, gate);
     // Valid transport token but a bad credential: 200 ok:false, so the relay maps
     // it to an SMTP 535 (auth failed) and not to its own config error (401).
     return json({ ok: false, error: "E_AUTH_FAILED" });
   }
+  await clearFailures(env, keys, gate);
   return json({ ok: true, from });
 }
 
