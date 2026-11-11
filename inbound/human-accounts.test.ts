@@ -1,3 +1,4 @@
+import { sqliteBatch } from "./test-support";
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -44,7 +45,7 @@ function realEnv(overrides: Record<string, unknown> = {}) {
     };
   }
   const env = {
-    DB: { prepare },
+    DB: { prepare, batch: sqliteBatch(db) },
     ALLOWED_FROM_DOMAIN: "skyphusion.org",
     WEBMAIL_AUTH_BACKEND: "native",
     POSTERN_API_TOKEN: ADMIN,
@@ -531,7 +532,7 @@ describe("#790 POST /api/session/password", () => {
 describe("#790 migration 0015 (upgrade path)", () => {
   it("adds the columns on a database built from the earlier migrations", () => {
     const db = new DatabaseSync(":memory:");
-    for (const f of ["0004_smtp_credentials.sql", "0010_webmail_sessions.sql", "0015_human_accounts.sql"]) {
+    for (const f of ["0004_smtp_credentials.sql", "0010_webmail_sessions.sql", "0015_human_accounts.sql", "0020_session_principal.sql"]) {
       db.exec(readFileSync(new URL(`./migrations/${f}`, import.meta.url), "utf8"));
     }
     const cols = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as Array<{ name: string }>).map((c) => c.name);

@@ -153,7 +153,9 @@ CREATE TABLE IF NOT EXISTS webmail_sessions (
   expires_at   TEXT NOT NULL,
   revoked      INTEGER NOT NULL DEFAULT 0,
   -- the login that minted it (#790, migration 0015); NULL on pre-0015 rows
-  username     TEXT
+  username     TEXT,
+  -- the human principal behind the session (#854 M2, migration 0020); NULL on older rows
+  principal_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_identity ON webmail_sessions(identity);
 CREATE INDEX IF NOT EXISTS idx_sessions_username ON webmail_sessions(username);

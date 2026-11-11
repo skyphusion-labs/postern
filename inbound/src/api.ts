@@ -2325,6 +2325,9 @@ interface AuthResolution extends TokenResolution {
   caps?: string[];
   /** Set only for a RUNTIME agent identity (#801): its stable agent_identities id. */
   identityId?: string;
+  /** Set only for a webmail session (#854 M2): the human principal behind it, or null on
+   *  a session minted before migration 0020. Carried for #740 S5; it authorizes nothing. */
+  principalId?: string | null;
   viaSession?: boolean;
   csrfHash?: string;
 }
@@ -2344,6 +2347,7 @@ async function resolveCookieAuth(request: Request, env: Env): Promise<AuthResolu
     scope: "read",
     identity: session.identity,
     caps: session.caps,
+    principalId: session.principalId,
     viaSession: true,
     csrfHash: session.csrfHash,
   };

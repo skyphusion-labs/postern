@@ -13,12 +13,12 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
-**Upgrade.** Migration `0019` (the principal tables and six service-principal seeds) is
-additive and is applied by the deploy. The backfill that copies existing identities and users
-in now runs automatically after each deploy: the release workflow calls
-`POST /api/admin/principals/backfill` once the new version answers (#901), and the self-host
-installer calls it after any run that deployed a Worker version or created the first admin.
-A manual run is still safe: it is idempotent.
+**Upgrade.** Migrations `0019` (the principal tables and six service-principal seeds) and
+`0020` (`webmail_sessions.principal_id`) are additive and are applied by the deploy. The
+backfill that copies existing identities and users in now runs automatically after each
+deploy: the release workflow calls `POST /api/admin/principals/backfill` once the new version
+answers (#901), and the self-host installer calls it after any run that deployed a Worker
+version or created the first admin. A manual run is still safe: it is idempotent.
 
 ### Added
 
@@ -28,6 +28,11 @@ A manual run is still safe: it is idempotent.
   identities (keeping their `idn_` ids) and human users in. Idempotent and
   convergent. Store only: every credential resolves exactly as before. See
   `docs/IDENTITY.md` section 6.
+- **Webmail sessions name their human principal (#854 M2).** Each sign-in
+  records the principal behind it (created at sign-in if the backfill has
+  not reached that login), and a grant or audit row can name a human
+  principal as grantor and actor. Nothing new authorizes from it yet; it is
+  what #740 S5 builds on.
 
 - **The `send_as` power (#740 S4).** An agent holding a `send_as` grant
   sends as the human by naming the address as `from`: From is the human
