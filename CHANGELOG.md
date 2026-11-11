@@ -20,6 +20,12 @@ when no runtime agent identity and no native login exists (so there was nothing 
 and the webmail auth backend. Production read zero rows of both kinds while it had registry agents,
 which the old report showed as all zeros, the same as a clean pass.
 
+**Fix: a reply to mail sent through Cloudflare Email Sending threads to the sent copy.** Cloudflare
+replaces postern's Message-ID with its own, so the recipient sees only the provider's id, and their
+reply quotes it in In-Reply-To and References. The sent copy was stored under postern's id only, so
+the reply started a new thread. The sent copy now records the provider id as its `claimed_id`,
+which thread resolution already matches, so the reply joins the conversation.
+
 **Fix: a session from before the principals migration can read mail again in webmail.**
 Since #853, the page loads the human-only list on its own right after sign-in. Such a session
 gets `E_REAUTH_REQUIRED` for that list, and the page signed it out at once, before the person
