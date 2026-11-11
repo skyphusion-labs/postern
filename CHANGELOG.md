@@ -27,6 +27,11 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **Webmail shows attachment names with hidden characters made visible.**
+  Control and invisible format characters in an attachment filename are
+  shown as `[U+XXXX]`, the name is isolated left to right, and the
+  download name replaces each such character with `_`.
+
 - **The webmail remote-content notice counts every remote reference.**
   SVG image, use and feImage links, CSS url() written with escapes,
   @import of a plain string and image-set() strings are counted and
