@@ -125,6 +125,16 @@ describe("mailbox_search", () => {
     expect("collapse" in hybrid).toBe(false);
   });
 
+  it("#926 collapseThreads: true is refused outside semantic before any request; semantic forwards it", async () => {
+    const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
+    const search = tool("mailbox_search");
+    expect(Object.keys(search.inputSchema)).toContain("collapseThreads");
+    await expect(search.handler(client, { query: "x", collapseThreads: true })).rejects.toThrow(/collapseThreads folds threads in mode semantic/);
+    expect(client.search).not.toHaveBeenCalled();
+    await search.handler(client, { query: "x", mode: "semantic", collapseThreads: true });
+    expect(client.search).toHaveBeenLastCalledWith(expect.objectContaining({ collapseThreads: true }));
+  });
+
   it("forwards from, mailbox, after, before, hasAttachment, and seen to client.search (#419 sync)", async () => {
     const client: any = { search: vi.fn().mockResolvedValue({ items: [], cursor: null }) };
     const out: any = await tool("mailbox_search").handler(client, {

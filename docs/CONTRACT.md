@@ -340,7 +340,13 @@ newest first; each takes the score of the slot it lands in, so hybrid inherits t
 `similar: { count, ids }`: the family's OTHER visible members, best first, `ids` capped at 20,
 `count` exact. `collapse=0` lists every member. `collapse=1` (or `true`) in any other mode is
 refused (`E_VALIDATION_ERROR`, HTTP 400), never accepted and ignored; hybrid never collapses.
-`similar` covers only mail the caller may see: a member hidden from it is not counted. semantic/hybrid are SCORE-ranked, so they return a single
+`similar` covers only mail the caller may see: a member hidden from it is not counted.
+
+**Thread collapse (#926).** `collapseThreads=1` (semantic only, default **off**) then folds the
+hits of one thread (`threadId`) into its best hit, which carries `threadHits: { count, ids }`: the
+thread's other visible hits that are not already inside some hit's `similar`, best first, `ids`
+capped at 20. `collapseThreads=1` in any other mode is refused (`E_VALIDATION_ERROR`, HTTP 400);
+hybrid never folds threads. Like `similar`, it covers visible mail only. semantic/hybrid are SCORE-ranked, so they return a single
 ranked page of up to `limit` hits. A date keyset `cursor` does not continue them: supplying one
 with `mode=semantic` or `mode=hybrid` is refused (`E_VALIDATION_ERROR`, HTTP 400) rather than
 accepted and dropped (#803). `fts` and `substr` still page on that cursor, and so does a search

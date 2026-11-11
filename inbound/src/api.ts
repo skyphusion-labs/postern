@@ -920,6 +920,21 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           400,
         );
       }
+      // #926: fold one thread's hits into its best hit, semantic only, same rules as collapse.
+      const threadsParam = url.searchParams.get("collapseThreads");
+      if (threadsParam !== null && threadsParam !== "0" && threadsParam !== "1" &&
+          threadsParam !== "true" && threadsParam !== "false") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "collapseThreads must be 0|1|true|false" },
+          400,
+        );
+      }
+      if ((threadsParam === "1" || threadsParam === "true") && modeParam !== "semantic") {
+        return json(
+          { ok: false, error: "E_VALIDATION_ERROR", message: "collapseThreads folds threads in mode semantic only; remove it or pass mode=semantic" },
+          400,
+        );
+      }
       // Asking a mode that never collapses to collapse is refused, not ignored (the #651
       // rule): the caller would read the answer as collapsed. "Do not collapse" is true
       // of every mode, so 0/false is accepted anywhere.
@@ -983,6 +998,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         hasAttachment: hasAttParam === null ? undefined : hasAttParam === "1" || hasAttParam === "true",
         seen: seenParam === null ? undefined : seenParam === "1" || seenParam === "true",
         collapse: modeParam !== "semantic" ? false : collapseParam === null ? SEMANTIC_COLLAPSE_DEFAULT : collapseParam === "1" || collapseParam === "true",
+        collapseThreads: modeParam !== "semantic" ? false : threadsParam === null ? SEMANTIC_THREAD_COLLAPSE_DEFAULT : threadsParam === "1" || threadsParam === "true",
         // A role read drops the account viewer: the queue IS the scope, and the account
         // boundary would otherwise intersect it down to the member own mail (#425).
         viewer: role ? undefined : sessionIdentity,
@@ -1326,6 +1342,10 @@ async function quoteScope(
  *  collapse variant improved family coverage at 10 (39% to 69%) and regressed no query
  *  family against the same ranking without it. */
 const SEMANTIC_COLLAPSE_DEFAULT = true;
+
+/** #926: whether semantic search folds a thread's hits when `collapseThreads` is absent.
+ *  Decided by the recall eval under the same rule as collapse. */
+const SEMANTIC_THREAD_COLLAPSE_DEFAULT = false;
 
 /** The #853 guard: set for an AGENT reader only, i.e. a Bearer bound to an identity (a
  *  runtime agent identity or a registry entry). A webmail session is the human and a

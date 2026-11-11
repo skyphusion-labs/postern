@@ -365,6 +365,8 @@ const SEARCH_PROBES: Record<string, Probe> = {
   // #813: what collapse CHANGES (semantic template families) is proved in semrank.test.ts
   // and search-collapse.test.ts against a vector stand-in; here, the strict refusal.
   collapse: async (e, c) => refuses(e, c, "/api/search?q=keyword&mode=semantic&collapse=maybe"),
+  // #926: what it CHANGES is proved in search-collapse.test.ts; here, the strict refusal.
+  collapseThreads: async (e, c) => refuses(e, c, "/api/search?q=keyword&mode=semantic&collapseThreads=maybe"),
   seenFor: async (e, c) => refuses(e, c, "/api/search?q=keyword&seenFor=not-an-address"),
   hasAttachment: async (e, c) => {
     await refuses(e, c, "/api/search?q=keyword&hasAttachment=maybe");

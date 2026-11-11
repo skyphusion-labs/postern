@@ -123,7 +123,7 @@ def _emitted() -> list[dict[str, Any]]:
     c.search(
         "q", mode="substr", field="subject", direction="inbound", to="a@x.com",
         from_addr="b@x.com", mailbox="trash", seen_for="a@x.com", after="2026-01-01",
-        before="2026-02-01", has_attachment=True, seen=False, collapse=False, limit=5, cursor="c1",
+        before="2026-02-01", has_attachment=True, seen=False, collapse=False, collapse_threads=False, limit=5, cursor="c1",
         fields=["uid", "date", "from", "subject"],
     )
     c.search("q", lens="sent", to="a@x.com")

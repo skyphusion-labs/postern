@@ -13,6 +13,7 @@ const OPERATOR = "test-token";
 const ORIGIN = "https://postern.example";
 const HUMAN = "conrad@skyphusion.org";
 const AGENT = "agent@skyphusion.org";
+const BOB = "bob@skyphusion.org";
 const CI = "ci@builds.example";
 const PASSWORD = "correct-horse-battery";
 type Json = Record<string, unknown>;
@@ -32,7 +33,7 @@ function embed(text: string): number[] {
 }
 const cos = (a: number[], b: number[]) => a.reduce((s, x, i) => s + x * b[i], 0);
 
-async function setup() {
+async function setup(scope: "granted" | "estate" = "granted") {
   const embedded: string[] = [];
   const index = new Map<string, { values: number[]; metadata: Json }>();
   const AI = { async run(_m: string, i: { text: string[] }) { embedded.push(...i.text); return { data: i.text.map(embed) }; } };
@@ -47,7 +48,7 @@ async function setup() {
     async describe() { return { vectorCount: index.size }; },
     async getByIds(ids: string[]) { return ids.filter((id) => index.has(id)).map((id) => ({ id })); },
   };
-  const r = realEnv({ AI, VECTORIZE, AGENT_READ_SCOPE: "granted", WEBMAIL_AUTH_BACKEND: "native", EMAIL: { async send() { return { messageId: "p" }; } } });
+  const r = realEnv({ AI, VECTORIZE, AGENT_READ_SCOPE: scope, WEBMAIL_AUTH_BACKEND: "native", EMAIL: { async send() { return { messageId: "p" }; } } });
   const call = async (method: string, path: string, opts: { token?: string; session?: { cookie: string; csrf: string }; body?: unknown } = {}) => {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (opts.token) headers.authorization = `Bearer ${opts.token}`;
@@ -70,9 +71,15 @@ async function setup() {
   }
   await put("lunch@x", "Lunch on friday", "Shall we get lunch on friday near the office", "2026-11-03T00:00:00.000Z");
   await put("invoice@x", "Invoice 2211 overdue", "Your invoice 2211 is overdue, please pay by monday", "2026-11-04T00:00:00.000Z");
-  return { ...r, call, put, commits, embedded, index };
+  return { ...r, call, put, commits, embedded, index, pendingCtx: ctx, settle: () => Promise.all(pending.splice(0)) };
 }
 type S = Awaited<ReturnType<typeof setup>>;
+async function signIn(s: S, username: string) {
+  const res = await handleApi(new Request(ORIGIN + "/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, password: PASSWORD }) }), s.env, s.ctx);
+  expect(res.status).toBe(200);
+  const cookie = (n: string) => res.headers.getSetCookie().find((c) => c.startsWith(n + "="))!.split(";")[0];
+  return { cookie: `${cookie(SESSION_COOKIE)}; ${cookie(CSRF_COOKIE)}`, csrf: cookie(CSRF_COOKIE).slice(CSRF_COOKIE.length + 1) };
+}
 const hits = (res: { body: Json }) => (res.body.items as Json[]).map((h) => ({ id: (h.message as Json).messageId as string, similar: h.similar as Json | undefined }));
 const sem = (s: S, q: string, extra = "") => s.call("GET", `/api/search?q=${encodeURIComponent(q)}&mode=semantic${extra}`, { token: OPERATOR });
 
@@ -206,5 +213,83 @@ describe("#813 composes with #853: a hidden member is not a member", () => {
     // The operator still sees the whole family.
     const op = hits(await sem(s, `corpus-sync failed ${s.commits[1]}`)).find((h) => h.id.startsWith("run-"));
     expect(op).toEqual({ id: "run-1@ci", similar: { count: 4, ids: expect.any(Array) } });
+  });
+});
+
+describe("#926 thread collapse in semantic search", () => {
+  async function withThread(scope: "granted" | "estate" = "granted") {
+    const s = await setup(scope);
+    // Three DIFFERENT senders, as a real thread has: one sender's replies with one subject
+    // would be a template family, which the default family collapse (#813) folds first.
+    const msgs = [
+      ["zep-0@x", "ops@x.example", "Zeppelin hangar maintenance", "The zeppelin hangar maintenance starts monday morning", null],
+      ["zep-1@x", "sam@x.example", "Re: Zeppelin hangar maintenance", "Which zeppelin hangar doors close during maintenance", "zep-0@x"],
+      ["zep-2@x", "kim@x.example", "Re: Zeppelin hangar maintenance", "All zeppelin hangar doors close for the maintenance week", "zep-1@x"],
+    ] as const;
+    for (const [i, [id, from, subject, body, parent]] of msgs.entries()) {
+      await store.put(s.env, {
+        messageId: id, direction: "inbound", from, to: HUMAN, subject, date: `2026-11-1${i}T00:00:00.000Z`,
+        inReplyTo: parent, references: parent ? [parent] : [], bodyText: body, auth: AUTH, trusted: false, deliveredTo: [HUMAN], vectorize: true,
+      }, s.pendingCtx);
+      await s.settle();
+    }
+    return s;
+  }
+  const zep = (res: { body: Json }) => (res.body.items as Json[])
+    .map((h) => ({ id: (h.message as Json).messageId as string, threadHits: h.threadHits as Json | undefined }))
+    .filter((h) => h.id.startsWith("zep-"));
+
+  it("off by default: every message of the thread is a row", async () => {
+    const s = await withThread();
+    const rows = zep(await sem(s, "zeppelin hangar maintenance"));
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.threadHits === undefined)).toBe(true);
+  });
+
+  it("collapseThreads=1 folds the thread into its best hit with the others in threadHits", async () => {
+    const s = await withThread();
+    const plain = zep(await sem(s, "zeppelin hangar maintenance", "&collapseThreads=0"));
+    const rows = zep(await sem(s, "zeppelin hangar maintenance", "&collapseThreads=1"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(plain[0].id);
+    expect(rows[0].threadHits).toEqual({ count: 2, ids: plain.slice(1).map((r) => r.id) });
+  });
+
+  it("refused outside semantic; hybrid never folds threads", async () => {
+    const s = await withThread();
+    for (const mode of ["hybrid", "fts", "substr"]) {
+      const r = await s.call("GET", `/api/search?q=zeppelin&mode=${mode}&collapseThreads=1`, { token: OPERATOR });
+      expect([r.status, r.body.error], mode).toEqual([400, "E_VALIDATION_ERROR"]);
+    }
+    const h = await s.call("GET", "/api/search?q=zeppelin&mode=hybrid&collapseThreads=0", { token: OPERATOR });
+    expect(zep(h)).toHaveLength(3);
+    // A query fts cannot answer (no message has every token): every thread hit comes from the
+    // semantic half, so a fold there would show as fewer rows.
+    const q = encodeURIComponent("zeppelin doors week schedule");
+    expect(((await s.call("GET", `/api/search?q=${q}&mode=fts`, { token: OPERATOR })).body.items as Json[]).length, "CONTROL: fts finds nothing").toBe(0);
+    expect(zep(await s.call("GET", `/api/search?q=${q}&mode=hybrid&limit=20`, { token: OPERATOR }))).toHaveLength(3);
+  });
+
+  it("estate: a hidden message of the thread is neither the representative nor in threadHits for an agent", async () => {
+    // Under estate read a plain agent search spans every address, so one thread can be
+    // partly hidden: zep-2 reaches the agent only through BOB, and BOB marks the thread.
+    const s = await withThread("estate");
+    expect((await s.call("POST", "/api/admin/users", { token: OPERATOR, body: { username: BOB, password: PASSWORD } })).status).toBe(201);
+    // zep-2 goes to BOB only. The agent holds HUMAN's grant, not BOB's, so it reaches zep-2
+    // only through the estate, and BOB's mark hides it; zep-0 and zep-1 stay (through HUMAN).
+    s.raw.prepare("UPDATE messages SET delivered_to = ',' || ? || ',' WHERE message_id = 'zep-2@x'").run(BOB);
+    const minted = await s.call("POST", "/api/admin/identities", { token: OPERATOR, body: { from: AGENT, scopes: ["read"] } });
+    const agent = minted.body as { id: string; token: string };
+    expect((await s.call("POST", "/api/admin/delegations", { token: OPERATOR, body: { granteeId: agent.id, address: HUMAN, powers: ["read"] } })).status).toBe(201);
+    const q = "/api/search?q=zeppelin%20hangar%20maintenance&mode=semantic&collapseThreads=1";
+    const before = zep(await s.call("GET", q, { token: agent.token }));
+    expect(before.reduce((n, r) => n + 1 + ((r.threadHits?.count as number) ?? 0), 0), "CONTROL: all three visible").toBe(3);
+    const bob = await signIn(s, BOB);
+    const thread = (s.raw.prepare("SELECT COALESCE(thread_id, message_id) AS t FROM messages WHERE message_id = 'zep-2@x'").get() as Json).t;
+    expect((await s.call("POST", "/api/delegations/mine/exclusions", { session: bob, body: { threadId: thread } })).status).toBe(201);
+    const after = zep(await s.call("GET", q, { token: agent.token }));
+    const seen = after.flatMap((r) => [r.id, ...(((r.threadHits?.ids as string[]) ?? []))]);
+    expect(seen).not.toContain("zep-2@x");
+    expect(seen.sort()).toEqual(["zep-0@x", "zep-1@x"]);
   });
 });

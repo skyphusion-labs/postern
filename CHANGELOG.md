@@ -21,6 +21,11 @@ working meanwhile. Cost: one bge-base embedding per chunk at $0.067 per million 
 
 ### Added
 
+- **Semantic search can fold a thread into one hit (#926).** `collapseThreads=1` (semantic only)
+  keeps a thread's best hit and lists its other visible hits as `threadHits: {count, ids}`.
+  Off by default: in the recall eval it raised the distinct threads in the top 10 from 8.25 to
+  9.75 but moved no recall family, and a default changes only on a recall gain. Refused outside
+  `mode=semantic`; hybrid never folds threads. MCP `mailbox_search` and the Python client take it.
 - **Semantic search embeds the subject and ranks template families (#813).** Chunk 0 now
   carries `Subject: <subject>` (an empty-body message gets a subject chunk), recorded as
   `vector_ledger.embed_version` 2. Near-identical notifications from one sender are ranked by
