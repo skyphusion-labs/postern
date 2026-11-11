@@ -11,6 +11,27 @@ places is how ledgers drift. Its tag-to-`mcp/package.json` version lockstep is
 enforced by the shared tag preflight (`.github/scripts/tag-preflight.sh`), so a
 mismatched MCP tag fails before it publishes.
 
+## Unreleased
+
+**Upgrade.** Unset `AGENT_READ_SCOPE` means `estate`: an upgraded deploy keeps the
+estate-wide agent read until the operator sets `AGENT_READ_SCOPE = "granted"`. The
+installer writes `granted` for a new install and does not add it on upgrade.
+
+### Added
+
+- **Delegation grants enforce `read` and `organize` (#740 S2, #860).** The
+  `AGENT_READ_SCOPE` flag (`estate` or `granted`; an unknown value fails
+  closed to `granted`). Under `granted`, an agent reads its own address
+  plus the addresses it holds a grant on. An `organize` grant widens mark
+  read, flags and move to the granted address's mail, and every such
+  write is audited in the same batch. `GET /api/whoami` reports
+  `delegations`. See `docs/DELEGATION.md` section 4.
+- **The `quote` power (#740 S3).** A `quote` grant lets an agent reply
+  to, quote and forward the granted address's mail, under either
+  `AGENT_READ_SCOPE` value. Each such quote writes a `delegation.quote`
+  audit row before it is sent, and nothing is sent if that row cannot be
+  written. See `docs/DELEGATION.md` section 4.4.
+
 ## v1.10.1
 
 PATCH. Fixes across inbound, the installer and CI. Upgrade to pick them up; no config change
@@ -102,8 +123,10 @@ uninstall command and an Email Routing report for the installer, PBKDF2-SHA512 f
 credentials, and write-scope and redirect fixes.
 
 **Upgrade.** Migrations `0016` (agent identities, audit log) and `0017` (delegation grants) are
-additive and are applied by the deploy. Nothing changes for an existing deploy until an operator
-mints an identity or a grant. Existing SHA-256 password hashes keep verifying and are upgraded to
+additive and are applied by the deploy. Apart from the write-scope fix below (an existing
+`POSTERN_SEND_IDENTITIES` entry that holds `organize` without `read` is now held to its own
+address), nothing changes for an existing deploy until an operator mints an identity or a grant.
+Existing SHA-256 password hashes keep verifying and are upgraded to
 SHA-512 on the next successful sign-in. The MCP changes below ship on the separate
 `postern-mcp-v*` track, not with this tag.
 
