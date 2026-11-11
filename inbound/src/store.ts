@@ -345,34 +345,45 @@ export interface PutResult {
  * row and fork, which is the exact bug the collapse exists to prevent, moved one seam
  * over. The raw form is tried FIRST, so this is purely additive: no lookup that
  * succeeded before can start failing, and for a representable id the two forms are the
- * same string and only one query runs.
+ * same string.
+ *
+ * At most MAX_THREAD_REFERENCES References are read, the most recent ones: threading
+ * needs the closest ancestors, not the whole chain. Every candidate is looked up in ONE
+ * query, and the first candidate in the order above that has a row wins.
  */
+export const MAX_THREAD_REFERENCES = 20;
+
 async function resolveThreadId(
   db: D1Database,
   messageId: string,
   inReplyTo: string | null | undefined,
   references: string[] | undefined,
 ): Promise<string> {
-  const quoted: string[] = [];
-  if (inReplyTo) quoted.push(stripAngle(inReplyTo));
-  // References: check most-recent first (closest parent wins).
-  for (const r of (references ?? []).slice().reverse()) {
-    const id = stripAngle(r);
-    if (id && !quoted.includes(id)) quoted.push(id);
-  }
-  const candidates: string[] = [];
+  const quoted = new Set<string>();
+  if (inReplyTo) quoted.add(stripAngle(inReplyTo));
+  // References: most recent first (closest parent wins), and only the last
+  // MAX_THREAD_REFERENCES of them.
+  const recent = (references ?? []).slice(-MAX_THREAD_REFERENCES).reverse();
+  for (const r of recent) quoted.add(stripAngle(r));
+  const candidates = new Set<string>();
   for (const id of quoted) {
-    if (!id || candidates.includes(id)) continue;
-    candidates.push(id);
-    const stored = await representableId(id);
-    if (stored !== id && !candidates.includes(stored)) candidates.push(stored);
+    if (!id) continue;
+    candidates.add(id);
+    candidates.add(await representableId(id));
   }
-  for (const parentId of candidates) {
-    const row = await db
-      .prepare("SELECT thread_id FROM messages WHERE message_id = ? LIMIT 1")
-      .bind(parentId)
-      .first<{ thread_id: string | null }>();
-    if (row && row.thread_id) return row.thread_id;
+  if (candidates.size === 0) return messageId;
+  const ids = [...candidates];
+  const { results } = await db
+    .prepare(`SELECT message_id, thread_id FROM messages WHERE message_id IN (${ids.map(() => "?").join(", ")})`)
+    .bind(...ids)
+    .all<{ message_id: string; thread_id: string | null }>();
+  const threadOf = new Map<string, string>();
+  for (const row of results ?? []) {
+    if (row.thread_id && !threadOf.has(row.message_id)) threadOf.set(row.message_id, row.thread_id);
+  }
+  for (const id of ids) {
+    const t = threadOf.get(id);
+    if (t) return t;
   }
   return messageId;
 }
