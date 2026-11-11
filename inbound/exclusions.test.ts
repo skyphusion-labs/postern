@@ -120,7 +120,7 @@ async function setup(flag: "granted" | "estate", roles = `${QUEUE}=${HUMAN}+${BO
     return log;
   };
   const audit = () => r.raw.prepare("SELECT actor_kind, actor_id, action, target_kind, target_id, outcome, detail FROM audit_log ORDER BY id").all() as Json[];
-  return { ...r, call, signIn, agent, agentWith, recordSql, threadOf, owner, mark, unmark, audit };
+  return { ...r, call, signIn, agent, agentWith, recordSql, threadOf, owner, mark, unmark, audit, vectorIds: ids };
 }
 type S = Awaited<ReturnType<typeof setup>>;
 const idsOf = (items: unknown) => ((items ?? []) as Json[]).map((m) => (m.message ? (m.message as Json).messageId : m.messageId));
@@ -325,6 +325,7 @@ async function withBoth(flag: "granted" | "estate") {
     messageId: BOTH_MSG, direction: "inbound", from: "x@example.com", to: `${HUMAN}, ${BOB}`, subject: "to both", date: "2026-02-06T00:00:00.000Z",
     bodyText: "both", auth: AUTH, trusted: false, deliveredTo: [HUMAN, BOB],
   }, s.ctx);
+  s.vectorIds.push(BOTH_MSG); // a semantic candidate too, so only a filter can drop it
   return s;
 }
 const sees = async (s: S, token: string, via: string) => ({
@@ -347,6 +348,10 @@ for (const flag of ["granted", "estate"] as const) {
       );
       expect(idsOf((await s.call("GET", `/api/search?q=both&mode=substr&field=body&to=${HUMAN}`, { token: both })).body.items)).toContain(BOTH_MSG);
       expect((((await s.call("GET", `/api/folders?to=${HUMAN}`, { token: both })).body.folders as Json[]).find((f) => f.id === "inbox") as Json).count).toBe(4);
+      expect((await s.call("GET", `/api/messages?to=${HUMAN}&countOnly=1`, { token: both })).body.total).toBe(4);
+      for (const mode of ["fts", "semantic", "hybrid"]) {
+        expect(idsOf((await s.call("GET", `/api/search?q=both&mode=${mode}&to=${HUMAN}`, { token: both })).body.items), mode).toContain(BOTH_MSG);
+      }
       expect(await sees(s, alices, HUMAN)).toEqual(reached);
       expect(await sees(s, bobs, BOB)).toEqual(reached);
       expect(await sees(s, both, BOB)).toEqual(reached);
@@ -356,15 +361,26 @@ for (const flag of ["granted", "estate"] as const) {
       expect(await sees(s, both, BOB)).toEqual(reached);
       // A to= naming ONE held address reads that mailbox as its owner sees it (Joan's live
       // finding on 174a90e): through Alice's view the row is gone, through Bob's it stays.
+      const has = async (token: string, path: string) => idsOf((await s.call("GET", path, { token })).body.items).includes(BOTH_MSG);
       const views = async (token: string, via: string) => ({
-        list: idsOf((await s.call("GET", `/api/messages?to=${via}`, { token })).body.items).includes(BOTH_MSG),
-        search: idsOf((await s.call("GET", `/api/search?q=both&mode=substr&field=body&to=${via}`, { token })).body.items).includes(BOTH_MSG),
+        list: await has(token, `/api/messages?to=${via}`),
+        count: (await s.call("GET", `/api/messages?to=${via}&countOnly=1`, { token })).body.total,
+        substr: await has(token, `/api/search?q=both&mode=substr&field=body&to=${via}`),
+        fts: await has(token, `/api/search?q=both&mode=fts&to=${via}`),
+        semantic: await has(token, `/api/search?q=both&mode=semantic&to=${via}`),
+        hybrid: await has(token, `/api/search?q=both&mode=hybrid&to=${via}`),
         inbox: (((await s.call("GET", `/api/folders?to=${via}`, { token })).body.folders as Json[]).find((f) => f.id === "inbox") as Json).count,
       });
-      // HUMAN's inbox: HUMAN_MSG, SHARED_MSG, OTHER_MSG (+ BOTH_MSG unless hidden); BOB's: BOB_MSG (+ BOTH_MSG).
-      expect(await views(both, HUMAN)).toEqual({ list: false, search: false, inbox: 3 });
-      expect(await views(both, BOB)).toEqual({ list: true, search: true, inbox: 2 });
-      expect(await views(alices, HUMAN)).toEqual({ list: false, search: false, inbox: 3 });
+      // HUMAN's mail: HUMAN_MSG, SHARED_MSG, OTHER_MSG, all inbox (+ BOTH_MSG unless hidden).
+      // BOB's: BOB_MSG (+ BOTH_MSG).
+      const hiddenVia = { list: false, count: 3, substr: false, fts: false, semantic: false, hybrid: false, inbox: 3 };
+      expect(await views(both, HUMAN)).toEqual(hiddenVia);
+      expect(await views(both, BOB)).toEqual({ list: true, count: 2, substr: true, fts: true, semantic: true, hybrid: true, inbox: 2 });
+      expect(await views(alices, HUMAN)).toEqual(hiddenVia);
+      // With no to=, the read is judged over every held address, so Bob's grant keeps it.
+      // A plain list is the estate under estate read, and the agent's own mailbox under granted.
+      if (flag === "estate") expect(await has(both, "/api/messages")).toBe(true);
+      expect(await has(both, "/api/search?q=both&mode=substr&field=body")).toBe(flag === "estate");
       // Bob's own mark on the same thread closes his door too, and then nobody reaches it.
       const bob = await s.signIn(BOB);
       expect((await s.mark(s.threadOf(BOTH_MSG), bob)).status).toBe(201);
