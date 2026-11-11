@@ -1117,13 +1117,16 @@ function sessionReadScope(env: Env, resolution: AuthResolution): string[] | unde
  * one. Holding no permission to read is not a reason to read wider.
  *
  * Role queues are included so a member replying to mail delivered to a queue it belongs to
- * still resolves, matching what the read route grants that same member (#425). A
- * resolution with no bound identity is a static operator/IMAP token, estate-wide by
- * construction, and says so with the literal rather than by omission.
+ * still resolves, matching what the read route grants that same member (#425).
+ *
+ * A resolution with no bound identity is a static token. It quotes the estate ONLY when
+ * the gate would let it READ (a `both` or `read` token), and says so with the literal. Any
+ * other static token, `send` above all, gets the EMPTY scope and quotes nothing: the quote
+ * is a read, and a per-function key that cannot read must not read through a write route.
  */
 function writeReadScope(env: Env, resolution: AuthResolution): MessageReadScope {
   const bound = resolution.identity?.from;
-  if (!bound) return "estate";
+  if (!bound) return authorize(resolution, "read") ? "estate" : [];
   return [bound, ...rolesForViewer(env, bound)];
 }
 

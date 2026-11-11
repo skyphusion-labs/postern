@@ -15,6 +15,16 @@ mismatched MCP tag fails before it publishes.
 
 ### Fixed
 
+- **The reply and forward quote follows the caller's read scope.** A
+  static token that cannot read (`POSTERN_API_TOKEN_SEND`) no longer
+  quotes or forwards a stored message: the source is not found, as on the
+  read routes. `both` and `read` tokens and bound identities are
+  unchanged.
+
+- **HTML-to-text conversion runs in one pass.** Mail with only an HTML
+  body is converted to its stored text body by a single linear scan, and
+  the converter reads at most the first 512,000 characters, the same bound
+  as the stored HTML. Output on ordinary HTML is unchanged.
 - **Sign-in attempts are counted atomically.** Webmail sign-in, change
   password and first-run setup now reserve each attempt before the
   password check, so attempts made at the same time are each counted
