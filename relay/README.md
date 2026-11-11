@@ -209,7 +209,7 @@ enumeration, but ONLINE password guessing needs an application backstop. The
 submission AUTH door applies a **per-account** failure counter with lockout +
 exponential backoff (default: lock after 5 consecutive failures, 60s base
 doubling to a 900s cap), plus a **global** aggregate ceiling that cools down ALL
-auth for one window once tripped (default 100 failures / 60s). It is keyed on
+auth for one window once tripped (off unless `AUTH_THROTTLE_GLOBAL_MAX_FAILURES` is set). It is keyed on
 the **account, not the source IP**: a door behind an L4 load balancer can see
 only the balancer's own address unless PROXY protocol is configured
 (`docs/PROXY-PROTOCOL.md`), so per-IP throttling (and fail2ban) cannot be relied

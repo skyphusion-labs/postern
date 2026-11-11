@@ -93,6 +93,11 @@ const SUBROUTE_PROBES: Record<string, (s: S, token: string, id: string) => Promi
     (await s.call("GET", `/api/messages/${encodeURIComponent(id)}/attachments/0`, t)).status === 200,
 };
 const NOT_MAIL: Record<string, string> = {
+  "self-delegation-grantees": "#740 S5: the roster of live agent identities a human may grant to (id, name, From); it is not stored mail, so no read scope narrows it",
+  "self-delegations-list": "#740 S5: the delegation grants on the session's own address; grant records, not stored mail, always pinned to that one address",
+  "self-delegations-grant": "#740 S5: a POST that makes a grant on the session's own address; a write of a grant record, not a read of mail",
+  "self-delegation-revoke": "#740 S5: a DELETE that revokes a grant on the session's own address; a write of a grant record, not a read of mail",
+  "self-audit": "#740 S5: audit rows about the session's own address; log records, not stored mail, and pinned to that one address by construction",
   whoami: "reports the scope; asserted on its own below",
   "recipients-recent": "the bound identity's OWN outbound recipients; no grant widens it",
   mobileconfig: "a setup profile for the bound identity; carries no mail",

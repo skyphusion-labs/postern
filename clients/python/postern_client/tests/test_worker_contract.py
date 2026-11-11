@@ -278,8 +278,10 @@ class ParityTest(unittest.TestCase):
             declared = set(PARAMS.get(row["id"], {}).get("query") or [])
             if not declared or row["match"] != "exact":
                 continue
-            if row["id"] in ("recipients-recent", "imap-drafts", "session", "smtp-auth"):
-                continue  # not this client's surface: the door and webmail own those
+            if row["id"] in ("recipients-recent", "imap-drafts", "session", "smtp-auth", "self-audit"):
+                # not this client's surface: the door and webmail own those (self-audit is
+                # #740 S5's webmail-session route; a Bearer client is refused there)
+                continue
             gap = sorted(declared - self._reachable(row["path"]))
             if gap:
                 missing[row["path"]] = gap
