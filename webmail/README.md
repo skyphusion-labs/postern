@@ -239,7 +239,12 @@ XSS is the main surface. The page is built to neutralize it:
     content. There is no "load remote images" opt-in: a working one would require
     relaxing this directive for the whole top frame, defeating the tracking-pixel
     protection it provides. A per-message notice reports how many remote items were
-    blocked; it is informational, not an action (#343).
+    blocked; it is informational, not an action (#343). The count covers remote
+    `img`/`srcset`, media and embeds, legacy `background`, `<link>`, SVG
+    `image`/`use`/`feImage` `href` and `xlink:href`, and CSS `url()`, `@import` and
+    `image-set()` references. CSS is read with its escapes decoded and its comments
+    skipped, in one linear pass, so an escaped URL is counted and a commented-out one
+    is not. Each counted item is also removed from the frame's document.
 - **Attachment download via a Bearer fetch.** The API is token-gated, so a
   download fetches the bytes with the `Authorization` header and saves them from
   an object URL; the token is never placed in a URL. The endpoint returns the
