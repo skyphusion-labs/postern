@@ -741,6 +741,12 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
 
   const transport = selectTransport(env);
   const { providerMessageId } = await transport.dispatch(outbound);
+  // Cloudflare Email Sending replaces our Message-ID with its own (transport/cf.ts strips
+  // ours), so the recipient only ever sees the provider id, and their reply quotes it in
+  // In-Reply-To / References. Record it on the sent copy as claimed_id: thread resolution
+  // matches claimed_id, and a trusted claimant wins, so the reply joins this thread.
+  const wireId = providerMessageId ? store.stripAngle(providerMessageId) : "";
+  const claimedId = wireId && wireId !== messageId ? wireId : null;
 
   // Store the sent copy in the same store so the thread is complete (#27).
   const put = await store.put(
@@ -791,6 +797,7 @@ async function dispatchAndStore(env: Env, ctx: ExecutionContext, d: DispatchInpu
       // Outbound is always our own mail = always crew-relevant, so index it
       // unconditionally (no VECTORIZE_FOR allowlist gate, unlike inbound).
       vectorize: true,
+      claimedId,
     },
     ctx,
   );

@@ -346,6 +346,10 @@ export interface StoreInput {
   attachments?: { filename?: string; mimeType?: string; content: ArrayBuffer }[];
   /** Opt-in Vectorize indexing for this recipient (inbound RAG). */
   vectorize?: boolean;
+  /** The id this message also goes by on the wire, stored as claimed_id. A sent copy sets it
+   *  to the provider's Message-ID when the transport replaced ours (Cloudflare Email Sending
+   *  sets its own), so a reply that quotes the id the recipient saw threads to it. */
+  claimedId?: string | null;
   // --- M8 envelope fidelity v2 (#189) ---
   /** Bare lower-cased recipients this message was DELIVERED to. Inbound: the one
    *  envelope recipient per delivery (merged into the existing row on a dedup hit,
@@ -462,7 +466,7 @@ async function resolveThreadId(
   return messageId;
 }
 
-function stripAngle(s: string): string {
+export function stripAngle(s: string): string {
   return s.replace(/[<>]/g, "").trim();
 }
 
@@ -566,7 +570,7 @@ async function forkedMessageId(input: StoreInput): Promise<string> {
 }
 
 export async function put(env: Env, input: StoreInput, ctx: ExecutionContext): Promise<PutResult> {
-  return await putRow(env, input, ctx, false);
+  return await putRow(env, input, ctx, false, input.claimedId ?? null);
 }
 
 /** `forked` marks the one retry `put` allows itself: the stored id was already taken by
