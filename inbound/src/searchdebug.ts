@@ -9,9 +9,11 @@
 // `gold` message, where its own vectors sit against that list.
 //
 // Guards, all three required:
-//   - admin scope (routes.ts row `admin-search-debug`): the static `both` token or the
-//     POSTERN_API_TOKEN_ADMIN slot. Never a read token, a registry identity or a session,
-//     so webmail cannot reach it.
+//   - the static `both` (operator) token ONLY. The route row is `admin` scope, so the gate
+//     also admits the POSTERN_API_TOKEN_ADMIN slot, and this handler then refuses it (403
+//     E_FORBIDDEN, audited): the #904 slot cannot read mail, and a query-to-ids rank
+//     oracle is a mail read by another name. Never a read token, a registry identity or a
+//     session, so webmail cannot reach it.
 //   - OFF BY DEFAULT: answers 404 unless the deploy sets SEARCH_DEBUG=1. A query plus the
 //     ids that match it is a content oracle over the whole estate, so the operator turns it
 //     on for a measurement window and off again.
@@ -28,6 +30,8 @@ const LIMIT_MAX = 50;
 const LIMIT_DEFAULT = 10;
 /** A Message-ID longer than this is not one the store would hold verbatim. */
 const GOLD_MAX = 998;
+/** The audit actor id of the #904 admin-only slot (api.ts adminActorOf). */
+const ADMIN_SLOT_ACTOR = "svc_admin";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -79,6 +83,20 @@ export async function handleSearchDebug(
   defaults: SearchDefaults,
 ): Promise<Response | null> {
   if (request.method !== "GET") return null;
+  // Before the flag check, so the admin slot cannot even learn whether the route is armed.
+  if (actor.id === ADMIN_SLOT_ACTOR) {
+    await auditStatement(
+      env,
+      new Date().toISOString(),
+      { action: "search.debug", outcome: "refused", detail: { reason: "admin-slot" } },
+      undefined,
+      actor,
+    ).run();
+    return json(
+      { ok: false, error: "E_FORBIDDEN", message: "search debug needs the operator (both) token; the admin-only slot cannot read mail" },
+      403,
+    );
+  }
   if (!searchDebugEnabled(env)) {
     return json(
       { ok: false, error: "E_NOT_FOUND", message: "search debug is off on this deploy; set SEARCH_DEBUG=1 to enable it" },

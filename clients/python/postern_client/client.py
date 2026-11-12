@@ -1201,7 +1201,8 @@ class PosternClient:
         limit: Optional[int] = None,
         gold: Optional[str] = None,
     ) -> dict[str, Any]:
-        """GET /api/admin/search-debug (#950). Operator only, and 404 unless the deploy
+        """GET /api/admin/search-debug (#950). The operator (both) token only; the
+        admin-only slot is refused. 404 unless the deploy
         sets SEARCH_DEBUG=1. The raw Vectorize matches for `q` before any fusion, the fused
         page from the same call, and, with `gold` (a Message-ID), where that message's own
         vectors sit. `mode` is semantic (default) or hybrid. Ids and scores only.

@@ -196,7 +196,7 @@ interface Env {
    * #950: arms GET /api/admin/search-debug, the raw Vectorize ranking behind a search.
    * OFF unless exactly `1` or `true`; unset, empty or anything else answers 404. A query
    * plus the ids that match it is a content oracle over the whole estate, so set it for a
-   * measurement window only, then remove it. Admin scope is still required when it is on.
+   * measurement window only, then remove it. The operator (both) token is still required when it is on; the admin-only slot is refused.
    */
   SEARCH_DEBUG?: string;
   /**

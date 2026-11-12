@@ -126,10 +126,23 @@ describe("#950 search-debug is admin only", () => {
     const s = await setup();
     expect((await s.call("/api/search?mode=semantic&q=deploy", READ)).status).toBe(200);
   });
-  it("the admin slot and the operator both clear it", async () => {
+  it("the admin-only slot is refused (403 E_FORBIDDEN): it cannot read mail, so no rank oracle", async () => {
     const s = await setup();
-    expect((await s.call(Q, ADMIN)).status).toBe(200);
+    const res = await s.call(Q, ADMIN);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("E_FORBIDDEN");
+    expect(res.text).not.toContain("vectorId");
+    expect(s.queries).toEqual([]);
+    // The refusal is audited as the slot itself.
+    const rows = s.raw.prepare("SELECT actor_id, outcome FROM audit_log WHERE action = 'search.debug'").all() as Json[];
+    expect(rows).toEqual([{ actor_id: "svc_admin", outcome: "refused" }]);
+    // CONTROL: the operator clears the same request on the same deploy.
     expect((await s.call(Q, OPERATOR)).status).toBe(200);
+  });
+  it("the admin slot is refused before the flag check: it cannot learn whether the route is armed", async () => {
+    const s = await setup({ debug: null });
+    expect((await s.call(Q, ADMIN)).status).toBe(403);
+    expect((await s.call(Q, OPERATOR)).status).toBe(404);
   });
   it("the webmail page never names the route", async () => {
     const page = readFileSync(resolve(__dirname, "../webmail/index.html"), "utf8");
@@ -211,10 +224,10 @@ describe("#950 search-debug output", () => {
 
   it("audit: one search.debug row with the query length, never the query", async () => {
     const s = await setup();
-    await s.call(Q, ADMIN);
+    await s.call(Q, OPERATOR);
     const rows = s.raw.prepare("SELECT actor_id, action, outcome, detail FROM audit_log WHERE action = 'search.debug'").all() as Json[];
     expect(rows.length).toBe(1);
-    expect(rows[0].actor_id).toBe("svc_admin");
+    expect(rows[0].actor_id).toBe("svc_both");
     expect(JSON.parse(rows[0].detail)).toEqual({ mode: "semantic", limit: 10, qLength: "inbound worker deploy failed".length, gold: false });
     expect(rows[0].detail).not.toContain("inbound");
   });

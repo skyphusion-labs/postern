@@ -239,9 +239,9 @@ match it is a content oracle over the whole mailbox, so turn it on for a measure
 window only, then remove the var and redeploy.
 
 ```bash
-# Needs an admin-scoped token (POSTERN_API_TOKEN_ADMIN or the both token).
+# Needs the operator (both) token. The admin-only slot is refused (403): it cannot read mail.
 curl -fsS -G https://mail.example.com/api/admin/search-debug \
-  -H "Authorization: Bearer $POSTERN_API_TOKEN_ADMIN" \
+  -H "Authorization: Bearer $POSTERN_API_TOKEN" \
   --data-urlencode "q=<the probe query>" \
   --data-urlencode "gold=<the Message-ID the probe should find>" \
   --data-urlencode "mode=semantic" --data-urlencode "limit=10"
