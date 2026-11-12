@@ -1,8 +1,22 @@
 # Identity: one principal layer for humans and agents (#854)
 
-Status: **ruled; phase M1 shipped.** Conrad accepted all ten recommendations in section 9
-as written (2026-11-10, recorded on #854). M1 (section 6) is built: the tables, the
-service-principal seeds, and the idempotent backfill. M2 and M3 are not built. Where this
+Status: **ruled; M1, M2 and the read-only part of M3a shipped.** Conrad accepted all ten
+recommendations in section 9 as written (2026-11-10, recorded on #854). Section 6 has the
+detail of each phase. Shipped:
+
+- **M1**, the tables, the service-principal seeds and the idempotent backfill: #900. The
+  deploy runs the backfill after each inbound release: #906.
+- **M2**, sessions name their human principal and grants can name a human grantor (#905),
+  the admin-only slot audited as `svc_admin` (#907), dual-write plus the parity route
+  (#912), a sign-in survives a failure on the principal side (#914), and reads
+  agree-or-fallback (#917). M2 first shipped in v1.12.0.
+- **M3a, read-only**: parity answers `gate: unmeasured` when it compared nothing (#945),
+  and the operator routes `GET /api/admin/principals` and `/api/admin/principals/{id}`
+  (#941). Both first shipped in v1.15.0.
+
+Not built: the rest of M3a (app passwords, D-ID-4, and human API tokens, D-ID-3; parked)
+and M3b (`credentials` becomes the authority for the existing types; gated on a parity
+`pass` with that kind measured). Where this
 file and a shipped contract (AUTH-CONTRACT.md, CONTRACT.md,
 `docs/design/webmail-v2-contracts.md` 1.10, DELEGATION.md) disagree, the shipped contract
 wins.
