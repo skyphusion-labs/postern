@@ -13,6 +13,25 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+**Fix: the principal parity check no longer reads as a pass when it compared nothing (#854).**
+`GET /api/admin/principals/parity` now answers a `gate`: `fail` on any disagreement, `unmeasured`
+when no runtime agent identity and no native login exists (so there was nothing to compare), else
+`pass`, plus which kinds were compared. It also names what it cannot see: the env-registry agents
+and the webmail auth backend. Production read zero rows of both kinds while it had registry agents,
+which the old report showed as all zeros, the same as a clean pass.
+
+**New: the operator can read the principal layer (#854 M3a).** `GET /api/admin/principals` lists
+principals (humans, agents and the service slots), filtered by `kind`, enabled only unless
+`includeDisabled=1`. `GET /api/admin/principals/{id}` shows one with its credentials and
+addresses. Both are operator only, read only and audited. No response carries a credential's
+lookup or secret.
+
+**Fix: a reply to mail sent through Cloudflare Email Sending threads to the sent copy.** Cloudflare
+replaces postern's Message-ID with its own, so the recipient sees only the provider's id, and their
+reply quotes it in In-Reply-To and References. The sent copy was stored under postern's id only, so
+the reply started a new thread. The sent copy now records the provider id as its `claimed_id`,
+which thread resolution already matches, so the reply joins the conversation.
+
 **Fix: a session from before the principals migration can read mail again in webmail.**
 Since #853, the page loads the human-only list on its own right after sign-in. Such a session
 gets `E_REAUTH_REQUIRED` for that list, and the page signed it out at once, before the person
@@ -25,6 +44,10 @@ sign-out was sent.
 - `inbound/reindex.mjs` tries a failed page (a network error, including mid-body, or HTTP 5xx) up to 6 times (5 retries, waits 2 s to 32 s), prints each page's cursor, and resumes from `--cursor`. A long `--stale-only` run (#813) no longer restarts at page 0 after one connection reset.
 - **docs(release):** the release procedure gains step 3, move postern-demo and postern-site to the new tag (#934). Both drifted unseen: the demo served v1.8.0 and the site linked v1.9.0 while v1.14.0 was current.
 - **fix(inbound):** the landing page names its write-up "identity-bound credentials (since v1.4.1)". The old "Postern v1.4.1 identity-bound credentials" sat on a page every instance serves, so it read as the running version (#934).
+- `inbound/eval/replay813.mjs` reports FOUND as its primary known-item metric (the gold is a top-10 row, or folded into a top-10 hit's `similar`), with STRICT beside it, and splits known-item probes by whether their template family repeats (#940). With collapse on, a strict miss on a repeated family is usually a sibling standing for the group.
+- **docs(readme):** the README opens with the problem Postern solves, then a 5-minute path on the public demo, running it yourself (locally with no Cloudflare account, then the one-command installer), and honest limits. The apex line is corrected: posternonline.com is the project site, not a redirect to the demo.
+- **feat(mcp):** `@skyphusion/postern-mcp` carries the metadata the official MCP Registry needs: `mcpName` (`io.github.skyphusion-labs/postern-mcp`) in `mcp/package.json`, and `mcp/server.json` (validated against the 2025-12-11 schema). `mcp/test/server-json.test.ts` keeps both in step with `package.json`. Nothing is published until the next `postern-mcp-v*` release.
+- **feat(search):** hybrid no longer drops the family members its cap leaves off. They ride on the family's best kept hit as `similar: { count, ids }`, the same shape and meaning as in semantic (#940). The rows are unchanged, so hybrid still never folds, and a known item that is a family's third member is now one expand away instead of missing.
 
 ## v1.14.0
 

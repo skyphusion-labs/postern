@@ -50,10 +50,11 @@ import {
   noDelegations,
   type AgentDelegations,
 } from "./delegations";
-import { resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
+import { parseRegistry, resolveRegistryIdentity, type Scope, type TokenResolution } from "./sendidentity";
 import { agentAudit, agentMessageAudit, auditStatement, OPERATOR_ACTOR, type AuditActor } from "./adminkit";
 import { backfillPrincipals } from "./principals";
-import { principalParity, readMisses } from "./principalmirror";
+import { handleAdminPrincipals } from "./principaladmin";
+import { parityGate, principalParity, readMisses } from "./principalmirror";
 import { handleSelfService } from "./selfservice";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
 // from and that every non-TypeScript seam reads as contracts/api-*.json. This used to
@@ -461,7 +462,16 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     }
     // #854 M2: does every old-table row agree with its principal and credential?
     if (request.method === "GET" && path === "/api/admin/principals/parity") {
-      const parity = { ...(await principalParity(env)), readMisses: await readMisses(env) };
+      const report = await principalParity(env);
+      const misses = await readMisses(env);
+      // #854: a parity that compared nothing is "unmeasured", never a pass, and it names the
+      // identity sources it cannot see, so a zero has a reason: env-registry agents (D-ID-8:
+      // no principal ids) and a webmail backend other than native (no smtp_credentials rows).
+      const outOfScope = {
+        registryAgents: parseRegistry(env.POSTERN_SEND_IDENTITIES).size,
+        webmailAuthBackend: (env.WEBMAIL_AUTH_BACKEND ?? "").trim() || "off",
+      };
+      const parity = { ...report, readMisses: misses, ...parityGate(report, misses), outOfScope };
       await auditStatement(env, new Date().toISOString(), {
         action: "principals.parity",
         outcome: "ok",
@@ -471,6 +481,7 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
           orphans: parity.orphans.diffs,
           agentReadMisses: parity.readMisses.agent,
           humanReadMisses: parity.readMisses.human,
+          gate: parity.gate,
         },
       }).run();
       return json({ ok: true, ...parity });
@@ -506,6 +517,12 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
         },
       }, undefined, actor).run();
       return json({ ok: true, ...report });
+    }
+    // #854 M3a: the read-only principal view (list, show). After parity and backfill,
+    // which share the prefix and are matched above.
+    if (path === "/api/admin/principals" || path.startsWith("/api/admin/principals/")) {
+      const pres = await handleAdminPrincipals(request, env, url, adminActorOf(resolution));
+      if (pres) return pres;
     }
 
     // --- admin: human user management (#790, contract 1.10.4) ---

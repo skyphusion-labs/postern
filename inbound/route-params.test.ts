@@ -38,7 +38,7 @@ const PARAMS = JSON.parse(
 // was a blind spot: useradmin.ts (#790) reads limit and cursor, and the two arms below
 // passed only because api.ts happens to read the same names elsewhere. #801 added
 // includeRevoked in agentidentities.ts, which an api.ts-only scan reports as "invented".
-const API_SRC = ["./src/api.ts", "./src/useradmin.ts", "./src/agentidentities.ts", "./src/adminkit.ts", "./src/delegations.ts"]
+const API_SRC = ["./src/api.ts", "./src/useradmin.ts", "./src/agentidentities.ts", "./src/adminkit.ts", "./src/delegations.ts", "./src/principaladmin.ts"]
   .map((p) => readFileSync(new URL(p, import.meta.url), "utf8"))
   .join("\n");
 const TOKEN = "test-token";
@@ -441,7 +441,7 @@ describe("#417 the two contract files join", () => {
       "admin-smtp-credential-delete", "admin-roles", "imap-roles",
       "admin-user-get", "admin-user-delete",
       "admin-identity-revoke", "admin-delegation-revoke",
-      "admin-principals-backfill", "admin-principals-parity",
+      "admin-principals-backfill", "admin-principals-parity", "admin-principal-show",
       "self-delegation-grantees", "self-delegations-list", "self-delegation-revoke",
       "self-exclusions-list", "self-exclusion-delete",
     ];

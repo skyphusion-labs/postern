@@ -241,6 +241,12 @@ export const ROUTE_TABLE: readonly RouteSpec[] = [
   { id: "admin-principals-parity", method: "GET", path: "/api/admin/principals/parity", match: "exact",
     scope: "admin", auth: "bearer",
     note: "#854 M2: compare every agent identity and human user with its principal and credential; counts plus sample ids. The evidence for retiring the old-table fallback. Audited (principals.parity)" },
+  { id: "admin-principals-list", method: "GET", path: "/api/admin/principals", match: "exact", scope: "admin",
+    auth: "bearer", query: ["limit", "cursor", "kind", "includeDisabled"],
+    note: "#854 M3a: one keyset page of principals ordered by createdAt; enabled only unless includeDisabled=1; kind= human|agent|service. Read only. Audited (principal.list)" },
+  { id: "admin-principal-show", method: "GET", path: "/api/admin/principals/", match: "prefix", scope: "admin",
+    auth: "bearer", requireChild: true, template: "/api/admin/principals/{id}",
+    note: "#854 M3a: one principal (idn_, prn_ or svc_ id) with its credentials (type, caps, protocols, dates; never the lookup or the secret) and addresses. Read only. Audited (principal.show)" },
   // #740 S5: the human's own delegation and audit trail. A webmail SESSION only (the
   // handler refuses every Bearer, E_SESSION_REQUIRED); `read` is held by every session, and
   // the gate's CSRF check covers the state-changing verbs. The address is always the

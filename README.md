@@ -5,31 +5,29 @@
 [![npm @skyphusion/postern-mcp](https://img.shields.io/npm/v/@skyphusion/postern-mcp?label=postern-mcp)](https://www.npmjs.com/package/@skyphusion/postern-mcp)
 [![PyPI postern-client](https://img.shields.io/pypi/v/postern-client?label=postern-client)](https://pypi.org/project/postern-client/)
 
-Email, for humans and agents. Postern is a self-hostable mailbox on Cloudflare:
-it sends and receives mail, stores every message in a searchable store, and
-exposes one structured API that agents and human clients (IMAP/webmail) both
-speak. Cloudflare Email is the default transport on each seam, never a hard
-dependency.
+**Agents need their own email.** Postern gives each human and each agent an address on your own
+domain. Each one sends and receives as itself, with its own credential, and agents use the mailbox
+over MCP. It runs on Cloudflare (Workers, D1, R2, Email Routing and Email Sending), so there is no
+mail server to run.
 
-Humans and agents each **send as themselves**, under per-identity credentials
-rather than a shared mailbox (see [docs/SEND-IDENTITIES.md](docs/SEND-IDENTITIES.md)),
-and agents speak the mailbox natively over **MCP**
-([`@skyphusion/postern-mcp`](https://www.npmjs.com/package/@skyphusion/postern-mcp)) as
-a first-class door, not an afterthought.
+Postern is a self-hostable mailbox. It sends and receives mail, keeps every message in one
+searchable store, and gives agents and human clients (webmail and IMAP) one API. Humans and agents
+send as themselves under per-identity credentials, not a shared mailbox
+([docs/SEND-IDENTITIES.md](docs/SEND-IDENTITIES.md)). Agents connect through the MCP server
+[`@skyphusion/postern-mcp`](https://www.npmjs.com/package/@skyphusion/postern-mcp).
 
-From a fresh clone, with only your own domain, you can deploy it, send a
-message, and receive + read it back. Outbound send needs Cloudflare Email Sending
-on the **Workers Paid** plan (USD 5/month); inbound via Email Routing is free-plan
-OK. See **[DEPLOY.md](DEPLOY.md)** for the
-clean-install quickstart and **[inbound/smoke.mjs](inbound/smoke.mjs)** for the
-scripted v1.0 acceptance smoke (issue #25).
+- [Try it in 5 minutes](#try-it-live): the public demo, in a browser or from an agent.
+- [Run it yourself](#run-it-yourself): on your own machine first (no Cloudflare account), then on
+  your domain with one command.
+- [Honest limits](#honest-limits): what it needs, and what it does not do.
 
 ## Try it live
 
+This is the 5-minute path. You need a browser, or an agent that speaks MCP.
+
 Live read-only demo: [https://demo.posternonline.com](https://demo.posternonline.com)
 (landing) or [webmail](https://demo.posternonline.com/webmail). Log in with the demo
-token below. Apex [posternonline.com](https://posternonline.com) **301s** to the demo
-host. Sitemap: [demo.posternonline.com/sitemap.xml](https://demo.posternonline.com/sitemap.xml).
+token below. [posternonline.com](https://posternonline.com) is the project site. Sitemap: [demo.posternonline.com/sitemap.xml](https://demo.posternonline.com/sitemap.xml).
 
 Mail **any** address `@posternonline.com` and watch it appear in the mailbox.
 That is the product working: Email Routing -> worker -> D1 store.
@@ -146,25 +144,58 @@ The inbox list, a message read view, and search:
 > for setup and the security model (BYO-token, token in `sessionStorage` only, no
 > `innerHTML` of message content, locked-down CSP).
 
-## Quick start
+## Run it yourself
 
-Full steps in [DEPLOY.md](DEPLOY.md). In short:
+**1. On your own machine, with no Cloudflare account.** Everything except real mail delivery runs
+under `wrangler dev`, with local D1 and R2 (DEPLOY.md section 6):
 
 ```bash
-cd inbound                                   # everything below runs from inbound/
-npm ci                                       # installs the pinned wrangler; before any npx wrangler
-npx wrangler login
-npx wrangler d1 create postern --binding DB  # writes database_id into the existing DB block
-npx wrangler r2 bucket create postern-attachments --binding ATTACHMENTS
-# edit wrangler.jsonc: DEFAULT_FROM / ALLOWED_FROM_DOMAIN, and set
-# "workers_dev": true (default is false: no reachable URL to smoke without it)
-npx wrangler d1 migrations apply postern --remote
-npm run deploy                               # first deploy creates the Worker
-npx wrangler secret put POSTERN_API_TOKEN    # openssl rand -hex 32
+git clone https://github.com/skyphusion-labs/postern && cd postern/inbound
+npm ci
+printf 'POSTERN_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > .dev.vars   # local secret, gitignored
+npx wrangler d1 migrations apply postern --local
+npx wrangler dev                                                        # http://localhost:8787
 ```
 
-Then route inbound mail to the Worker (Email Routing -> Routing Rules ->
-catch-all to the Worker), and run the smoke (see DEPLOY.md).
+Then, in a second terminal in `inbound/`, simulate an inbound mail and find it:
+
+```bash
+TOKEN=$(sed -n 's/^POSTERN_API_TOKEN=//p' .dev.vars)
+printf 'From: a@sender.example\r\nTo: you@example.com\r\nSubject: postern hello\r\nMessage-ID: <1@sender.example>\r\n\r\nhi\r\n' \
+  | curl --data-binary @- 'http://localhost:8787/cdn-cgi/handler/email?from=a@sender.example&to=you@example.com'
+curl -H "Authorization: Bearer $TOKEN" 'http://localhost:8787/api/search?q=hello'
+```
+
+Webmail is at `http://localhost:8787/webmail`. The acceptance smoke is `node smoke.mjs`
+(DEPLOY.md section 6).
+
+**2. On your domain, with one command.** You need a Cloudflare account, a domain on Cloudflare DNS,
+Node 22 or later, and an API token (DEPLOY.md "Before you start"):
+
+```bash
+git clone https://github.com/skyphusion-labs/postern && cd postern
+export CLOUDFLARE_API_TOKEN=<your token>     # read from the environment, never printed
+node deploy/postern.mjs install --domain example.com --dry-run   # the plan; changes nothing
+node deploy/postern.mjs install --domain example.com
+```
+
+The installer creates the store, deploys the Worker at `https://mail.<domain>`, sets up Email
+Routing and Email Sending, and creates your first admin login. It refuses, and changes nothing,
+when the install would break mail you already have. Full steps, upgrade and rollback:
+[DEPLOY.md](DEPLOY.md). The manual install, command by command, is DEPLOY.md Appendix A.
+
+## Honest limits
+
+- **Sending needs Workers Paid** (USD 5/month): Cloudflare Email Sending requires it. Receiving
+  through Email Routing works on the free plan.
+- **Your domain must be on Cloudflare**, with Email Routing (MX at Cloudflare) and Email Sending
+  turned on. The installer does this for you.
+- **Semantic search needs Vectorize and Workers AI.** Locally, search is full-text only.
+- **Attachments:** at most 20 parts and 25 MiB per message (the Cloudflare cap). An inline image
+  arrives as an attachment, not inline ([docs/CONTRACT.md](docs/CONTRACT.md), "v1 limitations").
+- **IMAP is read-mostly:** read state, flags and moves only; sending is the API's job
+  ([imap/README.md](imap/README.md), "Known limitations").
+- **The demo is one shared, public mailbox.** Do not mail anything private to it.
 
 ## Client packages
 

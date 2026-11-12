@@ -352,7 +352,11 @@ mail only.
 **Hybrid family cap (#930).** Hybrid does not fold, it caps: at most `familyCap` hits per template
 family in the blended page (an integer 0..10, default **2**; `0` lists every member). Each half
 fetches up to 5x `limit` so the page refills. When the cap left any match off, the page is not
-complete: no `cursor`, `complete: false`, and `degraded` names how many rows were left off. A
+complete: no `cursor`, `complete: false`, and `degraded` names how many rows were left off. The
+members left off are not lost (#940): the family's best kept hit carries them as
+`similar: { count, ids }`, best first, `ids` capped at 20, the same shape and meaning as in
+semantic (same-family messages not listed as rows). The rows are exactly what the cap kept;
+only members inside the fetched window are known. A
 non-zero `familyCap` in any other mode is refused (400). The cap counts visible mail only. semantic/hybrid are SCORE-ranked, so they return a single
 ranked page of up to `limit` hits. A date keyset `cursor` does not continue them: supplying one
 with `mode=semantic` or `mode=hybrid` is refused (`E_VALIDATION_ERROR`, HTTP 400) rather than
@@ -581,6 +585,11 @@ interface Transport {
 `providerMessageId` is **best-effort and provider-dependent**: populated only when the provider
 returns an id (CF Email Sending does; an SMTP relay may not). Callers must not treat its absence
 as failure, and must thread/store on the core-generated `messageId`, never on `providerMessageId`.
+The sent copy also records `providerMessageId` (angle brackets stripped) as its `claimed_id` when it
+differs from `messageId`. CF Email Sending replaces our Message-ID with its own, so the recipient
+sees only the provider id and quotes it when replying. Thread resolution matches `claimed_id`, and
+the sent copy is trusted, so such a reply joins the sent copy's thread. A read by id still uses
+`messageId` only.
 
 - **`CfEmailTransport` (default).** Wraps `env.EMAIL.send()`, byte-for-byte the current
   behavior. Selected when `OUTBOUND_TRANSPORT` is unset or `cf`.
@@ -681,7 +690,9 @@ none touches D1 directly (#25, #26).
 | DELETE | `/api/delegations/mine/exclusions/{id}` | #853, session only: remove my mark; any other id is 404. Audited `delegation.unexclude`. CSRF | #853 |
 | GET | `/api/audit/mine` | #740 S5, session only: the audit rows about my address, newest first (keyset `limit`/`cursor`), the `/api/admin/audit` row shape | #740 S5 |
 | GET | `/api/admin/audit` | the audit log, newest first (keyset `limit`/`cursor`): actor, action, target, outcome, detail; refusals included. The operator is actor `{kind: "service", id: "svc_both"}` since #854 M1 (older rows: `operator`, `null`) | #801 |
-| GET | `/api/admin/principals/parity` | does every agent identity and human user agree with its principal and credential? `{agents: {checked, diffs, sample}, humans: {checked, diffs, withoutPrincipal, sample}, orphans: {diffs, sample}, readMisses: {agent, human, byDay}}` (read misses over the last 30 days): counts and opaque ids (`idn_`/`prn_`/`crd_`) only, never a hash, secret, username or address. The evidence for retiring the old-table fallback (IDENTITY.md section 6) | #854 M2 |
+| GET | `/api/admin/principals/parity` | does every agent identity and human user agree with its principal and credential? `{agents: {checked, diffs, sample}, humans: {checked, diffs, withoutPrincipal, sample}, orphans: {diffs, sample}, readMisses: {agent, human, byDay}, gate, measured: {agents, humans}, reason, outOfScope: {registryAgents, webmailAuthBackend}}` (read misses over the last 30 days). `gate` is `fail` on any diff, orphan or miss, `unmeasured` when no row of either kind was compared (never a pass), else `pass`; `outOfScope` names the identity sources parity cannot see: counts and opaque ids (`idn_`/`prn_`/`crd_`) only, never a hash, secret, username or address. The evidence for retiring the old-table fallback (IDENTITY.md section 6) | #854 M2 |
+| GET | `/api/admin/principals` | one keyset page (`limit`/`cursor`) of principals, ordered by `createdAt`: `{id, kind, displayName, label, createdBy, createdAt, disabledAt}`. Enabled only unless `includeDisabled=1`; `kind=human|agent|service`. Read only. Audited `principal.list` | #854 M3a |
+| GET | `/api/admin/principals/{id}` | one principal (`idn_`, `prn_` or `svc_` id) with its `credentials` (`{id, type, caps, protocols, label, createdAt, lastUsedAt, expiresAt, revokedAt}`, never the lookup or the secret) and `addresses` (`{address, primary}`). A path that is not an id is the same 404 as a missing id. Read only. Audited `principal.show` | #854 M3a |
 | POST | `/api/admin/principals/backfill` | copy agent identities, human users and the static slots into the principal tables; idempotent and convergent; returns `{services, agents, humans, addressConflicts}`. Store only: nothing authorizes from these tables yet (IDENTITY.md section 6) | #854 M1 |
 | POST | `/api/admin/reindex` | backfill / re-embed the mailbox into Vectorize, one page per call | M4 (#116 ws4) |
 | POST | `/api/admin/reproject` | refill `projected_size` after a `PROJECTION_VERSION` bump (one keyset page; body: `cursor?`, `limit?`, `dryRun?`, `countOnly?`) | #507 / #520 |
@@ -1225,7 +1236,8 @@ than drop the message or widen a `delivered_to` to place it. Refs GHSA-pjv6-4xmx
 a read by that id (`GET /api/messages/:id`, MCP `mailbox_get`) returns that message. A
 later, DIFFERENT message that arrives with the same id is stored under its derived id with
 `claimed_id` set to the id it arrived with (migration 0018; rows forked before 0018 carry
-NULL). **A consumer that keys on a structured Message-ID, such as a GitHub notification id,
+NULL). An outbound sent copy also sets `claimed_id`, to the provider's Message-ID when the
+transport replaced ours (section on transports). **A consumer that keys on a structured Message-ID, such as a GitHub notification id,
 must check `trusted` on the message it reads.** Thread resolution (section 1) prefers a
 trusted message for an id: the holder when it is trusted, else the earliest trusted
 claimant, else the holder. An untrusted claimant is never chosen as a parent.

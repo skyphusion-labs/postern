@@ -274,6 +274,25 @@ never allow what the old table denies. A failure on the new side (the credential
 counter write, or the session mint's principal lookup) falls back to today's resolution and is
 logged; it never denies. `GET /api/admin/principals/parity` reports the miss counts.
 
+**The parity gate (#854, 2026-11-11).** The parity route answers `gate`: `fail` on any diff, orphan
+or read-path miss; `unmeasured` when no `agent_identities` or `smtp_credentials` row exists, so
+nothing was compared; else `pass`, with `measured` saying which kinds were compared. A check that
+compared nothing cannot go red, so zero rows is never a pass. Production read zero rows of both
+kinds on 2026-11-11 while it had agents: they come from the env registry, which D-ID-8 leaves
+without principal ids. `outOfScope` reports those sources (the registry entry count and the webmail
+auth backend), so a zero has a visible reason. M3b retires the fallback for a kind only on a
+`pass` with that kind measured.
+
+**M3a, the read-only view (shipped).** M3 is split (#854, 2026-11-11). M3a is additive and not
+gated: `GET /api/admin/principals` (keyset list; `kind`, `includeDisabled`) and
+`GET /api/admin/principals/{id}` (the principal, its credentials and its addresses), operator
+only, audited `principal.list` and `principal.show`. They read the principal tables and
+authorize nothing. No response carries a credential's `lookup` or `secret`: the column list
+leaves both out (`inbound/src/principaladmin.ts`). Next in M3a: the credential types with no
+old-table twin (app passwords, D-ID-4; human API tokens, D-ID-3), for which `credentials` is
+the only store. M3b (`credentials` becomes the authority for the existing types, the old
+tables freeze) stays behind the gate below.
+
 **How the fallback is retired.** It is the lead's call, made from the parity route (it needs
 no spend and is not a ruling). M3 (credentials become the authority, the old tables stop being
 written) happens only when all of these hold: the deploy backfill runs on every release (#901, #906); one full
