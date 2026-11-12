@@ -156,9 +156,9 @@ function extendCorpus(messages, queries) {
 
 // #950: GitHub Actions "PR run failed" notifications. Each subject is unique (a workflow and a PR
 // title occur together once), so the family key (semrank templateKey) calls every one of them a
-// unique shape, as production's did. But every body is the same long Actions template: the job
-// table, the run links and the footer. Only a repo-local run id, a sha, the PR number and a few job
-// timings differ. That is the class #940's classification found: the template dominates chunk 0.
+// unique shape, as production's did. But every body is the same short Actions template (round 2,
+// below): the workflow line, one failed job and the footer. Only the workflow, the job and its
+// timing differ. That is the class #940's classification found: the template dominates chunk 0.
 // ALL SYNTHETIC: invented repo, people, titles and ids.
 const WORKFLOWS950 = ["ci", "CodeQL", "release-gate", "coverage", "deploy-preview", "lint", "e2e", "docs"];
 const TITLES950 = [
@@ -166,35 +166,45 @@ const TITLES950 = [
   "Cache the pricing table at the edge", "Drop the legacy session cookie", "Paginate the audit log API",
 ];
 const JOBS950 = ["build (ubuntu-latest, node 22)", "test (unit)", "test (integration)", "typecheck", "lint", "bundle-size", "e2e (chromium)", "e2e (webkit)"];
-function actionsBody(rnd, workflow, title, pr, sha, runId) {
-  const failed = JOBS950[Math.floor(rnd() * JOBS950.length)];
-  const secs = () => `${Math.floor(rnd() * 4)}m ${Math.floor(10 + rnd() * 49)}s`;
-  const rows = JOBS950.map((j) => (j === failed ? `  X ${j}    Failed in ${secs()}    1 error, 2 warnings` : `  OK ${j}    Succeeded in ${secs()}`));
-  return [
-    `acme/widget | ${workflow} workflow run`,
-    "",
-    `${title}`,
-    `Pull request #${pr} by octo-dev, head ${sha}`,
-    "",
+// #950 round 2: the REAL shape. Production's "PR run failed" bodies are 325 to 338 characters of
+// body_text, one chunk each, and the Actions footer dominates them (the lead's counts on #950,
+// 2026-11-12; no content was read). Round 1 used a 1474 to 1520 character job table, and its
+// control failed. This body is the short notification: the repo, the workflow line, the one failed
+// job, and the footer. It does NOT carry the PR title; the subject does. The footer and the fixed
+// chrome are about two thirds of it. ALL SYNTHETIC: the structure is the public GitHub template,
+// the repo, workflow, job and address text are invented or generic.
+export const ACTIONS950_LEN = [325, 338];
+function actionsBody(rnd, workflow) {
+  const make = (job, m, s) => [
+    "acme/widget",
+    "Workflow run failed",
     `${workflow}: Some jobs were not successful`,
-    "",
-    "Jobs",
-    ...rows,
-    "",
+    "View workflow run",
+    job,
+    `Failed in ${m} minutes and ${s} seconds`,
     "Annotations",
-    "  1 error and 2 warnings",
-    `  X ${failed}: Process completed with exit code 1.`,
-    "  ! Node.js 20 actions are deprecated. The following actions are running on Node.js 20 and may not work as expected: actions/checkout@v4, actions/setup-node@v4. Actions will be forced to run with Node.js 24 by default starting June 2nd, 2026.",
-    "  ! The `set-output` command is deprecated and will be disabled soon. Please upgrade to using Environment Files.",
-    "",
-    `View workflow run: https://github.example/acme/widget/actions/runs/${runId}`,
-    `View pull request: https://github.example/acme/widget/pull/${pr}`,
-    "",
+    "1 error",
     "--",
-    "You are receiving this email because you are subscribed to GitHub Actions notifications for workflow runs you triggered or for repositories you watch.",
-    "Manage your GitHub Actions notifications: https://github.example/settings/notifications",
-    "To stop receiving these emails, change your notification settings. GitHub, Inc. 88 Colin P Kelly Jr Street, San Francisco, CA 94107 (synthetic).",
+    "You are receiving this because this workflow ran on your branch.",
+    "Manage your GitHub Actions notifications here.",
+    "GitHub, Inc. 88 Colin P Kelly Jr Street, San Francisco, CA 94107",
   ].join("\n");
+  // The failed job and timing are drawn from rnd; the first draw that lands in the real length
+  // range wins, so the corpus stays deterministic and every body is of production length.
+  const j0 = Math.floor(rnd() * JOBS950.length);
+  const m0 = 1 + Math.floor(rnd() * 9);
+  const s0 = 10 + Math.floor(rnd() * 50);
+  for (let dj = 0; dj < JOBS950.length; dj++) {
+    for (let dm = 0; dm < 9; dm++) {
+      const b = make(JOBS950[(j0 + dj) % JOBS950.length], 1 + ((m0 - 1 + dm) % 9), s0);
+      if (b.length >= ACTIONS950_LEN[0] && b.length <= ACTIONS950_LEN[1]) return b;
+    }
+    for (const pad of ["", " (retried)", " (attempt 2)", " (attempt 3)"]) {
+      const b = make(JOBS950[(j0 + dj) % JOBS950.length] + pad, m0, s0);
+      if (b.length >= ACTIONS950_LEN[0] && b.length <= ACTIONS950_LEN[1]) return b;
+    }
+  }
+  throw new Error(`#950: no real-length Actions body for workflow ${workflow}`);
 }
 function extendCorpus950(messages, queries) {
   const rnd = mulberry32(950);
@@ -211,7 +221,7 @@ function extendCorpus950(messages, queries) {
       messages.push({
         to: ME, inReplyTo: null, id, from: "notifications@github.example",
         subject: `[acme/widget] PR run failed: ${workflow} - ${title} (${sha})`,
-        body: actionsBody(rnd, workflow, title, pr, sha, 7_000_000 + w * 100 + t), date: nextDate(), family: `gha:${workflow}:${t}`,
+        body: actionsBody(rnd, workflow), date: nextDate(), family: `gha:${workflow}:${t}`,
       });
       ids.push({ id, workflow, title });
     });
@@ -255,7 +265,7 @@ function extendCorpus950Scale(messages) {
     messages.push({
       to: ME, inReplyTo: null, id: `gha-old-${tag}@github.example`, from: "notifications@github.example",
       subject: `[acme/widget] PR run failed: ${workflow} - ${title} (${sha})`,
-      body: actionsBody(rnd, workflow, title, pr, sha, 6_000_000 + tick), date: nextDate(), family: "gha-old",
+      body: actionsBody(rnd, workflow), date: nextDate(), family: "gha-old",
     });
   };
   WORKFLOWS950.forEach((workflow, w) => TITLES950.forEach((title, t) => {
@@ -355,6 +365,7 @@ export function buildCorpus() {
   queries.push({ family: "diversity", q: "deliveries and account security", goldFamilies: ["order", "login"] });
   extendCorpus(messages, queries);
   extendCorpus950(messages, queries);
-  extendCorpus950Scale(messages);
+  // Run A (EVAL950_RUN=A) is the probe block alone; run B (the default) adds the older re-runs.
+  if (process.env.EVAL950_RUN !== "A") extendCorpus950Scale(messages);
   return { messages, queries };
 }

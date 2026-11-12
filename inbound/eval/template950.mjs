@@ -10,7 +10,8 @@ import { shapeKey } from "./shape813.mjs";
 
 const norm = (l) => l.trim().replace(/\b[0-9a-f]{7,}\b/g, "#h").replace(/\d+/g, "#");
 const { messages } = buildCorpus();
-const block = messages.filter((m) => m.id.startsWith("gha-"));
+// The 48 probe messages only: the older re-runs (gha-old-) repeat each subject, which would count the subject line itself as shared template.
+const block = messages.filter((m) => m.id.startsWith("gha-") && !m.id.startsWith("gha-old-"));
 const shapes = new Map();
 for (const m of messages) shapes.set(shapeKey(m.from, m.subject), (shapes.get(shapeKey(m.from, m.subject)) ?? 0) + 1);
 const unique = block.filter((m) => shapes.get(shapeKey(m.from, m.subject)) === 1).length;
