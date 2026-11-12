@@ -81,3 +81,28 @@ The new metric is "distinct threads@10": the number of different threads among t
 - **Hybrid has no collapse.** Its diversity drops from 44% (V0) to 39% (V2): one of three queries ("automated notifications") covers 1 of 6 families instead of 2. Embedding the subject tightens each template family, and hybrid cannot fold them.
 - **The index is exact cosine kNN.** Vectorize is approximate, so production recall can only be lower.
 - **The sample is small** (98 queries, 3 for diversity). It shows the direction and the size of the effect, not a precise rate.
+
+## #950: the Actions-template class
+
+**Corpus.** A third block, appended with its own seed (950), so the first 485 messages and 132
+queries are byte-identical to the #930 run. It adds 48 synthetic GitHub Actions "PR run failed"
+notifications: 8 workflows times 6 PR titles. Each subject is unique, so the shape key calls all 48 a
+unique shape, as production's #6 and #36 were. Every body is the same long Actions template (the job
+table, the annotations, the run links and the footer), and only the sha, the run id, the failed job
+and the timings differ. Two query families: `actions` (12 probes, the message's own exact subject,
+the production probe shape) and `actions-title` (12 probes, "<workflow> failed on <PR title>").
+
+**Recipes** (`recipes950.mjs`, eval only): R2 is what ships. R3a adds a subject-only chunk ahead of
+R2. R3b cuts the signature footer and link-only lines before R2. R3c is both.
+
+**Step 0, no token** (`node eval/template950.mjs`): how much of chunk 0 is the shared template.
+
+| recipe | chunks per message | chunk 0 chars | shared template share of chunk 0 (median, min, max) | subject share of chunk 0 (median) |
+|---|---|---|---|---|
+| R2 | 2 | 1286 | 93% (83%, 94%) | 7% |
+| R3a | 3 | 88 | 0% (0%, 0%) | 100% |
+| R3b | 1 | 1054 | 91% (80%, 92%) | 8% |
+| R3c | 2 | 88 | 0% (0%, 0%) | 100% |
+
+This is structure, not recall. Recall needs the real embeddings: `embed813.mjs` (about 487 new
+texts, about 50k tokens), then `recall813.eval.mjs`. Results go here when that runs.

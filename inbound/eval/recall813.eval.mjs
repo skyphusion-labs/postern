@@ -12,6 +12,7 @@ import { it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { buildCorpus } from "./corpus813.mjs";
+import { RECIPES950 } from "./recipes950.mjs";
 import { embedChunks } from "../src/embedtext";
 import * as store from "../src/store";
 import { realEnv, AUTH } from "../realdb";
@@ -31,8 +32,13 @@ const VARIANTS = [
   { name: "H2 hybrid + cap 1 per family", recipe: 2, familyRank: true, collapse: false, familyCap: 1, modes: ["hybrid"] },
   { name: "H3 hybrid + cap 2 per family", recipe: 2, familyRank: true, collapse: false, familyCap: 2, modes: ["hybrid"] },
   { name: "H4 hybrid + cap 3 per family", recipe: 2, familyRank: true, collapse: false, familyCap: 3, modes: ["hybrid"] },
+  // #950: the candidate recipes, each with what ships (semantic V4, hybrid H3), against V4 and H3.
+  ...["R3a", "R3b", "R3c"].flatMap((r) => [
+    { name: `${r} semantic (V4 settings)`, recipe: RECIPES950[r], familyRank: true, collapse: true, collapseThreads: true, modes: ["semantic"] },
+    { name: `${r} hybrid (H3 settings)`, recipe: RECIPES950[r], familyRank: true, collapse: false, familyCap: 2, modes: ["hybrid"] },
+  ]),
 ];
-const FAMILIES = ["token", "latest", "subject", "paraphrase", "diversity"];
+const FAMILIES = ["token", "latest", "subject", "paraphrase", "diversity", "actions", "actions-title"];
 
 async function buildVariant(corpus, cache, recipe) {
   const vec = (t) => {
@@ -54,7 +60,7 @@ async function buildVariant(corpus, cache, recipe) {
       messageId: m.id, direction: "inbound", from: m.from, to: m.to, subject: m.subject, date: m.date,
       inReplyTo: m.inReplyTo, references: m.inReplyTo ? [m.inReplyTo] : [], bodyText: m.body, auth: AUTH, trusted: false, deliveredTo: [m.to],
     }, r.ctx);
-    const chunks = embedChunks(m.subject, m.body, recipe);
+    const chunks = typeof recipe === "function" ? recipe(m.subject, m.body) : embedChunks(m.subject, m.body, recipe);
     const ids = await store.vectorIdsForMessage(m.id, chunks.length);
     chunks.forEach((t, i) => index.push({ id: ids[i], values: vec(t), metadata: { message_id: m.id, chunk: i } }));
   }
@@ -116,14 +122,14 @@ it("#813 recall at k, before and after", async () => {
     }
   }
   const pct = (x) => (x === undefined ? "" : `${Math.round(x * 100)}%`);
-  const lines = ["| variant | mode | token r@1 / r@10 | latest r@1 / r@10 | subject r@1 / r@10 | paraphrase r@1 / r@5 / r@10 | diversity coverage@10 | MRR (all single-gold) | distinct threads@10, paraphrase |", "|---|---|---|---|---|---|---|---|---|"];
+  const lines = ["| variant | mode | token r@1 / r@10 | latest r@1 / r@10 | subject r@1 / r@10 | paraphrase r@1 / r@5 / r@10 | diversity coverage@10 | actions r@1 / r@10 (found@10) | actions-title r@1 / r@10 (found@10) | MRR (all single-gold) | distinct threads@10, paraphrase |", "|---|---|---|---|---|---|---|---|---|---|---|"];
   for (const r of results) {
     const s = r.summary;
     const single = r.rows.filter((x) => x.family !== "diversity");
     const mrr = single.reduce((a, x) => a + (x.strict >= 0 && x.strict < 10 ? 1 / (x.strict + 1) : 0), 0) / single.length;
     const para = r.rows.filter((x) => x.family === "paraphrase");
     const thr = (para.reduce((a, x) => a + x.threads10, 0) / para.length).toFixed(2);
-    lines.push(`| ${r.variant} | ${r.mode} | ${pct(s.token.r1)} / ${pct(s.token.r10)} | ${pct(s.latest.r1)} / ${pct(s.latest.r10)} | ${pct(s.subject.r1)} / ${pct(s.subject.r10)} | ${pct(s.paraphrase.r1)} / ${pct(s.paraphrase.r5)} / ${pct(s.paraphrase.r10)} | ${pct(s.diversity.coverage10)} | ${mrr.toFixed(3)} | ${thr} |`);
+    lines.push(`| ${r.variant} | ${r.mode} | ${pct(s.token.r1)} / ${pct(s.token.r10)} | ${pct(s.latest.r1)} / ${pct(s.latest.r10)} | ${pct(s.subject.r1)} / ${pct(s.subject.r10)} | ${pct(s.paraphrase.r1)} / ${pct(s.paraphrase.r5)} / ${pct(s.paraphrase.r10)} | ${pct(s.diversity.coverage10)} | ${pct(s.actions.r1)} / ${pct(s.actions.r10)} (${pct(s.actions.surfaced10)}) | ${pct(s["actions-title"].r1)} / ${pct(s["actions-title"].r10)} (${pct(s["actions-title"].surfaced10)}) | ${mrr.toFixed(3)} | ${thr} |`);
   }
   const table = lines.join("\n");
   console.log(`\n${corpus.messages.length} messages, ${corpus.queries.length} queries\n${table}\n`);

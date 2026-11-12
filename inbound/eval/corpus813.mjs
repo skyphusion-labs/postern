@@ -154,6 +154,81 @@ function extendCorpus(messages, queries) {
   D("pull requests and deploys", ["pr", "deploy-ok"]);
 }
 
+// #950: GitHub Actions "PR run failed" notifications. Each subject is unique (a workflow and a PR
+// title occur together once), so the family key (semrank templateKey) calls every one of them a
+// unique shape, as production's did. But every body is the same long Actions template: the job
+// table, the run links and the footer. Only a repo-local run id, a sha, the PR number and a few job
+// timings differ. That is the class #940's classification found: the template dominates chunk 0.
+// ALL SYNTHETIC: invented repo, people, titles and ids.
+const WORKFLOWS950 = ["ci", "CodeQL", "release-gate", "coverage", "deploy-preview", "lint", "e2e", "docs"];
+const TITLES950 = [
+  "Add retry to the webhook sender", "Fix timezone drift in the scheduler", "Move image uploads to R2",
+  "Cache the pricing table at the edge", "Drop the legacy session cookie", "Paginate the audit log API",
+];
+const JOBS950 = ["build (ubuntu-latest, node 22)", "test (unit)", "test (integration)", "typecheck", "lint", "bundle-size", "e2e (chromium)", "e2e (webkit)"];
+function actionsBody(rnd, workflow, title, pr, sha, runId) {
+  const failed = JOBS950[Math.floor(rnd() * JOBS950.length)];
+  const secs = () => `${Math.floor(rnd() * 4)}m ${Math.floor(10 + rnd() * 49)}s`;
+  const rows = JOBS950.map((j) => (j === failed ? `  X ${j}    Failed in ${secs()}    1 error, 2 warnings` : `  OK ${j}    Succeeded in ${secs()}`));
+  return [
+    `acme/widget | ${workflow} workflow run`,
+    "",
+    `${title}`,
+    `Pull request #${pr} by octo-dev, head ${sha}`,
+    "",
+    `${workflow}: Some jobs were not successful`,
+    "",
+    "Jobs",
+    ...rows,
+    "",
+    "Annotations",
+    "  1 error and 2 warnings",
+    `  X ${failed}: Process completed with exit code 1.`,
+    "  ! Node.js 20 actions are deprecated. The following actions are running on Node.js 20 and may not work as expected: actions/checkout@v4, actions/setup-node@v4. Actions will be forced to run with Node.js 24 by default starting June 2nd, 2026.",
+    "  ! The `set-output` command is deprecated and will be disabled soon. Please upgrade to using Environment Files.",
+    "",
+    `View workflow run: https://github.example/acme/widget/actions/runs/${runId}`,
+    `View pull request: https://github.example/acme/widget/pull/${pr}`,
+    "",
+    "--",
+    "You are receiving this email because you are subscribed to GitHub Actions notifications for workflow runs you triggered or for repositories you watch.",
+    "Manage your GitHub Actions notifications: https://github.example/settings/notifications",
+    "To stop receiving these emails, change your notification settings. GitHub, Inc. 88 Colin P Kelly Jr Street, San Francisco, CA 94107 (synthetic).",
+  ].join("\n");
+}
+function extendCorpus950(messages, queries) {
+  const rnd = mulberry32(950);
+  const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
+  const base = Date.UTC(2026, 10, 1);
+  let tick = 0;
+  const nextDate = () => new Date(base + (tick++) * 3_600_000 * 3).toISOString();
+  const ids = [];
+  WORKFLOWS950.forEach((workflow, w) => {
+    TITLES950.forEach((title, t) => {
+      const pr = 400 + t;
+      const sha = hex(7);
+      const id = `gha-${w}-${t}@github.example`;
+      messages.push({
+        to: ME, inReplyTo: null, id, from: "notifications@github.example",
+        subject: `[acme/widget] PR run failed: ${workflow} - ${title} (${sha})`,
+        body: actionsBody(rnd, workflow, title, pr, sha, 7_000_000 + w * 100 + t), date: nextDate(), family: `gha:${workflow}:${t}`,
+      });
+      ids.push({ id, workflow, title });
+    });
+  });
+  // The production probe shape: the message searched by its own exact subject (12 probes, spread).
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  for (let k = 0; k < 12; k++) {
+    const x = ids[Math.floor((k * ids.length) / 12)];
+    queries.push({ family: "actions", q: byId.get(x.id).subject, gold: [x.id] });
+  }
+  // A person's shape: the workflow and the PR title, no repo, no sha (12 probes, offset by 2).
+  for (let k = 0; k < 12; k++) {
+    const x = ids[(Math.floor((k * ids.length) / 12) + 2) % ids.length];
+    queries.push({ family: "actions-title", q: `${x.workflow} failed on ${x.title}`, gold: [x.id] });
+  }
+}
+
 export function buildCorpus() {
   const rnd = mulberry32(813);
   const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
@@ -244,5 +319,6 @@ export function buildCorpus() {
   queries.push({ family: "diversity", q: "automated notifications I received", goldFamilies: ["ci:corpus-sync", "ci:nightly-index", "ci:deploy-staging", "pr", "order", "login"] });
   queries.push({ family: "diversity", q: "deliveries and account security", goldFamilies: ["order", "login"] });
   extendCorpus(messages, queries);
+  extendCorpus950(messages, queries);
   return { messages, queries };
 }

@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { buildCorpus } from "./corpus813.mjs";
 import { embedChunks } from "../src/embedtext.ts";
+import { RECIPES950 } from "./recipes950.mjs";
 
 const account = process.env.CLOUDFLARE_ACCOUNT_ID;
 const token = process.env.CF_WORKERS_AI_TOKEN;
@@ -23,6 +24,8 @@ const sha = (t) => createHash("sha256").update(t).digest("hex");
 const { messages, queries } = buildCorpus();
 const texts = new Set();
 for (const m of messages) for (const v of [1, 2]) for (const t of embedChunks(m.subject, m.body, v)) texts.add(t);
+// #950: the candidate recipes (eval/recipes950.mjs). R2 is v2 again, so it adds nothing.
+for (const m of messages) for (const recipe of Object.values(RECIPES950)) for (const t of recipe(m.subject, m.body)) texts.add(t);
 for (const q of queries) texts.add(q.q);
 // Read once and treat "not there yet" as an empty cache: no check-then-read window.
 let cache = {};
