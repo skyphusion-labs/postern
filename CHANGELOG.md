@@ -13,6 +13,45 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+## v1.16.0
+
+MINOR. The operator can read the live Vectorize ranking behind a semantic or hybrid search (#950),
+the measurement the offline recall eval cannot make. The python client can call it.
+
+**Upgrade.**
+
+- No migration, and no new binding or secret: `inbound/migrations` and `inbound/wrangler.jsonc` are
+  unchanged since v1.15.0.
+- One new optional var, `SEARCH_DEBUG`. It is OFF when unset, and the new route answers 404 until
+  it is exactly `1` or `true`. Leave it unset except for a measurement window (OPERATIONS.md
+  section 7). Nothing else changes when it is unset.
+
+### Added
+
+- **The operator can read the raw Vectorize ranking for one query (#950).**
+  `GET /api/admin/search-debug` returns:
+  - the Vectorize matches (rank, vector id, score, chunk, message id) before the collapse to
+    messages, scope, the family tiebreak or the hybrid blend;
+  - the page `/api/search` returns for the same query, built from the same Vectorize call;
+  - for an optional `gold` Message-ID, its own vectors with exact cosine and raw rank, plus a
+    verdict (`in-raw`, `ann-miss`, `outranked`, ...).
+
+  The eval ranks with exact kNN and Vectorize is approximate, so this is the only way to see
+  where a live query loses a message. Guards:
+  - the `both` token only: the admin-only slot is refused (403 `E_FORBIDDEN`, audited) because it
+    cannot read mail;
+  - off unless `SEARCH_DEBUG` is set;
+  - ids and scores only, never mail content;
+  - one `search.debug` audit row per call, with the query length and never the query.
+- **python client: `search_debug` (#950).** `Client.search_debug(q, mode=, limit=, gold=)` calls the
+  route, so every parameter the worker honors stays reachable from a client.
+
+### Changed
+
+- **docs(identity):** the IDENTITY.md status line now lists what of #854 has shipped (M2 in
+  v1.12.0, the read-only part of M3a in v1.15.0) and what is not built (app passwords and human
+  API tokens, parked; M3b, gated on parity). It used to say M2 and M3 were not built (#951).
+
 ## v1.15.0
 
 MINOR. Hybrid search keeps the family members its cap leaves off reachable as `similar` (#940);
