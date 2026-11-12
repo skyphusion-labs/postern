@@ -3084,7 +3084,7 @@ async function substrSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
 
 // Embed a query string with the same model + binding ingest uses, so the query
 // vector lives in the same space as the indexed chunk vectors.
-async function embedQuery(env: Env, text: string): Promise<number[] | null> {
+export async function embedQuery(env: Env, text: string): Promise<number[] | null> {
   if (!env.AI) return null;
   const embed = (await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [text] })) as { data: number[][] };
   const vec = embed?.data?.[0];
@@ -3110,10 +3110,22 @@ async function embedQuery(env: Env, text: string): Promise<number[] | null> {
  */
 const VECTOR_TOPK_MAX = 50;
 
-interface VectorizeMatch {
+export interface VectorizeMatch {
   id: string;
   score: number;
-  metadata?: { message_id?: string } | null;
+  metadata?: { message_id?: string; chunk?: number } | null;
+}
+
+/**
+ * #950: one raw Vectorize call as the score-ranked search made it, BEFORE the collapse to
+ * messages, the scope filters, the family tiebreak and the hybrid blend. Filled only by
+ * searchTraced() for the operator debug route; the shipped search() never passes a sink.
+ */
+export interface VectorTrace {
+  queryVec: number[];
+  topK: number;
+  wide: boolean;
+  matches: VectorizeMatch[];
 }
 
 // Nearest message ids for a query, best chunk-score per message. Vectorize is
@@ -3124,6 +3136,7 @@ async function nearestMessageIds(
   queryVec: number[],
   limit: number,
   wide: boolean,
+  trace?: VectorTrace[],
 ): Promise<{ ranked: { messageId: string; score: number }[]; exhausted: boolean; topK: number }> {
   // `wide` = a filter will be applied AFTER hydration, so every row the filter drops is a
   // row the retrieval should have replaced and did not. limit*3 was always a guess at how
@@ -3139,6 +3152,7 @@ async function nearestMessageIds(
     returnMetadata: "all",
   })) as { matches?: VectorizeMatch[] };
   const matches = res.matches ?? [];
+  trace?.push({ queryVec, topK, wide, matches });
   const best = new Map<string, number>();
   for (const m of matches) {
     const id = m.metadata?.message_id;
@@ -3273,7 +3287,7 @@ function passesViewerScope(
   return !direction || m.direction === direction;
 }
 
-async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
+async function semanticSearch(env: Env, q: SearchQuery, trace?: VectorTrace[]): Promise<Page<SearchHit>> {
   const limit = clampLimit(q.limit);
   const text = (q.q ?? "").trim();
   if (!text) return { items: [], cursor: null };
@@ -3301,7 +3315,7 @@ async function semanticSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>
   }
 
   const wide = hasPostRetrievalFilter(q);
-  const { ranked, exhausted, topK } = await nearestMessageIds(env, queryVec, limit, wide);
+  const { ranked, exhausted, topK } = await nearestMessageIds(env, queryVec, limit, wide, trace);
   const summaries = await summariesByIds(env, ranked.map((r) => r.messageId), seenKey(q), q.agentGuard);
   const items: SearchHit[] = [];
   for (const r of ranked) {
@@ -3427,7 +3441,7 @@ async function rankSemanticFamilies(env: Env, items: SearchHit[], q: SearchQuery
   });
 }
 
-async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> {
+async function hybridSearch(env: Env, q: SearchQuery, trace?: VectorTrace[]): Promise<Page<SearchHit>> {
   const limit = clampLimit(q.limit);
   // Pull each side, then merge by message_id on a normalized 0..1 score and sum.
   const shared = {
@@ -3453,7 +3467,7 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
   const [ftsPage, semPage] = await Promise.all([
     ftsSearch(env, { ...shared, mode: "fts" }),
     // #813: hybrid stays one row per message, so its semantic half never collapses.
-    semanticSearch(env, { ...shared, mode: "semantic", collapse: false, collapseThreads: false }),
+    semanticSearch(env, { ...shared, mode: "semantic", collapse: false, collapseThreads: false }, trace),
   ]);
 
   const merged = new Map<string, SearchHit & { score: number }>();
@@ -3498,6 +3512,27 @@ async function hybridSearch(env: Env, q: SearchQuery): Promise<Page<SearchHit>> 
     .join("; ");
   if (reasons) out.degraded = reasons;
   return out;
+}
+
+/**
+ * #950: the shipped semantic or hybrid search, plus the raw Vectorize call it made. The
+ * page is exactly what search() returns for the same query (same code path, same call);
+ * the trace is the matches that call returned, in Vectorize order, before anything ranked
+ * them. Operator debug only (GET /api/admin/search-debug); not on the RPC door.
+ */
+export async function searchTraced(
+  env: Env,
+  q: SearchQuery & { mode: "semantic" | "hybrid" },
+): Promise<{ page: Page<SearchHit>; traces: VectorTrace[] }> {
+  if (q.cursor) throw new SearchCursorRefused();
+  const traces: VectorTrace[] = [];
+  const page = q.mode === "semantic" ? await semanticSearch(env, q, traces) : await hybridSearch(env, q, traces);
+  return { page, traces };
+}
+
+/** #950: read stored vectors (values included) by id, in batches the binding accepts. */
+export async function vectorsByIds(env: Env, ids: string[]): Promise<ByIdVector[]> {
+  return getByIdsBatched(env, ids);
 }
 
 /** Thrown when a search mode is requested before it ships (semantic/hybrid = M4). */
@@ -4128,7 +4163,7 @@ async function liveVectorCount(env: Env): Promise<number> {
  *  the per-request wall-clock on a real mailbox, low enough to stay polite. */
 const RECONCILE_CONCURRENCY = 8;
 
-interface ByIdVector {
+export interface ByIdVector {
   id: string;
   values?: number[];
   metadata?: Record<string, unknown> | null;

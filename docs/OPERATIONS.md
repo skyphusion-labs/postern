@@ -228,3 +228,38 @@ closing a projection window. A green walk with residual `notCurrent` is not done
   Rotate deliberately and update every consumer in the same change.
 - **Backups that block.** A running `d1 export` blocks other database requests;
   schedule it off-peak so a backup never looks like an outage.
+
+## 7. Measuring the live semantic ranking (#950)
+
+The offline recall eval (`inbound/eval/`) ranks with exact cosine kNN. Vectorize is an
+approximate index, so the eval cannot see where a live query loses a message.
+`GET /api/admin/search-debug` reads the live ranking for one query. It is OFF by default:
+the route answers 404 until the deploy sets `SEARCH_DEBUG=1`. A query plus the ids that
+match it is a content oracle over the whole mailbox, so turn it on for a measurement
+window only, then remove the var and redeploy.
+
+```bash
+# Needs an admin-scoped token (POSTERN_API_TOKEN_ADMIN or the both token).
+curl -fsS -G https://mail.example.com/api/admin/search-debug \
+  -H "Authorization: Bearer $POSTERN_API_TOKEN_ADMIN" \
+  --data-urlencode "q=<the probe query>" \
+  --data-urlencode "gold=<the Message-ID the probe should find>" \
+  --data-urlencode "mode=semantic" --data-urlencode "limit=10"
+```
+
+Read `gold.verdict` first:
+
+- `in-raw`: Vectorize returned the gold. Any miss happened after it: compare
+  `gold.chunks[].rawRank` with `gold.fusedRank` (null = scope, the family tiebreak or the
+  collapse dropped or folded it; check `fused[].similarCount`).
+- `ann-miss`: the gold's exact cosine is above `floorScore`, the K-th raw score, yet
+  Vectorize left it out. The approximate index lost a true neighbour.
+- `outranked`: the gold's exact cosine is at or below `floorScore`. Exact search would
+  also leave it out of the topK: the embedding ranks it too low, or the crowd is too big.
+- `not-in-short-result`, `not-indexed`, `vectors-missing`: fewer than topK came back, no
+  ledger rows exist, or the ledger names vectors the index no longer holds.
+
+Trust a cosine only when `scoreCheck.delta` is near 0: it recomputes the rank-1 score
+from its stored vector, so a large delta means the recomputed cosines and the Vectorize
+scores are not on the same scale. The `fused` page comes from the same Vectorize call
+as `raw`, not a second query.

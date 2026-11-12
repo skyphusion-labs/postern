@@ -63,6 +63,9 @@ function referenceRequiredScope(method: string, path: string): RouteScope | null
   // after a PROJECTION_VERSION bump). Same deliberate-act rule as the #438 row above.
   if (method === "POST" && path === "/api/admin/reproject") return "admin";
   if (method === "POST" && path === "/api/admin/reconcile") return "admin";
+  // #950 adds GET /api/admin/search-debug at `admin` scope (the raw Vectorize ranking,
+  // off unless SEARCH_DEBUG=1). Same deliberate-act rule as the #438 row above.
+  if (method === "GET" && path === "/api/admin/search-debug") return "admin";
   // #790 adds human user management at `admin` scope (contract 1.10.4). Same
   // deliberate-act rule: the users collection and every child under it, any method the
   // handler serves; the bare "/api/admin/users/" (no username) is NOT claimed.
@@ -115,6 +118,7 @@ const CORPUS = [
   "/api/imap/drafts", "/api/imap/drafts/d1", "/api/imap/import", "/api/imap/roles",
   "/api/admin/smtp-credentials", "/api/admin/smtp-credentials/", "/api/admin/smtp-credentials/bob",
   "/api/admin/reindex", "/api/admin/reconcile", "/api/admin/reproject",
+  "/api/admin/search-debug", "/api/admin/search-debugx", "/api/admin/search-debug/x",
   "/api/admin/users", "/api/admin/users/", "/api/admin/users/bob", "/api/admin/users/bob/password",
   "/api/admin/usersx", "/api/admin/users2/bob",
   "/api/admin/identities", "/api/admin/identities/", "/api/admin/identities/idn_0123", "/api/admin/identitiesx",
