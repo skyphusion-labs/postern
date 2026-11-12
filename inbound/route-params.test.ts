@@ -38,7 +38,7 @@ const PARAMS = JSON.parse(
 // was a blind spot: useradmin.ts (#790) reads limit and cursor, and the two arms below
 // passed only because api.ts happens to read the same names elsewhere. #801 added
 // includeRevoked in agentidentities.ts, which an api.ts-only scan reports as "invented".
-const API_SRC = ["./src/api.ts", "./src/useradmin.ts", "./src/agentidentities.ts", "./src/adminkit.ts", "./src/delegations.ts", "./src/principaladmin.ts"]
+const API_SRC = ["./src/api.ts", "./src/useradmin.ts", "./src/agentidentities.ts", "./src/adminkit.ts", "./src/delegations.ts", "./src/principaladmin.ts", "./src/searchdebug.ts"]
   .map((p) => readFileSync(new URL(p, import.meta.url), "utf8"))
   .join("\n");
 const TOKEN = "test-token";

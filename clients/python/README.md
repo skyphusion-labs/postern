@@ -262,6 +262,7 @@ that reports no scope it says so rather than guessing.
 | `mint_identity` / `list_identities` / `revoke_identity` | `/api/admin/identities[/{id}]` | `{id, token, ...}` (the token ONCE, never again) / `{items, cursor}` / `{revoked, alreadyRevoked}` (#801) |
 | `list_audit` | `GET /api/admin/audit` | `{items, cursor}`, newest first (#801) |
 | `list_principals` / `get_principal` | `/api/admin/principals[/{id}]` | `{items, cursor}` / `{principal, credentials, addresses}` (#854 M3a; read only, never a lookup or secret) |
+| `search_debug` | `GET /api/admin/search-debug` | `{raw, fused, scoreCheck, gold?, ...}` (#950; the `both` token only, the admin slot is refused; 404 unless `SEARCH_DEBUG=1`; ids and scores only) |
 | `grant_delegation` / `list_delegations` / `revoke_delegation` | `/api/admin/delegations[/{id}]` | `{id, granteeId, address, powers, ...}` / `{items, cursor}` / `{revoked, alreadyRevoked}` (#740 S1; stored, not yet enforced) |
 | `ping` | `GET /api/messages?limit=1` | `bool` |
 

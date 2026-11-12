@@ -54,6 +54,7 @@ import { parseRegistry, resolveRegistryIdentity, type Scope, type TokenResolutio
 import { agentAudit, agentMessageAudit, auditStatement, OPERATOR_ACTOR, type AuditActor } from "./adminkit";
 import { backfillPrincipals } from "./principals";
 import { handleAdminPrincipals } from "./principaladmin";
+import { handleSearchDebug } from "./searchdebug";
 import { parityGate, principalParity, readMisses } from "./principalmirror";
 import { handleSelfService } from "./selfservice";
 // The route table is DATA (#417): ONE declaration that the scope gate below derives
@@ -434,6 +435,18 @@ export async function handleApi(request: Request, env: Env, ctx: ExecutionContex
     // fully enumerable. NEVER deletes: the prune is a separate, Conrad-supervised step.
     if (request.method === "POST" && path === "/api/admin/reconcile") {
       return await handleReconcile(request, env);
+    }
+
+    // --- admin: raw Vectorize ranking for one query (#950, OFF unless SEARCH_DEBUG=1) ---
+    // Operator measurement only: ids and scores, never mail content. See searchdebug.ts.
+    if (request.method === "GET" && path === "/api/admin/search-debug") {
+      // The SAME defaults /api/search applies, passed in so the two cannot drift.
+      const dres = await handleSearchDebug(request, env, url, adminActorOf(resolution), {
+        collapse: SEMANTIC_COLLAPSE_DEFAULT,
+        collapseThreads: SEMANTIC_THREAD_COLLAPSE_DEFAULT,
+        familyCap: HYBRID_FAMILY_CAP_DEFAULT,
+      });
+      if (dres) return dres;
     }
 
     // --- admin: revoke an SMTP submission credential (an alias of the user delete) ---

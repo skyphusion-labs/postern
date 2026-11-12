@@ -178,6 +178,8 @@ def _emitted() -> list[dict[str, Any]]:
     # #854 M3a the principal layer, read only (operator).
     c.list_principals(kind="human", limit=5, cursor="c1", include_disabled=True)
     c.get_principal("prn_0")
+    # #950 the raw Vectorize ranking (operator, off unless SEARCH_DEBUG=1).
+    c.search_debug("q", mode="hybrid", limit=5, gold="m@x")
 
     out: list[dict[str, Any]] = []
     for req in t.requests:

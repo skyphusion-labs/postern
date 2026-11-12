@@ -501,6 +501,15 @@
       "note": "the role map is operator config (#425): who is on which queue is a deployment fact, not a mailbox view, so a read token cannot see it"
     },
     {
+      "id": "admin-search-debug",
+      "method": "GET",
+      "path": "/api/admin/search-debug",
+      "match": "exact",
+      "scope": "admin",
+      "auth": "bearer",
+      "note": "#950 operator debug: the raw Vectorize matches (vector id, score, rank, chunk, message id) before any fusion, beside the fused page from the same call, plus where a `gold` message's own vectors sit. The both token ONLY: the gate admits the admin slot and the handler refuses it (403 E_FORBIDDEN), since the slot cannot read mail. 404 unless SEARCH_DEBUG=1; ids and scores only, never mail content. Audited (search.debug, query length only; refusals too)"
+    },
+    {
       "id": "admin-reconcile",
       "method": "POST",
       "path": "/api/admin/reconcile",
