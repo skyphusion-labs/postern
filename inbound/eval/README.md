@@ -105,4 +105,38 @@ R2. R3b cuts the signature footer and link-only lines before R2. R3c is both.
 | R3c | 2 | 88 | 0% (0%, 0%) | 100% |
 
 This is structure, not recall. Recall needs the real embeddings: `embed813.mjs` (about 487 new
-texts, about 50k tokens), then `recall813.eval.mjs`. Results go here when that runs.
+texts, about 50k tokens), then `recall813.eval.mjs`. Results below.
+
+**Recall, 2026-11-12** (joan, real bge-base embeddings, exact kNN). Run A is the 533-message corpus
+(the #930 corpus plus the 48 probe messages). Run B adds 432 older Actions notifications, 480 in all,
+because Vectorize reads at most 50 chunks and production's probes competed with older re-runs.
+
+**The control failed in both runs.** R2 with the shipped settings (V4 semantic) finds the `actions`
+probes at 100% r@1, in A and in B. The synthetic block does not reproduce the production miss, so
+these runs do not show that any recipe fixes the #950 class. Under exact kNN, the family tiebreak
+puts the newest member of a near-identical family first, and each probe is the newest of its
+re-runs. What these runs cannot see: Vectorize is approximate nearest neighbour, not exact; real
+Actions bodies come from HTML; and whether production's two misses were embedded by the current
+recipe at all.
+
+Side finding, on the families that are not #950's (V4 and H3 against the candidates):
+
+| run | variant | latest r@1 | paraphrase r@1 / r@5 / r@10 | diversity@10 | MRR | distinct threads@10 |
+|---|---|---|---|---|---|---|
+| A | V4 semantic | 83% | 85% / 98% / 98% | 59% | 0.952 | 9.77 |
+| A | R3a semantic | 100% | 90% / 100% / 100% | 61% | 0.976 | 9.05 |
+| A | R3c semantic | 100% | 90% / 100% / 100% | 65% | 0.976 | 8.97 |
+| A | H3 hybrid | 83% | 85% / 98% / 98% | 56% | 0.939 | 7.60 |
+| A | R3a hybrid | 100% | 90% / 100% / 100% | **55%** | 0.959 | 6.62 |
+| A | R3c hybrid | 100% | 90% / 100% / 100% | 59% | 0.959 | 6.62 |
+| B | V4 semantic | 83% | 85% / 98% / 98% | 58% | 0.952 | 9.80 |
+| B | R3a semantic | 100% | 90% / 100% / 100% | 59% | 0.976 | 9.10 |
+| B | R3c semantic | 100% | 90% / 100% / 100% | 58% | 0.976 | 9.08 |
+| B | H3 hybrid | 83% | 85% / 98% / 98% | 46% | 0.952 | 7.67 |
+| B | R3a hybrid | 100% | 90% / 100% / 100% | 50% | 0.972 | 6.65 |
+| B | R3c hybrid | 100% | 90% / 100% / 100% | 49% | 0.972 | 6.65 |
+
+token and subject are 100% / 100% in every row. By the #813 rule, R3c is no worse on any family in
+either run. R3a drops hybrid diversity 56% to 55% in run A (one step on 15 queries). Distinct threads
+in the top 10 fall by about 0.7 (semantic) and 1.0 (hybrid) under both. That is not a recall family,
+and it is reported here.

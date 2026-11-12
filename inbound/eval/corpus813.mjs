@@ -229,6 +229,41 @@ function extendCorpus950(messages, queries) {
   }
 }
 
+// #950 scale: OLDER Actions notifications, so the probes compete the way production's did. The
+// #940 probes were the newest mail, and their near-identical siblings (re-runs of the same workflow
+// on the same PR, and other PRs) sat behind them, outside the replay's 200-message shape window.
+// Semantic retrieval reads at most 50 chunks (Vectorize's topK ceiling, store.ts), so a crowd of
+// near-identical chunks can push the gold out of the pool entirely: NOT FOUND, not even foldable.
+// 6 re-runs of each of the 48 (workflow, title) pairs, plus 18 more titles once per workflow: 432
+// messages, all dated before the probes. Appended with its own seed, so everything above stays
+// byte-identical.
+const TITLES950B = [
+  "Rate limit the export endpoint", "Upgrade the queue consumer", "Rename the billing tables", "Add a dark mode toggle",
+  "Fix the flaky upload test", "Batch the analytics writes", "Remove the old feature flags", "Speed up the search index build",
+  "Validate webhook signatures", "Split the admin bundle", "Retry failed email sends", "Add audit events for logins",
+  "Migrate cron jobs to queues", "Trim the onboarding flow", "Fix currency rounding", "Store avatars in R2",
+  "Harden the CSP header", "Log slow D1 queries",
+];
+function extendCorpus950Scale(messages) {
+  const rnd = mulberry32(9501);
+  const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
+  const base = Date.UTC(2026, 8, 1); // September: before every #950 probe (November)
+  let tick = 0;
+  const nextDate = () => new Date(base + (tick++) * 3_600_000 * 2).toISOString();
+  const push = (workflow, title, pr, tag) => {
+    const sha = hex(7);
+    messages.push({
+      to: ME, inReplyTo: null, id: `gha-old-${tag}@github.example`, from: "notifications@github.example",
+      subject: `[acme/widget] PR run failed: ${workflow} - ${title} (${sha})`,
+      body: actionsBody(rnd, workflow, title, pr, sha, 6_000_000 + tick), date: nextDate(), family: "gha-old",
+    });
+  };
+  WORKFLOWS950.forEach((workflow, w) => TITLES950.forEach((title, t) => {
+    for (let r = 0; r < 6; r++) push(workflow, title, 400 + t, `${w}-${t}-${r}`);
+  }));
+  WORKFLOWS950.forEach((workflow, w) => TITLES950B.forEach((title, t) => push(workflow, title, 500 + t, `${w}-b${t}`)));
+}
+
 export function buildCorpus() {
   const rnd = mulberry32(813);
   const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rnd() * 16)]).join("");
@@ -320,5 +355,6 @@ export function buildCorpus() {
   queries.push({ family: "diversity", q: "deliveries and account security", goldFamilies: ["order", "login"] });
   extendCorpus(messages, queries);
   extendCorpus950(messages, queries);
+  extendCorpus950Scale(messages);
   return { messages, queries };
 }
