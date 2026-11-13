@@ -25,8 +25,14 @@ Email Routing catch-all routes to Worker `postern`. Public read token is documen
 (`POSTERN_API_TOKEN_READ`; send/reply/delete refused). Mail any `@posternonline.com` address into
 the shared demo mailbox.
 
-**Production estate mail** remains the operator private deploy (skyphusion.org inbound Worker /
-escrow wrangler in crew-secrets) -- distinct from the public posternonline demo.
+**Production estate mail** is the Worker `skyphusion-email-inbound` (D1 `skyphusion-mail`),
+distinct from the public posternonline demo (Worker `postern`, its own D1). It ships from THIS
+repo's tag deploy (`deploy.yml` on a `v*` tag): the operator wrangler config lives in the
+`POSTERN_INBOUND_WRANGLER` secret of the GitHub Environment `production`, and that config, not
+the committed template, names the Worker and its D1. An escrow copy of the config is kept out of
+tree in the operator private infrastructure repository; it is a backup, not the deploy path. To
+see what a tag deployed, read the deploy run log ("Reading live vars for Worker: ...",
+"Uploaded ...", the `env.DB (...)` binding line).
 
 Read **docs/CONTRACT.md** (authoritative data model + transport seams), **docs/AUTH-CONTRACT.md**, and
 **docs/SEND-IDENTITIES.md** before changing behavior.

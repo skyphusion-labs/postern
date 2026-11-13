@@ -21,9 +21,12 @@ name: deploy
 # main-ancestry are wrong stops HERE instead of shipping production while the
 # release + publish workflows fail downstream (what v1.0.5 did).
 #
-# Worker deployed (name per inbound/wrangler.jsonc):
-#   inbound/  -> postern        (CF Email Routing ingestion + store/read/send API;
-#                                was skyphusion-email-inbound)
+# Worker deployed: inbound/ (CF Email Routing ingestion + store/read/send API).
+# The NAME and the D1 come from the config this run deploys with: the operator's
+# POSTERN_INBOUND_WRANGLER secret when set (this repository's estate deploy names
+# skyphusion-email-inbound there), else the committed inbound/wrangler.jsonc
+# template ("postern", placeholder ids). The run log names the Worker it touched
+# ("Reading live vars for Worker: ...", "Uploaded ...").
 #
 # The legacy send-only worker/ (postern-send) was folded into inbound/ (#190).
 #
