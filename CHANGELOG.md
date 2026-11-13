@@ -13,6 +13,12 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+### Added
+
+- **eval: `debug950.mjs`, the live #950 measurement driver.** It reads the operator debug route (#952)
+  for the "PR run failed" probes and 3 controls, and sorts each miss by the decision table fixed on
+  #950. It prints counts, ranks, cosines and verdicts only. Eval only: no change to the Worker.
+
 ## v1.16.1
 
 PATCH. Inbound trust is hardened (#954): it also requires Cloudflare's own Received header.

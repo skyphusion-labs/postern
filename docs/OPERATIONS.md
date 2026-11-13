@@ -263,3 +263,7 @@ Trust a cosine only when `scoreCheck.delta` is near 0: it recomputes the rank-1 
 from its stored vector, so a large delta means the recomputed cosines and the Vectorize
 scores are not on the same scale. The `fused` page comes from the same Vectorize call
 as `raw`, not a second query.
+
+For #950 the operator runs the probe set, not single calls:
+`POSTERN_URL=... POSTERN_TOKEN=<both token> node inbound/eval/debug950.mjs --json`. It picks the
+probes, makes every call, and prints counts, ranks, cosines and verdicts only.

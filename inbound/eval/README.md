@@ -9,6 +9,7 @@ This eval measures recall at k for semantic and hybrid search, before and after 
 | `recall813.eval.mjs` | For each variant: builds a fresh real-sqlite postern, stores the corpus through `store.put`, fills an in-memory index with the cached vectors, and runs every query through `store.search`. |
 | `vitest.eval.config.ts` | The only config that runs the eval. |
 | `replay813.mjs` | The live replay for an operator: the issue's known-item probe against a real deploy. It is read-only, and its summary prints counts and latencies, not mail content. Its primary known-item metric is FOUND (the gold is a top-10 row or folded into a top-10 hit's `similar`); STRICT (a top-10 row only) is printed beside it, and known-item probes are split by whether their template family repeats (#940). |
+| `debug950.mjs` | The live #950 measurement for an operator, inside a `SEARCH_DEBUG=1` window (docs/OPERATIONS.md section 7). It probes the "PR run failed" class and 3 unique-shape controls through `GET /api/admin/search-debug`, and reads each gold's verdict, raw message rank and cosine against the decision table fixed on #950. It prints counts, ranks, cosines and verdicts only, never a subject, sender, Message-ID or vector id. If a control fails, nothing else is read. Tested by `debug950.test.ts`. |
 | `shape813.mjs` | The template-family key the replay splits probes by: a copy of `src/semrank.ts` `templateKey`, held equal by `semrank-shape-parity.test.ts`. |
 
 ## Run
