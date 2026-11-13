@@ -252,18 +252,42 @@ Read `gold.verdict` first:
 - `in-raw`: Vectorize returned the gold. Any miss happened after it: compare
   `gold.chunks[].rawRank` with `gold.fusedRank` (null = scope, the family tiebreak or the
   collapse dropped or folded it; check `fused[].similarCount`).
-- `ann-miss`: the gold's exact cosine is above `floorScore`, the K-th raw score, yet
-  Vectorize left it out. The approximate index lost a true neighbour.
-- `outranked`: the gold's exact cosine is at or below `floorScore`. Exact search would
-  also leave it out of the topK: the embedding ranks it too low, or the crowd is too big.
+- `ann-miss`: the gold's exact cosine is above `floorExact`, the lowest EXACT score among
+  the vectors Vectorize returned, yet Vectorize left it out. The approximate index lost a
+  true neighbour.
+- `outranked`: the gold's exact cosine is at or below `floorExact`. Every returned vector
+  beats it on the exact scale: the embedding ranks it too low, or the crowd is too big.
 - `not-in-short-result`, `not-indexed`, `vectors-missing`: fewer than topK came back, no
-  ledger rows exist, or the ledger names vectors the index no longer holds.
+  ledger rows exist, or the ledger names vectors the index no longer holds. `unscored`: a full
+  list, but no returned vector could be scored exactly.
 
-Trust a cosine only when `scoreCheck.delta` is near 0: it recomputes the rank-1 score
-from its stored vector, so a large delta means the recomputed cosines and the Vectorize
-scores are not on the same scale. The `fused` page comes from the same Vectorize call
-as `raw`, not a second query.
+**The two scales.** The search queries Vectorize without `returnValues`, so Vectorize scores
+APPROXIMATELY ([query vectors](https://developers.cloudflare.com/vectorize/best-practices/query-vectors/),
+read 2026-11-13). On 2026-11-13 the production gap was 0.10 to 0.11. So every `raw` row
+carries `score` (Vectorize, approximate) and `exact` (recomputed from its stored vector), and
+every verdict compares exact with exact. `floorScore` is the approximate K-th score, for
+reference only. `approxError` (`n`, `max`, `median`) and `scoreCheck` (rank 1) report the gap.
+They are measurements, not a trust gate. `gold.exactRankInRaw` is where exact scores would
+place the gold among the returned messages. The `fused` page comes from the same Vectorize
+call as `raw`, not a second query.
+
+Semantic search always asks Vectorize for the ceiling (topK 50), and slices to `limit` only
+after the family tiebreak and the collapse (`hasPostRetrievalFilter`, the #813 clause). So
+`limit` changes the `fused` page, not the `raw` pool.
 
 For #950 the operator runs the probe set, not single calls:
 `POSTERN_URL=... POSTERN_TOKEN=<both token> node inbound/eval/debug950.mjs --json`. It picks the
-probes, makes every call, and prints counts, ranks, cosines and verdicts only.
+probes, makes every call, and prints counts, ranks, cosines and verdicts only. It needs a
+deploy whose route gives `floorExact`; against an older route it says INSTRUMENT NOT TRUSTED.
+
+Count the audit rows of a window (D1, the store database). The time column is `at`, an ISO
+8601 UTC string:
+
+```sql
+SELECT outcome, COUNT(*) FROM audit_log
+WHERE action = 'search.debug' AND at >= '<arm time, e.g. 2026-11-13T12:30:00Z>'
+GROUP BY outcome;
+```
+
+`ok` counts the calls the route answered. `refused` counts admin-slot calls (403). A 404
+(unarmed) writes no row.
