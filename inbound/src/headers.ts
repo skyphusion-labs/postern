@@ -231,11 +231,11 @@ function parseEntry(part: string): { method: string; result: string; props: Reco
  *  3. `dkim` is the FIRST DKIM verdict; `dkimDomains` lists the `header.d` of every
  *     passing signature in the leading dkim run; only the first `dmarc=` counts.
  *
- * RESIDUAL (accepted, tracked): this trusts the FIRST instance because CF prepends its
- * own Authentication-Results to every message it routes (observed live). If CF ever
- * delivered a message without one, a sender-supplied instance would become the first
- * and be read as CF's. An authserv-id check cannot help (it is forgeable); only
- * validating CF's ARC-Seal would remove this reliance. Not built.
+ * This trusts the FIRST instance because CF prepends its own Authentication-Results to
+ * every message it routes (observed live). The driver reads it only after cfTraceBlock
+ * proves that instance sits inside CF's own trace block (see driverAuth). An
+ * authserv-id check cannot help (it is forgeable); only validating CF's ARC-Seal would
+ * remove the reliance on the block's shape. Not built.
  */
 export function parseAuthResults(instance: string): AuthVerdicts {
   const cut = instance.search(/spf\s*=/i);
@@ -288,4 +288,104 @@ export function authFromHeaders(get: (name: string) => string | null): AuthVerdi
   if (ar.dkimDomains) out.dkimDomains = ar.dkimDomains;
   if (ar.dmarcFrom) out.dmarcFrom = ar.dmarcFrom;
   return out;
+}
+
+// --- Cloudflare trace block (inbound trust also requires CF's own Received) ---
+
+/** One raw header as postal-mime returns it: lower-cased key, unfolded value, in wire
+ *  order (top of the message first). */
+export interface RawHeader {
+  key: string;
+  value: string;
+}
+
+export type TraceRefusal =
+  | "no_headers"
+  | "first_not_received"
+  | "received_not_cloudflare"
+  | "no_block_end"
+  | "foreign_header_in_block"
+  | "duplicate_in_block"
+  | "no_auth_results_in_block";
+
+export type TraceCheck = { ok: true } | { ok: false; reason: TraceRefusal };
+
+/** Longest Received value the check will parse; a longer one is refused. */
+export const MAX_RECEIVED_LENGTH = 2048;
+
+/**
+ * The Received header CF Email Routing writes, after whitespace is collapsed:
+ *   from <helo> (<ip>) by cloudflare-email.com (cloudflare) id <id> for <rcpt>; <date>
+ * The whole value is anchored. The HELO is sender-chosen, so it must be ONE token with
+ * no space and no parenthesis: a HELO cannot carry its own "by cloudflare-email.com".
+ */
+const CF_RECEIVED =
+  /^from [^\s()]+ \([0-9a-f.:]+\) by cloudflare-email\.com \(cloudflare\) id [a-z0-9._-]+ for <[^\s<>]+>; [^;]+$/i;
+
+/** The headers CF writes between its Received and the end-of-block marker. */
+const CF_BLOCK_NAMES = new Set([
+  "arc-seal",
+  "arc-message-signature",
+  "arc-authentication-results",
+  "received-spf",
+  "authentication-results",
+]);
+
+/** The last header of CF's block, observed live. The sender's own headers follow it. */
+const CF_BLOCK_END = "x-cf-spamh-score";
+
+/** True when `value` is the Received header CF Email Routing writes. */
+export function isCloudflareReceived(value: string): boolean {
+  if (value.length > MAX_RECEIVED_LENGTH) return false;
+  return CF_RECEIVED.test(value.replace(/\s+/g, " ").trim());
+}
+
+/**
+ * Check that the message, as CF handed it to the Worker, starts with CF's own trace
+ * block, and that the first Authentication-Results sits INSIDE that block:
+ *
+ *   1. header 1 is a Received in CF's exact shape (isCloudflareReceived);
+ *   2. an X-CF-SpamH-Score header ends the block (the first one);
+ *   3. every header between them is one CF writes (CF_BLOCK_NAMES), each at most once;
+ *   4. exactly one Authentication-Results is in the block.
+ *
+ * Any other shape refuses (fail closed). A refusal means "no verdict we can attribute
+ * to CF", so the driver reads no verdict at all. Headers the sender wrote sit below
+ * the block, so an Authentication-Results among them never counts.
+ */
+export function cfTraceBlock(headers: readonly RawHeader[]): TraceCheck {
+  if (headers.length === 0) return { ok: false, reason: "no_headers" };
+  if (headers[0].key.toLowerCase() !== "received") return { ok: false, reason: "first_not_received" };
+  if (!isCloudflareReceived(headers[0].value)) return { ok: false, reason: "received_not_cloudflare" };
+  let end = -1;
+  for (let i = 1; i < headers.length; i++) {
+    if (headers[i].key.toLowerCase() === CF_BLOCK_END) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0) return { ok: false, reason: "no_block_end" };
+  const seen = new Set<string>();
+  for (let i = 1; i < end; i++) {
+    const k = headers[i].key.toLowerCase();
+    if (!CF_BLOCK_NAMES.has(k)) return { ok: false, reason: "foreign_header_in_block" };
+    if (seen.has(k)) return { ok: false, reason: "duplicate_in_block" };
+    seen.add(k);
+  }
+  if (!seen.has("authentication-results")) return { ok: false, reason: "no_auth_results_in_block" };
+  return { ok: true };
+}
+
+/**
+ * The driver's auth block: the CF verdicts (authFromHeaders) only when the raw
+ * message starts with CF's trace block (cfTraceBlock), else no verdict at all. The
+ * verdict text is still read from `message.headers`; the raw list only proves where
+ * the first Authentication-Results sits.
+ */
+export function driverAuth(
+  get: (name: string) => string | null,
+  raw: readonly RawHeader[],
+): { auth: AuthVerdicts; trace: TraceCheck } {
+  const trace = cfTraceBlock(raw);
+  return { auth: trace.ok ? authFromHeaders(get) : { ...NO_VERDICT }, trace };
 }
