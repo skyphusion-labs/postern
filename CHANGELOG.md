@@ -13,6 +13,22 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+## v1.17.0
+
+MINOR (2026-11-13). The operator debug route judges a lost message on the exact scale (#950).
+Vectorize scores approximately, so the route now gives every raw match its exact cosine and
+compares exact with exact. The eval driver `debug950.mjs` measures the live ranking with it.
+
+**Upgrade.**
+
+- No migration, and no new binding, var or secret: `inbound/migrations` and `inbound/wrangler.jsonc`
+  are unchanged since v1.16.1.
+- `SEARCH_DEBUG` stays unset except for a measurement window (OPERATIONS.md section 7). Nothing
+  changes when it is unset.
+- `GET /api/admin/search-debug` gains response fields (`raw[].exact`, `floorExact`, `scoring`,
+  `approxError`, `gold.exactRankInRaw`) and a verdict value (`unscored`). A client that reads the
+  route should accept them.
+
 ### Added
 
 - **eval: `debug950.mjs`, the live #950 measurement driver.** It reads the operator debug route (#952)
