@@ -13,6 +13,42 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+## v1.18.0
+
+MINOR (2026-11-13). Semantic search misses could not tell a message the index had not processed
+yet from a lost one (#963). The ledger now records each upsert's Vectorize mutation and when it
+returned, the operator debug route says `not-yet-queryable`, and two eval drivers measure the live
+gap and probe named messages.
+
+**Upgrade.**
+
+- **One migration: `0025_vector_mutation.sql`, additive.** It adds two nullable columns to
+  `vector_ledger` (`mutation_id`, `upserted_ms`). The #112 deploy gate applies it with the
+  release; existing rows stay NULL in both. No backfill.
+- No new binding, var or secret: `inbound/wrangler.jsonc` is unchanged since v1.17.0.
+- `SEARCH_DEBUG` stays unset except for a measurement window (OPERATIONS.md section 7). Nothing
+  changes when it is unset.
+- `GET /api/admin/search-debug` gains response fields (`index`, `serverNowMs`, `gold.upsertedMs`,
+  `gold.pending`, `gold.mutationIsLatest`) and a verdict value (`not-yet-queryable`). A client that
+  reads the route should accept them.
+
+### Added
+
+- **The vector ledger records when a vector becomes queryable (#963).** Each upsert's
+  `mutationId` and the Worker time it returned go into `vector_ledger` (migration 0025).
+  `describe()` gives the index's processing point; a number (seconds or ms) or an ISO date string
+  is read.
+- **search-debug: verdict `not-yet-queryable` (#963).** The gold's upsert is later than the index's
+  processing point, so it is not served yet. It is read after `in-raw` and `not-indexed`, before
+  the rest, so a fresh message is not reported as lost. A ledger row from before 0025 concludes
+  nothing from the clock.
+- **eval: `fresh963.mjs` (#963).** A passive window driver (no mail sent): it follows each new
+  inbound message until semantic search finds it, and reports seconds from the upsert to
+  "processed" and to FOUND, on the Worker's clock, with the decision row fixed on #963.
+- **eval: `debug950.mjs --gold-file` (#963).** Probes named messages from an operator-private file
+  of Message-IDs (owner-only, read through one file descriptor), each by its own subject, with one
+  more call, semantic search with `collapse=0`. Eval only.
+
 ## v1.17.0
 
 MINOR (2026-11-13). The operator debug route judges a lost message on the exact scale (#950).
