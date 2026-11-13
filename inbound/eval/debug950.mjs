@@ -3,10 +3,11 @@
 // SEARCH_DEBUG=1 window (OPERATIONS.md section 7):
 //
 //   POSTERN_URL=https://mail.example POSTERN_TOKEN=<the both token> \
-//     node eval/debug950.mjs [--class '^PR run failed:'] [--min 8] [--controls 3] [--json]
+//     node eval/debug950.mjs [--class-prefix 'PR run failed:'] [--min 8] [--controls 3] [--json]
 //
 // Probes (fixed on #950 before the window):
-//   class    every inbound message in the newest 80 whose subject matches --class. If fewer
+//   class    every inbound message in the newest 80 whose subject starts with --class-prefix
+//            (a literal prefix, never a regular expression). If fewer
 //            than --min, the newest --min from the newest 200.
 //   control  the newest --controls inbound messages of a unique template shape (no other
 //            listed message shares the family) that are not in the class.
@@ -22,7 +23,7 @@
 import { pathToFileURL } from "node:url";
 import { shapeKey } from "./shape813.mjs";
 
-export const DEFAULTS = { classRe: "^PR run failed:", min: 8, controls: 3, window: 80, wideWindow: 200 };
+export const DEFAULTS = { classPrefix: "PR run failed:", min: 8, controls: 3, window: 80, wideWindow: 200 };
 export const CALLS = [
   { key: "sem10", mode: "semantic", limit: 10 },
   { key: "sem50", mode: "semantic", limit: 50 },
@@ -33,9 +34,8 @@ export const SCORE_DELTA_MAX = 1e-3;
 
 /** Pick the class probes and the controls from a newest-first inbound listing. */
 export function selectProbes(listed, wide, opts = DEFAULTS) {
-  const re = new RegExp(opts.classRe);
   const usable = (m) => typeof m?.messageId === "string" && m.messageId && (m.subject ?? "").trim();
-  const isClass = (m) => re.test((m.subject ?? "").trim());
+  const isClass = (m) => (m.subject ?? "").trim().startsWith(opts.classPrefix);
   let cls = listed.filter((m) => usable(m) && isClass(m));
   let source = "window";
   if (cls.length < opts.min && wide) {
@@ -228,7 +228,7 @@ async function main() {
   };
   const opts = {
     ...DEFAULTS,
-    classRe: flag("--class") ?? DEFAULTS.classRe,
+    classPrefix: flag("--class-prefix") ?? DEFAULTS.classPrefix,
     min: Number(flag("--min") ?? DEFAULTS.min),
     controls: Number(flag("--controls") ?? DEFAULTS.controls),
   };

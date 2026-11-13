@@ -40,7 +40,7 @@ const debugBody = (ids: string[], verdict: string, opts: { delta?: number; fused
 describe("selectProbes", () => {
   it("takes the class from the window, and controls of a unique shape that are not in the class", () => {
     const listed = [cls(1, "aaaaaaa"), uniq(1), cls(2, "bbbbbbb"), uniq(2), uniq(3), uniq(4)];
-    const { cls: c, controls, source } = selectProbes(listed, listed, { classRe: "^PR run failed:", min: 2, controls: 3 });
+    const { cls: c, controls, source } = selectProbes(listed, listed, { classPrefix: "PR run failed:", min: 2, controls: 3 });
     expect(source).toBe("window");
     expect(c.map((m: { messageId: string }) => m.messageId)).toEqual([cls(1, "a").messageId, cls(2, "b").messageId]);
     expect(controls.map((m: { messageId: string }) => m.messageId)).toEqual([uniq(1), uniq(2), uniq(3)].map((m) => m.messageId));
@@ -48,13 +48,19 @@ describe("selectProbes", () => {
   it("falls back to the newest --min from the wide listing when the window has too few", () => {
     const listed = [cls(1, "aaaaaaa"), uniq(1)];
     const wide = [...listed, cls(2, "bbbbbbb"), cls(3, "ccccccc"), cls(4, "ddddddd")];
-    const r = selectProbes(listed, wide, { classRe: "^PR run failed:", min: 3, controls: 1 });
+    const r = selectProbes(listed, wide, { classPrefix: "PR run failed:", min: 3, controls: 1 });
     expect(r.source).toBe("wide");
     expect(r.cls).toHaveLength(3);
   });
+  it("the class prefix is literal text, never a regular expression", () => {
+    const listed = [cls(1, "aaaaaaa"), uniq(1)];
+    // "." as a pattern would match every subject; as a literal prefix it matches none.
+    expect(selectProbes(listed, listed, { classPrefix: ".", min: 0, controls: 0 }).cls).toHaveLength(0);
+    expect(selectProbes(listed, listed, { classPrefix: "PR run", min: 0, controls: 0 }).cls).toHaveLength(1);
+  });
   it("a message whose family repeats in the listing is never a control", () => {
     const twin = { ...uniq(1), messageId: "twin@mail.example" };
-    const r = selectProbes([uniq(1), twin, uniq(2)], undefined, { classRe: "^PR run failed:", min: 1, controls: 3 });
+    const r = selectProbes([uniq(1), twin, uniq(2)], undefined, { classPrefix: "PR run failed:", min: 1, controls: 3 });
     expect(r.controls.map((m: { messageId: string }) => m.messageId)).toEqual([uniq(2).messageId]);
   });
 });
@@ -146,7 +152,7 @@ function deploy(goldRankOf: (goldIndex: number) => number) {
 }
 
 describe("run: end to end on a stubbed deploy", () => {
-  const opts = { classRe: "^PR run failed:", min: 8, controls: 3, window: 80, wideWindow: 200 };
+  const opts = { classPrefix: "PR run failed:", min: 8, controls: 3, window: 80, wideWindow: 200 };
   it("reads H1 for the golds cut past rank 10, found for the rest, and trusts the controls", async () => {
     const { get, calls } = deploy((i) => (i % 2 === 0 ? 12 : 2));
     const res = await run(get, opts);
