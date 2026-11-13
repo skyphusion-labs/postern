@@ -5,7 +5,7 @@ import { handleApi } from "./api";
 import { send, reply, type SendRequest, type ReplyRequest, type SendResult } from "./mailbox";
 import * as store from "./store";
 import type { StoredMessage, StoredMessageSummary, ListQuery, SearchQuery, Page, SearchHit } from "./store";
-import { toArrayBuffer, authFromHeaders, chooseFrom } from "./headers";
+import { toArrayBuffer, driverAuth, chooseFrom } from "./headers";
 
 // The in-Worker inbound transport driver (issue #21): the one surviving email()
 // handler. It forwards, parses the MIME via postal-mime, extracts the CF auth
@@ -46,8 +46,12 @@ export default {
     // Auth verdicts: ONLY from message.headers (what CF hands the Worker), never from
     // the parsed MIME, and only the FIRST instance of each header, the one CF prepended.
     // A sender can write its own Authentication-Results / Received-SPF into the message;
-    // those sit below CF's and are never read (see authFromHeaders).
-    const auth = authFromHeaders((name) => message.headers.get(name));
+    // those sit below CF's and are never read (see authFromHeaders). The verdicts count
+    // only when the raw message starts with CF's own trace block (its Received first,
+    // the first Authentication-Results inside the block); otherwise no verdict at all
+    // (see cfTraceBlock). One log line per message, outcome and reason only, no address.
+    const { auth, trace } = driverAuth((name) => message.headers.get(name), parsed.headers);
+    console.log("inbound_trust_guard " + JSON.stringify(trace.ok ? { ok: true } : { ok: false, reason: trace.reason }));
 
     // Coerce postal-mime attachments to the contract shape, dropping any whose
     // content can't be read into an ArrayBuffer.

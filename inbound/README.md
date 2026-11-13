@@ -127,7 +127,12 @@ carries no verdicts (postern-relay SMTP intake) is never trusted.
 
 The in-Worker driver reads the verdicts only from `message.headers`, and only the
 FIRST instance of `Authentication-Results` (CF prepends its own; any copy the sender
-wrote into the message sits below it and is ignored). Inside CF's instance it reads
+wrote into the message sits below it and is ignored). Inbound trust also requires
+Cloudflare's own Received header: the raw message must start with CF's trace block
+(CF's `Received ... by cloudflare-email.com` first, the block ending at
+`X-CF-SpamH-Score`, the first `Authentication-Results` inside it). Any other shape
+yields no verdict, so the message is stored untrusted. Each inbound message logs one
+`inbound_trust_guard` line with the outcome and reason (no address). Inside CF's instance it reads
 NOTHING at or after the first `spf=`. In the text before that, a failing signature's
 selector or domain is still sender-chosen, so ANY unterminated or unbalanced quote or
 comment there voids the whole header (no verdict), and so does any `dkim=` or `dmarc=`
@@ -139,10 +144,8 @@ when it is well formed and voids the header when it is not; `reason=` is allowed
 cost an otherwise good DMARC pass. The stored `spf` value is the `Received-SPF` verdict,
 kept for display only.
 
-**Residual:** the design relies on CF ALWAYS prepending its own
-`Authentication-Results`. If CF ever delivered a message without one, a header the
-sender wrote would become the first instance and be read as CF's. Only validating CF's
-`ARC-Seal` would remove that reliance; it is not built.
+**Residual:** the design relies on the shape of the trace block CF prepends. Only
+validating CF's `ARC-Seal` would remove that reliance; it is not built.
 
 The allowlist match is anchored (`== entry` or `endsWith("@" + entry)`), so
 `notskyphusion.org` does not match `skyphusion.org`.

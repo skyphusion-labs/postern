@@ -13,6 +13,15 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+### Changed
+
+- Inbound trust also requires Cloudflare's own Received header. The in-Worker driver now reads
+  the Authentication-Results verdict only when the raw message starts with Cloudflare's trace
+  block (its `Received ... by cloudflare-email.com` first, the first `Authentication-Results`
+  inside the block). Any other shape stores the message with no verdict, so it is not
+  `trusted`. Each inbound message logs one `inbound_trust_guard` line (outcome and reason, no
+  address) so an operator can count refusals.
+
 ## v1.16.0
 
 MINOR. The operator can read the live Vectorize ranking behind a semantic or hybrid search (#950),

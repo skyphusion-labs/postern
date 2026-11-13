@@ -551,7 +551,13 @@ allowlisted domain with no DMARC record and no aligned DKIM is not trusted. When
 or partial**, the missing verdicts default to `none` and nothing is trusted: an SMTP transport
 that omits `auth` stores its mail untrusted, never an implicit pass. The in-Worker driver
 reads only the first (CF-prepended) instance of `Authentication-Results`, and nothing at or after
-its first `spf=`; any unbalanced quote or comment before that voids the header.
+its first `spf=`; any unbalanced quote or comment before that voids the header. It reads that
+instance only when the raw message starts with CF's trace block: header 1 is CF's own `Received`
+(`from <helo> (<ip>) by cloudflare-email.com (cloudflare) id <id> for <rcpt>; <date>`, matched
+exactly), the block ends at the first `X-CF-SpamH-Score`, every header between is one CF writes
+(`ARC-Seal`, `ARC-Message-Signature`, `ARC-Authentication-Results`, `Received-SPF`,
+`Authentication-Results`, each at most once), and exactly one `Authentication-Results` is inside
+it. Any other shape yields no verdict (`none`), so nothing is trusted.
 
 **Forwarding** (`FORWARD_TO` / `FORWARD_FOR`) stays, but only in the in-Worker driver: it
 needs the live `message.forward()` on the `ForwardableEmailMessage`, which an out-of-Worker
