@@ -9,7 +9,7 @@
 // id reaches the output. The live ranking itself is proven only by the operator window.
 import { describe, expect, it } from "vitest";
 // @ts-expect-error -- eval/ is plain ESM with no type declarations
-import { classify, controlOk, readDebug, run, selectClass, selectControls, familyCounts, summarize, parseGoldFile, goldFileModeOk, routeOf, GOLD_MAX_IDS } from "./eval/debug950.mjs";
+import { classify, controlOk, readDebug, run, selectClass, selectControls, familyCounts, summarize, parseGoldFile, goldFileModeOk, routeOf, readGoldFile, GOLD_MAX_IDS } from "./eval/debug950.mjs";
 
 const SENDER = "notifications@github.example";
 const SECRET_WORD = "zanzibar";
@@ -235,6 +235,39 @@ describe("#963 --gold-file", () => {
     expect(goldFileModeOk(0o100640)).toBe(false);
     expect(goldFileModeOk(0o100644)).toBe(false);
     expect(goldFileModeOk(0o100604)).toBe(false);
+  });
+  it("the file is checked and read through ONE descriptor (no check-then-read race on the path)", () => {
+    const calls: string[] = [];
+    const body = JSON.stringify([cls(1, "a").messageId]);
+    const fake = (mode: number) => ({
+      openSync: (p: string) => { calls.push(`open ${p === "/g.json" ? "path" : "?"}`); return 7; },
+      fstatSync: (fd: number) => { calls.push(`fstat ${fd}`); return { mode }; },
+      readFileSync: (fd: number | string) => { calls.push(`read ${typeof fd === "number" ? fd : "path"}`); return body; },
+      closeSync: (fd: number) => { calls.push(`close ${fd}`); },
+      statSync: () => { calls.push("stat path"); return { mode }; },
+    });
+    expect(readGoldFile("/g.json", fake(0o100600))).toEqual([cls(1, "a").messageId]);
+    expect(calls).toEqual(["open path", "fstat 7", "read 7", "close 7"]);
+    // A file others can read is refused, and the descriptor is still closed.
+    calls.length = 0;
+    expect(() => readGoldFile("/g.json", fake(0o100644))).toThrow(/^gold file: group or others/);
+    expect(calls).toEqual(["open path", "fstat 7", "close 7"]);
+  });
+  it("on a real file: mode 600 reads, mode 644 is refused", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "g963-"));
+    try {
+      const f = path.join(dir, "gold.json");
+      fs.writeFileSync(f, JSON.stringify([uniq(1).messageId]), { mode: 0o600 });
+      fs.chmodSync(f, 0o600);
+      expect(readGoldFile(f, fs)).toEqual([uniq(1).messageId]);
+      fs.chmodSync(f, 0o644);
+      expect(() => readGoldFile(f, fs)).toThrow(/^gold file: /);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
   it("an error names a message lookup as /api/messages/<id>, never its Message-ID", () => {
     expect(routeOf(`/api/messages/${encodeURIComponent(cls(1, "a").messageId)}`)).toBe("/api/messages/<id>");

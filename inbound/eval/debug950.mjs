@@ -180,6 +180,24 @@ export function goldFileModeOk(mode) {
   return (mode & 0o077) === 0;
 }
 
+/**
+ * Read the gold file through ONE file descriptor: open it, check the mode with fstat on that
+ * descriptor, read from the same descriptor, close it. Checking a path and then reading the path
+ * again would let the file be swapped in between (a time-of-check to time-of-use race; CodeQL
+ * js/file-system-race on #964). `fs` is node:fs, or a stand-in in the tests. Returns the ids.
+ */
+export function readGoldFile(path, fs) {
+  const fd = fs.openSync(path, "r");
+  try {
+    if (!goldFileModeOk(fs.fstatSync(fd).mode)) {
+      throw new Error("gold file: group or others can read it; chmod 600 it first (it holds Message-IDs)");
+    }
+    return parseGoldFile(fs.readFileSync(fd, "utf8"));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** The route as an error may name it: a message lookup carries a Message-ID in its path. */
 export function routeOf(path) {
   return path.split("?")[0].replace(/^\/api\/messages\/.+$/, "/api/messages/<id>");
@@ -329,12 +347,13 @@ async function main() {
   };
   const goldFile = flag("--gold-file");
   if (goldFile) {
-    const { statSync, readFileSync } = await import("node:fs");
-    if (!goldFileModeOk(statSync(goldFile).mode)) {
-      console.error("gold file: group or others can read it; chmod 600 it first (it holds Message-IDs)");
+    try {
+      opts.golds = readGoldFile(goldFile, await import("node:fs"));
+    } catch (e) {
+      // parseGoldFile and the mode check never echo the file's content.
+      console.error(String(e.message ?? e).startsWith("gold file:") ? e.message : "gold file: cannot read it");
       process.exit(2);
     }
-    opts.golds = parseGoldFile(readFileSync(goldFile, "utf8"));
   }
   const get = async (path) => {
     const res = await fetch(base + path, { headers: { authorization: `Bearer ${token}` } });
