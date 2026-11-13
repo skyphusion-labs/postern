@@ -938,8 +938,15 @@ export async function indexProgress(env: Env): Promise<{ processedUpToMs: number
   if (!vi?.describe) return null;
   const d = await vi.describe();
   const t = d?.processedUpToDatetime;
-  // The type says number without a unit. A value below 1e11 is seconds (1e11 s is year 5138).
-  const processedUpToMs = typeof t === "number" && Number.isFinite(t) && t > 0 ? (t < 1e11 ? t * 1000 : t) : null;
+  // The binding type says number without a unit; the REST describe answers an ISO date string.
+  // Accept both: a number below 1e11 is seconds (1e11 s is year 5138), above it ms; a string is
+  // read with Date.parse. Anything else is null, so nothing is concluded from it.
+  let processedUpToMs: number | null = null;
+  if (typeof t === "number" && Number.isFinite(t) && t > 0) processedUpToMs = t < 1e11 ? t * 1000 : t;
+  else if (typeof t === "string" && t.trim()) {
+    const ms = Date.parse(t);
+    processedUpToMs = Number.isFinite(ms) && ms > 0 ? ms : null;
+  }
   const processedUpToMutation = typeof d?.processedUpToMutation === "string" && d.processedUpToMutation ? d.processedUpToMutation : null;
   const n = typeof d?.vectorCount === "number" ? d.vectorCount : typeof d?.vectorsCount === "number" ? d.vectorsCount : null;
   if (processedUpToMs === null && processedUpToMutation === null) return null;

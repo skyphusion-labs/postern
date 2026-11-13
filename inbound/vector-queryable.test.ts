@@ -34,7 +34,7 @@ const cos = (a: number[], b: number[]) => a.reduce((s, x, i) => s + x * b[i], 0)
 
 /** A V2-like Vectorize: upsert returns { mutationId }; a vector is QUERYABLE only after
  *  processed() moves the processing point past its mutation. `legacy` returns no mutationId. */
-function fakeVectorize(o: { legacy?: boolean; seconds?: boolean } = {}) {
+function fakeVectorize(o: { legacy?: boolean; seconds?: boolean; iso?: boolean } = {}) {
   const stored = new Map<string, { id: string; values: number[]; metadata: Json; mutation: number; at: number }>();
   let next = 0;
   let processedUpTo = { mutation: 0, at: 0 };
@@ -57,7 +57,7 @@ function fakeVectorize(o: { legacy?: boolean; seconds?: boolean } = {}) {
     async describe() {
       if (o.legacy) return { vectorsCount: stored.size };
       const at = processedUpTo.at;
-      return { vectorCount: stored.size, dimensions: DIM, processedUpToDatetime: o.seconds ? at / 1000 : at, processedUpToMutation: uuid(processedUpTo.mutation) };
+      return { vectorCount: stored.size, dimensions: DIM, processedUpToDatetime: o.iso ? new Date(at).toISOString() : o.seconds ? at / 1000 : at, processedUpToMutation: uuid(processedUpTo.mutation) };
     },
     async getByIds(ids: string[]) {
       return ids.filter((id) => stored.has(id)).map((id) => stored.get(id)!);
@@ -72,7 +72,7 @@ function fakeVectorize(o: { legacy?: boolean; seconds?: boolean } = {}) {
   };
 }
 
-async function setup(o: { legacy?: boolean; seconds?: boolean } = {}) {
+async function setup(o: { legacy?: boolean; seconds?: boolean; iso?: boolean } = {}) {
   const v = fakeVectorize(o);
   const AI = { async run(_m: string, i: { text: string[] }) { return { data: i.text.map(embed) }; } };
   const r = realEnv({ AI, VECTORIZE: v.api, SEARCH_DEBUG: "1" });
@@ -161,6 +161,29 @@ describe("#963 indexProgress", () => {
       expect(Math.abs(p!.processedUpToMs! - Date.now())).toBeLessThan(5000);
       expect(p!.processedUpToMutation).toMatch(/^00000000-/);
     }
+  });
+  it("reads an ISO date string (the REST describe's form) too", async () => {
+    const s = await setup({ iso: true });
+    await s.put("p@x", "Progress mail", "Some body text here");
+    s.v.processAll();
+    const p = await store.indexProgress(s.env);
+    expect(p).not.toBeNull();
+    expect(Math.abs(p!.processedUpToMs! - Date.now())).toBeLessThan(5000);
+  });
+  it("an unreadable processing point (a bad string, an object, zero) is null, never a guess", async () => {
+    for (const bad of ["not a date", "", { at: 1 }, 0, -5, Number.NaN]) {
+      const s = await setup();
+      (s.v.api as { describe: () => Promise<Json> }).describe = async () => ({ vectorCount: 1, processedUpToDatetime: bad as unknown });
+      expect(await store.indexProgress(s.env), JSON.stringify(bad)).toBeNull();
+    }
+  });
+  it("THE STRING CASE end to end: with an ISO processing point the route still reads not-yet-queryable, then in-raw", async () => {
+    const s = await setup({ iso: true });
+    await s.put("fresh@x", "Quarterly report draft", "The quarterly report draft is attached for review");
+    s.v.processNone();
+    expect((await s.debug("quarterly report draft", "fresh@x")).gold.verdict).toBe("not-yet-queryable");
+    s.v.processAll();
+    expect((await s.debug("quarterly report draft", "fresh@x")).gold.verdict).toBe("in-raw");
   });
   it("a binding with no processing point gives null (nothing is concluded from it)", async () => {
     const s = await setup({ legacy: true });
