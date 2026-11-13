@@ -289,6 +289,17 @@ For #950 the operator runs the probe set, not single calls:
 probes, makes every call, and prints counts, ranks, cosines and verdicts only. It needs a
 deploy whose route gives `floorExact`; against an older route it says INSTRUMENT NOT TRUSTED.
 
+To probe named messages (#963), put their Message-IDs in a file only you can read, and pass it:
+
+```bash
+printf '%s' '["<the first Message-ID>", "<the second>"]' > gold.json && chmod 600 gold.json
+POSTERN_URL=... POSTERN_TOKEN=<both token> node inbound/eval/debug950.mjs --gold-file gold.json --json
+```
+
+The driver refuses a gold file that group or others can read. Each gold's own subject is its
+query. The output adds `found0`/`strict0` (semantic search with `collapse=0`). Never commit the
+file: a Message-ID names a real message.
+
 To measure how long fresh mail takes to become findable in semantic search (#963), run the
 passive driver for the window. It sends no mail; it follows each message that arrives after it
 starts until semantic search finds it:
