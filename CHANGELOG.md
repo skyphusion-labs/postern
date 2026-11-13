@@ -13,6 +13,19 @@ mismatched MCP tag fails before it publishes.
 
 ## Unreleased
 
+## v1.16.1
+
+PATCH. Inbound trust is hardened (#954): it also requires Cloudflare's own Received header.
+
+**Upgrade.**
+
+- No migration, and no new binding, var or secret: `inbound/migrations` and `inbound/wrangler.jsonc`
+  are unchanged since v1.16.0.
+- After the deploy, check that the share of inbound mail stored `trusted` is what it was before, and
+  that the Worker log shows `inbound_trust_guard {"ok":true}` on mail Cloudflare delivered. If
+  `ok:false` appears on ordinary mail, the message did not match the expected Cloudflare header
+  block; the message is still stored, but untrusted.
+
 ### Changed
 
 - Inbound trust also requires Cloudflare's own Received header. The in-Worker driver now reads
