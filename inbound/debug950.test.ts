@@ -9,7 +9,7 @@
 // id reaches the output. The live ranking itself is proven only by the operator window.
 import { describe, expect, it } from "vitest";
 // @ts-expect-error -- eval/ is plain ESM with no type declarations
-import { classify, controlOk, readDebug, run, selectClass, selectControls, familyCounts, summarize } from "./eval/debug950.mjs";
+import { classify, controlOk, readDebug, run, selectClass, selectControls, familyCounts, summarize, parseGoldFile, goldFileModeOk, routeOf, GOLD_MAX_IDS } from "./eval/debug950.mjs";
 
 const SENDER = "notifications@github.example";
 const SECRET_WORD = "zanzibar";
@@ -207,5 +207,111 @@ describe("run: end to end on a stubbed deploy", () => {
     const res = await run(get, { ...OPTS, min: 1, controls: 1 });
     expect(res.rows[0].reading).toBe("error");
     expect(summarize(res)).toContain("INSTRUMENT NOT TRUSTED");
+  });
+});
+
+// #963: --gold-file. Named messages (from an operator-private file) instead of a class.
+describe("#963 --gold-file", () => {
+  it("parses Message-IDs, as strings or { messageId }, strips angle brackets, drops repeats", () => {
+    const a = cls(1, "aaaaaaa").messageId;
+    const b = uniq(1).messageId;
+    expect(parseGoldFile(JSON.stringify([`<${a}>`, { messageId: b }, a]))).toEqual([a, b]);
+  });
+  it("refuses a bad file without echoing its content", () => {
+    for (const bad of [`not json ${SECRET_WORD}`, "[]", "{}", JSON.stringify([1]), JSON.stringify([""]), JSON.stringify(Array(GOLD_MAX_IDS + 1).fill(`x-${SECRET_WORD}`))]) {
+      let msg = "";
+      try {
+        parseGoldFile(bad);
+      } catch (e) {
+        msg = String((e as Error).message);
+      }
+      expect(msg).toMatch(/^gold file: /);
+      expect(msg).not.toContain(SECRET_WORD);
+    }
+  });
+  it("the file must be owner-only (600 or 400); group or other read is refused", () => {
+    expect(goldFileModeOk(0o100600)).toBe(true);
+    expect(goldFileModeOk(0o100400)).toBe(true);
+    expect(goldFileModeOk(0o100640)).toBe(false);
+    expect(goldFileModeOk(0o100644)).toBe(false);
+    expect(goldFileModeOk(0o100604)).toBe(false);
+  });
+  it("an error names a message lookup as /api/messages/<id>, never its Message-ID", () => {
+    expect(routeOf(`/api/messages/${encodeURIComponent(cls(1, "a").messageId)}`)).toBe("/api/messages/<id>");
+    expect(routeOf("/api/messages?direction=inbound&q=x")).toBe("/api/messages");
+    expect(routeOf("/api/search?q=secret")).toBe("/api/search");
+  });
+
+  /** The stubbed deploy, plus GET /api/messages/<id> and search collapse=0 (a gold lost with collapse on, found with it off). */
+  function goldDeploy() {
+    const d = deploy({ lostEvery: 2 });
+    const all = [...Array.from({ length: 12 }, (_, i) => cls(i + 1, (i + 1).toString(16).padStart(7, "e"))), uniq(1), uniq(2), uniq(3)];
+    const calls: string[] = [];
+    const get = async (path: string) => {
+      const url = new URL("https://x" + path);
+      if (url.pathname.startsWith("/api/messages/")) {
+        calls.push("/api/messages/<id>");
+        const id = decodeURIComponent(url.pathname.slice("/api/messages/".length));
+        const m = all.find((x) => x.messageId === id);
+        if (!m) throw new Error(`GET ${routeOf(path)} failed: HTTP 404`);
+        return { ok: true, message: { subject: m.subject, from: m.from, date: m.date } };
+      }
+      if (url.pathname === "/api/search" && url.searchParams.get("collapse") === "0") {
+        calls.push("/api/search:semantic:c0");
+        const m = all.find((x) => x.subject === url.searchParams.get("q"))!;
+        return { items: [{ message: { messageId: m.messageId } }] };
+      }
+      if (url.pathname === "/api/messages") calls.push(url.searchParams.get("q") ? "/api/messages:fts" : "/api/messages");
+      else calls.push(url.pathname + ":" + (url.searchParams.get("mode") ?? ""));
+      return d.get(path);
+    };
+    return { get, calls };
+  }
+
+  it("reads each gold by its Message-ID, makes the class calls plus collapse=0, and never runs the FTS class listing", async () => {
+    const { get, calls } = goldDeploy();
+    // cls(2, ...): its Message-ID does not depend on the sha. The second gold is not in the mailbox.
+    const golds = [cls(2, "a").messageId, "absent-" + SECRET_WORD + "@mail.example"];
+    const res = await run(get, { ...OPTS, golds });
+    expect(res.probeKind).toBe("gold");
+    expect(res.classProbes).toBe(1);
+    expect(res.goldMissing).toBe(1);
+    expect(calls.filter((c) => c === "/api/messages:fts")).toHaveLength(0);
+    expect(calls.filter((c) => c === "/api/messages/<id>")).toHaveLength(2);
+    expect(calls.filter((c) => c === "/api/search:semantic:c0")).toHaveLength(1);
+    const g = res.rows.find((r: { kind: string }) => r.kind === "gold");
+    // cls(2) is actions index 1: lostEvery 2 loses even indices only, so it is found.
+    expect(g.reading).toBe("found");
+    expect(g.found0).toBe(true);
+    expect(g.strict0).toBe(1);
+    const text = summarize(res);
+    expect(text).toContain("#963 debug: 1 gold probes from the gold file (1 not readable)");
+    expect(text).toContain("gold readings: found 1");
+    expect(text).toContain("found0 strict0");
+  });
+
+  it("a gold lost with collapse on is read as such, and its collapse=0 reading is separate", async () => {
+    const { get } = goldDeploy();
+    const res = await run(get, { ...OPTS, golds: [cls(1, "a").messageId] }); // actions index 0: lost (0 % 2 == 0)
+    const g = res.rows.find((r: { kind: string }) => r.kind === "gold");
+    expect(g.reading).toBe("in-raw-not-found");
+    expect(g.found0).toBe(true);
+  });
+
+  it("a gold is never also a control", async () => {
+    const { get } = goldDeploy();
+    const res = await run(get, { ...OPTS, golds: [uniq(1).messageId] });
+    const controls = res.rows.filter((r: { kind: string }) => r.kind === "control").length;
+    expect(controls).toBe(2); // uniq(2) and uniq(3); uniq(1) is the gold
+    expect(res.rows.filter((r: { kind: string }) => r.kind === "gold")).toHaveLength(1);
+  });
+
+  it("PRIVACY: no gold Message-ID, subject or sender reaches the summary or the JSON rows", async () => {
+    const { get } = goldDeploy();
+    const res = await run(get, { ...OPTS, golds: [cls(3, "a").messageId, uniq(2).messageId] });
+    const out = summarize(res) + "\n" + JSON.stringify(res.rows);
+    expect(out).not.toContain(SECRET_WORD);
+    expect(out).not.toContain(SENDER);
+    expect(out).not.toMatch(/@mail\.example|vec-|PR run failed|skyphusion-labs/);
   });
 });

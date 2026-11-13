@@ -4,6 +4,14 @@
 //
 //   POSTERN_URL=https://mail.example POSTERN_TOKEN=<the both token> \
 //     node eval/debug950.mjs [--class-match 'PR run failed:'] [--min 8] [--controls 3] [--json]
+//   ... node eval/debug950.mjs --gold-file <path> [--controls 3] [--json]          (#963)
+//
+// --gold-file (#963): probe named messages instead of a class. The file is OPERATOR-PRIVATE: a
+// JSON list of Message-IDs (strings, or objects with a messageId), 1 to 20 of them, owner-only
+// (mode 600; a file that group or others can read is refused) and never committed. Each gold is
+// read with GET /api/messages/<Message-ID> (the operator token), and its own subject is the
+// query. The same calls as a class probe, plus search semantic with collapse=0. The ids stay in
+// the file: the output numbers the probes, and an error names the route as /api/messages/<id>.
 //
 // Probes:
 //   class    the newest --min inbound messages whose subject CONTAINS --class-match (literal
@@ -32,6 +40,8 @@ import { pathToFileURL } from "node:url";
 import { shapeKey } from "./shape813.mjs";
 
 export const DEFAULTS = { classMatch: "PR run failed:", min: 8, controls: 3, window: 80, classLimit: 200 };
+/** At most this many named golds per run: a measurement, not a crawl of the mailbox. */
+export const GOLD_MAX_IDS = 20;
 export const CALLS = [
   { key: "sem10", mode: "semantic", limit: 10 },
   { key: "hyb10", mode: "hybrid", limit: 10 },
@@ -146,21 +156,73 @@ function round(x) {
   return typeof x === "number" ? Math.round(x * 1e4) / 1e4 : null;
 }
 
+/**
+ * Parse an operator gold file (#963): a JSON list of Message-IDs, or of objects with a
+ * messageId. Angle brackets are stripped. Throws on anything else, without echoing the content.
+ */
+export function parseGoldFile(text) {
+  let v;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    throw new Error("gold file: not JSON");
+  }
+  if (!Array.isArray(v) || v.length === 0 || v.length > GOLD_MAX_IDS) throw new Error(`gold file: must be a JSON list of 1 to ${GOLD_MAX_IDS} Message-IDs`);
+  const ids = v.map((x) => (typeof x === "string" ? x : x && typeof x.messageId === "string" ? x.messageId : null));
+  if (ids.some((x) => x === null)) throw new Error("gold file: every entry must be a Message-ID string or { messageId }");
+  const clean = ids.map((x) => x.trim().replace(/^<|>$/g, ""));
+  if (clean.some((x) => x.length === 0 || x.length > 998)) throw new Error("gold file: a Message-ID is empty or too long");
+  return [...new Set(clean)];
+}
+
+/** The gold file holds Message-IDs: refuse it unless only its owner can read it (mode 600 or 400). */
+export function goldFileModeOk(mode) {
+  return (mode & 0o077) === 0;
+}
+
+/** The route as an error may name it: a message lookup carries a Message-ID in its path. */
+export function routeOf(path) {
+  return path.split("?")[0].replace(/^\/api\/messages\/.+$/, "/api/messages/<id>");
+}
+
 /** The whole measurement. `get(path)` returns the parsed JSON body, or throws on non-2xx. */
 export async function run(get, opts = DEFAULTS) {
   const fields = "fields=messageId,subject,date,from";
   const listed = (await get(`/api/messages?direction=inbound&limit=${opts.window}&${fields}`)).items ?? [];
-  const classQ = new URLSearchParams({ direction: "inbound", q: opts.classMatch, limit: String(opts.classLimit) });
-  const candidates = (await get(`/api/messages?${classQ}&${fields}`)).items ?? [];
-  const cls = selectClass(candidates, opts);
+  const golds = Array.isArray(opts.golds) ? opts.golds : null;
+  let candidates = [];
+  let cls = [];
+  let goldMissing = 0;
+  if (golds) {
+    // #963: named golds, each read by its Message-ID. A gold that does not answer is counted,
+    // never named.
+    for (const id of golds) {
+      let m = null;
+      try {
+        const body = await get(`/api/messages/${encodeURIComponent(id)}`);
+        m = body?.message ?? null;
+      } catch {
+        m = null;
+      }
+      if (m && (m.subject ?? "").trim()) cls.push({ messageId: id, subject: m.subject, from: m.from ?? "", date: m.date ?? "" });
+      else goldMissing += 1;
+    }
+    candidates = cls;
+  } else {
+    const classQ = new URLSearchParams({ direction: "inbound", q: opts.classMatch, limit: String(opts.classLimit) });
+    candidates = (await get(`/api/messages?${classQ}&${fields}`)).items ?? [];
+    cls = selectClass(candidates, opts);
+  }
   const counts = familyCounts([...listed, ...candidates]);
-  const controls = selectControls(listed, counts, opts);
+  // A named gold is never also a control.
+  const controls = selectControls(golds ? listed.filter((m) => !golds.includes(m.messageId)) : listed, counts, opts);
   const famById = new Map();
   for (const m of [...candidates, ...listed]) famById.set(m.messageId, shapeKey(m.from, m.subject));
   const familyOf = (id) => famById.get(id);
 
   const rows = [];
-  const probes = [...cls.map((m) => ({ m, kind: "class" })), ...controls.map((m) => ({ m, kind: "control" }))];
+  const probeKind = golds ? "gold" : "class";
+  const probes = [...cls.map((m) => ({ m, kind: probeKind })), ...controls.map((m) => ({ m, kind: "control" }))];
   for (const [i, { m, kind }] of probes.entries()) {
     const fam = shapeKey(m.from, m.subject);
     const row = { i: i + 1, kind, familyListed: counts.get(fam) ?? 1 };
@@ -180,16 +242,30 @@ export async function run(get, opts = DEFAULTS) {
       row.found = null;
       row.searchError = String(e.message ?? e);
     }
-    row.reading = kind === "class" ? classify(row) : controlOk(row) ? "control-ok" : "control-FAILED";
+    if (kind === "gold") {
+      // #963: the issue's "they miss with collapse=0 too" is read, not assumed.
+      try {
+        const s0 = readSearch(await get(`/api/search?${new URLSearchParams({ q: m.subject, mode: "semantic", collapse: "0", limit: "10" })}`), m.messageId);
+        row.found0 = s0.found;
+        row.strict0 = s0.strict;
+      } catch (e) {
+        row.found0 = null;
+        row.search0Error = String(e.message ?? e);
+      }
+    }
+    row.reading = kind === "control" ? (controlOk(row) ? "control-ok" : "control-FAILED") : classify(row);
     rows.push(row);
   }
-  return { classCandidates: candidates.length, listed: listed.length, classProbes: cls.length, controls: controls.length, rows };
+  return { probeKind, classCandidates: candidates.length, listed: listed.length, classProbes: cls.length, controls: controls.length, goldMissing, rows };
 }
 
 /** Human summary: counts and the per-probe numbers. No content. */
 export function summarize(res) {
   const out = [];
-  out.push(`#950 debug: ${res.classProbes} class probes (of ${res.classCandidates} FTS candidates), ${res.controls} controls (window ${res.listed})`);
+  const gold = res.probeKind === "gold";
+  const kind = gold ? "gold" : "class";
+  if (gold) out.push(`#963 debug: ${res.classProbes} gold probes from the gold file (${res.goldMissing ?? 0} not readable), ${res.controls} controls (window ${res.listed})`);
+  else out.push(`#950 debug: ${res.classProbes} class probes (of ${res.classCandidates} FTS candidates), ${res.controls} controls (window ${res.listed})`);
   const ctl = res.rows.filter((r) => r.kind === "control");
   const ctlOk = ctl.filter((r) => r.reading === "control-ok").length;
   out.push(`controls ok: ${ctlOk} of ${ctl.length}${ctlOk === ctl.length && ctl.length > 0 ? "" : "  << INSTRUMENT NOT TRUSTED: read nothing else"}`);
@@ -199,14 +275,14 @@ export function summarize(res) {
   out.push(`semantic pool topK seen: ${[...pool].join(", ") || "none"} (expected ${SEMANTIC_TOPK})`);
   const errs = res.rows.map((r) => r.sem10?.approxErrorMax).filter((x) => typeof x === "number");
   out.push(`approximate-scoring gap (max per probe): ${errs.length ? `${Math.min(...errs)} to ${Math.max(...errs)}` : "none"}`);
-  if (res.classProbes === 0) out.push("class probes: none matched  << widen --class-match or check the subject shape");
+  if (res.classProbes === 0) out.push(gold ? "gold probes: none readable  << check the gold file and the token" : "class probes: none matched  << widen --class-match or check the subject shape");
   const tally = new Map();
-  for (const r of res.rows.filter((x) => x.kind === "class")) tally.set(r.reading, (tally.get(r.reading) ?? 0) + 1);
-  out.push(`class readings: ${[...tally].map(([k, v]) => `${k} ${v}`).join(", ") || "none"}`);
-  const hyb = res.rows.filter((r) => r.kind === "class" && r.hyb10?.verdict === "in-raw").length;
-  out.push(`class probes in-raw under hybrid limit=10 (control): ${hyb} of ${res.classProbes}`);
+  for (const r of res.rows.filter((x) => x.kind === kind)) tally.set(r.reading, (tally.get(r.reading) ?? 0) + 1);
+  out.push(`${kind} readings: ${[...tally].map(([k, v]) => `${k} ${v}`).join(", ") || "none"}`);
+  const hyb = res.rows.filter((r) => r.kind === kind && r.hyb10?.verdict === "in-raw").length;
+  out.push(`${kind} probes in-raw under hybrid limit=10 (control): ${hyb} of ${res.classProbes}`);
   out.push("");
-  out.push("probe kind    reading            famListed | sem10: verdict  msgRank exactRank famInRaw best    floorEx fused | found strict");
+  out.push(`probe kind    reading            famListed | sem10: verdict  msgRank exactRank famInRaw best    floorEx fused | found strict${gold ? " | found0 strict0" : ""}`);
   for (const r of res.rows) {
     const a = r.sem10 ?? {};
     out.push(
@@ -226,6 +302,7 @@ export function summarize(res) {
         "|",
         String(r.found ?? "-").padEnd(5),
         String(r.strict ?? "-"),
+        ...(gold ? ["|", String(r.found0 ?? "-").padEnd(6), String(r.strict0 ?? "-")] : []),
       ].join(" "),
     );
   }
@@ -250,10 +327,20 @@ async function main() {
     min: Number(flag("--min") ?? DEFAULTS.min),
     controls: Number(flag("--controls") ?? DEFAULTS.controls),
   };
+  const goldFile = flag("--gold-file");
+  if (goldFile) {
+    const { statSync, readFileSync } = await import("node:fs");
+    if (!goldFileModeOk(statSync(goldFile).mode)) {
+      console.error("gold file: group or others can read it; chmod 600 it first (it holds Message-IDs)");
+      process.exit(2);
+    }
+    opts.golds = parseGoldFile(readFileSync(goldFile, "utf8"));
+  }
   const get = async (path) => {
     const res = await fetch(base + path, { headers: { authorization: `Bearer ${token}` } });
-    // The path carries the probe subject in its query string: print the route only.
-    if (!res.ok) throw new Error(`GET ${path.split("?")[0]} failed: HTTP ${res.status}`);
+    // The path carries the probe subject in its query string, and a message lookup carries a
+    // Message-ID in its path: print the route only.
+    if (!res.ok) throw new Error(`GET ${routeOf(path)} failed: HTTP ${res.status}`);
     return res.json();
   };
   const res = await run(get, opts);
@@ -263,7 +350,7 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
-    console.error(`debug950 failed: ${String(e.message ?? e).split("?")[0]}`);
+    console.error(`debug950 failed: ${routeOf(String(e.message ?? e))}`);
     process.exit(1);
   });
 }
