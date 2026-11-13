@@ -18,6 +18,20 @@ mismatched MCP tag fails before it publishes.
 - **eval: `debug950.mjs`, the live #950 measurement driver.** It reads the operator debug route (#952)
   for the "PR run failed" probes and 3 controls, and sorts each miss by the decision table fixed on
   #950. It prints counts, ranks, cosines and verdicts only. Eval only: no change to the Worker.
+- **search-debug: every raw match carries its exact cosine (#950).** New fields `raw[].exact`,
+  `floorExact`, `scoring`, `approxError` and `gold.exactRankInRaw`, and a new verdict `unscored`.
+
+### Fixed
+
+- **search-debug judged `ann-miss` and `outranked` on mixed scales (#950).** The gold's exact
+  cosine was compared with `floorScore`, an APPROXIMATE Vectorize score (the search queries
+  without `returnValues`). Window 1 measured a gap of 0.10 to 0.11 between the two. The verdict
+  now compares exact with exact (`floorExact`).
+- **eval: `debug950.mjs` after window 1 (#950).** The class is found by a literal CONTAINS
+  match over the FTS list, at any age (real GitHub subjects start `[owner/repo] `, so the prefix
+  match found none). Controls need in-raw plus found on the exact scale, not raw rank 1. The
+  duplicate semantic limit=50 call is gone (semantic always reads the topK 50 pool). Without
+  the exact scale, nothing is read.
 
 ## v1.16.1
 

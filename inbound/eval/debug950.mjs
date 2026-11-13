@@ -3,19 +3,27 @@
 // SEARCH_DEBUG=1 window (OPERATIONS.md section 7):
 //
 //   POSTERN_URL=https://mail.example POSTERN_TOKEN=<the both token> \
-//     node eval/debug950.mjs [--class-prefix 'PR run failed:'] [--min 8] [--controls 3] [--json]
+//     node eval/debug950.mjs [--class-match 'PR run failed:'] [--min 8] [--controls 3] [--json]
 //
-// Probes (fixed on #950 before the window):
-//   class    every inbound message in the newest 80 whose subject starts with --class-prefix
-//            (a literal prefix, never a regular expression). If fewer
-//            than --min, the newest --min from the newest 200.
-//   control  the newest --controls inbound messages of a unique template shape (no other
-//            listed message shares the family) that are not in the class.
+// Probes:
+//   class    the newest --min inbound messages whose subject CONTAINS --class-match (literal
+//            text, never a regular expression; real GitHub subjects carry a "[owner/repo] "
+//            prefix, which is why window 1 found none with a prefix match). They are found
+//            with the FTS list (/api/messages?q=), so they are found at any age.
+//   control  the newest --controls inbound messages of a unique template shape in the newest
+//            80 that are not in the class.
 // Each probe is its own subject as the query, its own Message-ID as the gold. Calls per probe:
-//   debug semantic limit=10   the production pool (topK 30)
-//   debug semantic limit=50   the deepest pool with metadata (topK 50)
+//   debug semantic limit=10   the production call. Semantic always asks Vectorize for the
+//                             ceiling (topK 50) and slices AFTER the family tiebreak
+//                             (store.ts hasPostRetrievalFilter, the #813 clause), so a
+//                             limit=50 call would read the same pool; window 1 showed it.
 //   debug hybrid   limit=10   control: hybrid finds this class today
 //   search semantic limit=10  FOUND as the replay counts it (strict row, or folded into `similar`)
+//
+// Scale: Vectorize scores APPROXIMATELY (no returnValues). Window 1 measured a 0.10 to 0.11
+// gap. The route now gives every raw match its EXACT cosine and judges the gold on the exact
+// scale (floorExact). A deploy whose route predates that gives no exact scores, and this
+// driver then says INSTRUMENT NOT TRUSTED.
 //
 // PRIVACY (primary): the output is counts, ranks, cosines and verdicts. It never prints a
 // subject, a sender, a Message-ID or a vector id. Probes are numbered. The token is never
@@ -23,35 +31,34 @@
 import { pathToFileURL } from "node:url";
 import { shapeKey } from "./shape813.mjs";
 
-export const DEFAULTS = { classPrefix: "PR run failed:", min: 8, controls: 3, window: 80, wideWindow: 200 };
+export const DEFAULTS = { classMatch: "PR run failed:", min: 8, controls: 3, window: 80, classLimit: 200 };
 export const CALLS = [
   { key: "sem10", mode: "semantic", limit: 10 },
-  { key: "sem50", mode: "semantic", limit: 50 },
   { key: "hyb10", mode: "hybrid", limit: 10 },
 ];
-/** A cosine is trusted only when the route recomputes rank 1 within this of Vectorize. */
-export const SCORE_DELTA_MAX = 1e-3;
+/** Semantic retrieval always uses Vectorize's ceiling with metadata (store.ts VECTOR_TOPK_MAX). */
+export const SEMANTIC_TOPK = 50;
 
-/** Pick the class probes and the controls from a newest-first inbound listing. */
-export function selectProbes(listed, wide, opts = DEFAULTS) {
-  const usable = (m) => typeof m?.messageId === "string" && m.messageId && (m.subject ?? "").trim();
-  const isClass = (m) => (m.subject ?? "").trim().startsWith(opts.classPrefix);
-  let cls = listed.filter((m) => usable(m) && isClass(m));
-  let source = "window";
-  if (cls.length < opts.min && wide) {
-    cls = wide.filter((m) => usable(m) && isClass(m)).slice(0, opts.min);
-    source = "wide";
-  }
-  const counts = familyCounts(wide ?? listed);
-  const controls = listed
-    .filter((m) => usable(m) && !isClass(m) && (counts.get(shapeKey(m.from, m.subject)) ?? 1) === 1)
+const usable = (m) => typeof m?.messageId === "string" && m.messageId && (m.subject ?? "").trim();
+
+/** The class: subjects that contain the literal match text, newest first, at most `min`. */
+export function selectClass(candidates, opts = DEFAULTS) {
+  return candidates.filter((m) => usable(m) && (m.subject ?? "").includes(opts.classMatch)).slice(0, opts.min);
+}
+
+/** Controls: unique template shape in the window listing, and not in the class. */
+export function selectControls(listed, counts, opts = DEFAULTS) {
+  return listed
+    .filter((m) => usable(m) && !(m.subject ?? "").includes(opts.classMatch) && (counts.get(shapeKey(m.from, m.subject)) ?? 1) === 1)
     .slice(0, opts.controls);
-  return { cls, controls, source, counts };
 }
 
 export function familyCounts(listed) {
   const c = new Map();
+  const seen = new Set();
   for (const m of listed) {
+    if (seen.has(m.messageId)) continue;
+    seen.add(m.messageId);
     const k = shapeKey(m.from, m.subject);
     c.set(k, (c.get(k) ?? 0) + 1);
   }
@@ -60,9 +67,8 @@ export function familyCounts(listed) {
 
 /**
  * Read one debug response for one gold. rawMessageRank is 1 + the number of DISTINCT messages
- * in `raw` before the gold's first vector: the position the slice to `limit` cuts on
- * (store.ts nearestMessageIds). familyInRaw counts raw messages whose family (known from the
- * listing) equals the gold's.
+ * in `raw` before the gold's first vector. exactScored is true only when the route gave the
+ * exact scale (floorExact field, an exact score on raw matches); without it no verdict is used.
  */
 export function readDebug(body, goldId, family, familyOf) {
   if (!body || body.ok !== true) return { error: body?.error ?? "no body" };
@@ -81,20 +87,22 @@ export function readDebug(body, goldId, family, familyOf) {
     }
     seen.add(r.messageId);
   }
-  const delta = body.scoreCheck?.delta;
+  const exactScored = "floorExact" in body && raw.length > 0 && raw.every((r) => typeof r.exact === "number");
   return {
     verdict: g.verdict ?? null,
     rawMessageRank,
     rawVectorRank,
+    exactRankInRaw: g.exactRankInRaw ?? null,
     rawMessages: seen.size,
     topK: body.topK ?? null,
     exhausted: body.exhausted ?? null,
     floorScore: round(body.floorScore),
+    floorExact: round(body.floorExact),
     bestCosine: round(g.bestCosine),
     fusedRank: g.fusedRank ?? null,
     familyInRaw: familyIds.size,
-    scoreDelta: typeof delta === "number" ? delta : null,
-    scoreTrusted: typeof delta === "number" && delta < SCORE_DELTA_MAX,
+    approxErrorMax: round(body.approxError?.max),
+    exactScored,
   };
 }
 
@@ -107,20 +115,31 @@ export function readSearch(body, goldId) {
 }
 
 /**
- * The #950 decision table (fixed on the issue before the window), for one class probe.
- * sem10 is the production pool; sem50 is the depth test.
+ * The reading for one class probe, on the production call (sem10). Only on the exact scale.
+ *   found               the shipped semantic search surfaces it (row or `similar`)
+ *   in-raw-not-found    Vectorize returned it, and a step after retrieval (scope, the family
+ *                       tiebreak, the collapse, the thread fold, the slice) lost it
+ *   ann-miss            its exact cosine beats a vector Vectorize returned, yet it was left out
+ *   outranked           50 returned vectors beat it on the exact scale: crowded out
+ *   (index verdicts pass through: not-indexed, vectors-missing, not-in-short-result, unscored)
  */
-export function classify(row, limit = 10) {
+export function classify(row) {
   const a = row.sem10;
-  const b = row.sem50;
   if (!a || a.error) return "error";
+  if (!a.exactScored) return "no-exact-scale";
   if (row.found) return "found";
-  if (a.verdict === "in-raw") {
-    if (a.rawMessageRank !== null && a.rawMessageRank > limit) return "H1-cut-before-tiebreak";
-    return "post-retrieval-defect";
-  }
-  if (a.verdict === "outranked") return b && b.verdict === "in-raw" ? "H1-shallow-pool" : "outranked-at-50";
+  if (a.verdict === "in-raw") return "in-raw-not-found";
   return a.verdict ?? "unknown";
+}
+
+/**
+ * A control is a message the shipped search finds. It must come back in-raw and FOUND, on the
+ * exact scale. Not "raw rank 1": approximate scores reorder near ties, and a subject unique in
+ * the inbound listing can still be shared by another stored message (window 1: 2 of 3 at rank 2,
+ * all found).
+ */
+export function controlOk(row) {
+  return row.sem10?.verdict === "in-raw" && row.sem10?.exactScored === true && row.found === true;
 }
 
 function round(x) {
@@ -131,10 +150,13 @@ function round(x) {
 export async function run(get, opts = DEFAULTS) {
   const fields = "fields=messageId,subject,date,from";
   const listed = (await get(`/api/messages?direction=inbound&limit=${opts.window}&${fields}`)).items ?? [];
-  const wide = (await get(`/api/messages?direction=inbound&limit=${opts.wideWindow}&${fields}`)).items ?? [];
-  const { cls, controls, source, counts } = selectProbes(listed, wide, opts);
+  const classQ = new URLSearchParams({ direction: "inbound", q: opts.classMatch, limit: String(opts.classLimit) });
+  const candidates = (await get(`/api/messages?${classQ}&${fields}`)).items ?? [];
+  const cls = selectClass(candidates, opts);
+  const counts = familyCounts([...listed, ...candidates]);
+  const controls = selectControls(listed, counts, opts);
   const famById = new Map();
-  for (const m of [...wide, ...listed]) famById.set(m.messageId, shapeKey(m.from, m.subject));
+  for (const m of [...candidates, ...listed]) famById.set(m.messageId, shapeKey(m.from, m.subject));
   const familyOf = (id) => famById.get(id);
 
   const rows = [];
@@ -161,50 +183,46 @@ export async function run(get, opts = DEFAULTS) {
     row.reading = kind === "class" ? classify(row) : controlOk(row) ? "control-ok" : "control-FAILED";
     rows.push(row);
   }
-  return { source, listed: listed.length, wide: wide.length, classProbes: cls.length, controls: controls.length, rows };
-}
-
-/** A control must come back as the first message of the raw list in the production pool. */
-export function controlOk(row) {
-  return row.sem10?.verdict === "in-raw" && row.sem10?.rawMessageRank === 1 && row.sem10?.scoreTrusted === true;
+  return { classCandidates: candidates.length, listed: listed.length, classProbes: cls.length, controls: controls.length, rows };
 }
 
 /** Human summary: counts and the per-probe numbers. No content. */
 export function summarize(res) {
   const out = [];
-  out.push(`#950 debug: ${res.classProbes} class probes (from the ${res.source === "wide" ? "newest 200" : "newest 80"}), ${res.controls} controls; listed ${res.listed} / ${res.wide}`);
+  out.push(`#950 debug: ${res.classProbes} class probes (of ${res.classCandidates} FTS candidates), ${res.controls} controls (window ${res.listed})`);
   const ctl = res.rows.filter((r) => r.kind === "control");
   const ctlOk = ctl.filter((r) => r.reading === "control-ok").length;
   out.push(`controls ok: ${ctlOk} of ${ctl.length}${ctlOk === ctl.length && ctl.length > 0 ? "" : "  << INSTRUMENT NOT TRUSTED: read nothing else"}`);
-  const untrusted = res.rows.filter((r) => CALLS.some((c) => r[c.key] && !r[c.key].error && !r[c.key].scoreTrusted)).length;
-  out.push(`probes with a scoreCheck delta >= ${SCORE_DELTA_MAX} on any call: ${untrusted}`);
+  const noExact = res.rows.filter((r) => r.sem10 && !r.sem10.error && !r.sem10.exactScored).length;
+  if (noExact) out.push(`probes without the exact scale: ${noExact}  << the deployed route predates floorExact; deploy it first`);
+  const pool = new Set(res.rows.map((r) => r.sem10?.topK).filter((x) => x !== null && x !== undefined));
+  out.push(`semantic pool topK seen: ${[...pool].join(", ") || "none"} (expected ${SEMANTIC_TOPK})`);
+  const errs = res.rows.map((r) => r.sem10?.approxErrorMax).filter((x) => typeof x === "number");
+  out.push(`approximate-scoring gap (max per probe): ${errs.length ? `${Math.min(...errs)} to ${Math.max(...errs)}` : "none"}`);
+  if (res.classProbes === 0) out.push("class probes: none matched  << widen --class-match or check the subject shape");
   const tally = new Map();
   for (const r of res.rows.filter((x) => x.kind === "class")) tally.set(r.reading, (tally.get(r.reading) ?? 0) + 1);
   out.push(`class readings: ${[...tally].map(([k, v]) => `${k} ${v}`).join(", ") || "none"}`);
   const hyb = res.rows.filter((r) => r.kind === "class" && r.hyb10?.verdict === "in-raw").length;
   out.push(`class probes in-raw under hybrid limit=10 (control): ${hyb} of ${res.classProbes}`);
   out.push("");
-  out.push("probe kind    reading                   famListed | sem10: verdict  msgRank vecRank famInRaw best    floor   fused | sem50: verdict  msgRank | found strict");
+  out.push("probe kind    reading            famListed | sem10: verdict  msgRank exactRank famInRaw best    floorEx fused | found strict");
   for (const r of res.rows) {
     const a = r.sem10 ?? {};
-    const b = r.sem50 ?? {};
     out.push(
       [
         String(r.i).padStart(5),
         r.kind.padEnd(7),
-        String(r.reading).padEnd(25),
+        String(r.reading).padEnd(18),
         String(r.familyListed).padStart(9),
         "|",
         String(a.verdict ?? a.error ?? "-").padEnd(14),
         String(a.rawMessageRank ?? "-").padStart(7),
-        String(a.rawVectorRank ?? "-").padStart(7),
+        String(a.exactRankInRaw ?? "-").padStart(9),
         String(a.familyInRaw ?? "-").padStart(8),
         String(a.bestCosine ?? "-").padEnd(7),
-        String(a.floorScore ?? "-").padEnd(7),
+        String(a.floorExact ?? "-").padEnd(7),
         String(a.fusedRank ?? "-").padStart(5),
-        "|",
-        String(b.verdict ?? b.error ?? "-").padEnd(14),
-        String(b.rawMessageRank ?? "-").padStart(7),
         "|",
         String(r.found ?? "-").padEnd(5),
         String(r.strict ?? "-"),
@@ -228,7 +246,7 @@ async function main() {
   };
   const opts = {
     ...DEFAULTS,
-    classPrefix: flag("--class-prefix") ?? DEFAULTS.classPrefix,
+    classMatch: flag("--class-match") ?? DEFAULTS.classMatch,
     min: Number(flag("--min") ?? DEFAULTS.min),
     controls: Number(flag("--controls") ?? DEFAULTS.controls),
   };

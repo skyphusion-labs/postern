@@ -30,7 +30,7 @@ function embed(text: string): number[] {
 }
 const cos = (a: number[], b: number[]) => a.reduce((s, x, i) => s + x * b[i], 0);
 
-async function setup(opts: { debug?: string | null; filler?: number } = {}) {
+async function setup(opts: { debug?: string | null; filler?: number; approxOffset?: number } = {}) {
   const index = new Map<string, { id: string; values: number[]; metadata: Json }>();
   const dropped = new Set<string>();
   const queries: number[] = [];
@@ -43,7 +43,11 @@ async function setup(opts: { debug?: string | null; filler?: number } = {}) {
         .filter((v) => !dropped.has(v.id))
         .map((v) => ({ id: v.id, score: cos(q, v.values), metadata: v.metadata }))
         .sort((a, b) => b.score - a.score)
-        .slice(0, o.topK);
+        .slice(0, o.topK)
+        // Production queries without returnValues, so Vectorize scores APPROXIMATELY
+        // (developers.cloudflare.com/vectorize/best-practices/query-vectors, read
+        // 2026-11-13). approxOffset models that: the order is exact, the score is not.
+        .map((m) => ({ ...m, score: m.score + (opts.approxOffset ?? 0) }));
       return { matches };
     },
     async deleteByIds() { return {}; },
@@ -164,7 +168,8 @@ describe("#950 search-debug output", () => {
     expect(res.body.floorScore).toBeNull();
     expect(res.body.topK).toBe(50);
     raw.forEach((r, i) => {
-      expect(Object.keys(r).sort()).toEqual(["chunk", "messageId", "rank", "score", "vectorId"]);
+      expect(Object.keys(r).sort()).toEqual(["chunk", "exact", "messageId", "rank", "score", "vectorId"]);
+      expect(r.exact).toBeCloseTo(r.score, 9); // the stub scores exactly unless told not to
       expect(r.rank).toBe(i + 1);
       expect(typeof r.score).toBe("number");
       expect(typeof r.chunk).toBe("number");
@@ -292,5 +297,63 @@ describe("#950 gold: where the expected message sits in the raw list", () => {
     const s = await setup();
     for (const [id, v] of s.index) if (v.metadata.message_id === "lunch@x") s.index.delete(id);
     expect((await s.call(goldQ("lunch@x"), OPERATOR)).body.gold.verdict).toBe("vectors-missing");
+  });
+});
+
+describe("#950 approximate scoring: verdicts on the exact scale", () => {
+  const goldQ = (id: string) => Q + "&gold=" + encodeURIComponent(id);
+
+  it("every raw match carries its exact cosine, and floorExact is the lowest exact score of a full list", async () => {
+    const s = await setup({ filler: 60, approxOffset: 0.1 });
+    const res = await s.call(goldQ("deploy-2@ci"), OPERATOR);
+    const raw = res.body.raw as Json[];
+    expect(raw.length).toBe(50);
+    for (const r of raw) {
+      expect(typeof r.exact).toBe("number");
+      expect(r.score - r.exact).toBeCloseTo(0.1, 9);
+    }
+    expect(res.body.floorExact).toBeCloseTo(Math.min(...raw.map((r) => r.exact)), 12);
+    expect(res.body.approxError.n).toBe(50);
+    expect(res.body.approxError.max).toBeCloseTo(0.1, 9);
+    expect(res.body.approxError.median).toBeCloseTo(0.1, 9);
+  });
+
+  it("scoreCheck reports the approximate-scoring gap instead of hiding it", async () => {
+    const s = await setup({ approxOffset: 0.1 });
+    const res = await s.call(Q, OPERATOR);
+    expect(res.body.scoreCheck.delta).toBeCloseTo(0.1, 9);
+  });
+
+  it("ann-miss on the exact scale: the gold beats the exact floor though it is below the approximate one", async () => {
+    // 0.5, not production's 0.1: in this small corpus the gold sits about 0.35 above the exact
+    // floor, and the case needs it BETWEEN the exact floor and the approximate one.
+    const s = await setup({ filler: 60, approxOffset: 0.5 });
+    const before = await s.call(goldQ("deploy-2@ci"), OPERATOR);
+    expect(before.body.gold.verdict).toBe("in-raw"); // CONTROL: nothing dropped yet
+    for (const c of before.body.gold.chunks) s.dropped.add(c.vectorId);
+    const res = await s.call(goldQ("deploy-2@ci"), OPERATOR);
+    const g = res.body.gold;
+    // The premise of this case: the mixed-scale comparison would call it outranked.
+    expect(g.bestCosine).toBeLessThanOrEqual(res.body.floorScore);
+    expect(g.bestCosine).toBeGreaterThan(res.body.floorExact);
+    expect(g.verdict).toBe("ann-miss");
+  });
+
+  it("outranked on the exact scale stays outranked", async () => {
+    const s = await setup({ filler: 60, approxOffset: 0.1 });
+    const res = await s.call(goldQ("invoice@x"), OPERATOR);
+    expect(res.body.gold.verdict).toBe("outranked");
+    expect(res.body.gold.bestCosine).toBeLessThanOrEqual(res.body.floorExact);
+  });
+
+  it("exactRankInRaw: where exact scores would place the gold among the returned messages", async () => {
+    const s = await setup({ approxOffset: 0.1 });
+    const res = await s.call(goldQ("deploy-2@ci"), OPERATOR);
+    const raw = res.body.raw as Json[];
+    const best = new Map<string, number>();
+    for (const r of raw) best.set(r.messageId, Math.max(best.get(r.messageId) ?? -2, r.exact));
+    const g = best.get("deploy-2@ci")!;
+    const above = [...best.entries()].filter(([id, v]) => id !== "deploy-2@ci" && v > g).length;
+    expect(res.body.gold.exactRankInRaw).toBe(above + 1);
   });
 });

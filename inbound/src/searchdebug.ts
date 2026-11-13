@@ -17,6 +17,12 @@
 //   - OFF BY DEFAULT: answers 404 unless the deploy sets SEARCH_DEBUG=1. A query plus the
 //     ids that match it is a content oracle over the whole estate, so the operator turns it
 //     on for a measurement window and off again.
+//   - APPROXIMATE SCORES. Production queries without returnValues, so Vectorize scores
+//     approximately (developers.cloudflare.com/vectorize/best-practices/query-vectors, read
+//     2026-11-13); window 1 of #950 measured a 0.10 to 0.11 gap against the exact cosine.
+//     So every raw match also carries its EXACT cosine, recomputed from its stored vector,
+//     and the gold verdict compares exact with exact (floorExact), never exact with the
+//     approximate floorScore.
 //   - ids and scores only. No subject, sender, recipient, date or body leaves this route,
 //     though Vectorize metadata carries some of them. Each call writes one audit row
 //     (`search.debug`) with the mode, the limit and the query LENGTH, never the query.
@@ -65,6 +71,7 @@ export type GoldVerdict =
   | "ann-miss" // exact cosine beats the K-th raw score, yet Vectorize did not return it
   | "outranked" // exact cosine is below the K-th raw score: crowded out of the topK
   | "not-in-short-result" // Vectorize returned fewer than topK and still left it out
+  | "unscored" // a full list, but no raw match had a stored vector to score exactly
   | "not-indexed" // no vector_ledger rows for this message
   | "vectors-missing"; // ledger rows exist, but Vectorize holds none of those vectors
 
@@ -154,13 +161,21 @@ export async function handleSearchDebug(
     );
   }
 
-  const raw = trace.matches.map((m, i) => ({
-    rank: i + 1,
-    vectorId: m.id,
-    score: m.score,
-    chunk: typeof m.metadata?.chunk === "number" ? m.metadata.chunk : null,
-    messageId: typeof m.metadata?.message_id === "string" ? m.metadata.message_id : null,
-  }));
+  // The exact cosine of every raw match, from its stored vector (getByIds, batched). The
+  // Vectorize score is approximate, so this is the scale every comparison below uses.
+  const rawStored = trace.matches.length ? await store.vectorsByIds(env, trace.matches.map((m) => m.id)) : [];
+  const rawValues = new Map(rawStored.map((v) => [v.id, v.values]));
+  const raw = trace.matches.map((m, i) => {
+    const values = rawValues.get(m.id);
+    return {
+      rank: i + 1,
+      vectorId: m.id,
+      score: m.score,
+      exact: values ? cosine(trace.queryVec, values) : null,
+      chunk: typeof m.metadata?.chunk === "number" ? m.metadata.chunk : null,
+      messageId: typeof m.metadata?.message_id === "string" ? m.metadata.message_id : null,
+    };
+  });
   const firstRawRank = new Map<string, number>();
   for (const r of raw) if (r.messageId && !firstRawRank.has(r.messageId)) firstRawRank.set(r.messageId, r.rank);
   const fused = page.items.map((h, i) => ({
@@ -173,13 +188,21 @@ export async function handleSearchDebug(
   }));
   const full = trace.matches.length >= trace.topK;
   const floorScore = full && raw.length > 0 ? raw[raw.length - 1].score : null;
+  // The lowest EXACT score among what Vectorize returned. A gold whose exact cosine beats
+  // it would have displaced a returned vector under exact search.
+  const exacts = raw.map((r) => r.exact).filter((x): x is number => x !== null);
+  const floorExact = full && exacts.length > 0 ? Math.min(...exacts) : null;
+  // The size of the approximate-scoring gap, over every raw match that has an exact score.
+  const gaps = raw.filter((r) => r.exact !== null).map((r) => Math.abs(r.score - (r.exact as number))).sort((a, b) => a - b);
+  const approxError = gaps.length
+    ? { n: gaps.length, max: gaps[gaps.length - 1], median: gaps[Math.floor((gaps.length - 1) / 2)] }
+    : { n: 0, max: null, median: null };
 
-  // CONTROL for every cosine below: recompute the rank-1 score from its stored vector. If
-  // this disagrees with Vectorize, the gold cosines are not comparable to the raw scores.
+  // The rank-1 score against its exact recompute. Under approximate scoring the delta is the
+  // scorer's error, not a defect; approxError above gives it over the whole list.
   let scoreCheck: Record<string, unknown> | null = null;
   if (raw.length > 0) {
-    const [v] = await store.vectorsByIds(env, [raw[0].vectorId]);
-    const recomputed = v?.values ? cosine(trace.queryVec, v.values) : null;
+    const recomputed = raw[0].exact;
     scoreCheck = {
       vectorId: raw[0].vectorId,
       vectorizeScore: raw[0].score,
@@ -216,11 +239,21 @@ export async function handleSearchDebug(
     else if (ledger.length === 0) verdict = "not-indexed";
     else if (!chunks.some((c) => c.inIndex)) verdict = "vectors-missing";
     else if (!full) verdict = "not-in-short-result";
-    else verdict = best !== null && floorScore !== null && best > floorScore ? "ann-miss" : "outranked";
+    else if (floorExact === null) verdict = "unscored";
+    else verdict = best !== null && best > floorExact ? "ann-miss" : "outranked";
+    // Where exact scores would place the gold among the messages Vectorize returned: 1 + the
+    // number of OTHER raw messages whose best exact score beats the gold's.
+    const bestByMsg = new Map<string, number>();
+    for (const r of raw) {
+      if (r.messageId && r.exact !== null) bestByMsg.set(r.messageId, Math.max(bestByMsg.get(r.messageId) ?? -Infinity, r.exact));
+    }
+    const exactRankInRaw =
+      best === null ? null : 1 + [...bestByMsg].filter(([id, v]) => id !== gold && v > best).length;
     goldReport = {
       messageId: gold,
       verdict,
       bestCosine: best,
+      exactRankInRaw,
       fusedRank: fused.find((f) => f.messageId === gold)?.rank ?? null,
       chunks,
     };
@@ -234,6 +267,9 @@ export async function handleSearchDebug(
     wide: trace.wide,
     exhausted: !full,
     floorScore,
+    floorExact,
+    scoring: "approximate",
+    approxError,
     raw,
     fused,
     complete: page.complete ?? page.cursor === null,
