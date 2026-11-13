@@ -73,6 +73,7 @@ export type GoldVerdict =
   | "not-in-short-result" // Vectorize returned fewer than topK and still left it out
   | "unscored" // a full list, but no raw match had a stored vector to score exactly
   | "not-indexed" // no vector_ledger rows for this message
+  | "not-yet-queryable" // #963: the index has not processed the gold's upsert yet (describe())
   | "vectors-missing"; // ledger rows exist, but Vectorize holds none of those vectors
 
 /** The /api/search defaults for an omitted collapse / collapseThreads / familyCap (api.ts). */
@@ -211,13 +212,17 @@ export async function handleSearchDebug(
     };
   }
 
+  // #963: how far the index has processed its mutations (one describe()). A vector whose upsert
+  // returned after processedUpTo is stored but not yet served by query().
+  const progress = await store.indexProgress(env);
+
   let goldReport: Record<string, unknown> | undefined;
   if (gold !== undefined) {
     const { results } = await env.DB.prepare(
-      "SELECT vector_id, chunk, embed_version FROM vector_ledger WHERE message_id = ? ORDER BY chunk",
+      "SELECT vector_id, chunk, embed_version, mutation_id, upserted_ms FROM vector_ledger WHERE message_id = ? ORDER BY chunk",
     )
       .bind(gold)
-      .all<{ vector_id: string; chunk: number; embed_version: number }>();
+      .all<{ vector_id: string; chunk: number; embed_version: number; mutation_id: string | null; upserted_ms: number | null }>();
     const ledger = results ?? [];
     const rawRankById = new Map(raw.map((r) => [r.vectorId, r.rank]));
     const stored = ledger.length ? await store.vectorsByIds(env, ledger.map((l) => l.vector_id)) : [];
@@ -234,9 +239,16 @@ export async function handleSearchDebug(
       };
     });
     const best = chunks.reduce<number | null>((m, c) => (c.cosine !== null && (m === null || c.cosine > m) ? c.cosine : m), null);
+    // The latest upsert of the gold's vectors (one upsert writes every chunk), and whether the
+    // index has processed past it. null when the ledger row predates 0025 or describe() gives no
+    // processing point: then nothing is concluded from it.
+    const upsertedMs = ledger.reduce<number | null>((m, l) => (typeof l.upserted_ms === "number" && (m === null || l.upserted_ms > m) ? l.upserted_ms : m), null);
+    const mutationId = ledger.find((l) => typeof l.mutation_id === "string")?.mutation_id ?? null;
+    const pending = upsertedMs !== null && progress?.processedUpToMs != null ? progress.processedUpToMs < upsertedMs : null;
     let verdict: GoldVerdict;
     if (chunks.some((c) => c.rawRank !== null)) verdict = "in-raw";
     else if (ledger.length === 0) verdict = "not-indexed";
+    else if (pending === true) verdict = "not-yet-queryable";
     else if (!chunks.some((c) => c.inIndex)) verdict = "vectors-missing";
     else if (!full) verdict = "not-in-short-result";
     else if (floorExact === null) verdict = "unscored";
@@ -255,6 +267,11 @@ export async function handleSearchDebug(
       bestCosine: best,
       exactRankInRaw,
       fusedRank: fused.find((f) => f.messageId === gold)?.rank ?? null,
+      // #963: when its upsert returned, and whether the index had processed past it. The
+      // mutation id is an opaque UUID, never content; mutationIsLatest is the exact match.
+      upsertedMs,
+      pending,
+      mutationIsLatest: mutationId !== null && progress?.processedUpToMutation ? progress.processedUpToMutation === mutationId : null,
       chunks,
     };
   }
@@ -275,6 +292,12 @@ export async function handleSearchDebug(
     complete: page.complete ?? page.cursor === null,
     degraded: page.degraded ?? null,
     scoreCheck,
+    // #963: the index's processing point. processedUpToMs is Vectorize's clock, upsertedMs the
+    // Worker's: a skew between them shifts "pending" by that much.
+    index: progress,
+    // #963: the Worker's clock at this answer, the clock upsertedMs was read with, so a driver
+    // measures "send to queryable" on one clock, never the operator's against the Worker's.
+    serverNowMs: Date.now(),
     ...(goldReport ? { gold: goldReport } : {}),
   });
 }

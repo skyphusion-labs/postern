@@ -260,6 +260,15 @@ Read `gold.verdict` first:
 - `not-in-short-result`, `not-indexed`, `vectors-missing`: fewer than topK came back, no
   ledger rows exist, or the ledger names vectors the index no longer holds. `unscored`: a full
   list, but no returned vector could be scored exactly.
+- `not-yet-queryable` (#963): Vectorize has not processed the gold's upsert yet. Vectorize
+  mutations are asynchronous: the ledger records the upsert's `mutationId` and when it
+  returned (`upserted_ms`, migration 0025), and `describe()` says how far the index has
+  processed (`processedUpToDatetime`). It is read after `in-raw` and `not-indexed` and before
+  the others, so a fresh message is never reported as lost. A ledger row from before 0025, or a
+  binding with no processing point, concludes nothing from the clock (`gold.pending` is null).
+
+Every answer also carries `index` (`processedUpToMs`, `processedUpToMutation`, `vectorCount`)
+and `serverNowMs` (the Worker's clock, the one `upsertedMs` was read with).
 
 **The two scales.** The search queries Vectorize without `returnValues`, so Vectorize scores
 APPROXIMATELY ([query vectors](https://developers.cloudflare.com/vectorize/best-practices/query-vectors/),
@@ -279,6 +288,18 @@ For #950 the operator runs the probe set, not single calls:
 `POSTERN_URL=... POSTERN_TOKEN=<both token> node inbound/eval/debug950.mjs --json`. It picks the
 probes, makes every call, and prints counts, ranks, cosines and verdicts only. It needs a
 deploy whose route gives `floorExact`; against an older route it says INSTRUMENT NOT TRUSTED.
+
+To measure how long fresh mail takes to become findable in semantic search (#963), run the
+passive driver for the window. It sends no mail; it follows each message that arrives after it
+starts until semantic search finds it:
+
+```bash
+POSTERN_URL=... POSTERN_TOKEN=<both token> node inbound/eval/fresh963.mjs --minutes 30 --json
+```
+
+It prints counts and seconds only, on the Worker's clock: `processedS` (upsert to the index
+processing past it) and `foundS` (upsert to FOUND), with p50, p95, max and the decision row
+fixed in the #963 design (at least 10 messages).
 
 Count the audit rows of a window (D1, the store database). The time column is `at`, an ISO
 8601 UTC string:

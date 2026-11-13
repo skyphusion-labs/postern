@@ -916,20 +916,50 @@ export async function embedAndUpsert(env: Env, f: VectorizeFields): Promise<numb
       subject: f.subject,
     },
   }));
-  if (vectors.length) await env.VECTORIZE.upsert(vectors);
-  if (vectors.length) await syncVectorLedger(env, f.messageId, ids);
+  if (vectors.length) {
+    // #963: keep the upsert's answer. Vectorize processes the mutation asynchronously, so the
+    // ledger records WHICH mutation and WHEN it was sent, and the debug route can tell "not
+    // queryable yet" from "lost" (describe() processedUpToDatetime). The V2 binding returns
+    // { mutationId }; the declared VectorizeIndex type is the legacy one, hence the cast.
+    const res = (await env.VECTORIZE.upsert(vectors)) as unknown as { mutationId?: unknown } | undefined;
+    const upsertedMs = Date.now();
+    const mutationId = typeof res?.mutationId === "string" && res.mutationId ? res.mutationId : null;
+    await syncVectorLedger(env, f.messageId, ids, { mutationId, upsertedMs });
+  }
   return vectors.length;
 }
 
+/** The index's processing point (#963), from describe(): processedUpToDatetime as epoch ms, and
+ *  processedUpToMutation. null when the binding gives neither (a legacy index, or a fake). */
+export async function indexProgress(env: Env): Promise<{ processedUpToMs: number | null; processedUpToMutation: string | null; vectorCount: number | null } | null> {
+  const vi = env.VECTORIZE as unknown as {
+    describe?: () => Promise<{ processedUpToDatetime?: unknown; processedUpToMutation?: unknown; vectorCount?: unknown; vectorsCount?: unknown }>;
+  };
+  if (!vi?.describe) return null;
+  const d = await vi.describe();
+  const t = d?.processedUpToDatetime;
+  // The type says number without a unit. A value below 1e11 is seconds (1e11 s is year 5138).
+  const processedUpToMs = typeof t === "number" && Number.isFinite(t) && t > 0 ? (t < 1e11 ? t * 1000 : t) : null;
+  const processedUpToMutation = typeof d?.processedUpToMutation === "string" && d.processedUpToMutation ? d.processedUpToMutation : null;
+  const n = typeof d?.vectorCount === "number" ? d.vectorCount : typeof d?.vectorsCount === "number" ? d.vectorsCount : null;
+  if (processedUpToMs === null && processedUpToMutation === null) return null;
+  return { processedUpToMs, processedUpToMutation, vectorCount: n };
+}
+
 /** Record the chunk-vector ids upserted for a message (#279 id-ledger). */
-async function syncVectorLedger(env: Env, messageId: string, vectorIds: string[]): Promise<void> {
+async function syncVectorLedger(
+  env: Env,
+  messageId: string,
+  vectorIds: string[],
+  sent: { mutationId: string | null; upsertedMs: number },
+): Promise<void> {
   if (!env.DB || vectorIds.length === 0) return;
   await env.DB.prepare("DELETE FROM vector_ledger WHERE message_id = ?").bind(messageId).run();
   for (let i = 0; i < vectorIds.length; i++) {
     await env.DB.prepare(
-      "INSERT INTO vector_ledger (vector_id, message_id, chunk, indexed_at, embed_version) VALUES (?, ?, ?, datetime('now'), ?)",
+      "INSERT INTO vector_ledger (vector_id, message_id, chunk, indexed_at, embed_version, mutation_id, upserted_ms) VALUES (?, ?, ?, datetime('now'), ?, ?, ?)",
     )
-      .bind(vectorIds[i], messageId, i, EMBED_VERSION)
+      .bind(vectorIds[i], messageId, i, EMBED_VERSION, sent.mutationId, sent.upsertedMs)
       .run();
   }
 }

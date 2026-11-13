@@ -133,7 +133,11 @@ CREATE TABLE IF NOT EXISTS vector_ledger (
   chunk       INTEGER NOT NULL,
   indexed_at  TEXT NOT NULL DEFAULT (datetime('now')),
   -- #813 (migration 0024): the embed recipe (embedtext.ts EMBED_VERSION). 1 = body only.
-  embed_version INTEGER NOT NULL DEFAULT 1
+  embed_version INTEGER NOT NULL DEFAULT 1,
+  -- #963 (migration 0025): the upsert's Vectorize mutationId, and Worker Date.now() when the
+  -- upsert returned. NULL on rows from before 0025, or on a binding that returns no mutationId.
+  mutation_id TEXT,
+  upserted_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_vector_ledger_message ON vector_ledger(message_id);
 
