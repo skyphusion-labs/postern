@@ -21,7 +21,8 @@ Skyphusion Labs Cloudflare account (not a separate demo account). Live Worker na
 custom domain **`demo.posternonline.com`**. The apex **`posternonline.com`** and
 **`www.posternonline.com`** are the marketing site, served by the `postern-site` repo's own Worker
 (custom domains in its `wrangler.toml`; read live 2026-11-13: both answer 200, no redirect).
-Operator config: gitignored `inbound/wrangler.demo.jsonc` (account + D1/R2/Vectorize ids). The demo
+Its config, with the account and the D1/R2/Vectorize ids, is the `postern-demo` repo's committed
+`wrangler.jsonc`. The gitignored `inbound/wrangler.demo.jsonc` here is not the deploy path. The demo
 deploys from the `postern-demo` repo's CI on merge to its `main` (it pins `POSTERN_VERSION` and
 `POSTERN_COMMIT`); do not deploy it by hand.
 Email Routing catch-all routes to Worker `postern`. Public read token is documented in **README.md**
