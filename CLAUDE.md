@@ -18,9 +18,12 @@ version in this file). Tag-gated release on `main` (`v*`).
 
 **Public demo (Skyphusion Labs account, 2026-08):** zone **posternonline.com** lives on the regular
 Skyphusion Labs Cloudflare account (not a separate demo account). Live Worker name **`postern`**,
-custom domains **`demo.posternonline.com`**, **`posternonline.com`**, **`www.posternonline.com`**
-(apex/www **301** to demo). Operator config: gitignored `inbound/wrangler.demo.jsonc` (account +
-D1/R2/Vectorize ids). Redeploy: `cd inbound && npx wrangler deploy --config wrangler.demo.jsonc`.
+custom domain **`demo.posternonline.com`**. The apex **`posternonline.com`** and
+**`www.posternonline.com`** are the marketing site, served by the `postern-site` repo's own Worker
+(custom domains in its `wrangler.toml`; read live 2026-11-13: both answer 200, no redirect).
+Operator config: gitignored `inbound/wrangler.demo.jsonc` (account + D1/R2/Vectorize ids). The demo
+deploys from the `postern-demo` repo's CI on merge to its `main` (it pins `POSTERN_VERSION` and
+`POSTERN_COMMIT`); do not deploy it by hand.
 Email Routing catch-all routes to Worker `postern`. Public read token is documented in **README.md**
 (`POSTERN_API_TOKEN_READ`; send/reply/delete refused). Mail any `@posternonline.com` address into
 the shared demo mailbox.
